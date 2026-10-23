@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 /// The letters of an invite code: upper case without 0/O and 1/I/L, so a code read out loud or typed from a
 /// screen can't be mistaken.
 pub const CODE_CHARS: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+/// Characters in a join code.
 pub const CODE_LEN: usize = 6;
 /// A member whose event stream has been gone this long (seconds) is dropped.
 pub const DROP_SECS: f64 = 120.0;
@@ -47,18 +48,24 @@ pub const PREV_RESTARTS_AFTER: f64 = 3.0;
 /// The columns of a queue entry's song (the library's usual row; the server's enrichment adds the rest).
 pub const ROW_COLS: &str = "id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate";
 
+/// Visibility: every account on the server sees the group in its list.
 pub const ANYONE: &str = "anyone";
+/// Visibility: only people with the link or the code find it.
 pub const LINK: &str = "link";
 
 /// Who added a queue entry (the songs of a start or a `set_queue`: whoever sent them).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AddedBy {
+    /// the account (0 for a guest)
     pub user: i64,
+    /// their name as shown
     pub name: String,
+    /// a guest added it
     pub guest: bool,
 }
 
 impl AddedBy {
+    /// As the API gives it: `{user, name, guest}`.
     pub fn json(&self) -> Value {
         json!({ "user": self.user, "name": self.name, "guest": self.guest })
     }
@@ -69,7 +76,9 @@ impl AddedBy {
 pub struct Entry {
     /// unique within the group and stable while the entry exists (the same song queued twice has two)
     pub qid: String,
+    /// the song's library id
     pub track: i64,
+    /// who added it
     pub added_by: AddedBy,
     /// the song's row as the library lists it ([`ROW_COLS`]), not enriched
     pub row: Arc<Row>,
@@ -93,13 +102,17 @@ pub struct Member {
     pub user: i64,
     /// a guest's own id; None for an account
     pub guest: Option<String>,
+    /// the name shown in the group
     pub name: String,
     /// a server path of the account's picture, or ""
     pub avatar: String,
     /// the device the account joined from ("" for a guest)
     pub device_id: String,
+    /// the device's name as shown
     pub device_name: String,
+    /// when it joined, Unix seconds
     pub joined_at: f64,
+    /// hosts the group
     pub host: bool,
     /// the account that added this member, when someone did (never so far: everyone joins by themselves)
     pub added_by: Option<i64>,
@@ -112,10 +125,12 @@ pub struct Member {
 }
 
 impl Member {
+    /// A guest, not an account.
     pub fn is_guest(&self) -> bool {
         self.guest.is_some()
     }
 
+    /// As the API gives it (the member list).
     pub fn json(&self) -> Value {
         json!({
             "member": self.member, "user": self.user, "name": self.name, "avatar": self.avatar,
@@ -131,14 +146,29 @@ pub enum Event {
     /// something changed: the streams send the state as it is now
     State,
     /// the group ended for everyone (`member` None), or for one member (`member`: removed, expired)
-    Ended { reason: &'static str, member: Option<String> },
+    Ended {
+        /// why it ended (removed, expired, idle, …)
+        reason: &'static str,
+        /// the member it ended for; None: everyone
+        member: Option<String>,
+    },
 }
 
 /// Who is asking: an account on a device, or a guest (by the membership its token names).
 #[derive(Clone, Debug)]
 pub enum Caller {
-    Account { user: i64, device: String },
-    Guest { member: String },
+    /// an account on one of its devices
+    Account {
+        /// the account
+        user: i64,
+        /// its device id
+        device: String,
+    },
+    /// a guest, by membership
+    Guest {
+        /// the guest's membership id
+        member: String,
+    },
 }
 
 /// What the caller is in a group, for `you` and the permission checks.
@@ -155,6 +185,7 @@ pub struct You {
 }
 
 impl You {
+    /// The `you` object of the API.
     pub fn json(&self) -> Value {
         json!({ "member": self.member, "host": self.host, "can_control": self.can_control })
     }
@@ -162,30 +193,41 @@ impl You {
 
 /// One group listen.
 pub struct Group {
+    /// the group's id
     pub id: String,
+    /// its join code
     pub code: String,
     /// [`ANYONE`] or [`LINK`]
     pub visibility: String,
+    /// anyone may play, pause, seek and change the queue
     pub everyone_controls: bool,
     /// the host's switch "Guests can join with the link"
     pub guests_allowed: bool,
     /// the host's cap ("Limit to N people"); the server's `group_listen_max` caps it too
     pub max_members: i64,
+    /// the queue
     pub queue: Vec<Entry>,
+    /// the current entry in `queue`
     pub index: usize,
+    /// playing, not paused
     pub playing: bool,
     /// seconds into the current song at `anchor_ms`
     pub position: f64,
     /// the server's clock (Unix ms) when `position` was true
     pub anchor_ms: i64,
+    /// bumped with every change: devices skip states they already have
     pub rev: u64,
+    /// when it started, Unix seconds
     pub started_at: f64,
     /// the last change (Unix seconds): idle groups end after [`IDLE_SECS`]
     pub active_at: f64,
     /// ordered by `joined_at`
     pub members: Vec<Member>,
+    /// the next queue entry number
     next_qid: u64,
+    /// the next membership number
     next_member: u64,
+    /// tells the members' event streams about changes
     pub tx: broadcast::Sender<Event>,
     /// when the oldest change not saved yet happened (None: nothing to save)
     pub unsaved: Option<f64>,
@@ -198,22 +240,32 @@ pub struct Group {
 /// Where a new queue starts: the entry, seconds into it, playing or not.
 #[derive(Clone, Copy, Debug)]
 pub struct At {
+    /// the entry in the queue
     pub index: usize,
+    /// seconds into it
     pub position: f64,
+    /// playing, not paused
     pub playing: bool,
 }
 
 /// A new group's settings.
 pub struct NewGroup {
+    /// its id
     pub id: String,
+    /// its join code
     pub code: String,
+    /// [`ANYONE`] or [`LINK`]
     pub visibility: String,
+    /// "Everyone can control"
     pub everyone_controls: bool,
+    /// "Guests can join with the link"
     pub guests_allowed: bool,
+    /// the host's member limit
     pub max_members: i64,
 }
 
 impl Group {
+    /// A group with no members and an empty queue, started at `now_ms`.
     pub fn new(n: NewGroup, now_ms: i64) -> Group {
         let t = now_ms as f64 / 1000.0;
         Group {
@@ -226,6 +278,7 @@ impl Group {
 
     // ---- who is who -----------------------------------------------------------------------------------
 
+    /// The host's membership.
     pub fn host(&self) -> Option<&Member> {
         self.members.iter().find(|m| m.host)
     }
@@ -235,10 +288,12 @@ impl Group {
         self.host().map(|m| m.user).unwrap_or(0)
     }
 
+    /// The host's name ("" when there is none).
     pub fn host_name(&self) -> String {
         self.host().map(|m| m.name.clone()).unwrap_or_default()
     }
 
+    /// The membership with id `id`.
     pub fn member(&self, id: &str) -> Option<&Member> {
         self.members.iter().find(|m| m.member == id)
     }
@@ -256,6 +311,7 @@ impl Group {
         user > 0 && self.members.iter().any(|m| m.guest.is_none() && m.user == user)
     }
 
+    /// What the caller is in the group.
     pub fn you(&self, c: &Caller) -> You {
         let member = self.find(c).map(|m| m.member.clone()).unwrap_or_default();
         match c {
@@ -274,10 +330,12 @@ impl Group {
         self.max_members.min(server_max).max(2)
     }
 
+    /// No room for anyone else.
     pub fn full(&self, server_max: i64) -> bool {
         self.members.len() as i64 >= self.cap(server_max)
     }
 
+    /// Every account sees it in its list (not link-only).
     pub fn anyone(&self) -> bool {
         self.visibility != LINK
     }
@@ -329,6 +387,7 @@ impl Group {
         }
     }
 
+    /// The entry playing now.
     pub fn current(&self) -> Option<&Entry> {
         self.queue.get(self.index)
     }
@@ -392,6 +451,7 @@ impl Group {
 
     // ---- the queue ----------------------------------------------------------------------------------
 
+    /// A new queue entry for `track` with the next qid.
     fn entry(&mut self, track: i64, row: Arc<Row>, by: &AddedBy) -> Entry {
         let qid = format!("q{}", self.next_qid);
         self.next_qid += 1;
@@ -439,6 +499,7 @@ impl Group {
         }
     }
 
+    /// An error when `more` songs wouldn't fit the queue.
     fn room(&self, more: usize) -> ApiResult<()> {
         if self.queue.len() + more > QUEUE_MAX {
             return Err(err(400, format!("A group listen's queue holds at most {QUEUE_MAX} songs")));
@@ -643,6 +704,7 @@ impl Group {
     }
 }
 
+/// A queue entry as the API gives it: the song's row with `qid` and `added_by`.
 fn entry_json(e: &Entry) -> Value {
     let mut o = (*e.row).clone();
     o.insert("qid".into(), json!(e.qid));
@@ -714,11 +776,13 @@ pub fn random_code() -> String {
 /// Every group listen of this server process. Clones share them.
 #[derive(Clone)]
 pub struct Groups {
+    /// the live groups, behind one lock
     inner: Arc<Mutex<Inner>>,
     /// an id of this server process (random at start): a device tells a restart from an ended group by it
     pub boot: Arc<str>,
 }
 
+/// What the group listens keep, behind [`Groups::lock`].
 #[derive(Default)]
 pub struct Inner {
     /// by id
@@ -738,6 +802,7 @@ impl Default for Groups {
 }
 
 impl Groups {
+    /// The groups, locked (a poisoned lock is taken over).
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -754,6 +819,7 @@ impl Inner {
         }
     }
 
+    /// The live group with this join code (case, spaces and dashes forgiven).
     pub fn by_code(&self, code: &str) -> Option<&Group> {
         let code = normalize_code(code);
         if code.len() != CODE_LEN {
@@ -784,8 +850,11 @@ impl Inner {
 
 /// What is saved of a group: its row and its members' rows.
 pub struct Saved {
+    /// the group's id
     pub id: String,
+    /// its row's values, in column order
     pub group: Vec<Value>,
+    /// each member's row values
     pub members: Vec<Vec<Value>>,
 }
 

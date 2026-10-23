@@ -38,6 +38,7 @@ pub const BUSY: &str = "Server processing is busy – playing the original";
 pub struct Slots(Arc<AtomicUsize>);
 
 impl Slots {
+    /// No jobs running.
     pub fn new() -> Slots {
         Slots::default()
     }
@@ -83,13 +84,18 @@ impl Drop for Slot {
 /// The admin's limits (Settings → Server processing).
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    /// server processing is turned on
     pub enabled: bool,
+    /// processed streams at once (0: none)
     pub max_streams: usize,
+    /// the highest output rate, Hz
     pub max_rate: u32,
+    /// the most filter taps an engine setting may ask for
     pub max_taps: usize,
 }
 
 impl Limits {
+    /// The limits from the settings (192 kHz and 65 536 taps when unset).
     pub fn of(st: &impl Ctx) -> Limits {
         let rate = st.cfg().int("cadenza_max_rate");
         let taps = st.cfg().int("cadenza_max_taps");
@@ -102,6 +108,7 @@ impl Limits {
     }
 }
 
+/// The cache of filter coefficients, in the data folder.
 pub fn cache(st: &impl Ctx) -> CoefficientCache {
     CoefficientCache::in_dir(st.data_dir().join("cadenza-cache"))
 }
@@ -154,6 +161,7 @@ pub fn choose_filter_or(id: &str, fallback: &str, max_taps: usize) -> FilterKind
     cap_filter(FilterKind::parse(id).or_else(|| FilterKind::parse(fallback)).unwrap_or_default(), max_taps)
 }
 
+/// The dither for an id, with no admin default (tests).
 #[cfg(test)]
 pub fn choose_dither(id: &str) -> DitherKind {
     choose_dither_or(id, "")
@@ -181,7 +189,9 @@ pub fn input_format(info: &Value) -> InputFormat {
 /// A downloaded Cadenza program a job runs on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct External {
+    /// the program file
     pub path: PathBuf,
+    /// its version
     pub version: String,
 }
 
@@ -226,6 +236,7 @@ pub fn saved_values(st: &impl Ctx) -> Map<String, Value> {
     parse_values(&st.cfg().str("cadenza_engine_settings"))
 }
 
+/// A JSON object of engine values; anything else reads as none.
 pub fn parse_values(text: &str) -> Map<String, Value> {
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(m)) => m,
@@ -260,6 +271,7 @@ pub fn builtin_schema(max_taps: usize) -> Value {
 /// The active engine and the admin's settings for it.
 #[derive(Clone, Debug)]
 pub struct Engine {
+    /// the downloaded program, None for the built-in engine
     pub external: Option<External>,
     /// the engine's settings schema
     pub settings: Value,
@@ -277,15 +289,18 @@ pub struct EngineCache(Arc<Mutex<Option<(EngineKey, Engine)>>>);
 type EngineKey = (u64, u64);
 
 impl EngineCache {
+    /// The kept engine, when it was worked out for `key`.
     fn get(&self, key: EngineKey) -> Option<Engine> {
         self.0.lock().unwrap().as_ref().filter(|(k, _)| *k == key).map(|(_, e)| e.clone())
     }
 
+    /// Keep `e` as the engine for `key`.
     fn put(&self, key: EngineKey, e: Engine) {
         *self.0.lock().unwrap() = Some((key, e));
     }
 }
 
+/// What the kept engine depends on, as it stands now.
 fn engine_key(st: &impl Ctx) -> EngineKey {
     (st.cfg().generation(), st.playback().cadenza.epoch())
 }
@@ -315,6 +330,7 @@ impl Engine {
         tokio::task::spawn_blocking(move || Engine::of(&st2)).await.unwrap_or_else(|_| Engine::from_parts(None, saved_values(st), Limits::of(st).max_taps))
     }
 
+    /// The engine for a program (None: the built-in one) and the saved values.
     pub fn from_parts(prog: Option<crate::cadenza::CadenzaProgram>, values: Map<String, Value>, max_taps: usize) -> Engine {
         match prog {
             Some(p) => Engine { external: Some(External { path: p.path, version: p.version }), settings: p.settings, values },
@@ -322,6 +338,7 @@ impl Engine {
         }
     }
 
+    /// The engine's version.
     pub fn version(&self) -> String {
         match &self.external {
             Some(e) => e.version.clone(),
@@ -329,14 +346,17 @@ impl Engine {
         }
     }
 
+    /// "updated" for a downloaded program, "bundled" for the built-in engine.
     pub fn source(&self) -> &'static str {
         if self.external.is_some() { "updated" } else { "bundled" }
     }
 
+    /// The engine's name and version, as shown ("Cadenza 2.1.0 (updated)").
     pub fn label(&self) -> String {
         engine_label(self.external.as_ref())
     }
 
+    /// The setting keys of its schema.
     fn keys(&self) -> Vec<String> {
         self.settings.as_array().map(|a| a.iter().filter_map(|s| s["key"].as_str().map(String::from)).collect()).unwrap_or_default()
     }
@@ -384,15 +404,23 @@ impl Engine {
 /// What one processed stream does.
 #[derive(Clone)]
 pub struct Job {
+    /// the file to play
     pub path: String,
+    /// its format, as probed
     pub input: InputFormat,
+    /// where to start, seconds
     pub seek: f64,
+    /// the output rate, Hz
     pub rate: u32,
+    /// the resampling filter
     pub filter: FilterKind,
+    /// the dither for the 24-bit output
     pub dither: DitherKind,
+    /// the engine and its settings
     pub engine: EngineRun,
 }
 
+/// The DSP pipeline settings for a job: 24-bit at the job's rate, with its filter, dither and headroom.
 fn config(job: &Job) -> PipelineConfig {
     // level stays that of the original (no automatic -3 dB headroom) unless the admin set one; the soft clipper guards intersample overs
     PipelineConfig { filter: job.filter, output_rate: Some(job.rate), output_bits: 24, dither: job.dither, headroom_db: Some(job.engine.headroom_db), ..PipelineConfig::default() }
@@ -404,13 +432,16 @@ const BLOCK_BYTES: usize = 64 * 1024;
 /// Where the FLAC encoder writes: a pipe (live streaming) or a file (cache render: ffmpeg can then
 /// seek back and finish STREAMINFO and the seek table).
 pub enum Output {
+    /// stdout, for streaming
     Pipe,
+    /// this file, for a cache render
     File(std::path::PathBuf),
 }
 
 /// A running decoder → Cadenza → encoder chain. The decoder (and a downloaded engine) belong to the
 /// middle stage's task: they are killed when it ends, which it does once the encoder is gone.
 pub struct Chain {
+    /// the FLAC encoder
     pub encoder: tokio::process::Child,
     /// the encoder's stdout ([`Output::Pipe`] only)
     pub out: Option<tokio::process::ChildStdout>,

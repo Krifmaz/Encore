@@ -14,28 +14,42 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
+/// The extension id Encore registers with the Core as.
 pub const EXTENSION_ID: &str = "app.encore.roon";
 /// Roon's SOOD service id – the Core answers queries that name it.
 const SOOD_SERVICE_ID: &str = "00720724-5143-4a9b-abac-0e50cba674bb";
+/// Where SOOD queries go (Roon's multicast group and port).
 const SOOD_ADDR: &str = "239.255.90.90:9003";
+/// The Core's API port when its answer names none.
 const DEFAULT_PORT: u16 = 9330;
+/// How long a request waits for its answer.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// A Roon Core found on the network.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Core {
+    /// its unique id
     pub id: String,
+    /// its display name
     pub name: String,
+    /// its version
     pub version: String,
+    /// its address
     pub host: String,
+    /// its API port
     pub port: u16,
 }
 
+/// The link's status for the API.
 #[derive(Default)]
 struct Status {
     /// off · searching · connecting · waiting_for_approval · connected · error
     phase: String,
+    /// what is happening, in words
     message: String,
+    /// the Core it is about
     core: Option<Core>,
+    /// when the phase last changed
     since: Option<Instant>,
 }
 
@@ -45,9 +59,13 @@ type ImageCache = HashMap<String, (Instant, String, Vec<u8>)>;
 /// Everything the rest of the app reads: status, the live zones, and the session to send requests on.
 #[derive(Default)]
 struct Shared {
+    /// the link's status
     status: Mutex<Status>,
+    /// the Core's zones by id, as Roon sends them
     zones: Mutex<BTreeMap<String, Value>>,
+    /// the connected session, if any
     session: Mutex<Option<Session>>,
+    /// cover images fetched from the Core
     images: Mutex<ImageCache>,
 }
 /// Encore's link to a Roon Core: its status, the live zones and the session. The server keeps one (in
@@ -56,6 +74,7 @@ struct Shared {
 pub struct Roon(Arc<Shared>);
 
 impl Roon {
+    /// Set the phase (restarting its clock when it changed), the message and the Core.
     fn set_status(&self, phase: &str, message: impl Into<String>, core: Option<Core>) {
         let mut s = self.0.status.lock().unwrap();
         if s.phase != phase { s.since = Some(Instant::now()); }
@@ -64,6 +83,7 @@ impl Roon {
         if core.is_some() || phase == "off" || phase == "searching" { s.core = core; }
     }
 
+    /// Fold a zones message into the live zones.
     fn apply_zone_changes(&self, body: &Value) {
         apply_zone_changes(&mut self.0.zones.lock().unwrap(), body);
     }
@@ -75,18 +95,26 @@ impl Roon {
 /// CONTINUE (one of many answers to a subscription).
 #[derive(Debug, Clone)]
 struct Moo {
+    /// REQUEST, COMPLETE or CONTINUE
     verb: String,
+    /// the service and method, or the answer's name ("Success", "Changed", …)
     name: String,
+    /// matches an answer to its request
     request_id: u32,
+    /// the headers, names lower case
     headers: HashMap<String, String>,
+    /// the body, if any
     body: Vec<u8>,
 }
 
 impl Moo {
+    /// The body as JSON (Null when it isn't).
     fn json(&self) -> Value { serde_json::from_slice(&self.body).unwrap_or(Value::Null) }
+    /// The body's Content-Type.
     fn content_type(&self) -> String { self.headers.get("content-type").cloned().unwrap_or_default() }
 }
 
+/// One MOO/1 frame: the first line, Request-Id, and with a body Content-Type and Content-Length.
 fn encode(verb: &str, name: &str, id: u32, body: Option<(&str, &[u8])>) -> Vec<u8> {
     let mut out = format!("MOO/1 {verb} {name}\nRequest-Id: {id}\n").into_bytes();
     match body {
@@ -99,6 +127,7 @@ fn encode(verb: &str, name: &str, id: u32, body: Option<(&str, &[u8])>) -> Vec<u
     out
 }
 
+/// Parse one MOO/1 frame.
 fn decode(frame: &[u8]) -> Option<Moo> {
     let sep = frame.windows(2).position(|w| w == b"\n\n")?;
     let head = std::str::from_utf8(&frame[..sep]).ok()?;
@@ -118,20 +147,27 @@ fn decode(frame: &[u8]) -> Option<Moo> {
     Some(Moo { verb, name, request_id, headers, body })
 }
 
+/// Who waits for answers to one request id.
 enum Waiter {
+    /// a request: the first answer
     Once(oneshot::Sender<Moo>),
+    /// a subscription: every answer
     Many(mpsc::UnboundedSender<Moo>),
 }
 
 /// A connected Core: frames go out through `tx`; answers come back to whoever waits on the request id.
 #[derive(Clone)]
 struct Session {
+    /// frames to the WebSocket writer
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// who waits for each request id's answers
     waiters: Arc<Mutex<HashMap<u32, Waiter>>>,
+    /// the next request id
     next_id: Arc<AtomicU32>,
 }
 
 impl Session {
+    /// Queue one frame for the Core.
     fn send_raw(&self, frame: Vec<u8>) -> Result<()> { self.tx.send(frame).map_err(|_| anyhow!("Roon connection closed")) }
 
     /// One request, one answer (COMPLETE).
@@ -160,6 +196,7 @@ impl Session {
         Ok(rx)
     }
 
+    /// Answer a request from the Core.
     fn reply(&self, to: &Moo, name: &str, body: Option<Value>) {
         let b = body.map(|v| v.to_string());
         let _ = self.send_raw(encode("COMPLETE", name, to.request_id, b.as_deref().map(|s| ("application/json", s.as_bytes()))));
@@ -168,6 +205,7 @@ impl Session {
 
 // ---- SOOD discovery ---------------------------------------------------------------------------------
 
+/// Append one SOOD property: name length, name, value length (0xFFFF: no value) and value.
 fn sood_prop(buf: &mut Vec<u8>, name: &str, value: Option<&str>) {
     buf.push(name.len() as u8);
     buf.extend_from_slice(name.as_bytes());
@@ -177,6 +215,7 @@ fn sood_prop(buf: &mut Vec<u8>, name: &str, value: Option<&str>) {
     }
 }
 
+/// A SOOD packet's kind ('Q' query, 'R' reply) and its properties; None when it isn't SOOD version 2.
 fn sood_parse(pkt: &[u8]) -> Option<(char, HashMap<String, String>)> {
     if pkt.len() < 6 || &pkt[..4] != b"SOOD" || pkt[4] != 2 { return None; }
     let kind = pkt[5] as char;
@@ -251,6 +290,7 @@ fn slim_zone(z: &Value) -> Value {
     })
 }
 
+/// Fold a zones message (the full list, or what was added, changed, removed or seeked) into `zones`.
 fn apply_zone_changes(zones: &mut BTreeMap<String, Value>, body: &Value) {
     for z in body["zones"].as_array().into_iter().flatten() { if let Some(id) = z["zone_id"].as_str() { zones.insert(id.to_string(), z.clone()); } }
     for z in body["zones_changed"].as_array().into_iter().flatten().chain(body["zones_added"].as_array().into_iter().flatten()) {
@@ -265,6 +305,7 @@ fn apply_zone_changes(zones: &mut BTreeMap<String, Value>, body: &Value) {
     }
 }
 
+/// Connect to `core`, register (waiting for approval in Roon), subscribe to the zones and serve until the connection ends.
 async fn run_session(st: &impl Ctx, core: Core) -> Result<()> {
     let roon = &st.playback().roon;
     roon.set_status("connecting", format!("Connecting to {} ({}:{})", core.name, core.host, core.port), Some(core.clone()));
@@ -388,6 +429,7 @@ pub async fn supervisor(st: impl Ctx) {
 
 // ---- what the rest of Encore uses --------------------------------------------------------------------
 
+/// The link's status for the API: enabled, phase, message, Core, zone count, seconds in this phase.
 pub fn status(st: &impl Ctx) -> Value {
     let roon = &st.playback().roon;
     let s = roon.0.status.lock().unwrap();
@@ -399,6 +441,7 @@ pub fn status(st: &impl Ctx) -> Value {
 }
 
 impl Roon {
+    /// The zones, slimmed, sorted by name.
     pub fn zones(&self) -> Vec<Value> {
         let zones = self.0.zones.lock().unwrap();
         let mut v: Vec<Value> = zones.values().map(slim_zone).collect();
@@ -406,6 +449,7 @@ impl Roon {
         v
     }
 
+    /// The connected session, or an error.
     fn session(&self) -> Result<Session> { self.0.session.lock().unwrap().clone().ok_or_else(|| anyhow!("Not connected to Roon")) }
 
     /// Transport and volume for one zone. `value`: seconds for seek, 0..1 for volume.

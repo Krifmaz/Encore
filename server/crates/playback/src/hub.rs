@@ -15,9 +15,13 @@ pub const ALIVE: f64 = 15.0;
 /// device's own volume normalization (0.31; its state reports them as `norm`, client-shapes §5.1).
 pub const ACTIONS: [&str; 15] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat", "prefs"];
 
+/// One player device of a user, as its check-ins left it.
 pub struct Device {
+    /// the name it shows as
     pub name: String,
+    /// its last reported state (song, position, volume, …)
     pub state: Value,
+    /// when it last checked in, Unix seconds
     pub seen: f64,
     /// commands waiting for the next check-in (also pushed over the event stream when there is one)
     pub commands: Vec<Value>,
@@ -34,7 +38,9 @@ impl Device {
 
 /// One user's devices plus the channel that tells their open event streams about changes.
 pub struct Hub {
+    /// the devices by id
     pub devices: HashMap<String, Device>,
+    /// tells the user's open event streams that the device list changed
     pub watch: broadcast::Sender<Value>,
 }
 

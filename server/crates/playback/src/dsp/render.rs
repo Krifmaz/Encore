@@ -48,14 +48,23 @@ pub fn cache_key(track_id: i64, mtime_ns: i128, size: u64, rate: u32, filter: &s
 /// What to render: one library file with the settings of one request.
 #[derive(Clone)]
 pub struct Spec {
+    /// the library row
     pub track_id: i64,
+    /// the file
     pub path: String,
+    /// its modification time, ns (part of the cache key)
     pub mtime_ns: i128,
+    /// its size in bytes (part of the cache key)
     pub size: u64,
+    /// its format, as probed
     pub input: InputFormat,
+    /// the output rate, Hz
     pub rate: u32,
+    /// the resampling filter
     pub filter: FilterKind,
+    /// the dither
     pub dither: DitherKind,
+    /// the tap limit (part of the cache key: it changes the filter)
     pub max_taps: usize,
     /// the engine and its settings
     pub engine: EngineRun,
@@ -90,6 +99,7 @@ impl Spec {
         }
     }
 
+    /// The cache key of this render.
     pub fn key(&self) -> String {
         cache_key(self.track_id, self.mtime_ns, self.size, self.rate, &self.filter.id(), self.dither.id(), self.max_taps, &self.engine_tag)
     }
@@ -105,12 +115,15 @@ impl Spec {
 pub struct Ctx {
     /// the renders folder
     pub dir: PathBuf,
+    /// the filter coefficient cache
     pub coeff: CoefficientCache,
     /// the server's processing slots
     pub slots: Slots,
     /// the server's renders waiting or running
     pub renders: Renders,
+    /// the processing slots a render may take (`cadenza_max_streams`)
     pub max_streams: usize,
+    /// the cache size limit in bytes
     pub max_bytes: u64,
     /// false once the cache (or server processing) was turned off: running renders stop
     pub keep_going: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -136,12 +149,15 @@ impl Ctx {
         })
     }
 
+    /// The file a render writes while it runs.
     fn part(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.part"))
     }
+    /// A finished render.
     fn flac(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.flac"))
     }
+    /// A render's metadata.
     fn meta(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.json"))
     }
@@ -167,21 +183,28 @@ impl Ctx {
     }
 }
 
+/// The render cache size limit in MB (`cadenza_cache_mb`).
 pub fn max_mb(st: &impl Server) -> u64 {
     st.cfg().int("cadenza_cache_mb").max(0) as u64
 }
 
+/// Where a render is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// waiting for a processing slot
     Queued,
+    /// turning audio into the cache file
     Running,
+    /// finished: the file is in the cache
     Done,
+    /// stopped before the end
     Failed,
 }
 
+/// A render's progress, broadcast to the responses following it.
 #[derive(Clone, Debug)]
 pub struct Status {
+    /// where it is
     pub phase: Phase,
     /// seconds of output audio handed to the encoder so far
     pub secs: f64,
@@ -191,23 +214,32 @@ pub struct Status {
 
 /// One render in progress (or waiting for a slot).
 pub struct Render {
+    /// the cache key
     pub key: String,
+    /// the user it renders for
     pub user: i64,
+    /// the order renders were started in
     seq: u64,
+    /// its status, watched by followers
     tx: watch::Sender<Status>,
+    /// set to stop the render
     cancel: AtomicBool,
+    /// responses reading it as it is written
     followers: AtomicUsize,
     /// a slot handed over by a request that needs this render now
     gift: Mutex<Option<Slot>>,
 }
 
 impl Render {
+    /// Its progress now.
     pub fn status(&self) -> Status {
         self.tx.borrow().clone()
     }
+    /// Ask it to stop.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
     }
+    /// Change its status and tell the followers.
     fn update(&self, f: impl FnOnce(&mut Status)) {
         self.tx.send_modify(f);
     }
@@ -218,9 +250,12 @@ impl Render {
 #[derive(Clone, Default)]
 pub struct Renders(Arc<RenderTable>);
 
+/// The renders waiting or running, by cache key.
 #[derive(Default)]
 struct RenderTable {
+    /// the renders by cache key
     jobs: Mutex<HashMap<String, Arc<Render>>>,
+    /// the last sequence number handed out
     seq: AtomicU64,
     /// seconds of audio per wall-clock second of the last finished render
     last_factor: Mutex<Option<f64>>,
@@ -232,6 +267,7 @@ impl Renders {
         self.0.jobs.lock().unwrap()
     }
 
+    /// The next render's sequence number.
     fn next_seq(&self) -> u64 {
         self.0.seq.fetch_add(1, Ordering::SeqCst)
     }
@@ -239,11 +275,15 @@ impl Renders {
 
 /// What there is for a key right now.
 pub enum Found {
+    /// finished: the file
     Cached(PathBuf),
+    /// being rendered now
     Rendering(Arc<Render>),
+    /// neither
     Nothing,
 }
 
+/// What there is for `key`: a running render (not a cancelled one), else a finished file, else nothing.
 fn find(ctx: &Ctx, jobs: &HashMap<String, Arc<Render>>, key: &str) -> Found {
     // a cancelled render is about to fail: never follow it (get_or_start replaces it)
     if let Some(j) = jobs.get(key) {
@@ -258,6 +298,7 @@ fn find(ctx: &Ctx, jobs: &HashMap<String, Arc<Render>>, key: &str) -> Found {
     Found::Nothing
 }
 
+/// What there is for `key` right now.
 pub fn lookup(ctx: &Ctx, key: &str) -> Found {
     let jobs = ctx.renders.jobs();
     find(ctx, &jobs, key)
@@ -343,6 +384,7 @@ async fn run(ctx: Ctx, job: Arc<Render>, spec: Spec) {
     }
 }
 
+/// Run one render (after waiting for a slot): the file goes to `<key>.part` and is renamed into place when done. False when it stopped early.
 async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
     // wait for a slot (a request that needs this song now may hand one over); the phase changes
     // under the gift lock, so a gift can't arrive after the render took its own slot
@@ -451,6 +493,7 @@ async fn render(ctx: &Ctx, job: &Arc<Render>, spec: &Spec) -> bool {
 /// Keeps a render's follower count while a response reads it.
 struct Follower(Arc<Render>);
 impl Follower {
+    /// Count one more reader of `job` (dropped: one less).
     fn new(job: Arc<Render>) -> Follower {
         job.followers.fetch_add(1, Ordering::SeqCst);
         Follower(job)
@@ -511,8 +554,10 @@ pub async fn follow(ctx: &Ctx, job: Arc<Render>) -> std::io::Result<impl futures
     }))
 }
 
+/// One step of following a render: the file, its status, the reader guard, the read buffer, and whether the stream ended in an error.
 type FollowState = (tokio::fs::File, watch::Receiver<Status>, Follower, Vec<u8>, bool);
 
+/// Read what is there now; None at the end of the file.
 async fn follow_again(mut file: tokio::fs::File, rx: watch::Receiver<Status>, guard: Follower, mut buf: Vec<u8>) -> Option<(std::io::Result<Bytes>, FollowState)> {
     match file.read(&mut buf).await {
         Ok(0) => None,
@@ -598,6 +643,7 @@ pub async fn serve(ctx: &Ctx, spec: &Spec, user: i64, t: f64, req: Request) -> A
     }
 }
 
+/// Follow a render that has reached `t` seconds (a queued one is handed a slot so it starts now); None when it hasn't got there yet.
 async fn serve_job(ctx: &Ctx, job: Arc<Render>, spec: &Spec, t: f64) -> ApiResult<Option<Response>> {
     if !reached(&job, t) {
         return Ok(None);
@@ -679,13 +725,19 @@ fn touch(p: &Path) {
     }
 }
 
+/// One file in the renders folder.
 struct Entry {
+    /// its cache key
     key: String,
+    /// its size in bytes
     size: u64,
+    /// when it was last used (its modification time)
     used: SystemTime,
+    /// finished (`.flac`), not still running (`.part`)
     done: bool,
 }
 
+/// The renders and part files in `dir`.
 fn entries(dir: &Path) -> Vec<Entry> {
     let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
     rd.flatten()
@@ -701,6 +753,7 @@ fn entries(dir: &Path) -> Vec<Entry> {
         .collect()
 }
 
+/// Delete a finished render and its metadata.
 fn remove_key(dir: &Path, key: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{key}.flac")));
     let _ = std::fs::remove_file(dir.join(format!("{key}.json")));
@@ -759,6 +812,7 @@ pub fn forget_track(data_dir: &Path, track_id: i64) {
     }
 }
 
+/// Bytes as MB, one decimal.
 fn mb(bytes: u64) -> f64 {
     (bytes as f64 / 1_048_576.0 * 10.0).round() / 10.0
 }
@@ -805,6 +859,7 @@ pub fn usage_text(st: &impl Server) -> String {
 // FLAC seek table: ffmpeg's FLAC muxer leaves an 8 KiB PADDING block but writes no SEEKTABLE;
 // fill the padding with one (same size, so no audio moves) so browsers seek straight to a frame.
 
+/// The FLAC frame header CRC-8 (polynomial 0x07).
 fn crc8(data: &[u8]) -> u8 {
     let mut c = 0u8;
     for &b in data {
@@ -856,6 +911,7 @@ fn frame_header(b: &[u8]) -> Option<(u64, [u8; 2])> {
     Some((n, [b[2], b[3]]))
 }
 
+/// Channels for a FLAC channel assignment: 1..8 independent channels, the stereo modes 2.
 fn channels_of(code: u8) -> u8 {
     if code <= 7 {
         code + 1
@@ -973,6 +1029,7 @@ pub fn add_seektable(path: &Path) -> std::io::Result<usize> {
     Ok(points.len())
 }
 
+/// Read into `buf` from `at` until it is full or the file ends; the bytes read.
 fn read_at(f: &mut std::fs::File, at: u64, buf: &mut [u8]) -> std::io::Result<usize> {
     f.seek(SeekFrom::Start(at))?;
     let mut n = 0;

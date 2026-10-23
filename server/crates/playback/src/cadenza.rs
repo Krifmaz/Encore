@@ -56,8 +56,11 @@ pub fn builtin_cadenza_version() -> String {
 /// What `cadenza render --describe` says (protocol already checked).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Describe {
+    /// the program's version
     pub version: String,
+    /// the render protocol it speaks
     pub protocol: u64,
+    /// it was built with GPU processing
     pub gpu: bool,
     /// the engine settings schema: [{key, label, type, options?, default, help, min?, max?, step?}]
     pub settings: Value,
@@ -147,12 +150,14 @@ pub fn describe_now(exe: &Path) -> Result<Describe, String> {
     parse_describe(&String::from_utf8_lossy(&o.stdout))
 }
 
+/// Each program file's description, with the file's modification time it was read at (a new file is asked again).
 type DescribeCache = HashMap<PathBuf, (Option<SystemTime>, Result<Describe, String>)>;
 
 /// What each downloaded Cadenza program said about itself, kept per program file. The server keeps one
 /// (in [`crate::Playback`]); clones share it.
 #[derive(Clone, Default)]
 pub struct Programs {
+    /// what each program said, by its path
     described: Arc<Mutex<DescribeCache>>,
     /// moves with every [`Programs::forget`], so what was worked out from the programs is known to be old
     epoch: Arc<AtomicU64>,
@@ -202,7 +207,10 @@ impl Programs {
 /// The downloaded Cadenza server processing runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CadenzaProgram {
+    /// the program file
     pub path: PathBuf,
+    /// its version
     pub version: String,
+    /// its engine settings schema
     pub settings: Value,
 }

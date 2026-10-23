@@ -15,6 +15,7 @@ pub mod stream;
 
 /// What playback needs from the server.
 pub trait Ctx: encore_media::Ctx {
+    /// The playback state the server keeps.
     fn playback(&self) -> &Playback;
 }
 

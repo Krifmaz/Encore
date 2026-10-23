@@ -167,6 +167,7 @@ fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
 /// A signed-in listener. A share link has none, and its streams are never processed on the server.
 #[derive(Clone, Copy, Debug)]
 pub struct Listener {
+    /// the user's id
     pub user: i64,
     /// whether the listener has the `server_dsp` permission (only asked when the request wants processing)
     pub may_process: bool,
@@ -176,11 +177,17 @@ pub struct Listener {
 #[derive(Debug, PartialEq)]
 pub enum StreamPlan {
     /// the file itself with Range support (`original`)
-    Original { content_type: &'static str },
+    Original {
+        /// the file's Content-Type
+        content_type: &'static str,
+    },
     /// made on the fly by ffmpeg, streamed without a length
     Convert(Convert),
     /// upsampled on the server by Cadenza for this user (`cadenza-<rate>`): the render cache or live
-    Cadenza { user: i64 },
+    Cadenza {
+        /// the user it is processed for
+        user: i64,
+    },
 }
 
 /// A stream ffmpeg makes on the fly.
@@ -189,7 +196,12 @@ pub enum Convert {
     /// lossless FLAC: `flac` (a browser can't play the file, or `transcode` was asked for) or, with
     /// `fallback`, `flac-fallback` (the client's decoders don't cover the file's codec); DSD (`dsd`) is
     /// decoded to 24-bit / 176.4 kHz first
-    Flac { fallback: bool, dsd: bool },
+    Flac {
+        /// the client's decoders don't cover the file's codec
+        fallback: bool,
+        /// the file is DSD, decoded to PCM first
+        dsd: bool,
+    },
     /// AAC in an ADTS stream at this many kbps (`aac-<kbps>`)
     Aac(u32),
     /// Opus in Ogg at this many kbps (`opus-<kbps>`), for browsers without an AAC decoder
@@ -207,6 +219,7 @@ impl Convert {
         }
     }
 
+    /// The Content-Type of the stream.
     pub fn content_type(&self) -> &'static str {
         match self {
             Convert::Flac { .. } => "audio/flac",

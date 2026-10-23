@@ -28,7 +28,12 @@ pub enum Outcome {
     Finished(bool),
     /// it failed before any of its audio reached the encoder (it did not start, rejected an argument,
     /// crashed at once, stayed silent too long): another engine can take `io` over
-    Unavailable { why: String, io: Io },
+    Unavailable {
+        /// why it failed
+        why: String,
+        /// the input and output, for the next engine to take over
+        io: Io,
+    },
 }
 
 /// An engine server processing runs on.
@@ -49,6 +54,7 @@ fn decoder(job: &Job) -> std::io::Result<tokio::process::Child> {
         .spawn()
 }
 
+/// Send `v` on `ready` unless it was sent already.
 fn send(ready: &mut Option<Ready>, v: Result<String, String>) {
     if let Some(r) = ready.take() {
         let _ = r.send(v);
@@ -232,6 +238,7 @@ const FIRST_OUTPUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(test)]
 const FIRST_OUTPUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Run the downloaded Cadenza program: ffmpeg decodes straight into it, its output goes to the encoder. Gives the input back as [`Outcome::Unavailable`] when it fails before any audio reaches the encoder.
 async fn external(ext: &External, cache: &CoefficientCache, job: &Job, mut io: Io) -> Outcome {
     let frame = 4 * job.input.channels.max(1) as u64;
     let mut dec = match decoder(job) {

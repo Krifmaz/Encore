@@ -16,9 +16,13 @@ pub const SPOT_QUEUE_MAX: usize = 300;
 /// The last spot written for a user, so check-ins only touch the database every SPOT_EVERY seconds
 /// (and at once when the song changes or playback stops or starts).
 pub struct Last {
+    /// when it was written, Unix seconds
     pub at: f64,
+    /// the song it was for
     pub track: i64,
+    /// the device was playing
     pub playing: bool,
+    /// the device that wrote it
     pub device: String,
 }
 
