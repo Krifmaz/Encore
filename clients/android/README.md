@@ -23,6 +23,10 @@ What it does:
 - group listen: several people on the server hear the same queue at the same time, each on their own device
 - Cadenza on this phone (upsampling) and bit-perfect output to a USB DAC (Android 14+)
 - this phone as an Encore remote device (play here, send there, control another device)
+- Android TV / Google TV: the same APK installs on a TV and shows on its home screen (the leanback launcher entry
+  and a banner); a remote's D-pad moves a focus ring over the tabs, rows and tiles (`ui/theme/FocusRing.kt`), and the
+  TV becomes an Encore device the phone can send music to. To install, sideload `Encore-android-<version>.apk` from
+  the releases (for example with the Downloader app, or `adb install`); it then updates itself like on a phone
 - Android Auto (browse, search, voice, live lyrics, the quality badge, the artist's page) and the Encore Lyrics car app
 - "Share → Request in Encore", crash reports to the server (Diagnostics → App crashes)
 - songs saved for offline in `Music/Encore`, offline mode (the banner; Home, Library, Playlists, Settings and the

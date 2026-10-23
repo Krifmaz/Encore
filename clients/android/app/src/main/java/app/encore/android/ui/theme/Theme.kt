@@ -13,6 +13,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -311,6 +312,13 @@ val EncoreShapes: Shapes = Shapes(
     extraLarge = RoundedCornerShape(20.dp),
 )
 
+/**
+ * The app's theme: the account's palette (as [LocalEncorePalette]), Material 3 with Encore's colours, type and shapes,
+ * the focus ring on every clickable (for TV remotes and keyboards) and a root [Surface] for the content colour.
+ *
+ * @param settings the account's look (theme, accent, background) the palette is made from.
+ * @param content the app's UI.
+ */
 @Composable
 fun EncoreTheme(settings: Settings, content: @Composable () -> Unit) {
     val systemDark = isSystemInDarkTheme()
@@ -319,7 +327,13 @@ fun EncoreTheme(settings: Settings, content: @Composable () -> Unit) {
     CompositionLocalProvider(LocalEncorePalette provides palette) {
         // A Surface at the root sets the content colour for every Text (without it, Compose's default is black)
         MaterialTheme(colorScheme = scheme, typography = EncoreTypography, shapes = EncoreShapes) {
-            Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+            // every clickable also outlines itself while a D-pad / keyboard focuses it (TV remotes, FocusRing.kt);
+            // LocalIndication here is MaterialTheme's ripple, which the ring keeps underneath
+            val ripple = LocalIndication.current
+            val indication = remember(ripple, palette.accent) { FocusRingIndication(ripple, palette.accent) }
+            CompositionLocalProvider(LocalIndication provides indication) {
+                Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+            }
         }
     }
 }

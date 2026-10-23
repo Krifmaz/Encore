@@ -56,6 +56,7 @@ import app.encore.android.ui.components.ToastHost
 import app.encore.android.ui.components.Toasts
 import app.encore.android.data.repo.PickerOpts
 import app.encore.android.ui.screens.AccountScreen
+import app.encore.android.ui.theme.focusRing
 import app.encore.android.ui.screens.AlbumScreen
 import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
@@ -288,6 +289,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {
                         for (t in Tab.entries) {
                             NavigationBarItem(
+                                // the tabs pick their own ripple, so they need the TV focus ring added (FocusRing.kt)
+                                modifier = Modifier.focusRing(p.accent),
                                 selected = t == tab && stack.isEmpty(),
                                 onClick = {
                                     stack.clear()
