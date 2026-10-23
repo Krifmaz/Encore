@@ -149,7 +149,9 @@ impl AppState {
         let scheduler = encore_jobs::Scheduler::new(db.clone(), cfg.clone(), jobs.clone());
         let plugins = encore_plugins::Registry::new(data, db.clone(), cfg.clone());
         let st = AppState {
-            db, cfg, http, http_no_redirects, urls: Default::default(), limits: Arc::new(RateLimiter::default()), static_dir, library: Library::new(busy.clone()), mb: Default::default(),
+            db, cfg, http, http_no_redirects, urls: Default::default(), limits: Arc::new(RateLimiter::default()), static_dir, library: Library::new(busy.clone()),
+            // MusicBrainz's look-ups kept next to the database, so a restart doesn't make every page ask again
+            mb: Mb::with_store(&data.join("musicbrainz-cache.db")),
             pace: Default::default(), cache: Arc::new(ByteCache::new(REMOTE_CACHE_BYTES, REMOTE_CACHE_ENTRIES)), requests: Default::default(), busy, jobs, scheduler, media: Default::default(),
             playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(), plugins,
         };

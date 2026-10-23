@@ -48,6 +48,10 @@ pub struct State {
     live: Option<(String, String)>,
     /// `GET /api/discover/for-you`, shown while the box is empty (asked once per visit).
     picks: Option<Result<Value, String>>,
+    /// The catalogue search under way, given up when a newer one starts: its call is dropped, the server drops
+    /// the search, and its MusicBrainz look-ups no longer go before the newer search's in the server's
+    /// one-call-a-second line.
+    search: Option<iced::task::Handle>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +98,9 @@ fn run(state: &mut State, ctx: &Ctx) -> Task<Message> {
     state.seq += 1;
     let seq = state.seq;
     state.results = None;
+    if let Some(old) = state.search.take() {
+        old.abort();
+    }
     if state.q.is_empty() {
         state.lib = None;
         state.lib_for.clear();
@@ -101,13 +108,16 @@ fn run(state: &mut State, ctx: &Ctx) -> Task<Message> {
     }
     let api = ctx.api.clone();
     let disc_q = format!("/discover/search?q={}&type={}", urlencode(&state.q), state.typ);
-    let mut tasks = vec![Task::perform(
+    let (search, handle) = Task::perform(
         {
             let api = api.clone();
             async move { api.get(&disc_q).await }
         },
         move |r| Message::Results(seq, r),
-    )];
+    )
+    .abortable();
+    state.search = Some(handle);
+    let mut tasks = vec![search];
     if state.lib_for != state.q {
         state.lib = None;
         state.lib_for = state.q.clone();

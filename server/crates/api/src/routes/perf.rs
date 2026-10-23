@@ -20,6 +20,8 @@ async fn perf(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
         "lists": st.web.lists.stats(),
         "remote": st.cache.stats(),
         "musicbrainz": st.mb.cache_stats(),
+        // MusicBrainz look-ups kept on disk across restarts (null: memory only)
+        "musicbrainz_disk_answers": st.mb.stored(),
         "soulseek_browse": st.web.soulseek_browsed.stats(),
     });
     v["db"] = st.db.pool_waits();
@@ -75,7 +77,7 @@ mod tests {
         }
         assert!(v["db"]["write"]["waits"].is_u64(), "{v}");
         assert!(v["background"]["cover_pass"].is_object());
-        for k in ["interactive", "import", "request", "background"] {
+        for k in ["interactive", "section", "import", "request", "background"] {
             assert_eq!(v["background"]["musicbrainz_line"][k]["waiting"], 0, "{v}");
         }
         // the web app's files are not timed

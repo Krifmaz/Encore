@@ -4,9 +4,11 @@
 //! is it taking so long to import?"). Now the turn goes by priority:
 //!
 //! 1. [`Priority::Interactive`] – a page someone is looking at (every API call, `encore_api`'s layer)
-//! 2. [`Priority::Import`] – a download being imported (its tags, the release to check it against)
-//! 3. [`Priority::Request`] – the other steps of a request (which album a song is on, a discography)
-//! 4. [`Priority::Background`] – everything else: translations, aliases, the retag task, contributions …
+//! 2. [`Priority::Section`] – the slow extras of a page that show after it (an artist's releases on other
+//!    catalogues: a dozen look-ups), so the next page someone opens doesn't wait behind them
+//! 3. [`Priority::Import`] – a download being imported (its tags, the release to check it against)
+//! 4. [`Priority::Request`] – the other steps of a request (which album a song is on, a discography)
+//! 5. [`Priority::Background`] – everything else: translations, aliases, the retag task, contributions …
 //!
 //! First come, first served inside each. A class that has had someone waiting for [`SHARE`] without a turn
 //! gets the next one, so background work still gets a few calls a minute however busy the line is. A call
@@ -28,20 +30,25 @@ use tokio::time::{Duration, Instant};
 pub enum Priority {
     /// a page someone is looking at
     Interactive = 0,
+    /// the slow extras of a page, shown after the page itself (they go after any page someone opens next)
+    Section = 1,
     /// a download being imported
-    Import = 1,
+    Import = 2,
     /// a request's other steps
-    Request = 2,
+    Request = 3,
     /// work nobody waits for
-    Background = 3,
+    Background = 4,
 }
 
 impl Priority {
-    pub const ALL: [Priority; 4] = [Priority::Interactive, Priority::Import, Priority::Request, Priority::Background];
+    /// Every priority, most urgent first.
+    pub const ALL: [Priority; 5] = [Priority::Interactive, Priority::Section, Priority::Import, Priority::Request, Priority::Background];
 
+    /// The priority's name in `/api/admin/perf`.
     pub fn name(self) -> &'static str {
         match self {
             Priority::Interactive => "interactive",
+            Priority::Section => "section",
             Priority::Import => "import",
             Priority::Request => "request",
             Priority::Background => "background",
@@ -142,9 +149,9 @@ struct State {
     seq: u64,
     ids: u64,
     /// when each class last had a turn
-    served: [Option<Instant>; 4],
+    served: [Option<Instant>; 5],
     /// turns given since the start, by class
-    turns: [u64; 4],
+    turns: [u64; 5],
 }
 
 impl State {
@@ -368,13 +375,14 @@ mod tests {
         }
     }
 
-    /// A page goes first, then an import, then a request's lookup, then background work; one call a second.
+    /// A page goes first, then a page's section, then an import, then a request's lookup, then background work;
+    /// one call a second.
     #[tokio::test(start_paused = true)]
     async fn turns_go_by_priority_at_the_rate() {
         let (line, log, t0, gap) = (Line::default(), Log::default(), Instant::now(), Duration::from_secs(1));
         let mut hs = vec![caller(&line, &log, t0, "first", Priority::Background, gap)];
         settle().await;
-        for (n, c) in [("bg", Priority::Background), ("req", Priority::Request), ("imp", Priority::Import), ("page", Priority::Interactive), ("req2", Priority::Request)] {
+        for (n, c) in [("bg", Priority::Background), ("req", Priority::Request), ("sec", Priority::Section), ("imp", Priority::Import), ("page", Priority::Interactive), ("req2", Priority::Request)] {
             hs.push(caller(&line, &log, t0, n, c, gap));
             settle().await;
         }
@@ -383,9 +391,9 @@ mod tests {
         }
         let log = log.lock().unwrap().clone();
         let names: Vec<&str> = log.iter().map(|x| x.0).collect();
-        assert_eq!(names, ["first", "page", "imp", "req", "req2", "bg"]);
+        assert_eq!(names, ["first", "page", "sec", "imp", "req", "req2", "bg"]);
         spaced(&log, 1.0);
-        assert!(log[0].1 < 0.01 && (log[5].1 - 5.0).abs() < 0.01, "{log:?}");
+        assert!(log[0].1 < 0.01 && (log[6].1 - 6.0).abs() < 0.01, "{log:?}");
         assert_eq!(line.stats()["request"]["turns"], 2);
         assert_eq!(line.stats()["request"]["waiting"], 0);
     }

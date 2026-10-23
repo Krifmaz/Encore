@@ -1,5 +1,6 @@
 //! MusicBrainz web service: rate limited (1 request/second by default, every caller in one line that serves
-//! the most urgent first – [`crate::mb_line`]) and cached for an hour; and the calls that always go to
+//! the most urgent first – [`crate::mb_line`]), cached for an hour in memory and, for look-ups, on disk
+//! ([`crate::mb_store`]), with one call at a time for each answer; and the calls that always go to
 //! musicbrainz.org itself (the account sign-in, ISRC submissions).
 use crate::Ctx;
 use encore_core::json::s;
@@ -7,11 +8,13 @@ use reqwest::RequestBuilder;
 use serde_json::{json, Value};
 use encore_core::cache::{json_bytes, ByteCache, CacheStats};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 pub use crate::mb_line::{one_place, one_place_within, priority, with_priority, Priority};
 use crate::mb_line::Line;
+use crate::mb_store::Store;
 
 #[derive(Clone)]
 pub struct Mb {
@@ -19,6 +22,55 @@ pub struct Mb {
     line: Line,
     /// answers by path and query, for an hour, held to `CACHE_BYTES`
     cache: Arc<ByteCache<Value>>,
+    /// the look-ups' answers on disk ([`crate::mb_store`]), when the server has a folder for them
+    store: Option<Store>,
+    /// the calls being made now, by cache key: a second caller for the same answer waits for the first
+    /// instead of taking a turn of its own (the Android artist page asks for the artist four times at once)
+    flights: Arc<Mutex<HashMap<String, Flight>>>,
+    /// look-ups answered from disk although older than [`TTL`], to be asked again ([`Mb::refresh_stale`])
+    stale: Arc<Stale>,
+}
+
+/// A call to make again: its path and its parameters.
+type Call = (String, Vec<(String, String)>);
+
+/// The look-ups waiting to be asked again, and the bell [`Mb::refresh_stale`] waits for.
+#[derive(Default)]
+struct Stale {
+    /// the calls by cache key, each once
+    due: Mutex<HashMap<String, Call>>,
+    /// rung when one is added
+    bell: Notify,
+}
+
+/// A call being made now: the priority it waits at, and the lock its caller holds until it is done.
+struct Flight {
+    /// the leader's priority: only callers at that priority or a less urgent one wait for it
+    class: Priority,
+    /// held by the leader while it asks; the others wait for it, then find the answer in the cache
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// The caller asking MusicBrainz for an answer others may wait for; dropping it ends the flight.
+struct Lead {
+    /// the server's flights
+    flights: Arc<Mutex<HashMap<String, Flight>>>,
+    /// the answer's cache key
+    key: String,
+    /// this flight's lock (the map's entry may be a newer, more urgent flight's by now)
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// held until the answer is in the cache (or the call failed): the waiters go on when it is let go
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for Lead {
+    fn drop(&mut self) {
+        // the entry goes first, then (as the fields drop) the lock: a waiter that wakes finds no flight
+        let mut f = self.flights.lock().unwrap_or_else(|p| p.into_inner());
+        if f.get(&self.key).is_some_and(|x| Arc::ptr_eq(&x.lock, &self.lock)) {
+            f.remove(&self.key);
+        }
+    }
 }
 
 /// musicbrainz.org itself: signing in to an account and edits go there, never to a mirror (`musicbrainz_url`).
@@ -69,17 +121,38 @@ pub fn gap(st: &impl Ctx) -> Duration {
     Duration::from_secs_f64(1.0 / st.cfg().float("musicbrainz_rate").max(0.1))
 }
 
+/// How long an answer is used as it is (in memory, and on disk after a restart).
 const TTL: Duration = Duration::from_secs(3600);
+/// How long a look-up answered from disk past its [`TTL`] stays in memory while it is asked again.
+const STALE_TTL: Duration = Duration::from_secs(600);
 /// Most bytes the cached MusicBrainz answers may take in memory.
 pub const CACHE_BYTES: usize = 16 << 20;
 
 impl Default for Mb {
+    /// Answers in memory only.
     fn default() -> Self {
-        Mb { line: Line::default(), cache: Arc::new(ByteCache::new(CACHE_BYTES, 3000)) }
+        Mb { line: Line::default(), cache: Arc::new(ByteCache::new(CACHE_BYTES, 3000)), store: None, flights: Arc::default(), stale: Arc::default() }
     }
 }
 
+/// Whether a call's answer is kept on disk: the look-ups by id or by artist / release group, not searches
+/// (their answers change with every word, and a page asking one keeps it in memory for minutes anyway).
+fn kept_on_disk(params: &[(&str, String)]) -> bool {
+    !params.iter().any(|(k, _)| *k == "query")
+}
+
 impl Mb {
+    /// Answers in memory and, for the look-ups, in the file at `path` ([`crate::mb_store`]; memory only when
+    /// it can't be opened).
+    pub fn with_store(path: &std::path::Path) -> Self {
+        Mb { store: Store::open(path), ..Mb::default() }
+    }
+
+    /// How many answers are on disk (`/api/admin/perf`); None without a file.
+    pub fn stored(&self) -> Option<i64> {
+        self.store.as_ref().map(|s| s.len())
+    }
+
     /// What the answer cache holds (`/api/admin/perf`).
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
@@ -100,14 +173,99 @@ impl Mb {
         self.cache.get(&cache_key(path, params))
     }
 
-    /// One call: the hour-long cache, else a turn in the line at the caller's [`priority`] (inside [`one_place`]
-    /// at the place of the work's first call) and the call. A 503 (MusicBrainz says it is busy) waits 1.5, 3,
-    /// 4.5 s and joins the line again at the place it had; the fourth one gives up with [`Busy`].
+    /// One call: the hour-long cache; else, when the same call is being made already at this priority or a more
+    /// urgent one, its answer; else the answer on disk while it is under an hour old (a page someone is
+    /// looking at also takes an older one, up to [`crate::mb_store::KEEP_SECS`], and the call is made again in
+    /// the background: [`Mb::refresh_stale`]); else a turn in the line at the caller's [`priority`] (inside
+    /// [`one_place`] at the place of the work's first call) and the call. A 503 (MusicBrainz says it is busy)
+    /// waits 1.5, 3, 4.5 s and joins the line again at the place it had; the fourth one gives up with [`Busy`].
     pub async fn get(&self, st: &impl Ctx, path: &str, params: &[(&str, String)]) -> anyhow::Result<Value> {
         let key = cache_key(path, params);
         if let Some(v) = self.cache.get(&key) {
             return Ok(v);
         }
+        let class = priority();
+        let _lead = loop {
+            match self.lead_or_join(&key, class) {
+                Ok(lead) => break lead,
+                Err(lock) => {
+                    // the same call is under way: its answer, once it has one (a failed call: ask ourselves)
+                    let _done = lock.lock().await;
+                    if let Some(v) = self.cache.get(&key) {
+                        return Ok(v);
+                    }
+                }
+            }
+        };
+        if let Some(store) = self.store.clone().filter(|_| kept_on_disk(params)) {
+            let k = key.clone();
+            let kept = tokio::task::spawn_blocking(move || store.get(&k)).await.ok().flatten();
+            if let Some((v, at)) = kept {
+                let age = Duration::from_secs_f64((encore_db::now() - at).max(0.0));
+                if age < TTL {
+                    self.remember(&key, &v, TTL - age);
+                    return Ok(v);
+                }
+                if matches!(class, Priority::Interactive | Priority::Section) {
+                    self.remember(&key, &v, STALE_TTL);
+                    self.due(key, path, params);
+                    return Ok(v);
+                }
+            }
+        }
+        self.fetch(st, &key, path, params, class).await
+    }
+
+    /// Leads the call for `key` (Ok: the caller asks, the others wait for it), or the lock of the call already
+    /// under way at `class` or a more urgent priority to wait for (Err). A call under way at a less urgent
+    /// priority doesn't hold up a more urgent one: that one leads a flight of its own.
+    fn lead_or_join(&self, key: &str, class: Priority) -> Result<Lead, Arc<tokio::sync::Mutex<()>>> {
+        let mut f = self.flights.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(x) = f.get(key).filter(|x| x.class <= class) {
+            return Err(x.lock.clone());
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held = lock.clone().try_lock_owned().expect("a new lock is free");
+        f.insert(key.to_string(), Flight { class, lock: lock.clone() });
+        Ok(Lead { flights: self.flights.clone(), key: key.to_string(), lock, _held: held })
+    }
+
+    /// Keeps `v` in memory for `ttl`.
+    fn remember(&self, key: &str, v: &Value, ttl: Duration) {
+        let bytes = key.len() + json_bytes(v);
+        self.cache.insert(key.to_string(), v.clone(), bytes, Some(ttl), 0);
+    }
+
+    /// Marks a look-up answered from disk past its hour as due to be asked again.
+    fn due(&self, key: String, path: &str, params: &[(&str, String)]) {
+        let ps = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        self.stale.due.lock().unwrap_or_else(|p| p.into_inner()).entry(key).or_insert((path.to_string(), ps));
+        self.stale.bell.notify_one();
+    }
+
+    /// Asks MusicBrainz again, as background work, for the look-ups pages were shown from disk past their hour
+    /// (the next page then has the new answer). Runs for as long as the server does: started once at start.
+    pub async fn refresh_stale(&self, st: &impl Ctx) {
+        loop {
+            self.stale.bell.notified().await;
+            loop {
+                let next = {
+                    let mut due = self.stale.due.lock().unwrap_or_else(|p| p.into_inner());
+                    let k = due.keys().next().cloned();
+                    k.and_then(|k| due.remove(&k).map(|c| (k, c)))
+                };
+                let Some((key, (path, ps))) = next else { break };
+                let params: Vec<(&str, String)> = ps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                if let Err(e) = with_priority(Priority::Background, self.fetch(st, &key, &path, &params, Priority::Background)).await {
+                    tracing::debug!("MusicBrainz {path} not asked again: {e}");
+                }
+            }
+        }
+    }
+
+    /// The call itself: a turn in the line at `class`, MusicBrainz's answer, kept in memory and (a look-up) on
+    /// disk. 503s are asked again as [`Mb::get`] says.
+    async fn fetch(&self, st: &impl Ctx, key: &str, path: &str, params: &[(&str, String)], class: Priority) -> anyhow::Result<Value> {
         let mut ps: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
         ps.push(("fmt".into(), "json".into()));
         let base = st.cfg().str("musicbrainz_url");
@@ -115,7 +273,6 @@ impl Mb {
         let gap = gap(st);
         let contact = st.cfg().str("contact_email");
         let ua = format!("Encore/{} ( {} )", encore_core::VERSION, if contact.is_empty() { "https://github.com/Krifmaz/Encore".into() } else { contact });
-        let class = priority();
         let mut place = None;
         for attempt in 0..4 {
             place = Some(self.line.turn(class, gap, place).await);
@@ -125,8 +282,12 @@ impl Mb {
                 continue;
             }
             let v: Value = r.error_for_status()?.json().await?;
-            let bytes = key.len() + json_bytes(&v);
-            self.cache.insert(key, v.clone(), bytes, Some(TTL), 0);
+            self.remember(key, &v, TTL);
+            if let Some(store) = self.store.clone().filter(|_| kept_on_disk(params)) {
+                let (k, v2) = (key.to_string(), v.clone());
+                // written off the async threads; the caller doesn't wait for it
+                tokio::task::spawn_blocking(move || store.put(&k, &v2, encore_db::now()));
+            }
             return Ok(v);
         }
         Err(Busy.into())

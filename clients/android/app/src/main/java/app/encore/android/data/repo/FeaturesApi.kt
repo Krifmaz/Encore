@@ -20,18 +20,24 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * The server calls behind Discover, For you, Requests, the picker, playlist editing, Account and the Leaderboard
@@ -109,6 +115,15 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** GET /api/discover/search?q=&type=all|artist|album|track. */
     fun search(q: String, type: String): SearchResults =
         getObject("/api/discover/search?q=${EncoreApi.enc(q)}&type=${EncoreApi.enc(type)}").page(SearchResults.serializer())
+
+    /**
+     * [search] that is given up when the coroutine asking is cancelled (a newer query typed): the call is
+     * cancelled, its connection closes and the server drops the search with its MusicBrainz look-ups, which
+     * would otherwise go before the newer search's in the server's one-call-a-second line. Suspends; needs no
+     * Dispatchers.IO (OkHttp makes the call on its own threads).
+     */
+    suspend fun searchCancellable(q: String, type: String): SearchResults =
+        cancellableGet("/api/discover/search?q=${EncoreApi.enc(q)}&type=${EncoreApi.enc(type)}").page(SearchResults.serializer())
 
     fun artist(mbid: String): ArtistPage = getObject("/api/discover/artist/${EncoreApi.enc(mbid)}").page(ArtistPage.serializer())
 
@@ -731,6 +746,41 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
             app.encore.android.data.api.CoverVersions.note(el)
             return el
         }
+    }
+
+    /**
+     * A GET read like [call]'s (the server's `detail` in an [ApiException]), cancelled with the coroutine that
+     * waits for it: OkHttp's [Call.cancel] closes the connection, which the server takes as the call given up.
+     */
+    private suspend fun cancellableGet(path: String): JsonObject {
+        if (api.base.isEmpty()) throw IOException("Not signed in")
+        val req = Request.Builder().url(api.url(path)).get().header("Accept", "application/json").build()
+        val c = client.newCall(req)
+        val text = suspendCancellableCoroutine<String> { cont ->
+            cont.invokeOnCancellation { c.cancel() }
+            c.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    // after a cancel the coroutine has gone already; resuming it then does nothing
+                    cont.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { res ->
+                        val body = try { res.body.string() } catch (e: IOException) { cont.resumeWithException(e); return }
+                        if (!res.isSuccessful) {
+                            val o = parseObject(body)
+                            cont.resumeWithException(ApiException(res.code, o?.str("detail")?.ifEmpty { null } ?: "HTTP ${res.code}", o))
+                        } else {
+                            cont.resume(body)
+                        }
+                    }
+                }
+            })
+        }
+        if (text.isBlank()) return JsonObject(emptyMap())
+        val el = try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
+        app.encore.android.data.api.CoverVersions.note(el)
+        return el as? JsonObject ?: JsonObject(emptyMap())
     }
 
     private fun parseObject(text: String): JsonObject? =

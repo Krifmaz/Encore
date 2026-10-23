@@ -20,6 +20,7 @@ pub mod listenbrainz;
 pub mod lrclib;
 pub mod mb;
 mod mb_line;
+pub mod mb_store;
 pub mod progress;
 pub mod pypi;
 pub mod tidal;

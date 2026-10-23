@@ -120,6 +120,12 @@ urlencoding = { workspace = true }
 name = "perf"
 harness = false
 
+# the pages that wait on MusicBrainz, against a stand-in that answers as slowly as the real one:
+# `cargo bench --bench pages`
+[[bench]]
+name = "pages"
+harness = false
+
 # The release binary: the whole program optimised as one unit (fat LTO, one codegen unit) – slower to build,
 # faster to run. Panics keep unwinding (no `panic = "abort"`): the database lends its connections under
 # catch_unwind so a panic in one request can't poison the write lock, and a panicking handler or blocking

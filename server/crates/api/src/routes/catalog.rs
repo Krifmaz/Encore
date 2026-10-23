@@ -78,7 +78,9 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
     }
     let filter = encore_config::release_types::ReleaseFilter::for_artist(&st.cfg, &mbid);
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
-    let found = merged(&st, &a).await;
+    // a dozen MusicBrainz look-ups (the artist's barcodes, ISRCs) for a section shown under the page: after any
+    // page someone opens meanwhile (the album they tap next doesn't wait for them)
+    let found = mb::with_priority(mb::Priority::Section, merged(&st, &a)).await;
     let rgs: std::collections::HashSet<String> = a["release_groups"].as_array().into_iter().flatten().map(|g| s(&g["id"])).collect();
     // the library and the requests for every release: on the blocking pool
     let mut rel = st.blocking(move |st| {

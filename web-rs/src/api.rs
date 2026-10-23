@@ -97,6 +97,8 @@ async fn exchange(method: &str, path: &str, body: Option<Value>, signal: Option<
     let res = match built {
         Ok(r) => match r.send().await {
             Ok(r) => r,
+            // given up by its caller (get_abortable): not a sign the server is down
+            Err(_) if signal.as_ref().is_some_and(|s| s.aborted()) => return Err(ApiError { status: 0, message: "Cancelled".into(), data: Value::Null }),
             Err(_) => {
                 dom::dispatch("encore:server-down", None);
                 return Err(not_connected());
@@ -135,6 +137,10 @@ async fn answer(res: gloo_net::http::Response, path: &str) -> ApiResult {
 }
 
 pub async fn get(path: &str) -> ApiResult { request("GET", path, None).await }
+/// `get` that `signal` can give up (an [`web_sys::AbortController`] the caller keeps): Discover's search drops
+/// the search of the words typed before, whose MusicBrainz look-ups would otherwise go first in the server's
+/// one-a-second line. A call given up this way is an error with status 0 and no "server down" event.
+pub async fn get_abortable(path: &str, signal: Option<&web_sys::AbortSignal>) -> ApiResult { exchange("GET", path, None, signal.cloned()).await }
 /// `get`, given up after `ms`: for the calls that tell whether the server can be reached at all (a server
 /// whose address drops packets would otherwise keep them waiting for the connect timeout, a minute or more).
 pub async fn get_within(path: &str, ms: u32) -> ApiResult { send("GET", path, None, Some(ms)).await }

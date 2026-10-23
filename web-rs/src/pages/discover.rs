@@ -467,10 +467,12 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
         // results update in place – the page (and the search box with the phone keyboard) is never rebuilt while typing
         // the For you rows shown while the box is empty
         let picks: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        // the catalogue search under way, given up when a newer one starts
+        let inflight: Rc<RefCell<Option<web_sys::AbortController>>> = Rc::new(RefCell::new(None));
         let run: Rc<dyn Fn() -> Pin<Box<dyn Future<Output = ()>>>> = {
-            let (view, results, q, typ, seq, lib_cache, picks) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone());
+            let (view, results, q, typ, seq, lib_cache, picks, inflight) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone(), inflight.clone());
             Rc::new(move || {
-                let (view, results, q, typ, seq, lib_cache, picks) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone());
+                let (view, results, q, typ, seq, lib_cache, picks, inflight) = (view.clone(), results.clone(), q.clone(), typ.clone(), seq.clone(), lib_cache.clone(), picks.clone(), inflight.clone());
                 Box::pin(async move {
                     let t = typ.borrow().clone();
                     let qv = q.borrow().clone();
@@ -478,6 +480,10 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                     replace_state(&format!("#/search?q={}&type={}", encode(&qv), t));
                     seq.set(seq.get() + 1);
                     let mine = seq.get();
+                    // the search of the words typed before is given up: the server drops it, and with it its
+                    // MusicBrainz look-ups, which would otherwise go before this search's in the one-a-second line
+                    let ctl = web_sys::AbortController::new().ok();
+                    if let Some(old) = inflight.replace(ctl.clone()) { old.abort(); }
                     if qv.is_empty() {
                         // nothing typed: the For you picks (asked once per visit); the search replaces them as you type
                         let hint = empty_state(&icon("search"), "Search your library and the whole catalogue", "What you already have shows first; anything else can be requested with one click.");
@@ -504,7 +510,7 @@ pub fn render_search(view: Element, ctx: Ctx) -> PageFuture {
                     // the library row shows as soon as it's there, and stays when the catalogue fails
                     let got_data = Rc::new(Cell::new(false));
                     let (data, lib) = futures::join!(
-                        async { let d = api::get(&disc_q).await; got_data.set(true); d },
+                        async { let d = api::get_abortable(&disc_q, ctl.as_ref().map(|c| c.signal()).as_ref()).await; got_data.set(true); d },
                         async {
                             let l = match cached {
                                 Some(v) => Some(v),

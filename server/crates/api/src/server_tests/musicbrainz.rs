@@ -3,7 +3,9 @@
 //! after a page's, and its message says what it is at and what it waits for; the album lookup of a song ends
 //! (the album Deezer names – never a best-of –, the song on its own at once while MusicBrainz fails, or after its
 //! tries while it is busy) and says when it tries again; one album request serves the songs of an album however
-//! it was found; a restart keeps what MusicBrainz already said; a 503 still backs off and tries again.
+//! it was found; a restart keeps what MusicBrainz already said; a 503 still backs off and tries again; one
+//! look-up asked for by several pages at once is one call, and a look-up is answered from disk after a restart
+//! (an old one at once for a page, then asked again in the background).
 use crate::state::AppState;
 use crate::test_support::{user, TestServer};
 use encore_db::{now, p, RowExt};
@@ -408,5 +410,78 @@ async fn a_busy_musicbrainz_is_asked_again_after_its_back_off() {
     // and the answer is kept: asked again, MusicBrainz isn't
     st.mb.get(&st, "label/busy", &[]).await.unwrap();
     assert_eq!(hits.lock().unwrap().iter().filter(|h| *h == "label/busy").count(), 3);
+    ts.remove();
+}
+
+/// The same look-up asked for four times at once (the Android artist page and its sections) is one call: the
+/// others wait for its answer instead of taking turns of their own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_lookup_asked_at_once_is_one_call() {
+    let (ts, hits, _) = server("one-flight").await;
+    let st = ts.st.clone();
+    let calls: Vec<_> = (0..4).map(|_| {
+        let st = st.clone();
+        tokio::spawn(mb::with_priority(Priority::Interactive, async move { st.mb.get(&st, "artist/flight", &[]).await.map(|v| v["id"].clone()) }))
+    }).collect();
+    for c in calls {
+        assert_eq!(c.await.unwrap().unwrap(), json!("flight"));
+    }
+    assert_eq!(hits.lock().unwrap().iter().filter(|h| *h == "artist/flight").count(), 1);
+    ts.remove();
+}
+
+/// After a restart a look-up is answered from disk: under an hour old as it is; older, a page gets it at once and
+/// it is asked again in the background (work nobody waits for asks MusicBrainz instead). Searches aren't kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_answers_lookups_from_disk() {
+    let (ts, hits, _) = server("disk").await;
+    let st = ts.st.clone();
+    let n = |what: &str| hits.lock().unwrap().iter().filter(|h| *h == what).count();
+    let page = |mbv: mb::Mb, path: &'static str| {
+        let st = st.clone();
+        mb::with_priority(Priority::Interactive, async move { mbv.get(&st, path, &[]).await.unwrap() })
+    };
+    page(st.mb.clone(), "artist/kept").await;
+    st.mb.get(&st, "recording", &[("query", "x".to_string())]).await.unwrap();
+    assert_eq!((n("artist/kept"), n("search")), (1, 1));
+    // the answer is written off the request's thread: wait until it is there
+    let file = ts.dir.join("musicbrainz-cache.db");
+    for _ in 0..100 {
+        if mb::Mb::with_store(&file).stored() == Some(1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // a restart: a new line and an empty memory on the same file
+    let fresh = mb::Mb::with_store(&file);
+    assert_eq!(fresh.stored(), Some(1), "only the look-up is on disk, not the search");
+    page(fresh.clone(), "artist/kept").await;
+    assert_eq!(n("artist/kept"), 1, "under an hour old: from disk");
+    // two hours old: a page has it at once, and the refresh asks MusicBrainz again
+    rusqlite::Connection::open(&file).unwrap().execute("UPDATE answers SET fetched_at = fetched_at - 7200", []).unwrap();
+    let old = mb::Mb::with_store(&file);
+    let refresh = { let (old, st) = (old.clone(), st.clone()); tokio::spawn(async move { old.refresh_stale(&st).await }) };
+    assert_eq!(page(old.clone(), "artist/kept").await["id"], "kept");
+    for _ in 0..100 {
+        if n("artist/kept") == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(n("artist/kept"), 2, "asked again in the background");
+    refresh.abort();
+    // the refreshed answer reaches the file (written off the thread), then is made old again
+    let age = || rusqlite::Connection::open(&file).unwrap().query_row("SELECT ? - fetched_at FROM answers", [now()], |r| r.get::<_, f64>(0)).unwrap();
+    for _ in 0..100 {
+        if age() < 60.0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // background work doesn't take an old answer: it asks
+    rusqlite::Connection::open(&file).unwrap().execute("UPDATE answers SET fetched_at = fetched_at - 7200", []).unwrap();
+    let bg = mb::Mb::with_store(&file);
+    mb::with_priority(Priority::Background, bg.get(&st, "artist/kept", &[])).await.unwrap();
+    assert_eq!(n("artist/kept"), 3);
     ts.remove();
 }

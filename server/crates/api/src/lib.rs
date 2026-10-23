@@ -152,7 +152,8 @@ async fn musicbrainz_first(req: Request, next: Next) -> Response {
 /// artist index (every answer with songs needs it; about a second on a library of 60 000 songs), the download
 /// tools' versions (a Python start each for yt-dlp and streamrip: the picker, Diagnostics and the request
 /// worker ask for them) and Home's new releases (60 Deezer look-ups). Requests that arrive while one of these
-/// is being made wait for it rather than making their own.
+/// is being made wait for it rather than making their own. Also starts the refresh of MusicBrainz answers
+/// shown from disk past their hour (encore_http::mb::Mb::refresh_stale).
 pub fn warm_up(st: &AppState) {
     let s = st.clone();
     tokio::task::spawn_blocking(move || {
@@ -165,6 +166,9 @@ pub fn warm_up(st: &AppState) {
     });
     let s = st.clone();
     tokio::spawn(async move { routes::discover::warm_new_releases(&s).await });
+    // MusicBrainz look-ups a page was shown from disk past their hour are asked again in the background
+    let s = st.clone();
+    tokio::spawn(async move { s.mb.refresh_stale(&s).await });
     // 0.36, once: who uploaded or imported the songs the file manager brought in before songs kept it
     let s = st.clone();
     tokio::task::spawn_blocking(move || {

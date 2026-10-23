@@ -604,7 +604,8 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         }
         busy = true
         try {
-            results = withContext(Dispatchers.IO) { features.search(q, SEARCH_TYPES[type].first) }
+            // a newer query cancels this one, and its call with it (the server stops its MusicBrainz look-ups)
+            results = features.searchCancellable(q, SEARCH_TYPES[type].first)
             error = null
         } catch (e: CancellationException) {
             throw e
