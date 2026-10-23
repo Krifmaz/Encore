@@ -14,6 +14,7 @@ import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.SessionStore
 import app.encore.android.features.library.AlbumTypesRules
+import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.library.PlaylistLinkRules
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -443,8 +444,36 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return client.newCall(Request.Builder().url(url(path)).build()).execute()
     }
 
+    /**
+     * One API call. A `GET` of the signed-in server's `/api/` is also kept in [ApiCache], and answered from there when
+     * the server can't be reached: at once while offline mode is on (no wait for a timeout), and after a failed try
+     * otherwise (which also asks [OfflineMode] to check the server, so the banner shows). A page never opened before
+     * says so in offline mode instead of failing with a network error.
+     */
     private fun call(method: String, fullUrl: String, body: JsonElement?): JsonElement? {
         if (!fullUrl.startsWith("http")) throw IOException("Not signed in")
+        val session = store.current
+        val owner = if (session != null && method == "GET" && ApiCache.cacheable(fullUrl, session.server)) ApiCache.ownerOf(session) else ""
+        if (owner.isEmpty()) return send(method, fullUrl, body)
+        if (OfflineMode.active.value) return kept(owner, fullUrl) ?: throw IOException(NOT_KEPT)
+        return try {
+            send(method, fullUrl, body, keepFor = owner)
+        } catch (e: IOException) {
+            if (!OfflineMode.unreachable(e)) throw e
+            OfflineMode.noticeUnreachable()
+            kept(owner, fullUrl) ?: throw e
+        }
+    }
+
+    /** The kept answer to `GET url`, parsed; null when there is none (or it no longer parses). */
+    private fun kept(owner: String, url: String): JsonElement? {
+        val text = ApiCache.get(owner, url) ?: return null
+        if (text.isBlank()) return null
+        return try { json.parseToJsonElement(text) } catch (_: Exception) { null }
+    }
+
+    /** Sends the request; a successful answer is kept for [keepFor] (`server|username`) when that is not empty. */
+    private fun send(method: String, fullUrl: String, body: JsonElement?, keepFor: String = ""): JsonElement? {
         val rb: RequestBody? = when {
             body != null -> json.encodeToString(JsonElement.serializer(), body).toRequestBody(jsonType)
             method == "POST" || method == "PUT" || method == "DELETE" -> "".toRequestBody(jsonType)
@@ -458,9 +487,13 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
                 val detail = o?.str("detail")?.ifEmpty { null } ?: "HTTP ${res.code}"
                 throw ApiException(res.code, detail, o)
             }
-            if (text.isBlank()) return null
+            if (text.isBlank()) {
+                if (keepFor.isNotEmpty()) ApiCache.put(keepFor, fullUrl, text)
+                return null
+            }
             val el = try { json.parseToJsonElement(text) } catch (e: Exception) { throw IOException("Unexpected reply from the server") }
             CoverVersions.note(el)
+            if (keepFor.isNotEmpty()) ApiCache.put(keepFor, fullUrl, text)
             return el
         }
     }
@@ -469,6 +502,9 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         try { json.parseToJsonElement(text) as? JsonObject } catch (_: Exception) { null }
 
     companion object {
+        /** A page asked for in offline mode that this phone never kept an answer for. */
+        const val NOT_KEPT = "Offline – this page wasn't opened on this phone before, so nothing of it is saved here."
+
         /**
          * Formats the server sends as they are (server/src/routes/library.rs `browser_type`) and ExoPlayer decodes
          * natively: FLAC, MP3, AAC/M4A, Ogg/Opus, WAV. Everything else (DSD, APE, WavPack, WMA, AIFF, TTA, MPC …)

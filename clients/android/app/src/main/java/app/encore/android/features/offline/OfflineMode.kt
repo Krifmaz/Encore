@@ -25,24 +25,27 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Offline mode (the web's offline/mode.rs, for the phone): the signed-in server can't be reached and songs of it
- * are saved on this phone. The app then shows the offline banner, the Library tab shows Downloaded, everything
- * else is greyed, and the saved songs play from their files. The server is asked again every 30 s, when the
- * network changes, and on Retry; once it answers, the plays and likes made meanwhile are sent ("Back online –
- * 3 plays sent").
+ * Offline mode (the web's offline/mode.rs, for the phone): the signed-in server can't be reached. The app then shows
+ * the offline banner and stays usable: every page shows what the server last answered for it (the API answers this
+ * phone kept, data/api/ApiCache.kt), so Home, Library, Playlists, the pages opened before and Settings still open, the
+ * Library tab opens on Downloaded, and the songs saved on this phone play from their files. The server is asked again
+ * every 30 s, when the network changes, on Retry, and when a call fails to reach it; once it answers, the plays and
+ * likes made meanwhile are sent ("Back online – 3 plays sent") and the open page loads again from the server.
  *
  * Also the outbox's front door for the rest of the app: [queuePlay] and [queueLike] keep what the server couldn't
  * take, [flush] sends it under the account that made it, and [syncSoon] sends it after the next play or like the
  * server took (a short gap while online, as the web's `sync_outbox`).
  */
 object OfflineMode {
-    const val BANNER = "Offline – the server can't be reached. Downloaded songs play."
+    const val BANNER = "Offline – showing what this phone saved. Downloaded songs play."
     const val STILL_OFFLINE = "The server still can't be reached"
 
     /** How often offline mode asks the server again. */
     private const val RETRY_MS = 30_000L
     /** How long the server gets to answer a check. */
     private const val WAIT_SECONDS = 8L
+    /** A failed call asks for a check at most this often ([noticeUnreachable]). */
+    private const val NOTICE_GAP_MS = 10_000L
 
     private val _active = MutableStateFlow(false)
     /** The app is in offline mode. */
@@ -58,6 +61,8 @@ object OfflineMode {
     private var retryJob: Job? = null
     /** the phone has a network (the browser's `navigator.onLine`), kept by the default-network callback of [start] */
     @Volatile private var online = true
+    /** when a failed call last asked for a check ([noticeUnreachable]), in epoch ms */
+    @Volatile private var lastNotice = 0L
     /** the outbox is being sent ([syncSoon]) */
     private val syncing = AtomicBoolean(false)
     /** something was sent meanwhile: send again once that is done */
@@ -97,6 +102,20 @@ object OfflineMode {
         a.graph.scope.launch { if (!check(a)) Toasts.show(STILL_OFFLINE, "warn") }
     }
 
+    /**
+     * A call to the server just failed because it couldn't be reached (data/api/EncoreApi.kt): check the server now,
+     * so offline mode (and its banner) starts without waiting for the network to change. At most once per
+     * [NOTICE_GAP_MS]; nothing while offline mode is already on (its own retry loop runs) or before [start].
+     */
+    fun noticeUnreachable() {
+        val a = app ?: return
+        if (_active.value) return
+        val now = System.currentTimeMillis()
+        if (now - lastNotice < NOTICE_GAP_MS) return
+        lastNotice = now
+        recheck(a, 0L)
+    }
+
     private fun recheck(a: Context, afterMs: Long) {
         a.graph.scope.launch {
             if (afterMs > 0) delay(afterMs)
@@ -125,13 +144,15 @@ object OfflineMode {
             if (was) Toasts.show(Outbox.backOnlineText(plays, likes), "ok")
             if (likes > 0) graph.likes.refresh(force = true)
         } else {
+            // offline mode starts whether or not songs are saved here: the pages the server answered before still
+            // show (ApiCache), and Settings stays reachable
             val store = OfflineStore.of(a)
             val saved = withContext(Dispatchers.IO) { store.ensureLoaded(); store.songs().size }
-            if (saved > 0 && !_active.value) {
+            if (!_active.value) {
                 CrashLog.log("offline mode: the server can't be reached, $saved songs saved here")
                 _active.value = true
             }
-            if (_active.value) keepTrying(a)
+            keepTrying(a)
         }
         up
     }

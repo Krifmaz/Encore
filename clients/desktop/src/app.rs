@@ -55,6 +55,10 @@ pub enum ShellKind {
 #[derive(Clone, Debug)]
 pub enum Message {
     Tick,
+    /// The offline banner's Retry, and every 30 s in offline mode: ask the server again.
+    CheckServer,
+    /// The answer to [`Message::CheckServer`]: true when the server is back.
+    ServerBack(bool),
     Nav(Page),
     Back,
     SignOut,
@@ -523,7 +527,42 @@ impl App {
         ])
     }
 
+    /// Asks the server whether it is back ([`Api::check_back`], which ends offline mode).
+    fn check_server(&self) -> Task<Message> {
+        let api = self.api.clone();
+        Task::perform(async move { api.check_back().await }, Message::ServerBack)
+    }
+
+    /// Offline mode's banner above the page: the server can't be reached, the pages show what
+    /// this computer kept and the saved songs play; Retry asks again.
+    fn offline_banner(&self) -> Option<El<'_, Message>> {
+        if !self.api.is_offline() {
+            return None;
+        }
+        let p = theme::look();
+        Some(
+            container(
+                row![
+                    widgets::t("Offline – showing what this computer saved. Songs saved for offline play.")
+                        .size(14)
+                        .color(p.warn)
+                        .width(Length::Fill),
+                    widgets::btn("Offline music", theme::Btn::Default, Some(Message::Nav(Page::Offline))),
+                    widgets::btn("Retry", theme::Btn::Primary, Some(Message::CheckServer)),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([10, 16])
+            .width(Length::Fill)
+            .style(theme::warn_box)
+            .into(),
+        )
+    }
+
     fn sign_out(&mut self) -> Task<Message> {
+        // the answers kept for offline mode go with the session (before its cookie is cleared)
+        self.api.forget_kept();
         let server = self.config.server.clone();
         let token = match self.config.server_mut(&server) {
             Some(s) => {
@@ -635,9 +674,20 @@ impl App {
                         tasks.push(self.load_shell_kinds(&kinds));
                     }
                     tasks.push(link::on_tick(&mut self.link, self.api.clone(), &mut self.config).map(Message::Link));
+                    // offline mode: the server is asked again every 30 s
+                    if self.api.is_offline() && self.ticks.is_multiple_of(60) {
+                        tasks.push(self.check_server());
+                    }
                 }
                 tasks.push(crate::desktop::on_tick(self));
                 Task::batch(tasks)
+            }
+            Message::CheckServer => self.check_server(),
+            Message::ServerBack(false) => Task::none(),
+            Message::ServerBack(true) => {
+                // the open page and the shell's badges load again from the server
+                self.toast("Back online", ToastKind::Ok);
+                Task::batch([self.navigate(self.page.clone(), false), self.load_shell()])
             }
             Message::Nav(p) => self.navigate(p, true),
             Message::Back => match self.history.pop() {
@@ -956,6 +1006,11 @@ impl App {
                 .width(Length::Fill)
                 .style(theme::scroll);
             let bar = player::bar(&self.player, &ctx).map(Message::Player);
+            // offline mode: the banner over the page (not over the sidebar)
+            let main: El<'_, Message> = match self.offline_banner() {
+                Some(b) => column![container(b).padding([8, 16]), main].into(),
+                None => main.into(),
+            };
             column![
                 row![widgets::sidebar::view(self), main].height(Length::Fill),
                 bar

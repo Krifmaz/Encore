@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -195,7 +196,9 @@ private class TrackMenuRequest(val track: Track, val onAlbumPage: Boolean)
 @Composable
 private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Session) {
     val p = MaterialTheme.palette
-    var tab by remember { mutableStateOf(Tab.HOME) }
+    // saveable: the tab survives the activity being made again (a configuration change the manifest doesn't keep
+    // the activity through, or the system closing the app in the background)
+    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     val stack = remember { mutableStateListOf<Screen>() }
     var showPlayer by remember { mutableStateOf(false) }
     var showUpNext by remember { mutableStateOf(false) }
@@ -209,8 +212,6 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // this phone as a remote for another device (remote/RemoteDevice.kt) and the Devices sheet
     val link by player.remote.link.collectAsState()
     val devicesOpen by RemoteUi.devicesOpen.collectAsState()
-    // offline mode (features/offline): the banner, the Library tab with the songs saved here, the other tabs greyed
-    val offline by OfflineMode.active.collectAsState()
     // a group listen (features/group): its bar above the mini player; a group link shared to the app asks to join
     val group by GroupListen.state.collectAsState()
     val groupLink by GroupListen.pendingLink.collectAsState()
@@ -231,12 +232,6 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // whether the server has the Surround library (0.35): the Library's Surround tab, the song menu's surround entries
     LaunchedEffect(session) { SurroundUi.probe(graph) }
     val fixScope = rememberCoroutineScope()
-    LaunchedEffect(offline) {
-        if (offline) {
-            stack.clear()
-            tab = Tab.LIBRARY
-        }
-    }
     LaunchedEffect(session) { graph.likes.refresh(force = true) }
     // the first page of each Library tab's covers, so the tabs open with their covers in place
     LaunchedEffect(session) { graph.coverPreloader.firstPages() }
@@ -265,7 +260,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         onAddToPlaylist = { ids -> addToPlaylistIds = ids },
     )
 
-    BackHandler(enabled = lyricsOpen || showPlayer || stack.isNotEmpty() || (tab != Tab.HOME && !offline)) {
+    BackHandler(enabled = lyricsOpen || showPlayer || stack.isNotEmpty() || tab != Tab.HOME) {
         when {
             lyricsOpen -> player.closeLyrics()
             showPlayer -> showPlayer = false
@@ -294,7 +289,6 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                         for (t in Tab.entries) {
                             NavigationBarItem(
                                 selected = t == tab && stack.isEmpty(),
-                                enabled = !offline || t == Tab.LIBRARY,
                                 onClick = {
                                     stack.clear()
                                     tab = t

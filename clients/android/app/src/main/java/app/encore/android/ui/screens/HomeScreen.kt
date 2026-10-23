@@ -44,6 +44,8 @@ import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.session.Session
+import app.encore.android.features.offline.OfflineMode
+import app.encore.android.features.offline.shuffleLibrary
 import app.encore.android.features.requests.RequestCard
 import app.encore.android.features.requests.RequestSheets
 import app.encore.android.features.requests.rememberRequestActions
@@ -75,6 +77,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -112,9 +115,11 @@ fun HomeScreen(nav: Nav, session: Session) {
     val api = nav.graph.api
     val scope = rememberCoroutineScope()
     val p = MaterialTheme.palette
-    val loader = rememberLoad(session.server, session.username) {
+    // kept in memory (keep = true): back on the Home tab it shows at once and loads again quietly behind
+    val loader = rememberLoad("home", session.server, session.username, keep = true) {
         HomeData(
-            recent = api.recentAlbums(12),
+            // offline with no kept answer for Home yet: an empty page, so the menu (Settings, Account) still opens
+            recent = try { api.recentAlbums(12) } catch (e: IOException) { if (OfflineMode.unreachable(e)) emptyList() else throw e },
             played = try { api.recentPlays(20) } catch (_: Exception) { emptyList() },
             madeForYou = try { parseMadeForYou(api.madeForYou(), api.base) } catch (_: Exception) { emptyList() },
             me = try { api.me() } catch (_: Exception) { null },
@@ -216,10 +221,7 @@ fun HomeScreen(nav: Nav, session: Session) {
             item {
                 Row(Modifier.padding(horizontal = Gutter, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     EncoreButton("Shuffle library", iconRes = R.drawable.ic_shuffle, primary = true) {
-                        scope.launch {
-                            val songs = try { withContext(Dispatchers.IO) { api.shuffle(50, emptyList()) } } catch (_: Exception) { emptyList() }
-                            if (songs.isEmpty()) Toasts.show("Your library is empty", "err") else nav.player.play(songs)
-                        }
+                        scope.launch { shuffleLibrary(nav) }
                     }
                     if (data.played.isNotEmpty()) {
                         EncoreButton("Play recent", iconRes = R.drawable.ic_play) { nav.player.play(data.played) }

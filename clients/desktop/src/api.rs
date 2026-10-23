@@ -9,6 +9,7 @@ use reqwest::cookie::{CookieStore, Jar};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -135,6 +136,9 @@ pub struct Api {
     slow: reqwest::Client,
     jar: Arc<Jar>,
     base: RwLock<String>,
+    /// Offline mode: the server couldn't be reached, so `GET`s are answered from the kept copies
+    /// ([`crate::api_cache`]) without asking it; [`Api::check_back`] turns it off again.
+    offline: AtomicBool,
 }
 
 impl std::fmt::Debug for Api {
@@ -178,6 +182,7 @@ impl Api {
             slow,
             jar,
             base: RwLock::new(crate::config::normalize(base)),
+            offline: AtomicBool::new(false),
         })
     }
 
@@ -259,67 +264,96 @@ impl Api {
         h
     }
 
+    /// The server couldn't be reached and pages show what this computer kept (the banner shows).
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::Relaxed)
+    }
+
+    /// Asks `/api/health` once (8 s at most, never from the kept copies); when the server answers,
+    /// offline mode ends. True when it answered.
+    pub async fn check_back(&self) -> bool {
+        let base = self.base();
+        if base.is_empty() {
+            return false;
+        }
+        let up = match self
+            .client
+            .get(format!("{base}/api/health"))
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await
+        {
+            Ok(r) => !matches!(
+                r.status(),
+                StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+            ),
+            Err(_) => false,
+        };
+        if up {
+            self.offline.store(false, Ordering::Relaxed);
+        }
+        up
+    }
+
+    /// Forgets the answers kept for the current session (sign out); call before the cookie goes.
+    pub fn forget_kept(&self) {
+        let cookie = self.session_cookie();
+        crate::api_cache::forget(&crate::api_cache::owner(&self.base(), cookie.as_deref()));
+    }
+
+    /// One JSON call. A `GET` of the server's `/api/` is also kept ([`crate::api_cache`]) and
+    /// answered from there when the server can't be reached: at once in offline mode (no wait for
+    /// a timeout), and after a failed try otherwise, which starts offline mode. A page never
+    /// opened before says so instead of failing with a connection error.
     async fn request(&self, method: Method, path: &str, body: Option<Value>) -> ApiResult {
-        if self.base().is_empty() {
+        let base = self.base();
+        if base.is_empty() {
             return Err(ApiError::new(0, "No server chosen"));
         }
+        let url = self.url(path);
+        let owner = if method == Method::GET && crate::api_cache::cacheable(&url, &base) {
+            crate::api_cache::owner(&base, self.session_cookie().as_deref())
+        } else {
+            String::new()
+        };
+        if owner.is_empty() {
+            return self.send(method, &url, body).await.map(|(v, _)| v);
+        }
+        if self.is_offline() {
+            return kept(&owner, &url).ok_or_else(|| ApiError::new(0, NOT_KEPT));
+        }
+        match self.send(method, &url, body).await {
+            Ok((v, text)) => {
+                crate::api_cache::put(&owner, &url, &text);
+                Ok(v)
+            }
+            Err(e) if e.unreachable() => match kept(&owner, &url) {
+                Some(v) => {
+                    self.offline.store(true, Ordering::Relaxed);
+                    Ok(v)
+                }
+                None => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Sends one JSON call to `url`; on success the parsed answer and the text the server sent.
+    async fn send(&self, method: Method, url: &str, body: Option<Value>) -> Result<(Value, String), ApiError> {
         let mutating = method != Method::GET;
         let mut req = self
             .client
-            .request(method, self.url(path))
+            .request(method, url)
             .timeout(JSON_TIMEOUT)
             .headers(Self::headers(mutating, body.is_some()));
         if let Some(b) = body {
             req = req.body(b.to_string());
         }
-        self.finish(req.send().await).await
+        finish_text(req.send().await).await
     }
 
     async fn finish(&self, sent: Result<reqwest::Response, reqwest::Error>) -> ApiResult {
-        let res = match sent {
-            Ok(r) => r,
-            Err(e) => return Err(connection_error(&e)),
-        };
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        let data: Value = if text.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(&text).unwrap_or(Value::String(text.clone()))
-        };
-        if status.is_success() {
-            return Ok(data);
-        }
-        let mut msg = match data.get("detail") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(a)) => a
-                .iter()
-                .map(|m| crate::fmt::s(m, "msg"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            _ => String::new(),
-        };
-        if msg.is_empty() {
-            msg = status
-                .canonical_reason()
-                .unwrap_or("Request failed")
-                .to_string();
-        }
-        if matches!(
-            status,
-            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
-        ) {
-            return Err(ApiError {
-                status: 0,
-                message: "Not connected to the server".into(),
-                data,
-            });
-        }
-        Err(ApiError {
-            status: status.as_u16(),
-            message: msg,
-            data,
-        })
+        finish_text(sent).await.map(|(v, _)| v)
     }
 
     pub async fn get(&self, path: &str) -> ApiResult {
@@ -567,6 +601,67 @@ fn part_path(dest: &std::path::Path) -> std::path::PathBuf {
     let mut name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     name.push(".part");
     dest.with_file_name(name)
+}
+
+/// A page asked for in offline mode that this computer never kept an answer for.
+pub const NOT_KEPT: &str = "Offline – this page wasn't opened on this computer before, so nothing of it is saved here.";
+
+/// The kept answer to `GET url`, parsed (None when there is none or it no longer parses).
+fn kept(owner: &str, url: &str) -> Option<Value> {
+    let text = crate::api_cache::get(owner, url)?;
+    if text.is_empty() {
+        return Some(Value::Null);
+    }
+    serde_json::from_str(&text).ok()
+}
+
+/// The answer of a sent call: its JSON (and the text it came from, to keep), or the error in the
+/// web app's words (502–504 from a proxy count as "not connected").
+async fn finish_text(sent: Result<reqwest::Response, reqwest::Error>) -> Result<(Value, String), ApiError> {
+    let res = match sent {
+        Ok(r) => r,
+        Err(e) => return Err(connection_error(&e)),
+    };
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    let data: Value = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or(Value::String(text.clone()))
+    };
+    if status.is_success() {
+        return Ok((data, text));
+    }
+    let mut msg = match data.get("detail") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|m| crate::fmt::s(m, "msg"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    };
+    if msg.is_empty() {
+        msg = status
+            .canonical_reason()
+            .unwrap_or("Request failed")
+            .to_string();
+    }
+    if matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    ) {
+        return Err(ApiError {
+            status: 0,
+            message: "Not connected to the server".into(),
+            data,
+        });
+    }
+    Err(ApiError {
+        status: status.as_u16(),
+        message: msg,
+        data,
+    })
 }
 
 fn connection_error(e: &reqwest::Error) -> ApiError {

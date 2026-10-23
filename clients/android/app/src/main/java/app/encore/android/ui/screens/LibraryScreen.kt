@@ -80,7 +80,7 @@ import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.WrongAudioList
 import app.encore.android.features.offline.DownloadedList
-import app.encore.android.features.offline.OfflineLibraryScreen
+import app.encore.android.features.offline.shuffleLibrary
 import app.encore.android.features.offline.OfflineMode
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.Nav
@@ -100,7 +100,6 @@ import app.encore.android.ui.components.PopMenu
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Tile
-import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
@@ -143,6 +142,8 @@ private object LibraryState {
     var tab by mutableStateOf(0)
     /** the albums list's Type (0.36): a key of GET /api/library/album-types, "" = All types */
     var albumType by mutableStateOf("")
+    /** offline mode as the page last saw it: Downloaded is picked once when it starts, not on every visit */
+    var sawOffline = false
 }
 
 /** The first matches each section of the results view shows. */
@@ -223,7 +224,8 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 /**
  * Library: Albums / Artists / Songs (the web's #/library tabs), Surround on servers with the Surround library (0.35),
  * Downloaded once songs are saved on this phone (features/offline), and for admins Wrong audio (the songs the audio
- * check flagged). In offline mode the saved songs are the whole library.
+ * check flagged). In offline mode the lists show what the server last answered for them (data/api/ApiCache.kt) and the
+ * page opens on Downloaded, whose songs play without the server.
  *
  * The search box (0.31) searches the whole library whatever tab is selected: while it has a query the page shows
  * one results view (Artists, Albums, Songs, each with "Show all N" that opens its tab filtered by the query); a
@@ -233,10 +235,6 @@ private fun SortChip(tab: String, sort: LibSort, onChange: (LibSort) -> Unit, mo
 @Composable
 fun LibraryScreen(nav: Nav) {
     val offline by OfflineMode.active.collectAsState()
-    if (offline) {
-        OfflineLibraryScreen(nav)
-        return
-    }
     var tab by LibraryState::tab
     val context = LocalContext.current
     val store = remember(context) { LibrarySorts(context) }
@@ -251,6 +249,13 @@ fun LibraryScreen(nav: Nav) {
         (if (me?.isAdmin == true) listOf("issues" to "Wrong audio") else emptyList())
     val labels = tabs.map { it.second }
     val shown = if (tab < labels.size) tab else 0
+    // offline mode starting: Downloaded first, the songs that play without the server (the other tabs keep their
+    // last answers and stay a tap away)
+    val downloadedTab = tabs.indexOfFirst { it.first == "downloaded" }
+    LaunchedEffect(offline, downloadedTab) {
+        if (offline && !LibraryState.sawOffline && downloadedTab >= 0) tab = downloadedTab
+        LibraryState.sawOffline = offline && (LibraryState.sawOffline || downloadedTab >= 0)
+    }
     // every tab's sort, remembered per tab
     var sorts by remember { mutableStateOf(TABS.associate { (k, _) -> k to store.get(k) }) }
     // (Downloaded has no sort: it keeps the albums as they were saved; Surround lists the newest first)
@@ -279,10 +284,7 @@ fun LibraryScreen(nav: Nav) {
         topBar = {
             if (AlbumSelect.selecting) AlbumSelectTopBar(nav, scrollBehavior) else EncoreTopBar("Library", scrollBehavior = scrollBehavior, actions = {
                 SmallButton("Shuffle", iconRes = R.drawable.ic_shuffle, primary = true, modifier = Modifier.padding(end = Gutter)) {
-                    scope.launch {
-                        val songs = try { withContext(Dispatchers.IO) { nav.graph.api.shuffle(50, emptyList()) } } catch (_: Exception) { emptyList() }
-                        if (songs.isEmpty()) Toasts.show("Your library is empty", "err") else nav.player.play(songs)
-                    }
+                    scope.launch { shuffleLibrary(nav) }
                 }
             })
         },
@@ -607,7 +609,8 @@ private fun SurroundTab(nav: Nav, q: String = "") {
 @Composable
 private fun ArtistsTab(nav: Nav, sort: LibSort, q: String = "") {
     val api = nav.graph.api
-    val loader = rememberLoad("artists", sort, q) { api.artists(q = q, sort = sort.key, dir = sort.dir) }
+    // kept in memory: the Artists tab opens again at once and refreshes quietly
+    val loader = rememberLoad("artists", sort, q, keep = true) { api.artists(q = q, sort = sort.key, dir = sort.dir) }
     val grid = rememberLazyGridState()
     LaunchedEffect(sort, q) { if (grid.firstVisibleItemIndex > 0) grid.scrollToItem(0) }
     val index = rememberLibraryIndex(api, "artists", sort.key, dir = sort.dir)

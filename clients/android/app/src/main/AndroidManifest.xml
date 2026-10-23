@@ -34,8 +34,12 @@
         android:theme="@style/Theme.Encore"
         android:usesCleartextTraffic="true">
 
+        <!-- configChanges: turning the phone, folding or resizing it (split screen, a window on a desktop), a keyboard
+             and dark mode no longer make the activity again. Compose lays the same screen out for the new size, so
+             the open page, its scroll and what it loaded stay; without this every turn reloaded Home from scratch. -->
         <activity
             android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,14 +20,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -38,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
@@ -54,7 +49,6 @@ import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
 import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.Gutter
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
@@ -164,29 +158,19 @@ fun rememberOfflineMenu(nav: Nav): OfflineMenu {
 
 // ---- the Downloaded list ---------------------------------------------------------------------------------------
 
-/** The Library tab while offline: its title, Shuffle over the saved songs, and the Downloaded list. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun OfflineLibraryScreen(nav: Nav) {
-    val context = LocalContext.current
-    val store = remember(context) { OfflineStore.of(context) }
-    val all by store.all.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    Scaffold(
-        modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
-        containerColor = MaterialTheme.palette.bg,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            EncoreTopBar("Library", scrollBehavior = scrollBehavior, actions = {
-                val songs = store.songs(all)
-                SmallButton("Shuffle", iconRes = R.drawable.ic_shuffle, primary = true, enabled = songs.isNotEmpty(), modifier = Modifier.padding(end = Gutter)) {
-                    nav.player.play(songs.map { OfflineStore.trackOf(it) }, shuffle = true)
-                }
-            })
-        },
-    ) { padding ->
-        DownloadedList(nav, Modifier.padding(padding))
+/**
+ * Home's "Shuffle library" and the Library's Shuffle: 50 songs from the whole library, or in offline mode the songs
+ * saved on this phone (the server can't pick any), shuffled. Says so when there is nothing to play.
+ */
+suspend fun shuffleLibrary(nav: Nav) {
+    if (OfflineMode.active.value) {
+        val store = OfflineStore.of(nav.graph.app)
+        val saved = withContext(Dispatchers.IO) { store.ensureLoaded(); store.songs().map { OfflineStore.trackOf(it) } }
+        if (saved.isEmpty()) Toasts.show(EMPTY_TITLE, "info") else nav.player.play(saved, shuffle = true)
+        return
     }
+    val songs = try { withContext(Dispatchers.IO) { nav.graph.api.shuffle(50, emptyList()) } } catch (_: Exception) { emptyList() }
+    if (songs.isEmpty()) Toasts.show("Your library is empty", "err") else nav.player.play(songs)
 }
 
 /**

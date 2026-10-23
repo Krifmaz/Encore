@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import app.encore.android.data.api.ApiCache
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.UUID
@@ -141,6 +144,8 @@ class SessionStore(context: Context, private val scope: CoroutineScope) {
 
     /** Forgets the token (the server address stays as a suggestion). */
     suspend fun signOut() {
+        // the server's kept answers (offline mode) go with the account that signed out
+        current?.let { s -> withContext(Dispatchers.IO) { ApiCache.forget(ApiCache.ownerOf(s)) } }
         current = null
         store.edit {
             it.remove(TOKEN)

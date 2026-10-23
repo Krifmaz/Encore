@@ -112,8 +112,9 @@ private fun PlaylistArt(nav: Nav, pl: Playlist, modifier: Modifier, corner: Dp =
 @Composable
 fun PlaylistsScreen(nav: Nav) {
     val api = nav.graph.api
-    // the playlists, and the invites to collaborate waiting for the user (none when that ask fails)
-    val loader = rememberLoad("playlists") {
+    // the playlists, and the invites to collaborate waiting for the user (none when that ask fails); kept in memory,
+    // so the tab opens again at once and refreshes quietly
+    val loader = rememberLoad("playlists", keep = true) {
         api.playlists() to try { nav.features.collabInvites() } catch (e: Exception) { emptyList() }
     }
     val p = MaterialTheme.palette

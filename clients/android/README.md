@@ -25,7 +25,9 @@ What it does:
 - this phone as an Encore remote device (play here, send there, control another device)
 - Android Auto (browse, search, voice, live lyrics, the quality badge, the artist's page) and the Encore Lyrics car app
 - "Share → Request in Encore", crash reports to the server (Diagnostics → App crashes)
-- songs saved for offline in `Music/Encore`, offline mode, Downloaded in the Library tab and in Android Auto
+- songs saved for offline in `Music/Encore`, offline mode (the banner; Home, Library, Playlists, Settings and the
+  pages opened before show the server's last answers, kept on the phone), Downloaded in the Library tab and in Android Auto
+- turning the phone (or folding, resizing, dark mode) keeps the open page as it is instead of loading it again
 - updates itself from the GitHub releases (Settings → This device → Updates)
 - for admins, the file manager (Settings → Server → Files): browse, upload, move, rename, trash and import
 - for admins, the plugins (Settings → Server → Plugins, after Downloads): install, update, test, logs, disable and

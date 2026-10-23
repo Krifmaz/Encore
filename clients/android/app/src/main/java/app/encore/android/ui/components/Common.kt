@@ -64,12 +64,14 @@ import app.encore.android.data.api.Album
 import app.encore.android.data.api.CoverVersions
 import app.encore.android.data.api.Track
 import app.encore.android.features.library.SurroundRules
+import app.encore.android.features.offline.OfflineMode
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
@@ -117,23 +119,67 @@ class Loader<T>(val state: MutableState<Loadable<T>>, private val retryKey: Muta
     }
 }
 
+/**
+ * The last value each kept loader ([rememberLoad] with `keep = true`) showed, by its keys, so a screen opened again
+ * (back to the Home tab, a playlist opened twice) shows it at once and loads the new one quietly behind it. Only in
+ * memory, at most [MAX] screens; what survives the app closing is the API's own copy (data/api/ApiCache.kt).
+ */
+private object LoadMemory {
+    /** How many screens' values are kept. */
+    private const val MAX = 48
+
+    /** Keys → value, the least recently used first (an access-ordered LinkedHashMap). */
+    private val values = object : LinkedHashMap<List<Any?>, Any?>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<List<Any?>, Any?>?): Boolean = size > MAX
+    }
+
+    @Synchronized fun get(keys: List<Any?>): Any? = values[keys]
+    @Synchronized fun has(keys: List<Any?>): Boolean = values.containsKey(keys)
+    @Synchronized fun put(keys: List<Any?>, value: Any?) { values[keys] = value }
+}
+
+/**
+ * Runs [block] (a blocking API call) on the IO dispatcher when the screen opens, again when [keys] change, on
+ * [Loader.retry], and when offline mode starts or ends: a page that failed asks again (offline, the kept answer
+ * shows), and a page that shows something loads again quietly once the server is back.
+ *
+ * With [keep] the value is also kept in memory under [keys] (which must then name the screen, e.g. `"home"` first):
+ * opening the same screen again shows the last value at once, without the spinner, while the new one loads.
+ */
 @Composable
-fun <T> rememberLoad(vararg keys: Any?, block: () -> T): Loader<T> {
-    val state = remember(*keys) { mutableStateOf<Loadable<T>>(Loadable.Loading) }
+fun <T> rememberLoad(vararg keys: Any?, keep: Boolean = false, block: () -> T): Loader<T> {
+    val memoryKey = remember(*keys) { keys.toList() }
+    val state = remember(*keys) {
+        @Suppress("UNCHECKED_CAST")
+        val start: Loadable<T> = if (keep && LoadMemory.has(memoryKey)) Loadable.Ready(LoadMemory.get(memoryKey) as T) else Loadable.Loading
+        mutableStateOf(start)
+    }
     val retry = remember(*keys) { mutableStateOf(0) }
-    val quiet = remember(*keys) { mutableStateOf(false) }
+    // a kept value shown at the start counts as a quiet load: it stays until the new answer replaces it
+    val quiet = remember(*keys) { mutableStateOf(state.value is Loadable.Ready) }
     LaunchedEffect(retry.value, *keys) {
         if (!quiet.value || state.value !is Loadable.Ready) state.value = Loadable.Loading
         quiet.value = false
         state.value = try {
-            Loadable.Ready(withContext(Dispatchers.IO) { loadRetryingTimeout(block) })
+            val v = withContext(Dispatchers.IO) { loadRetryingTimeout(block) }
+            if (keep) LoadMemory.put(memoryKey, v)
+            Loadable.Ready(v)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Loadable.Failed(e.message ?: "Something went wrong")
+            // a quiet load that failed keeps what was shown (the server went away while the page was open)
+            val shown = state.value
+            if (shown is Loadable.Ready) shown else Loadable.Failed(e.message ?: "Something went wrong")
         }
     }
-    return Loader(state, retry, quiet)
+    val loader = Loader(state, retry, quiet)
+    // offline mode starting or ending (not its first value): failed pages ask again, shown pages refresh quietly
+    LaunchedEffect(*keys) {
+        OfflineMode.active.drop(1).collect {
+            if (state.value is Loadable.Failed) loader.retry() else if (state.value is Loadable.Ready) loader.refresh()
+        }
+    }
+    return loader
 }
 
 /**
