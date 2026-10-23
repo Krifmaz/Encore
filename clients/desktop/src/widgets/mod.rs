@@ -35,7 +35,7 @@ pub use icons::{icon, logo, Icon};
 pub use list_row::list_row;
 pub use modal::{confirm, modal};
 pub use pop_menu::{pop_menu, MenuItem};
-pub use search_box::search_box;
+pub use search_box::{search_box, search_box_clearable};
 pub use skeleton::{skeleton_rows, skeleton_tiles};
 pub use tabs::{seg, tabs, tabs_maybe};
 pub use tile::{grid, rail, Tile, TileKind};

@@ -86,6 +86,126 @@ fn reload() {
     if let Ok(ev) = web_sys::HashChangeEvent::new("hashchange") { let _ = dom::window().dispatch_event(&ev); }
 }
 
+// ---- search: a playlist's songs, and the Playlists page by name ------------------------------------
+
+/// The placeholder of the box that filters a playlist's songs.
+pub const SONG_SEARCH_PLACEHOLDER: &str = "Search title, artist or album";
+/// The placeholder of the box that filters the Playlists page.
+pub const PLAYLIST_SEARCH_PLACEHOLDER: &str = "Search playlists";
+
+/// What a playlist row is found by, lowercased: its title (and the translated and romanized titles when the
+/// server sends them, so a search works whichever one the listener sees), every artist and the album.
+pub fn item_haystack(it: &Value) -> String {
+    let mut parts = vec![it.s("title"), it.s("title_t"), it.s("title_r"), it.s("artist"), it.s("album")];
+    // `artists` is a list of names or of `{name}` objects, depending on the server's age
+    for a in it.a("artists") {
+        parts.push(a.as_str().map(str::to_string).unwrap_or_else(|| a.s("name")));
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join(" ").to_lowercase()
+}
+
+/// What a playlist tile is found by, lowercased: its name, and for someone else's playlist whose it is.
+pub fn playlist_haystack(p: &Value) -> String {
+    let mut s = p.s("name");
+    if is_linked(p) {
+        s = format!("{s} {}", linked_owner(p));
+    }
+    s.to_lowercase()
+}
+
+/// Every word of `query` appears somewhere in `hay` (already lowercased), in any order. An empty query
+/// matches everything, so clearing the box shows every row again.
+pub fn query_matches(hay: &str, query: &str) -> bool {
+    query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The line under a search box: nothing while it is empty, "12 of 5263 songs" while it finds some, and
+/// "No songs match “x”" when it finds none. `noun` is the singular and the plural ("song", "songs").
+pub fn found_text(shown: usize, total: usize, query: &str, noun: (&str, &str)) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        return String::new();
+    }
+    if shown == 0 {
+        return format!("No {} match “{query}”", noun.1);
+    }
+    format!("{shown} of {total} {}", if total == 1 { noun.0 } else { noun.1 })
+}
+
+/// A search box with a clear (×) button and the found line under it. `id` names the parts: `{id}-search`
+/// (the box), `{id}-q` (the input), `{id}-clear` and `{id}-found`. `hidden` starts it closed (a playlist
+/// opens it with its 🔍 button; the Playlists page shows it at once).
+fn search_box_html(id: &str, placeholder: &str, hidden: bool) -> String {
+    format!(r#"<div class="search search-clearable pl-search" id="{id}-search"{hide}>{search}<input class="input" id="{id}-q" type="search" enterkeyhint="search" placeholder="{ph}" aria-label="{ph}" autocomplete="off"><button class="btn sm ghost icon search-clear" id="{id}-clear" type="button" aria-label="Clear search" title="Clear" hidden>{x}</button></div>
+    <div class="small muted pl-found" id="{id}-found" hidden></div>"#,
+        hide = if hidden { " hidden" } else { "" }, search = icon("search"), ph = esc(placeholder), x = icon("x"))
+}
+
+/// Makes the search box `id` (see [`search_box_html`]) filter the elements matching `rows` inside `view`
+/// as the user types: each one carries its lowercased `data-q` text and is hidden when a word of the
+/// query is not in it. The clear button empties the box; Escape empties it too and, when `closable`,
+/// closes it again.
+fn wire_search(view: &Element, id: &str, rows: &str, noun: (&'static str, &'static str), closable: bool) {
+    let (Some(input), Some(clear), Some(found), Some(bx)) = (
+        dom::qs_in(view, &format!("#{id}-q")), dom::qs_in(view, &format!("#{id}-clear")),
+        dom::qs_in(view, &format!("#{id}-found")), dom::qs_in(view, &format!("#{id}-search")),
+    ) else { return };
+    // filter every row against the box's text, then update the clear button and the found line
+    let apply: Rc<dyn Fn()> = {
+        let (view, input, clear, found, rows) = (view.clone(), input.clone(), clear.clone(), found.clone(), rows.to_string());
+        Rc::new(move || {
+            let q = dom::value(&input);
+            // rows removed meanwhile (× on a song) are no longer in the DOM, so they aren't counted
+            let all = dom::qsa_in(&view, &rows);
+            let mut shown = 0;
+            for r in &all {
+                let hit = query_matches(&dom::data(r, "q"), &q);
+                dom::hide(r, !hit);
+                shown += hit as usize;
+            }
+            let line = found_text(shown, all.len(), &q, noun);
+            dom::hide(&found, line.is_empty());
+            dom::set_text(&found, &line);
+            dom::hide(&clear, q.is_empty());
+        })
+    };
+    { let a = apply.clone(); dom::on(&input, "input", move |_| a()); }
+    {
+        let (a, input2) = (apply.clone(), input.clone());
+        dom::on(&clear, "click", move |_| { dom::set_value(&input2, ""); a(); dom::focus(&input2); });
+    }
+    {
+        let (a, input2) = (apply, input.clone());
+        dom::on(&input, "keydown", move |e| {
+            if dom::key(e) != "Escape" { return; }
+            dom::set_value(&input2, "");
+            a();
+            if closable { dom::hide(&bx, true); }
+        });
+    }
+}
+
+/// The 🔍 button in a playlist's header: opens the song search and focuses it, or closes it again when it
+/// is open and empty (a search in progress stays open, so a stray click doesn't lose it).
+fn wire_search_toggle(view: &Element) {
+    let (Some(bx), Some(input)) = (dom::qs_in(view, "#pl-search"), dom::qs_in(view, "#pl-q")) else { return };
+    dom::on_sel(view, "#pl-find", "click", move |_| {
+        let open = !bx.has_attribute("hidden");
+        if open && dom::value(&input).is_empty() {
+            dom::hide(&bx, true);
+        } else {
+            dom::hide(&bx, false);
+            dom::focus(&input);
+        }
+    });
+}
+
+/// The 🔍 button that opens a playlist's song search.
+fn find_button() -> String {
+    format!(r#"<button class="btn icon" id="pl-find" aria-label="Search in this playlist" title="Search in this playlist">{}</button>"#, icon("search"))
+}
+
 /// " · shared" on a playlist's tile when it has a share link.
 fn shared_suffix(p: &Value) -> &'static str {
     if p.g("share").is_object() { " · shared" } else { "" }
@@ -221,13 +341,13 @@ pub fn add_toast(r: &Value) -> &'static str {
 
 /// An added playlist's tile: no merge box, whose it is, and where it came from.
 fn linked_card(p: &Value) -> String {
-    format!(r#"<div class="tile" data-href="/playlists/{id}">
+    format!(r#"<div class="tile" data-href="/playlists/{id}" data-q="{q}">
     <div class="art">{art}</div>
     <div class="t ellipsis">{name}</div>
     <div class="s ellipsis">{line}</div>
     <div class="s ellipsis faint">{LINKED_SOURCE}</div>
   </div>"#,
-        id = p.s("id"), art = art(&p.s("cover_url"), &p.s("name"), ""), name = esc(&p.s("name")), line = esc(&linked_tile_line(p)))
+        id = p.s("id"), q = esc(&playlist_haystack(p)), art = art(&p.s("cover_url"), &p.s("name"), ""), name = esc(&p.s("name")), line = esc(&linked_tile_line(p)))
 }
 
 /// The whole page of an added playlist: read-only (no rename, Share, sync, Add from link, Remove duplicates,
@@ -252,12 +372,12 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
     }
     let items = pl.a("items");
     let has = !items.is_empty();
-    let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}">
+    let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-q="{q}">
         <td class="num">{n}</td>
         <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
         <td class="hide-sm muted">{album}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-ptmenu="{i}" aria-label="More" title="More">{more}</button></td></tr>"##,
-        item = it.s("id"), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
+        item = it.s("id"), q = esc(&item_haystack(it)), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
         album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
         more = icon("more"),
     )).collect();
@@ -267,16 +387,20 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
         <div class="small muted mt">{hint}</div>
         <div class="row wrap mt">
           {play}
+          {find}
           {menu}
           <button class="btn" id="pl-save-copy">{copy}{SAVE_COPY}</button>
           {remove}
-        </div>"#, total = pl.i("total"), hint = esc(&linked_hint(&owner)), copy = icon("copy"));
+        </div>"#, total = pl.i("total"), hint = esc(&linked_hint(&owner)), copy = icon("copy"),
+        // the 🔍 only when there are songs to search
+        find = if has { find_button() } else { String::new() });
     let list = if has {
         format!(r#"
+    {search}
     <div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th></th></tr></thead>
       <tbody>{rows}
-      </tbody></table></div></div>"#)
+      </tbody></table></div></div>"#, search = search_box_html("pl", SONG_SEARCH_PLACEHOLDER, true))
     } else {
         empty_state(&icon("music"), LINKED_EMPTY, "")
     };
@@ -286,6 +410,8 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
 /// The page of an added playlist ([`linked_page_html`]) and its buttons.
 fn render_linked(view: &Element, id: &str, pl: &Value) {
     dom::set_html(view, &linked_page_html(pl, crate::pages::downloads::enabled()));
+    wire_search_toggle(view);
+    wire_search(view, "pl", "tbody tr[data-q]", ("song", "songs"), true);
     let items = pl.a("items");
     let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect();
     {
@@ -402,7 +528,7 @@ fn pl_card(p: &Value) -> String {
     let liked = p.s("kind") == "liked";
     let cover = if liked { String::new() } else { p.s("cover_url") };
     let targets = p.a("sync_targets");
-    format!(r#"<div class="tile" data-href="/playlists/{id}">
+    format!(r#"<div class="tile" data-href="/playlists/{id}" data-q="{q}">
     <label class="corner" style="z-index:2" onclick="event.stopPropagation()">{check}</label>
     <div class="art">{art}</div>
     <div class="t ellipsis">{name}</div>
@@ -410,6 +536,7 @@ fn pl_card(p: &Value) -> String {
     <div class="s ellipsis faint">{src}{sync}</div>
   </div>"#,
         id = p.s("id"),
+        q = esc(&playlist_haystack(p)),
         check = if liked { String::new() } else { format!(r#"<input type="checkbox" data-merge="{}" title="Select to merge">"#, p.s("id")) },
         art = if liked { r#"<div class="ph" style="background:var(--grad);color:#fff">♥</div>"#.to_string() } else { art(&cover, &p.s("name"), "") },
         name = esc(&p.s("name")),
@@ -623,7 +750,9 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         <button class="btn primary" id="import">{download}Import</button>
       </div>
     </div>
-    <div id="pls"></div>"#, list = icon("list"), plus = icon("plus"), link = icon("link"), download = icon("download")));
+    <div id="pls-find" hidden>{find}</div>
+    <div id="pls"></div>"#, list = icon("list"), plus = icon("plus"), link = icon("link"), download = icon("download"),
+            find = search_box_html("pls", PLAYLIST_SEARCH_PLACEHOLDER, false)));
         let bx = dom::qs_in(&view, "#pls").expect("#pls");
         dom::on(&bx, "click", |e| {
             if dom::closest(e, "input").is_some() { return; }
@@ -687,6 +816,9 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             super::collab::bind_invites(&view, reload);
         }
         dom::set_html(&bx, &if rows.is_empty() { empty_state(&icon("list"), "No playlists yet", "") } else { format!(r#"<div class="grid">{}</div>"#, rows.iter().map(pl_card).collect::<String>()) });
+        // the search by name, once there are playlists to search
+        if let Some(f) = dom::qs_in(&view, "#pls-find") { dom::hide(&f, rows.is_empty()); }
+        wire_search(&view, "pls", "#pls .tile[data-q]", ("playlist", "playlists"), false);
         Ok(())
     })
 }
@@ -717,13 +849,13 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let source = pl.s("source");
         let (total, matched) = (pl.f("total"), pl.f("matched"));
         let sync_targets = pl.a("sync_targets");
-        let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}">
+        let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-q="{q}">
         <td class="num">{n}</td>
         <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
         <td class="hide-sm muted">{album}</td>
         <td>{status}</td>
         <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
-            item = it.s("id"), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
+            item = it.s("id"), q = esc(&item_haystack(it)), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
             album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
             status = if it.truthy("track_id") {
                 format!(r#"<span class="badge ok" title="{}">✓ in library</span>{}"#, esc(&it.s("match_reason")), match it.s("verify_status").as_str() {
@@ -754,6 +886,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         {collab}
         <div class="row wrap mt">
           {play}
+          {find}
           {pl_menu}
           {share_btn}
           {req}
@@ -777,6 +910,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         {sync_btn}
       </div>
     </div>
+    {search}
     <div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th>Status</th><th></th></tr></thead>
       <tbody>{rows}
@@ -791,6 +925,9 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             h1attr = if !liked && !member { r#"contenteditable="true" spellcheck="false" id="pl-name" title="Click to rename""# } else { "" },
             name = esc(&pl.s("name")),
             total = pl.s("total"), matched = pl.s("matched"), missing_n = js_string(&json!(total - matched)),
+            // the 🔍 and its box only when there are songs to search
+            find = if items.is_empty() { String::new() } else { find_button() },
+            search = if items.is_empty() { String::new() } else { search_box_html("pl", SONG_SEARCH_PLACEHOLDER, true) },
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button><button class="btn" id="pl-shuffle">{}Shuffle</button>"#, icon("play"), icon("shuffle")) } else { String::new() },
             shared = share_line(&pl),
@@ -813,6 +950,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             rows = rows,
             empty = if items.is_empty() { empty_state(&icon("music"), "Empty playlist", "Add tracks from an album page or from a link.") } else { String::new() },
         ));
+        wire_search_toggle(&view);
+        wire_search(&view, "pl", "tbody tr[data-q]", ("song", "songs"), true);
         super::collab::bind(&view, &id, reload);
         {
             let (id2, pl_name) = (id.clone(), pl.s("name"));
@@ -1230,5 +1369,64 @@ mod merge_into_tests {
         let r = json!({ "total": 3100, "added": 3000, "duplicates_skipped": 100 });
         assert_eq!(merged_text(&r, true), "Added 3000 of 3100 tracks (100 already there)");
         assert_eq!(merged_text(&r, false), "Merged 3100 tracks → 3000 unique (100 duplicates removed)");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn a_song_is_found_by_title_artist_or_album() {
+        let it = json!({ "title": "Wompum VIP", "artist": "BARELY ALIVE", "album": "Head to Head, Vol. 1" });
+        let hay = item_haystack(&it);
+        for q in ["wompum", "WOMPUM vip", "barely", "head to head", "vip alive", "", "   "] {
+            assert!(query_matches(&hay, q), "{q}: {hay}");
+        }
+        for q in ["obsidian", "wompum obsidian"] {
+            assert!(!query_matches(&hay, q), "{q}: {hay}");
+        }
+    }
+
+    #[test]
+    fn every_artist_and_translation_counts() {
+        let it = json!({ "title": "夜に駆ける", "title_r": "Yoru ni Kakeru", "artist": "YOASOBI",
+                         "artists": [{ "name": "Ayase" }, "ikura"], "album": null });
+        let hay = item_haystack(&it);
+        for q in ["yoru", "ayase", "ikura", "駆ける", "yoasobi"] {
+            assert!(query_matches(&hay, q), "{q}: {hay}");
+        }
+        assert!(!hay.contains("null"), "{hay}");
+    }
+
+    #[test]
+    fn a_playlist_is_found_by_name_and_owner() {
+        assert!(query_matches(&playlist_haystack(&json!({ "name": "Liked Songs", "kind": "liked" })), "liked"));
+        let linked = json!({ "name": "Road trip", "kind": "linked", "linked": { "owner": "anna", "active": true } });
+        assert!(query_matches(&playlist_haystack(&linked), "road anna"));
+        assert!(!query_matches(&playlist_haystack(&json!({ "name": "Gym" })), "road"));
+    }
+
+    #[test]
+    fn the_found_line() {
+        assert_eq!(found_text(5263, 5263, "", ("song", "songs")), "");
+        assert_eq!(found_text(12, 5263, "atl", ("song", "songs")), "12 of 5263 songs");
+        assert_eq!(found_text(1, 1, "x", ("playlist", "playlists")), "1 of 1 playlist");
+        assert_eq!(found_text(0, 40, " zzz ", ("playlist", "playlists")), "No playlists match “zzz”");
+    }
+
+    #[test]
+    fn rows_and_tiles_carry_their_search_text() {
+        let tile = pl_card(&json!({ "id": 3, "name": "Road \"trip\"", "total": 10, "matched": 8, "source": "spotify", "sync_targets": [] }));
+        assert!(tile.contains(r#"data-q="road &quot;trip&quot;""#), "{tile}");
+        let mut pl = json!({ "id": 41, "kind": "linked", "name": "Road trip", "total": 1, "linked": { "owner": "anna", "active": true } });
+        pl["items"] = json!([{ "id": 7, "track_id": 3, "title": "One", "album": "First" }]);
+        let page = linked_page_html(&pl, false);
+        for part in [r#"data-q="one first""#, r#"id="pl-find""#, r#"id="pl-search" hidden"#, r#"id="pl-q""#, r#"id="pl-clear""#, SONG_SEARCH_PLACEHOLDER] {
+            assert!(page.contains(part), "{part}: {page}");
+        }
+        // nothing to search in an empty playlist
+        pl["items"] = json!([]);
+        assert!(!linked_page_html(&pl, false).contains("pl-find"));
     }
 }

@@ -20,20 +20,24 @@
 //! user joined (`collab.role: collaborator`) works like their own for its songs (add, remove,
 //! reorder, de-duplicate), without rename, share, sync, follow or Download missing; its Delete is
 //! Leave. docs/contracts/collaborative-playlists.md.
+//!
+//! 🔍 in the header opens a search above the songs that filters them by title, artist and album
+//! as you type (× clears it, 🔍 again closes it); a song found still plays the whole playlist from
+//! that song.
 
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::playlists::{
-    self, added_by_text, is_linked, linked_active, linked_hint, linked_kicker, linked_owner, linked_stopped, remove_text,
-    src_label, src_name, target_name, Import, ImportMsg, MergeInto, LINKED_EMPTY, REMOVED_FROM_MINE, REMOVE_FROM_MINE, SAVED_COPY,
-    SAVE_COPY,
+    self, added_by_text, found_text, is_linked, item_haystack, linked_active, linked_hint, linked_kicker, linked_owner,
+    linked_stopped, query_matches, remove_text, src_label, src_name, target_name, Import, ImportMsg, MergeInto,
+    LINKED_EMPTY, REMOVED_FROM_MINE, REMOVE_FROM_MINE, SAVED_COPY, SAVE_COPY, SONG_SEARCH_PLACEHOLDER,
 };
 use crate::pages::{Ctx, El, Page, Section};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::catalog;
 use crate::widgets::{
     self, badge, btn, btn_icon, btn_sm, card, card_flat, confirm, empty, error_box, h1, icon_btn, modal, muted,
-    pop_menu, skeleton_rows, small, small_muted, t, Icon, MenuItem, TrackRow,
+    pop_menu, search_box_clearable, skeleton_rows, small, small_muted, t, Icon, MenuItem, TrackRow,
 };
 use iced::widget::{column, container, progress_bar, row, text_input, toggler, tooltip};
 use iced::{Alignment, Length, Point, Subscription, Task};
@@ -224,7 +228,14 @@ pub struct State {
     /// The name while it is being edited.
     rename: Option<String>,
     busy: bool,
+    /// The song search: None while closed, else its text ("" shows every song).
+    search: Option<String>,
 }
+
+/// The id of the song search box, to focus it when it opens.
+const SEARCH_ID: &str = "playlist-search";
+/// The header's 🔍, as its tooltip says.
+const SEARCH_TIP: &str = "Search in this playlist";
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -284,6 +295,12 @@ pub enum Message {
     Menu(i64),
     /// `/library/tracks/{id}/added` for the open menu's song.
     Added(i64, Result<Value, ApiError>),
+    /// 🔍: open the song search (focused), or close it and forget the search.
+    ToggleSearch,
+    /// The search box's text changed.
+    SearchInput(String),
+    /// × in the search box.
+    SearchClear,
     CloseMenu,
     PlayNext(i64),
     Enqueue(i64),
@@ -328,6 +345,8 @@ pub fn open(state: &mut State, id: i64, ctx: &mut Ctx) -> Task<Message> {
     state.menu = None;
     state.rename = None;
     state.busy = false;
+    // another playlist starts without a search
+    state.search = None;
     load(state, ctx)
 }
 
@@ -382,6 +401,17 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Connections(Err(_)) => {}
         Message::OpenConnections => ctx.navigate(Page::Settings(Section::Connections)),
+        Message::ToggleSearch => {
+            if state.search.take().is_none() {
+                state.search = Some(String::new());
+                return iced::widget::operation::focus(SEARCH_ID);
+            }
+        }
+        Message::SearchInput(q) => state.search = Some(q),
+        Message::SearchClear => {
+            state.search = Some(String::new());
+            return iced::widget::operation::focus(SEARCH_ID);
+        }
         Message::OpenPage(p) => ctx.navigate(p),
         Message::Play(index) => {
             let rows = playable(&state.items());
@@ -996,6 +1026,10 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
         actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
         actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
     }
+    // 🔍 whenever there are songs to search
+    if !items.is_empty() {
+        actions = actions.push(icon_btn(Icon::Search, SEARCH_TIP, Some(Message::ToggleSearch)));
+    }
     if !member {
         actions = actions.push(
             tooltip(
@@ -1147,6 +1181,9 @@ fn linked_header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Me
             actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
             actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
         }
+        if !state.items().is_empty() {
+            actions = actions.push(icon_btn(Icon::Search, SEARCH_TIP, Some(Message::ToggleSearch)));
+        }
         actions = actions.push(btn_icon(Icon::Copy, SAVE_COPY, Btn::Default, (!state.busy).then_some(Message::SaveCopy)));
     } else {
         right = right.push(muted(linked_stopped(&owner)).size(14));
@@ -1156,13 +1193,43 @@ fn linked_header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Me
     row![cover, right].spacing(24).align_y(Alignment::End).into()
 }
 
+/// The song search above the rows while it is open: the box, and the found line under it
+/// ("12 of 5263 songs", or that nothing matches). None while it is closed.
+fn search_bar<'a>(state: &'a State, items: &[Value]) -> Option<El<'a, Message>> {
+    let q = state.search.as_deref()?;
+    let shown = items.iter().filter(|it| query_matches(&item_haystack(it), q)).count();
+    let found = found_text(shown, items.len(), q, ("song", "songs"));
+    let mut col = column![container(search_box_clearable(
+        SEARCH_ID,
+        SONG_SEARCH_PLACEHOLDER,
+        q,
+        Message::SearchInput,
+        Message::SearchClear
+    ))
+    .max_width(420)]
+    .spacing(8);
+    if !found.is_empty() {
+        col = col.push(small_muted(found));
+    }
+    Some(col.into())
+}
+
 fn track_rows<'a>(state: &'a State, items: &[Value], ctx: &Ctx<'a>) -> El<'a, Message> {
     // someone else's playlist: every song is in the library, and only its owner takes songs out
     let read_only = state.playlist().is_some_and(is_linked);
     let current = ctx.player.current_id();
+    let query = state.search.as_deref().unwrap_or("");
     let mut play_index = 0usize;
     let mut rows: Vec<El<'a, Message>> = Vec::with_capacity(items.len());
     for (i, it) in items.iter().enumerate() {
+        // a row the search hides still counts for the play index, so a found song plays the
+        // whole playlist from its own place
+        if !query_matches(&item_haystack(it), query) {
+            if fmt::truthy(it, "track_id") {
+                play_index += 1;
+            }
+            continue;
+        }
         let iid = fmt::i(it, "id");
         let in_library = fmt::truthy(it, "track_id");
         let tail = if fmt::truthy(it, "album") { format!(" · {}", fmt::s(it, "album")) } else { String::new() };
@@ -1206,6 +1273,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             } else if items.is_empty() {
                 col = col.push(empty(Icon::Music, LINKED_EMPTY, ""));
             } else {
+                if let Some(bar) = search_bar(state, &items) {
+                    col = col.push(bar);
+                }
                 col = col.push(track_rows(state, &items, ctx));
             }
             col.width(Length::Fill).into()
@@ -1223,6 +1293,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     "Add tracks from an album page or from a link.",
                 ));
             } else {
+                if let Some(bar) = search_bar(state, &items) {
+                    col = col.push(bar);
+                }
                 col = col.push(track_rows(state, &items, ctx));
             }
             col.width(Length::Fill).into()

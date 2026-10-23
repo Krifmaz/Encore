@@ -777,6 +777,14 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
   border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); }
 .dl-note svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
 .dl-search { max-width: 420px; margin: 4px 0 16px; }
+/* the search inside a playlist and on the Playlists page (pages/playlists.rs `search_box_html`) */
+.pl-search { max-width: 420px; margin: 0 0 12px; }
+.pl-found { margin: -6px 0 12px; }
+/* a search box with its own × button: room on the right, and no second × from the browser */
+.search-clearable .input { padding-right: 44px; }
+.search-clearable input::-webkit-search-cancel-button { display: none; }
+.search .search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
+.search .search-clear svg { position: static; transform: none; width: 16px; color: var(--muted); }
 .dl-album { margin-bottom: 14px; overflow: hidden; }
 .dl-album-head { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-bottom: 1px solid var(--border); min-width: 0; }
 .dl-album-title { font-weight: 700; font-size: 16px; }

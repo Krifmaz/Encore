@@ -375,8 +375,11 @@ data class PlaylistDetail(val playlist: Playlist, val rows: List<PlaylistRow>) {
     val tracks: List<Track> get() = rows.mapNotNull { it.track }
 }
 
-/** `requestStatus` is the linked request's status ("" when never requested or the request is gone). */
-data class PlaylistRow(val title: String, val artist: String, val track: Track?, val requestStatus: String = "")
+/**
+ * `requestStatus` is the linked request's status ("" when never requested or the request is gone). [album] is the
+ * playlist's own album text, so the playlist search finds rows that aren't in the library by their album too.
+ */
+data class PlaylistRow(val title: String, val artist: String, val track: Track?, val requestStatus: String = "", val album: String = "")
 
 /** GET /api/auth/info – what this server can do. */
 data class AuthInfo(val appName: String, val version: String, val signupMode: String, val features: List<String>) {

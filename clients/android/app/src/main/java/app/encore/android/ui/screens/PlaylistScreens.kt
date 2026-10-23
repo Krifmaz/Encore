@@ -76,6 +76,20 @@ import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import app.encore.android.features.library.PlaylistSearchRules
 
 /** The web's Liked Songs art: a heart on the accent gradient. */
 @Composable
@@ -107,6 +121,58 @@ private fun PlaylistArt(nav: Nav, pl: Playlist, modifier: Modifier, corner: Dp =
     }
 }
 
+/**
+ * The search box inside a playlist and on the Playlists screen (the web's `search_box_html`): 🔍, the text, × to clear,
+ * and under it [found] ("12 of 5263 songs", or that nothing matches; nothing while it is empty). It takes the focus
+ * when it opens, so the keyboard comes up at once; Search on the keyboard only hides the keyboard, since the rows
+ * already filter as you type. [gutter] is the side padding (0 inside the Playlists grid, which has its own).
+ */
+@Composable
+private fun PlaylistSearchField(value: String, onChange: (String) -> Unit, placeholder: String, found: String, gutter: Dp = Gutter) {
+    val p = MaterialTheme.palette
+    val focus = LocalFocusManager.current
+    val requester = remember { FocusRequester() }
+    // focus once when the box appears (not on every recomposition, so hiding the keyboard sticks)
+    LaunchedEffect(Unit) { requester.requestFocus() }
+    // an opaque background, so rows scrolling under the pinned box don't show through
+    Column(Modifier.fillMaxWidth().background(p.bg).padding(start = gutter, end = gutter, top = 4.dp, bottom = 8.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onChange,
+            placeholder = { Text(placeholder, color = p.faint, maxLines = 1) },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            leadingIcon = { Icon(painterResource(R.drawable.ic_search), contentDescription = null, tint = p.faint) },
+            trailingIcon = {
+                if (value.isNotEmpty()) {
+                    IconButton(onClick = { onChange("") }) { Icon(painterResource(R.drawable.ic_close), contentDescription = "Clear search", tint = p.muted) }
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = p.accent,
+                unfocusedBorderColor = p.border,
+                focusedContainerColor = p.bg2,
+                unfocusedContainerColor = p.bg2,
+                cursorColor = p.accent,
+            ),
+            modifier = Modifier.fillMaxWidth().focusRequester(requester),
+        )
+        if (found.isNotEmpty()) {
+            Text(found, style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(top = 6.dp))
+        }
+    }
+}
+
+/** The top bar's 🔍: opens the search box, or closes it (and forgets the search) when it is open. */
+@Composable
+private fun SearchToggle(open: Boolean, label: String, onToggle: () -> Unit) {
+    IconButton(onClick = onToggle) {
+        Icon(painterResource(if (open) R.drawable.ic_close else R.drawable.ic_search), contentDescription = if (open) "Close search" else label)
+    }
+}
+
 /** Playlists, Liked Songs first (web/js/pages/playlists.js `plCard` tiles). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -119,11 +185,21 @@ fun PlaylistsScreen(nav: Nav) {
     }
     val p = MaterialTheme.palette
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // the search by name: open from the top bar's 🔍, kept across rotation; Back closes it first
+    var searching by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    val closeSearch: () -> Unit = { searching = false; query = "" }
+    BackHandler(enabled = searching) { closeSearch() }
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = { EncoreTopBar("Playlists", scrollBehavior = scrollBehavior, actions = { PlaylistsActions(nav) }) },
+        topBar = {
+            EncoreTopBar("Playlists", scrollBehavior = scrollBehavior, actions = {
+                SearchToggle(searching, PlaylistSearchRules.OPEN_PLAYLIST_SEARCH) { if (searching) closeSearch() else searching = true }
+                PlaylistsActions(nav)
+            })
+        },
     ) { padding ->
         LoadableContent(loader) { (playlists, invites) ->
             val sorted = playlists.sortedByDescending { it.isLiked }
@@ -131,6 +207,7 @@ fun PlaylistsScreen(nav: Nav) {
                 EmptyState(R.drawable.ic_queue_music, "No playlists yet", modifier = Modifier.padding(padding))
                 return@LoadableContent
             }
+            val shown = PlaylistSearchRules.filterPlaylists(sorted, query)
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(140.dp),
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -143,7 +220,18 @@ fun PlaylistsScreen(nav: Nav) {
                         CollabInvites(nav, invites) { loader.refresh() }
                     }
                 }
-                items(sorted, key = { it.id }) { pl ->
+                // the box spans the whole line of the grid, under the invites
+                if (searching) {
+                    item(key = "search", span = { GridItemSpan(maxLineSpan) }) {
+                        PlaylistSearchField(
+                            query, { query = it }, PlaylistSearchRules.PLAYLIST_PLACEHOLDER,
+                            PlaylistSearchRules.foundText(shown.size, sorted.size, query, "playlist", "playlists"),
+                            // the grid already has the side gutter
+                            gutter = 0.dp,
+                        )
+                    }
+                }
+                items(shown, key = { it.id }) { pl ->
                     Tile(
                         title = pl.name,
                         // someone else's playlist added from a link: "12 tracks · by anna", or that the link ended
@@ -167,7 +255,7 @@ fun PlaylistsScreen(nav: Nav) {
  * no Share, no editing ⋯ (Save a copy and Remove from my playlists instead), "Playlist · by anna" and the owner's hint
  * instead of the library counts; once the link ended, the "stopped sharing" line and Remove.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val api = nav.graph.api
@@ -191,6 +279,16 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val loaded = ready ?: lastLoaded
     // an added playlist's Remove confirm: from its ⋯, or from the page's button once the link ended
     val confirmRemove = remember(id) { mutableStateOf(false) }
+    // the song search (title, artist, album): open from the top bar's 🔍, kept across rotation; Back closes it first
+    var searching by rememberSaveable(id) { mutableStateOf(false) }
+    var query by rememberSaveable(id) { mutableStateOf("") }
+    val closeSearch: () -> Unit = { searching = false; query = "" }
+    val toggleSearch: () -> Unit = { if (searching) closeSearch() else searching = true }
+    BackHandler(enabled = searching) { closeSearch() }
+    val listState = rememberLazyListState()
+    // the box sits under the head and the Play buttons (item 2) and stays pinned at the top while the results
+    // scroll: opening it scrolls there, so it shows even from deep down a long playlist
+    LaunchedEffect(searching) { if (searching && listState.layoutInfo.totalItemsCount > 2) listState.scrollToItem(2) }
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = p.bg,
@@ -201,11 +299,18 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                     // not known yet (first load, or it failed): an added playlist must not offer the own actions,
                     // Delete included, so there are none until it has loaded
                     loaded == null -> {}
-                    // someone else's playlist: Save a copy, Remove from my playlists
-                    loaded.isLinked -> LinkedPlaylistMenu(nav, id, loaded.name.ifEmpty { name }, loaded.linkedActive, confirmRemove)
-                    // someone else's collaborative playlist: its songs, Members and Leave (no Share, no Rename / Delete)
-                    loaded.isMember -> PlaylistMenu(nav, id, loaded.name.ifEmpty { name }, isLiked = false, onChanged = { loader.retry() }, member = true)
+                    // someone else's playlist: 🔍 while its link works, Save a copy, Remove from my playlists
+                    loaded.isLinked -> {
+                        if (loaded.linkedActive) SearchToggle(searching, PlaylistSearchRules.OPEN_SONG_SEARCH, toggleSearch)
+                        LinkedPlaylistMenu(nav, id, loaded.name.ifEmpty { name }, loaded.linkedActive, confirmRemove)
+                    }
+                    // someone else's collaborative playlist: 🔍, its songs, Members and Leave (no Share, no Rename / Delete)
+                    loaded.isMember -> {
+                        SearchToggle(searching, PlaylistSearchRules.OPEN_SONG_SEARCH, toggleSearch)
+                        PlaylistMenu(nav, id, loaded.name.ifEmpty { name }, isLiked = false, onChanged = { loader.retry() }, member = true)
+                    }
                     else -> {
+                        SearchToggle(searching, PlaylistSearchRules.OPEN_SONG_SEARCH, toggleSearch)
                         // the playlist's public link (Liked Songs too): made, copied, then the system share sheet
                         IconButton(onClick = {
                             val title = loaded.name.ifEmpty { name }
@@ -231,7 +336,15 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
             val rows = detail.rows
             val missing = rows.size - tracks.size
             val covers = rows.mapNotNull { it.track?.albumId?.takeIf { a -> a.isNotEmpty() } }.distinct().take(4).map { api.coverUrl(it, 400) }
-            LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            // the rows the search keeps, by their position in the playlist (all of them while it is empty)
+            val shown = remember(rows, query) { PlaylistSearchRules.filter(rows, query) }
+            // each row's place among the songs in the library, so a tap plays the whole playlist from that song
+            // (counted once here instead of per row, which was quadratic on a 5000-song Liked Songs)
+            val songAt = remember(rows) {
+                var n = 0
+                IntArray(rows.size) { i -> n.also { if (rows[i].track != null) n++ } }
+            }
+            LazyColumn(Modifier.fillMaxSize().padding(padding), state = listState) {
                 // .detail-head
                 item {
                     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -297,6 +410,14 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         } else Spacer(Modifier.height(16.dp))
                     }
                 }
+                if (searching && rows.isNotEmpty()) {
+                    stickyHeader(key = "search") {
+                        PlaylistSearchField(
+                            query, { query = it }, PlaylistSearchRules.SONG_PLACEHOLDER,
+                            PlaylistSearchRules.foundText(shown.size, rows.size, query, "song", "songs"),
+                        )
+                    }
+                }
                 if (rows.isEmpty()) {
                     when {
                         // an added playlist whose link ended: the head says so, nothing to list
@@ -305,11 +426,13 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         else -> item { EmptyState(R.drawable.ic_note, "Empty playlist", "Add tracks from an album page or from a link.") }
                     }
                 }
-                items(rows.size) { i ->
+                items(shown.size) { k ->
+                    // `i` is the row's position in the whole playlist, whatever the search hides
+                    val i = shown[k]
                     val row = rows[i]
                     val t = row.track
                     if (t != null) {
-                        val at = rows.subList(0, i).count { it.track != null }
+                        val at = songAt[i]
                         TrackRow(
                             track = t,
                             imageLoader = nav.graph.imageLoader,

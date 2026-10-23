@@ -16,12 +16,63 @@ use crate::theme::{self, Badge, Btn};
 use crate::widgets::choice::select;
 use crate::widgets::text_area::text_area;
 use crate::widgets::{
-    self, badge, btn, btn_icon, btn_sm, card, empty, error_box, field, grid, icon, modal, muted, page_head, skeleton_tiles, small,
-    small_muted, t, Icon, Tile, TileKind,
+    self, badge, btn, btn_icon, btn_sm, card, empty, error_box, field, grid, icon, modal, muted, page_head,
+    search_box_clearable, skeleton_tiles, small, small_muted, t, Icon, Tile, TileKind,
 };
 use iced::widget::{checkbox, column, container, pick_list, row, text_editor, text_input, toggler};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::{json, Value};
+
+// ---- search: a playlist's songs, and this page by name (web-rs/src/pages/playlists.rs) ---------
+
+/// The placeholder of the box that filters a playlist's songs.
+pub const SONG_SEARCH_PLACEHOLDER: &str = "Search title, artist or album";
+/// The placeholder of the box that filters the Playlists page.
+pub const PLAYLIST_SEARCH_PLACEHOLDER: &str = "Search playlists";
+/// The id of this page's search box.
+const SEARCH_ID: &str = "playlists-search";
+
+/// What a playlist row is found by, lowercased: its title (and the translated and romanized
+/// titles when the server sends them, so a search works whichever one shows), every artist and
+/// the album.
+pub fn item_haystack(it: &Value) -> String {
+    let mut parts = vec![fmt::s(it, "title"), fmt::s(it, "title_t"), fmt::s(it, "title_r"), fmt::s(it, "artist"), fmt::s(it, "album")];
+    // `artists` is a list of names or of `{name}` objects, depending on the server's age
+    for a in fmt::items(&it["artists"]) {
+        parts.push(a.as_str().map(str::to_string).unwrap_or_else(|| fmt::s(&a, "name")));
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join(" ").to_lowercase()
+}
+
+/// What a playlist tile is found by, lowercased: its name, and for someone else's playlist
+/// whose it is.
+pub fn playlist_haystack(p: &Value) -> String {
+    let mut s = fmt::s(p, "name");
+    if is_linked(p) {
+        s = format!("{s} {}", linked_owner(p));
+    }
+    s.to_lowercase()
+}
+
+/// Every word of `query` appears somewhere in `hay` (already lowercased), in any order. An empty
+/// query matches everything, so clearing the box shows every row again.
+pub fn query_matches(hay: &str, query: &str) -> bool {
+    query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The line under a search box: nothing while it is empty, "12 of 5263 songs" while it finds
+/// some, and "No songs match “x”" when it finds none. `noun` is the singular and the plural.
+pub fn found_text(shown: usize, total: usize, query: &str, noun: (&str, &str)) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        return String::new();
+    }
+    if shown == 0 {
+        return format!("No {} match “{query}”", noun.1);
+    }
+    format!("{shown} of {total} {}", if total == 1 { noun.0 } else { noun.1 })
+}
 
 /// `SRC[k]`: the display name of a playlist source.
 pub fn src_name(k: &str) -> Option<&'static str> {
@@ -576,6 +627,8 @@ pub struct State {
     selected: Vec<i64>,
     dialog: Option<Dialog>,
     creating: bool,
+    /// The search by name ("" shows every playlist).
+    query: String,
 }
 
 #[derive(Clone, Debug)]
@@ -597,6 +650,10 @@ pub enum Message {
     MergeGo,
     Merged(Result<Value, ApiError>),
     OpenAddShared,
+    /// The search box's text changed.
+    Query(String),
+    /// × in the search box.
+    ClearQuery,
     AddSharedLink(String),
     AddSharedGo,
     AddSharedDone(Result<Value, ApiError>),
@@ -629,7 +686,8 @@ pub fn invite_text(i: &Value) -> String {
     format!("{} invited you to collaborate on {} · {} tracks", fmt::s(i, "owner"), fmt::s(i, "name"), fmt::i(i, "count"))
 }
 
-/// Called when the app navigates here (with the route's parameters).
+/// Called when the app navigates here (with the route's parameters). The search stays, so Back
+/// from a playlist lands on the same results.
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.rows = None;
     state.selected.clear();
@@ -752,6 +810,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 m.busy = false;
             }
             ctx.toast_err(e.message);
+        }
+        Message::Query(q) => state.query = q,
+        Message::ClearQuery => {
+            state.query.clear();
+            // back in the box, ready for the next search
+            return iced::widget::operation::focus(SEARCH_ID);
         }
         Message::OpenAddShared => {
             state.dialog = Some(Dialog::AddShared { link: String::new(), busy: false, error: None });
@@ -1034,11 +1098,27 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         None => skeleton_tiles(6, widgets::tile::WIDTH),
         Some(Err(e)) => error_box(e),
         Some(Ok(rows)) if rows.is_empty() => empty(Icon::List, "No playlists yet", ""),
-        Some(Ok(rows)) => grid(
-            rows.iter()
-                .map(|p| tile(ctx, p, state.selected.contains(&fmt::i(p, "id"))))
-                .collect(),
-        ),
+        Some(Ok(rows)) => {
+            // the playlists whose name has every word of the search
+            let shown: Vec<&Value> = rows.iter().filter(|p| query_matches(&playlist_haystack(p), &state.query)).collect();
+            let found = found_text(shown.len(), rows.len(), &state.query, ("playlist", "playlists"));
+            let mut col = column![container(search_box_clearable(
+                SEARCH_ID,
+                PLAYLIST_SEARCH_PLACEHOLDER,
+                &state.query,
+                Message::Query,
+                Message::ClearQuery
+            ))
+            .max_width(420)]
+            .spacing(10);
+            if !found.is_empty() {
+                col = col.push(small_muted(found));
+            }
+            if !shown.is_empty() {
+                col = col.push(grid(shown.into_iter().map(|p| tile(ctx, p, state.selected.contains(&fmt::i(p, "id")))).collect()));
+            }
+            col.into()
+        }
     };
     let mut col = column![head].spacing(20).width(Length::Fill);
     if !state.invites.is_empty() {
@@ -1316,5 +1396,40 @@ mod merge_into_tests {
     fn the_toast_says_what_was_added() {
         let r = json!({ "total": 3100, "added": 3000, "duplicates_skipped": 100 });
         assert_eq!(merged_into_text(&r), "Added 3000 of 3100 tracks (100 already there)");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn a_song_is_found_by_title_artist_or_album() {
+        let hay = item_haystack(&json!({ "title": "Wompum VIP", "artist": "BARELY ALIVE", "album": "Head to Head, Vol. 1" }));
+        for q in ["wompum", "WOMPUM vip", "barely", "head to head", "vip alive", "", "  "] {
+            assert!(query_matches(&hay, q), "{q}: {hay}");
+        }
+        assert!(!query_matches(&hay, "wompum obsidian"));
+        let hay = item_haystack(&json!({ "title": "夜に駆ける", "title_r": "Yoru ni Kakeru", "artists": [{ "name": "Ayase" }, "ikura"] }));
+        for q in ["yoru", "ayase", "ikura", "駆ける"] {
+            assert!(query_matches(&hay, q), "{q}: {hay}");
+        }
+    }
+
+    #[test]
+    fn a_playlist_is_found_by_name_and_owner() {
+        assert!(query_matches(&playlist_haystack(&json!({ "name": "Liked Songs", "kind": "liked" })), "liked"));
+        let linked = json!({ "name": "Road trip", "kind": "linked", "linked": { "owner": "anna", "active": true } });
+        assert!(query_matches(&playlist_haystack(&linked), "road anna"));
+        assert!(!query_matches(&playlist_haystack(&json!({ "name": "Gym" })), "road"));
+    }
+
+    #[test]
+    fn the_found_line_matches_the_web() {
+        assert_eq!(found_text(5263, 5263, "", ("song", "songs")), "");
+        assert_eq!(found_text(12, 5263, "atl", ("song", "songs")), "12 of 5263 songs");
+        assert_eq!(found_text(1, 1, "x", ("playlist", "playlists")), "1 of 1 playlist");
+        assert_eq!(found_text(0, 40, " zzz ", ("playlist", "playlists")), "No playlists match “zzz”");
+        assert_eq!((SONG_SEARCH_PLACEHOLDER, PLAYLIST_SEARCH_PLACEHOLDER), ("Search title, artist or album", "Search playlists"));
     }
 }
