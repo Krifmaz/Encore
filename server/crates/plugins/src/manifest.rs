@@ -61,8 +61,11 @@ pub fn default_timeout(command: &str) -> u64 {
 /// Where a plugin came from: the catalog Encore ships (first-party), or an upload or a URL (third-party).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
+    /// the catalog Encore ships
     Catalog,
+    /// an uploaded archive
     Upload,
+    /// a URL
     Url,
 }
 
@@ -76,6 +79,7 @@ impl Origin {
         }
     }
 
+    /// The origin a stored name stands for.
     pub fn parse(s: &str) -> Option<Origin> {
         [Origin::Catalog, Origin::Upload, Origin::Url].into_iter().find(|o| o.as_str() == s)
     }
@@ -92,6 +96,7 @@ impl Origin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// `[plugin]`: who it is
     pub plugin: Plugin,
     /// The source ids a source plugin answers for (`source_order`, the picker). None listed: the plugin's id.
     #[serde(default)]
@@ -99,24 +104,31 @@ pub struct Manifest {
     /// How a process plugin is started. Builtin plugins have none, or only `env` and `timeouts`.
     #[serde(default)]
     pub run: Option<Run>,
+    /// `[update]`: where new versions come from
     #[serde(default)]
     pub update: Option<Update>,
+    /// `[install]`: how a version is checked before it is used
     #[serde(default)]
     pub install: Option<Install>,
     /// The program, one per machine.
     #[serde(default, rename = "binary")]
     pub binaries: Vec<Binary>,
+    /// `[python]`: the program is a Python package in a venv
     #[serde(default)]
     pub python: Option<Python>,
     /// Data files besides the program (a model), each chosen by a setting.
     #[serde(default, rename = "download")]
     pub downloads: Vec<DataFile>,
+    /// `[[settings]]`: the fields of its card
     #[serde(default)]
     pub settings: Vec<Setting>,
+    /// `[permissions]`: what its process may reach
     #[serde(default)]
     pub permissions: Permissions,
+    /// `[client]`: a download client's source, protocol and choice
     #[serde(default)]
     pub client: Option<Client>,
+    /// `[migration]`: how a tool from before plugins becomes this plugin
     #[serde(default)]
     pub migration: Option<Migration>,
 }
@@ -127,16 +139,21 @@ pub struct Manifest {
 pub struct Plugin {
     /// a-z, 0-9 and dashes, at most 40 characters: the folder under `<config>/plugins/`
     pub id: String,
+    /// the name shown
     pub name: String,
+    /// its version
     pub version: String,
+    /// one line about it
     #[serde(default)]
     pub description: String,
     /// one of [`KINDS`]
     pub kind: String,
     /// [`PROTOCOL`]
     pub protocol: u32,
+    /// a web page about it
     #[serde(default)]
     pub homepage: String,
+    /// its licence
     #[serde(default)]
     pub license: String,
     /// the commands it answers ([`COMMANDS`])
@@ -167,7 +184,9 @@ pub struct Plugin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEntry {
+    /// the source id
     pub id: String,
+    /// its name in the picker
     pub name: String,
     /// the picker's tab id when it differs from `id` (yt-dlp: `ytmusic`)
     #[serde(default)]
@@ -268,11 +287,13 @@ pub struct Check {
     /// relative to the venv (`[python]`) or the unpacked folder (`[[binary]]`); `*` matches within one name
     #[serde(default)]
     pub file: Option<String>,
+    /// the text that file must contain
     #[serde(default)]
     pub contains: Option<String>,
     /// a field of the JSON the version command prints
     #[serde(default)]
     pub json: Option<String>,
+    /// the value that JSON field must have
     #[serde(default)]
     pub equals: Option<Value>,
     /// what the install error says when it does not hold
@@ -329,7 +350,9 @@ pub struct DataFile {
     /// are removed
     #[serde(default)]
     pub when: Option<String>,
+    /// where to download it (https)
     pub url: String,
+    /// its sha256, when known up front
     #[serde(default)]
     pub sha256: Option<String>,
     /// "huggingface": the sha256 Hugging Face lists for the file; or as `[update] sums`
@@ -337,6 +360,7 @@ pub struct DataFile {
     pub sums: Option<String>,
     /// where it goes, relative to the plugin's data folder
     pub path: String,
+    /// the largest download accepted, MB
     #[serde(default)]
     pub max_mb: Option<u64>,
     /// the file's first bytes (a GGUF model starts with "GGUF")
@@ -352,7 +376,9 @@ pub struct DataFile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setting {
+    /// its key (an Encore setting for a builtin plugin)
     pub key: String,
+    /// its label (from settings.toml when left out for a builtin)
     #[serde(default)]
     pub label: Option<String>,
     /// [`SETTING_TYPES`]
@@ -361,12 +387,16 @@ pub struct Setting {
     /// [value, label] pairs of a select or checks
     #[serde(default)]
     pub options: Vec<(String, String)>,
+    /// its value when nothing is saved
     #[serde(default)]
     pub default: Option<Value>,
+    /// the lowest number allowed
     #[serde(default)]
     pub min: Option<f64>,
+    /// the highest number allowed
     #[serde(default)]
     pub max: Option<f64>,
+    /// the help line under it
     #[serde(default)]
     pub help: Option<String>,
     /// Extension: shown while another of the plugin's selects or switches has a value (`key=value`, `key!=value`)
@@ -464,9 +494,12 @@ pub struct Migration {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Value", into = "Value")]
 pub enum Network {
+    /// no network
     #[default]
     Off,
+    /// any host
     On,
+    /// only these hosts (`*.example.com` for a domain and its subdomains)
     Hosts(Vec<String>),
 }
 
@@ -476,6 +509,7 @@ impl Network {
         !matches!(self, Network::Off)
     }
 
+    /// The allowed hosts (none for Off and On).
     pub fn hosts(&self) -> &[String] {
         match self {
             Network::Hosts(h) => h,
@@ -539,10 +573,12 @@ impl From<Names> for Value {
 /// Why a manifest was refused: every problem found, each naming the table and key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestError {
+    /// every problem found, one line each
     pub problems: Vec<String>,
 }
 
 impl ManifestError {
+    /// An error with one problem.
     fn one(p: impl Into<String>) -> ManifestError {
         ManifestError { problems: vec![p.into()] }
     }
@@ -627,14 +663,17 @@ pub fn is_rel_path(s: &str, glob: bool) -> bool {
         && s.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
+/// 64 hex digits.
 fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// An https:// URL with no spaces.
 fn is_https(s: &str) -> bool {
     s.strip_prefix("https://").is_some_and(|rest| !rest.is_empty() && !rest.contains(char::is_whitespace))
 }
 
+/// `owner/repo` of GitHub.
 fn is_github_repo(s: &str) -> bool {
     let ok = |p: &str| !p.is_empty() && p != "." && p != ".." && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
     matches!(s.split('/').collect::<Vec<_>>().as_slice(), [o, r] if ok(o) && ok(r))
@@ -647,6 +686,7 @@ fn is_env_name(s: &str) -> bool {
     !b.is_empty() && b.len() <= 100 && (b[0].is_ascii_alphabetic() || b[0] == b'_') && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
+/// A host name, or `*.` and a domain, lower case.
 fn is_host_pattern(s: &str) -> bool {
     let h = s.strip_prefix("*.").unwrap_or(s);
     !h.is_empty() && h.len() <= 253 && h.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-.".contains(&b)) && !h.starts_with(['.', '-'])
@@ -678,12 +718,19 @@ pub fn fill(template: &str, version: &str, tag: &str) -> String {
 /// - `file:path`: the file or folder exists under the config folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
+    /// `key`: the setting is on
     On(String),
+    /// `!key`: it is not
     Off(String),
+    /// `key=value`
     Is(String, String),
+    /// `key!=value`
     IsNot(String, String),
+    /// `key~item`
     Lists(String, String),
+    /// `saved:key`
     Saved(String),
+    /// `file:path`
     File(String),
 }
 
@@ -697,6 +744,7 @@ pub trait Facts {
     fn exists(&self, rel: &str) -> bool;
 }
 
+/// A value as one word for comparing (numbers without ".0", null as "").
 fn word(v: &Value) -> String {
     match v {
         Value::String(s) => s.trim().to_string(),
@@ -723,6 +771,7 @@ pub fn truthy(v: &Value) -> bool {
 }
 
 impl Condition {
+    /// Read one condition (the forms in [`Condition`]).
     pub fn parse(s: &str) -> Result<Condition, String> {
         let bad_key = |k: &str| format!("{s:?}: {k:?} is not a setting name");
         let value_ok = |v: &str| !v.is_empty() && v.trim() == v && !v.contains(['=', '~']);
@@ -764,6 +813,7 @@ impl Condition {
         }
     }
 
+    /// Whether it holds now.
     pub fn holds(&self, facts: &impl Facts) -> bool {
         let val = |k: &str| facts.value(k).unwrap_or(Value::Null);
         match self {
@@ -799,6 +849,7 @@ impl Update {
         }
     }
 
+    /// The release tag with `{version}` in it (`v{version}` by default).
     pub fn tag_template(&self) -> &str {
         self.tag.as_deref().unwrap_or("v{version}")
     }
@@ -844,6 +895,7 @@ impl Binary {
 }
 
 impl Manifest {
+    /// The plugin's id.
     pub fn id(&self) -> &str {
         &self.plugin.id
     }
@@ -853,6 +905,7 @@ impl Manifest {
         !self.plugin.builtin
     }
 
+    /// It answers `command`.
     pub fn answers(&self, command: &str) -> bool {
         self.plugin.commands.iter().any(|c| c == command)
     }
@@ -883,6 +936,7 @@ impl Manifest {
         !self.binaries.is_empty() || self.python.is_some()
     }
 
+    /// Its setting `key`.
     pub fn setting(&self, key: &str) -> Option<&Setting> {
         self.settings.iter().find(|s| s.key == key)
     }
@@ -898,6 +952,7 @@ impl Manifest {
         self.install.as_ref().and_then(|i| i.verify.clone()).unwrap_or_else(|| vec!["{bin}".into(), "--version".into()])
     }
 
+    /// The largest program download accepted, bytes (`[install] max_mb`, else [`DEFAULT_MAX_MB`]).
     pub fn max_bytes(&self) -> u64 {
         self.install.as_ref().and_then(|i| i.max_mb).unwrap_or(DEFAULT_MAX_MB) * 1024 * 1024
     }
@@ -1029,6 +1084,7 @@ impl Manifest {
         p
     }
 
+    /// Check `[plugin]`.
     fn check_plugin(&self, p: &mut Vec<String>) {
         let pl = &self.plugin;
         if !is_id(&pl.id) {
@@ -1101,6 +1157,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[[sources]]`.
     fn check_sources(&self, p: &mut Vec<String>) {
         if !self.sources.is_empty() && self.plugin.kind != "source" {
             p.push("[[sources]]: only a source has source ids".into());
@@ -1123,6 +1180,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[run]`.
     fn check_run(&self, p: &mut Vec<String>) {
         let run = self.run.clone().unwrap_or_default();
         if self.plugin.builtin {
@@ -1162,6 +1220,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[update]`.
     fn check_update(&self, p: &mut Vec<String>) {
         let Some(u) = &self.update else {
             if self.installs_program() {
@@ -1241,6 +1300,7 @@ impl Manifest {
         }
     }
 
+    /// Check the program: `[[binary]]` or `[python]`, and `[install]`.
     fn check_program(&self, p: &mut Vec<String>) {
         if !self.binaries.is_empty() && self.python.is_some() {
             p.push("[[binary]] and [python]: one program per plugin".into());
@@ -1368,6 +1428,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[[download]]`.
     fn check_downloads(&self, p: &mut Vec<String>) {
         for d in &self.downloads {
             let at = format!("[[download]] {}", d.path);
@@ -1402,6 +1463,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[[settings]]`.
     fn check_settings(&self, p: &mut Vec<String>) {
         let mut seen = BTreeSet::new();
         for s in &self.settings {
@@ -1464,6 +1526,7 @@ impl Manifest {
         }
     }
 
+    /// Check a setting's options, default and range against its type `t`.
     fn check_setting_values(&self, s: &Setting, t: &str, at: &str, p: &mut Vec<String>) {
         let choice = matches!(t, "select" | "checks");
         if choice {
@@ -1526,6 +1589,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[permissions]`.
     fn check_permissions(&self, p: &mut Vec<String>) {
         let pm = &self.permissions;
         for h in pm.network.hosts() {
@@ -1558,6 +1622,7 @@ impl Manifest {
         range("open_files", pm.open_files, 16, 65_536, p);
     }
 
+    /// Check `[client]`.
     fn check_client(&self, p: &mut Vec<String>) {
         match (&self.client, self.plugin.kind == "client") {
             (None, true) => p.push("[client]: a download client names its source, protocol and chosen_by".into()),
@@ -1579,6 +1644,7 @@ impl Manifest {
         }
     }
 
+    /// Check `[migration]`.
     fn check_migration(&self, p: &mut Vec<String>) {
         let Some(m) = &self.migration else { return };
         if let Some(t) = &m.from_tool {
@@ -1706,6 +1772,7 @@ pub fn check_together(manifests: &[&Manifest]) -> Vec<String> {
 struct Owners(BTreeMap<String, String>);
 
 impl Owners {
+    /// Record that plugin `id` uses `name`; a problem when another plugin did first.
     fn claim(&mut self, what: &str, name: &str, id: &str, p: &mut Vec<String>) {
         match self.0.get(name) {
             Some(other) if other != id => p.push(format!("{what} {name:?} belongs to both {other} and {id}")),

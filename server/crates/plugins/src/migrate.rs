@@ -38,8 +38,11 @@ pub fn retry_after(n: usize) -> Duration {
 /// of Encore before plugins) rather than the plugin's own install.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgramAt {
+    /// the version
     pub version: String,
+    /// the program file
     pub path: PathBuf,
+    /// an adopted copy from before plugins, not the plugin's own install
     pub adopted: bool,
 }
 
@@ -116,6 +119,7 @@ impl Registry {
         self.db().one("SELECT value FROM plugin_state WHERE key=?", p![MIGRATION_KEY]).ok().flatten().map(|r| r.s("value")).unwrap_or_default()
     }
 
+    /// Record that the migration to `v` ran.
     fn set_migration_marker(&self, v: &str) {
         let _ = self.db().execute("INSERT OR REPLACE INTO plugin_state (key, value) VALUES (?,?)", p![MIGRATION_KEY, v]);
     }

@@ -59,10 +59,12 @@ pub fn check_sha256(file: &Path, got: &str, want: &str, what: &str) -> anyhow::R
 /// The versions of one program: `<root>/<version>/` and `<root>/current` naming the one in use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Versions {
+    /// the folder holding the version folders and `current`
     pub root: PathBuf,
 }
 
 impl Versions {
+    /// The versions under `root`.
     pub fn new(root: &Path) -> Versions {
         Versions { root: root.to_path_buf() }
     }
@@ -74,6 +76,7 @@ impl Versions {
         (!v.is_empty() && !v.contains('/') && !v.starts_with('.') && v != "current").then(|| v.to_string())
     }
 
+    /// The folder of `version`.
     pub fn dir(&self, version: &str) -> PathBuf {
         self.root.join(version)
     }
@@ -140,9 +143,13 @@ impl Versions {
 /// What a program printed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
+    /// it exited with status 0
     pub ok: bool,
+    /// its exit code (None: killed by a signal)
     pub code: Option<i32>,
+    /// what it printed (the first 1 MB)
     pub stdout: String,
+    /// its errors (the first 1 MB)
     pub stderr: String,
 }
 
@@ -202,6 +209,7 @@ pub fn output(spawn: &Spawn, limit: Duration) -> anyhow::Result<Output> {
 pub struct Verified {
     /// the version it names (`[install] version_from`)
     pub version: Option<String>,
+    /// what it printed
     pub output: Output,
 }
 
@@ -281,6 +289,7 @@ pub fn glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
     at
 }
 
+/// Glob-match `name` against `pattern` where `*` stands for any text.
 fn wildcard(pattern: &str, name: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     let (first, last) = (parts[0], parts[parts.len() - 1]);
@@ -303,6 +312,7 @@ fn wildcard(pattern: &str, name: &str) -> bool {
 /// What to install: a download (its URL, its expected sha256, how it unpacks) and the program in it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    /// where to download it
     pub url: String,
     /// the file name the download has (the asset's name; for messages and unpacking by name)
     pub name: String,
@@ -314,15 +324,20 @@ pub struct Program {
     pub bin: String,
     /// paths removed from what was unpacked
     pub remove: Vec<String>,
+    /// the largest download accepted, bytes
     pub max_bytes: u64,
 }
 
 /// An installed version.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Installed {
+    /// the version
     pub version: String,
+    /// its folder
     pub dir: PathBuf,
+    /// the program file in it
     pub bin: PathBuf,
+    /// the download's sha256
     pub sha256: String,
     /// what the version command named
     pub reports: Option<String>,
@@ -331,7 +346,9 @@ pub struct Installed {
 /// How the download step reaches the network: the plugin client and whether plain http is allowed (tests).
 #[derive(Clone)]
 pub struct Net {
+    /// the HTTP client downloads use
     pub http: reqwest::Client,
+    /// plain http:// is allowed (tests only)
     pub allow_http: bool,
 }
 
@@ -355,6 +372,7 @@ pub async fn install_program(
     res
 }
 
+/// [`install_program`] once the stage folder exists: download, check the sum, unpack, prepare, verify, switch.
 async fn install_staged(
     net: &Net,
     m: &Manifest,
@@ -413,6 +431,7 @@ pub fn unpack_program(download: &Path, p: &Program, stage: &Path) -> anyhow::Res
     Ok(())
 }
 
+/// Make `bin` executable (mode 755).
 pub fn make_executable(bin: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).map_err(fsx::at(Step::Plugin, "chmod", bin))?;

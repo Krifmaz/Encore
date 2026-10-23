@@ -11,7 +11,9 @@ use tokio::io::AsyncWriteExt;
 /// A finished download.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fetched {
+    /// where the download went
     pub path: PathBuf,
+    /// its size in bytes
     pub size: u64,
     /// lower-case hex
     pub sha256: String,

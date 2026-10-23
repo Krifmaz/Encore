@@ -34,16 +34,20 @@ pub const MASK: &str = encore_config::MASK;
 /// Why an operation was refused or failed: the words for the person, and the HTTP status that fits.
 #[derive(Debug)]
 pub struct Refused {
+    /// the HTTP status
     pub status: u16,
+    /// the words for the person
     pub message: String,
     /// a manifest's problems, each on its own
     pub problems: Vec<String>,
 }
 
 impl Refused {
+    /// A refusal with this status and message.
     pub fn new(status: u16, message: impl Into<String>) -> Refused {
         Refused { status, message: message.into(), problems: vec![] }
     }
+    /// As the API answers it: `{error, problems}`.
     pub fn json(&self) -> Value {
         json!({ "error": self.message, "problems": self.problems })
     }
@@ -84,13 +88,17 @@ impl From<fsx::StepError> for Refused {
     }
 }
 
+/// A result whose error is a [`Refused`].
 type Result<T> = std::result::Result<T, Refused>;
 
 /// Settings of the registry that tests change.
 #[derive(Clone)]
 struct Options {
+    /// where the release services are
     hosts: Hosts,
+    /// plain http:// is allowed (tests only)
     allow_http: bool,
+    /// the uv program Python plugins are installed with, once known
     uv: Option<PathBuf>,
     /// a program the system has on PATH counts as installed (off in tests: the host's own copies)
     system_copies: bool,
@@ -100,13 +108,21 @@ struct Options {
 #[derive(Clone)]
 pub struct Registry(Arc<Inner>);
 
+/// The registry's shared state.
 struct Inner {
+    /// Encore's config folder (`plugins/` is in it)
     config_dir: PathBuf,
+    /// the database (the `plugins` table)
     db: Db,
+    /// Encore's settings
     cfg: Config,
+    /// the HTTP client for downloads and release checks
     http: RwLock<reqwest::Client>,
+    /// what tests change
     opts: RwLock<Options>,
+    /// the sandbox level, found on first use
     sandbox: OnceLock<Sandbox>,
+    /// the builtin plugins' adapters, by id
     builtins: RwLock<HashMap<String, Arc<dyn Plugin>>>,
     /// loaded plugin programs, by id: (the version folder they run from, the plugin)
     procs: Mutex<HashMap<String, (PathBuf, Arc<ProcessPlugin>)>>,
@@ -125,6 +141,7 @@ pub struct PluginSource {
     pub id: String,
     /// its picker tab's id (the id unless the manifest names another)
     pub picker: String,
+    /// its name in the picker
     pub name: String,
     /// the plugin that answers for it
     pub plugin: String,
@@ -145,6 +162,7 @@ impl Drop for Busy {
     }
 }
 
+/// The User-Agent of plugin downloads and release checks.
 fn user_agent() -> String {
     format!("Encore/{} (+https://github.com/Krifmaz/Encore)", encore_core::VERSION)
 }
@@ -214,18 +232,22 @@ impl Registry {
         self.0.opts.write().unwrap().system_copies = false;
     }
 
+    /// A program on PATH counts as installed (off in tests).
     pub(crate) fn system_copies(&self) -> bool {
         self.0.opts.read().unwrap().system_copies
     }
 
+    /// Plain http:// is allowed (tests only).
     fn allow_http(&self) -> bool {
         self.0.opts.read().unwrap().allow_http
     }
 
+    /// What the install step needs of the network.
     fn net(&self) -> InstallNet {
         InstallNet { http: self.0.http.read().unwrap().clone(), allow_http: self.allow_http() }
     }
 
+    /// What release checks need of the network (with the GitHub token).
     fn release_net(&self) -> releases::Net {
         let o = self.0.opts.read().unwrap().clone();
         releases::Net { http: self.0.http.read().unwrap().clone(), allow_http: o.allow_http, hosts: o.hosts, github_token: self.0.cfg.str("github_token") }
@@ -256,10 +278,12 @@ impl Registry {
         self.0.builtins.write().unwrap().clear();
     }
 
+    /// The database.
     pub fn db(&self) -> &Db {
         &self.0.db
     }
 
+    /// Encore's settings.
     pub fn cfg(&self) -> &Config {
         &self.0.cfg
     }
@@ -326,6 +350,7 @@ impl Registry {
         Folders::new(&self.root().join(id))
     }
 
+    /// The plugin's log (the running program's own, else one over its folder).
     pub fn log(&self, id: &str) -> Log {
         if let Some((_, p)) = self.0.procs.lock().unwrap().get(id) {
             return p.log().clone();
@@ -335,10 +360,12 @@ impl Registry {
 
     // ---- the table ----------------------------------------------------------------------------------------
 
+    /// The plugin's row.
     pub fn row(&self, id: &str) -> Option<Row> {
         self.0.db.one("SELECT * FROM plugins WHERE id=?", p![id]).ok().flatten()
     }
 
+    /// Every plugin row, by id.
     pub fn rows(&self) -> Vec<Row> {
         self.0.db.query("SELECT * FROM plugins ORDER BY id", p![]).unwrap_or_default()
     }
@@ -353,6 +380,7 @@ impl Registry {
         self.row(id).is_some_and(|r| r.b("enabled"))
     }
 
+    /// Where a row's plugin came from (the catalog when the row doesn't say).
     fn origin_of(row: &Row) -> Origin {
         Origin::parse(&row.s("origin")).unwrap_or(Origin::Catalog)
     }
@@ -525,6 +553,7 @@ impl Registry {
         Some(self.card_of(&m, self.row(id).as_ref()))
     }
 
+    /// The plugin's card for the Plugins page: manifest, row, state, latest version, settings.
     fn card_of(&self, m: &Manifest, row: Option<&Row>) -> Value {
         let id = m.id();
         let origin = row.map(Self::origin_of).unwrap_or(Origin::Catalog);
@@ -594,6 +623,7 @@ impl Registry {
         self.0.busy.lock().unwrap().get(id).copied()
     }
 
+    /// Mark `id` busy with `what` until the guard drops; refused while it is busy with something else.
     fn busy(&self, id: &str, what: &'static str) -> Result<Busy> {
         let mut b = self.0.busy.lock().unwrap();
         if let Some(now) = b.get(id) {
@@ -603,6 +633,7 @@ impl Registry {
         Ok(Busy(self.clone(), id.to_string()))
     }
 
+    /// Set or clear the plugin's last error.
     fn set_error(&self, id: &str, e: Option<&str>) {
         let _ = self.0.db.execute("UPDATE plugins SET last_error=? WHERE id=?", p![e, id]);
     }
@@ -665,6 +696,7 @@ impl Registry {
         r
     }
 
+    /// The manifest and adapter of a plugin that is installed and switched on.
     fn ready(&self, id: &str) -> std::result::Result<(Manifest, Arc<dyn Plugin>), Failure> {
         let m = self.manifest(id).ok_or_else(|| Failure::internal(format!("no plugin {id}")))?;
         if !self.enabled(id) {
@@ -685,6 +717,7 @@ impl Registry {
 
     // ---- switching on and off -------------------------------------------------------------------------------
 
+    /// Switch the plugin on or off → its card.
     pub async fn enable(&self, id: &str, on: bool) -> Result<Value> {
         let m = self.manifest(id).ok_or_else(|| Refused::new(404, "Unknown plugin"))?;
         if !self.installed(id) {
@@ -698,6 +731,7 @@ impl Registry {
         Ok(self.card(id).unwrap_or(Value::Null))
     }
 
+    /// Turn automatic updates of the plugin on or off → its card.
     pub fn set_auto_update(&self, id: &str, on: bool) -> Result<Value> {
         if !self.installed(id) {
             return Err(Refused::new(400, "Not installed"));
@@ -788,6 +822,7 @@ impl Registry {
         self.list()
     }
 
+    /// The newest release: the plugin's own check, else its `[update]` source.
     async fn find_newest(&self, m: &Manifest) -> Result<Option<Found>> {
         if let Some(plugin) = self.plugin(m.id()) {
             if let Some(r) = plugin.check_update(&self.call(m)).await {
@@ -851,6 +886,7 @@ impl Registry {
         self.update_with(id, true).await
     }
 
+    /// Update one plugin: a catalog one reinstalls its program, another downloads its newest release. `unattended`: the scheduled update.
     async fn update_with(&self, id: &str, unattended: bool) -> Result<Value> {
         let m = self.manifest(id).ok_or_else(|| Refused::new(404, "Unknown plugin"))?;
         let row = self.row(id).ok_or_else(|| Refused::new(400, format!("{} is not installed", m.plugin.name)))?;
@@ -891,6 +927,7 @@ impl Registry {
         res
     }
 
+    /// After an install or update (`what`): run the plugin's `installed` hook and log, or record and log the error.
     async fn after_install(&self, m: &Manifest, res: std::result::Result<Option<String>, Refused>, what: &str) -> Result<Value> {
         let id = m.id();
         match res {
@@ -1060,6 +1097,7 @@ impl Registry {
         res
     }
 
+    /// Install a plugin from a URL (`owner/repo@ref`, a zip, or a plugin.toml naming its release zip), downloading into `scratch`.
     async fn install_url_in(&self, input: &str, scratch: &Path) -> Result<Value> {
         let net = self.release_net();
         let max = manifest::UPLOAD_MAX_BYTES;
@@ -1118,6 +1156,7 @@ impl Registry {
         res
     }
 
+    /// Unpack `archive` and install the plugin in it (`sub`: its folder inside; `only`: the id it must have).
     #[allow(clippy::too_many_arguments)]
     async fn install_unpacked(&self, archive: &Path, scratch: &Path, origin: Origin, sha: &str, sub: Option<&str>, only: Option<&str>, unattended: bool) -> Result<Value> {
         let kind = crate::archive::Kind::sniff(archive).ok_or_else(|| Refused::new(400, "Not a zip file"))?;
@@ -1411,6 +1450,7 @@ fn coerce(s: &manifest::Setting, v: &Value) -> std::result::Result<Value, String
     }
 }
 
+/// A value as text (null as "").
 fn text_of(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -1424,6 +1464,7 @@ fn schema_field(key: &str) -> Option<&'static encore_config::settings::Field> {
     encore_config::settings::SCHEMA.iter().flat_map(|s| s.groups.iter()).flat_map(|g| g.fields.iter()).find(|f| f.key == key)
 }
 
+/// A number as JSON: whole numbers as integers.
 fn number(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 1e15 { json!(n as i64) } else { json!(n) }
 }
@@ -1463,7 +1504,9 @@ pub fn field_json(m: &Manifest, s: &manifest::Setting, cfg: &Config) -> Value {
 
 /// [`manifest::Facts`] over Encore's settings and config folder.
 pub struct CfgFacts<'a> {
+    /// Encore's settings
     pub cfg: &'a Config,
+    /// Encore's config folder
     pub dir: &'a Path,
 }
 
@@ -1481,7 +1524,9 @@ impl manifest::Facts for CfgFacts<'_> {
 
 /// A catalog plugin no builtin crate has registered an adapter for yet: answers from its manifest.
 struct CatalogPlugin {
+    /// its manifest
     m: Manifest,
+    /// the registry it reads its rows from
     registry: Registry,
 }
 

@@ -23,13 +23,20 @@ use std::sync::OnceLock;
 pub enum Level {
     /// bubblewrap works: `proc` says whether it may mount a /proc of the sandbox's own (Docker refuses that at
     /// times; the sandbox then has no /proc at all, never the host's)
-    Full { bwrap: PathBuf, proc: bool },
+    Full {
+        /// the bubblewrap program
+        bwrap: PathBuf,
+        /// it may mount its own /proc
+        proc: bool,
+    },
+    /// no bubblewrap: resource limits only
     Limits,
 }
 
 /// The sandbox level found on this host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sandbox {
+    /// how much isolation there is
     pub level: Level,
     /// why it is not full isolation (bwrap's own words), for the log and Diagnostics
     pub reason: Option<String>,
@@ -88,6 +95,7 @@ impl Sandbox {
         Sandbox { level: Level::Limits, reason }
     }
 
+    /// Full isolation (bubblewrap).
     pub fn is_full(&self) -> bool {
         matches!(self.level, Level::Full { .. })
     }
@@ -112,32 +120,42 @@ pub struct Limits {
     pub cpu_secs: u64,
     /// processes and threads it may add (over what Encore's user runs already)
     pub processes: u64,
+    /// files it may have open
     pub open_files: u64,
 }
 
 impl Limits {
+    /// No limits.
     pub const NONE: Limits = Limits { memory_mb: 0, cpu_secs: 0, processes: 0, open_files: 0 };
 }
 
 /// One program start.
 #[derive(Debug, Clone)]
 pub struct Spawn {
+    /// the sandbox level to start it in
     sandbox: Sandbox,
+    /// the program
     program: PathBuf,
+    /// its arguments
     args: Vec<OsString>,
     /// the whole environment (nothing else of Encore's reaches the program)
     env: Vec<(String, String)>,
+    /// its working folder
     cwd: Option<PathBuf>,
     /// folders it sees read-only / writable (full isolation; at the same paths as outside)
     ro: Vec<PathBuf>,
+    /// folders it may write
     rw: Vec<PathBuf>,
+    /// it may reach the network
     network: bool,
+    /// its resource limits
     limits: Limits,
     /// nice 10 and idle disk priority
     low_priority: bool,
 }
 
 impl Spawn {
+    /// A start of `program` with nothing allowed yet.
     pub fn new(sandbox: &Sandbox, program: &Path) -> Spawn {
         Spawn {
             sandbox: sandbox.clone(),
@@ -153,11 +171,13 @@ impl Spawn {
         }
     }
 
+    /// Add one argument.
     pub fn arg(mut self, a: impl Into<OsString>) -> Spawn {
         self.args.push(a.into());
         self
     }
 
+    /// Add arguments.
     pub fn args<I: Into<OsString>>(mut self, a: impl IntoIterator<Item = I>) -> Spawn {
         self.args.extend(a.into_iter().map(Into::into));
         self
@@ -169,40 +189,48 @@ impl Spawn {
         self
     }
 
+    /// Run in `dir`.
     pub fn cwd(mut self, dir: &Path) -> Spawn {
         self.cwd = Some(dir.to_path_buf());
         self
     }
 
+    /// Let it read `p`.
     pub fn ro(mut self, p: &Path) -> Spawn {
         self.ro.push(p.to_path_buf());
         self
     }
 
+    /// Let it read and write `p`.
     pub fn rw(mut self, p: &Path) -> Spawn {
         self.rw.push(p.to_path_buf());
         self
     }
 
+    /// Let it reach the network, or not.
     pub fn network(mut self, on: bool) -> Spawn {
         self.network = on;
         self
     }
 
+    /// Its resource limits.
     pub fn limits(mut self, l: Limits) -> Spawn {
         self.limits = l;
         self
     }
 
+    /// Run at low processor and disk priority.
     pub fn low_priority(mut self, on: bool) -> Spawn {
         self.low_priority = on;
         self
     }
 
+    /// The program.
     pub fn program(&self) -> &Path {
         &self.program
     }
 
+    /// The sandbox level.
     pub fn sandbox(&self) -> &Sandbox {
         &self.sandbox
     }
@@ -296,6 +324,7 @@ impl Spawn {
     }
 }
 
+/// In the child before exec: its own session, no new privileges, other descriptors closed, the limits set, and low priority when asked.
 fn pre_exec(l: Limits, nproc: u64, low: bool) -> std::io::Result<()> {
     // SAFETY (whole function): plain system calls on this process, no allocation, no locks
     unsafe {

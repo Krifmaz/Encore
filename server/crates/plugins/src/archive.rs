@@ -18,7 +18,9 @@ use std::path::{Component, Path, PathBuf};
 /// How a download is unpacked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// a .zip
     Zip,
+    /// a gzipped tar (.tar.gz, .tgz)
     TarGz,
 }
 
@@ -76,7 +78,9 @@ impl Default for Limits {
 /// What came out.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Unpacked {
+    /// regular files written
     pub files: usize,
+    /// their bytes
     pub bytes: u64,
 }
 
@@ -132,14 +136,20 @@ pub fn unpack(archive: &Path, kind: Kind, dest: &Path, limits: Limits) -> anyhow
     Ok(w.out)
 }
 
+/// Writes an archive's entries into `dest`, keeping count against the limits.
 struct Writer {
+    /// the folder unpacked into
     dest: PathBuf,
+    /// what the archive may hold at most
     limits: Limits,
+    /// what was written so far
     out: Unpacked,
+    /// entries seen so far (folders and links too)
     entries: usize,
 }
 
 impl Writer {
+    /// Count one more entry; an error past the entry limit.
     fn count(&mut self) -> anyhow::Result<()> {
         self.entries += 1;
         if self.entries > self.limits.entries {
@@ -175,6 +185,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Make the folder `rel`.
     fn dir(&mut self, rel: &Path) -> anyhow::Result<()> {
         self.count()?;
         self.parents(rel)?;
@@ -186,6 +197,7 @@ impl Writer {
         }
     }
 
+    /// Write the file `rel` from `data` within the byte limit: 755 when the archive marks it executable, else 644.
     fn file(&mut self, rel: &Path, mode: u32, data: &mut dyn Read) -> anyhow::Result<()> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         self.count()?;
@@ -215,6 +227,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Make the link `rel` -> `target`, unless it points out of the folder.
     fn symlink(&mut self, rel: &Path, target: &str) -> anyhow::Result<()> {
         self.count()?;
         if !link_ok(rel, target) {
@@ -251,6 +264,7 @@ impl Writer {
 
 // ---- zip ------------------------------------------------------------------------------------------
 
+/// Unpack a zip file through `w`.
 fn unzip(archive: &Path, w: &mut Writer) -> anyhow::Result<()> {
     let file = fsx::open(archive, Step::Plugin)?;
     let mut a = zip::ZipArchive::new(io::BufReader::new(file)).map_err(|e| anyhow::anyhow!("not a zip file ({e})"))?;
@@ -290,6 +304,7 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..end]).into_owned()
 }
 
+/// A tar header number: octal text (a base-256 one is refused as too large).
 fn octal(b: &[u8]) -> anyhow::Result<u64> {
     if b.first().is_some_and(|c| c & 0x80 != 0) {
         anyhow::bail!("the archive has an entry too large to unpack");
@@ -329,6 +344,7 @@ fn pax(data: &[u8]) -> Vec<(String, String)> {
     out
 }
 
+/// Read past `n` bytes; an error when the archive ends first.
 fn skip(r: &mut impl Read, n: u64) -> anyhow::Result<()> {
     let got = io::copy(&mut r.take(n), &mut io::sink()).map_err(|e| anyhow::anyhow!("the archive is damaged ({e})"))?;
     if got != n {
@@ -337,6 +353,7 @@ fn skip(r: &mut impl Read, n: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read `n` bytes (at most 1 MiB: a header, a long name, PAX records).
 fn read_small(r: &mut impl Read, n: u64) -> anyhow::Result<Vec<u8>> {
     if n > 1 << 20 {
         anyhow::bail!("the archive has an oversized header");
@@ -346,6 +363,7 @@ fn read_small(r: &mut impl Read, n: u64) -> anyhow::Result<Vec<u8>> {
     Ok(v)
 }
 
+/// Unpack a gzipped tar through `w`: GNU long names and PAX paths read, links checked, other entry kinds skipped.
 fn untar(archive: &Path, w: &mut Writer) -> anyhow::Result<()> {
     let file = fsx::open(archive, Step::Plugin)?;
     let mut r = flate2::read::MultiGzDecoder::new(io::BufReader::new(file));

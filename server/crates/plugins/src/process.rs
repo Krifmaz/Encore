@@ -28,7 +28,9 @@ pub const GRACE: Duration = Duration::from_secs(10);
 pub const AUDIO_EXT: [&str; 13] = ["flac", "mp3", "m4a", "alac", "ogg", "opus", "wav", "aiff", "aif", "ape", "wv", "aac", "webm"];
 /// The defaults of a plugin program's limits (`[permissions]` memory, processes, open_files; cpu: the timeout).
 pub const DEFAULT_MEMORY_MB: u64 = 2048;
+/// Processes and threads a plugin program may run at once, by default.
 pub const DEFAULT_PROCESSES: u64 = 64;
+/// Files a plugin program may have open at once, by default.
 pub const DEFAULT_OPEN_FILES: u64 = 1024;
 /// The environment variables of Encore's own a networked plugin gets.
 const PROXY_VARS: [&str; 8] = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"];
@@ -36,10 +38,12 @@ const PROXY_VARS: [&str; 8] = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_pr
 /// A plugin's folders under `<config>/plugins/<id>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Folders {
+    /// the plugin's own folder, `<config>/plugins/<id>`
     pub root: PathBuf,
 }
 
 impl Folders {
+    /// The folders of the plugin under `root`.
     pub fn new(root: &Path) -> Folders {
         Folders { root: root.to_path_buf() }
     }
@@ -47,15 +51,19 @@ impl Folders {
     pub fn data(&self) -> PathBuf {
         self.root.join("data")
     }
+    /// Its logs.
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
+    /// HOME for its process.
     pub fn home(&self) -> PathBuf {
         self.root.join("home")
     }
+    /// TMPDIR for its process.
     pub fn tmp(&self) -> PathBuf {
         self.root.join("tmp")
     }
+    /// The folder of version `v`.
     pub fn version(&self, v: &str) -> PathBuf {
         self.root.join(v)
     }
@@ -106,11 +114,15 @@ fn outside_prefix(program: &Path) -> Option<PathBuf> {
 
 /// One plugin program.
 pub struct ProcessPlugin {
+    /// the plugin's manifest
     manifest: Manifest,
+    /// its folders
     folders: Folders,
     /// where the installed version's files are (the script, the SDK copy)
     version_dir: PathBuf,
+    /// how its processes are confined
     sandbox: Sandbox,
+    /// its log
     log: Log,
     /// more folders it sees read-only (a library it asked to read)
     read_only: Vec<PathBuf>,
@@ -124,11 +136,14 @@ pub struct ProcessPlugin {
 
 /// Why a run was stopped.
 enum Stopped {
+    /// it ran past its time limit
     Timeout,
+    /// the call was cancelled
     Cancelled,
 }
 
 impl ProcessPlugin {
+    /// A plugin program installed in `version_dir`, with its folders under `root`.
     pub fn new(manifest: Manifest, root: &Path, version_dir: &Path, sandbox: Sandbox, read_only: Vec<PathBuf>) -> ProcessPlugin {
         let folders = Folders::new(root);
         let log = Log::new(&folders.logs());
@@ -145,14 +160,17 @@ impl ProcessPlugin {
         }
     }
 
+    /// Its log.
     pub fn log(&self) -> &Log {
         &self.log
     }
 
+    /// Where the installed version's files are.
     pub fn version_dir(&self) -> &Path {
         &self.version_dir
     }
 
+    /// Its name, for messages.
     fn name(&self) -> &str {
         &self.manifest.plugin.name
     }
@@ -430,6 +448,7 @@ impl ProcessPlugin {
         Ok(a)
     }
 
+    /// The request of a command that sends only the settings.
     fn settings_request(call: &Call) -> Value {
         json!({ "settings": Value::Object(call.settings.clone()) })
     }

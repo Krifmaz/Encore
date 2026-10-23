@@ -17,15 +17,19 @@ const MAX_LINE: usize = 4000;
 /// One plugin's log. Clones share the lock, so lines from commands running together don't interleave halfway.
 #[derive(Clone, Debug)]
 pub struct Log {
+    /// the folder `plugin.log` and its rotations are in
     dir: PathBuf,
+    /// one writer at a time
     lock: Arc<Mutex<()>>,
 }
 
 impl Log {
+    /// The log in `dir`.
     pub fn new(dir: &Path) -> Log {
         Log { dir: dir.to_path_buf(), lock: Arc::default() }
     }
 
+    /// The current log file.
     pub fn path(&self) -> PathBuf {
         self.dir.join("plugin.log")
     }
@@ -38,6 +42,7 @@ impl Log {
         }
     }
 
+    /// Append one entry (`what`, then `text`), rotating the file first when it is full.
     fn write(&self, what: &str, text: &str) -> Result<(), fsx::StepError> {
         fsx::mkdir_all(&self.dir, Step::Plugin)?;
         let p = self.path();
@@ -57,6 +62,7 @@ impl Log {
         writeln!(f, "{} [{what}] {t}", stamp(encore_core::time::now())).map_err(fsx::at(Step::Plugin, "write", &p))
     }
 
+    /// Shift `plugin.log` → `.1` → `.2` …, dropping the oldest.
     fn rotate(&self) -> Result<(), fsx::StepError> {
         let name = |n: usize| if n == 0 { self.path() } else { self.dir.join(format!("plugin.log.{n}")) };
         let _ = std::fs::remove_file(name(KEEP));

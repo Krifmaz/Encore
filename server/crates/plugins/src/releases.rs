@@ -12,7 +12,9 @@ pub struct Hosts {
     pub github_api: String,
     /// GitHub's site (archive zips of `owner/repo@ref`)
     pub github: String,
+    /// PyPI
     pub pypi: String,
+    /// Hugging Face
     pub huggingface: String,
 }
 
@@ -30,7 +32,9 @@ impl Default for Hosts {
 /// A release asset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Asset {
+    /// its file name
     pub name: String,
+    /// where to download it
     pub url: String,
     /// GitHub's `digest` ("sha256:<hex>"), when it lists one
     pub digest: Option<String>,
@@ -39,12 +43,16 @@ pub struct Asset {
 /// A release that fits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
+    /// its tag
     pub tag: String,
+    /// its version, read from the tag (`[update] tag`)
     pub version: String,
+    /// its files
     pub assets: Vec<Asset>,
 }
 
 impl Release {
+    /// The asset named `name`.
     pub fn asset(&self, name: &str) -> Option<&Asset> {
         self.assets.iter().find(|a| a.name == name)
     }
@@ -53,14 +61,18 @@ impl Release {
 /// The network side of a check.
 #[derive(Clone)]
 pub struct Net {
+    /// the HTTP client
     pub http: reqwest::Client,
+    /// plain http:// is allowed (tests only)
     pub allow_http: bool,
+    /// where the services are
     pub hosts: Hosts,
     /// GitHub token (the `github_token` setting): 5,000 checks an hour instead of 60
     pub github_token: String,
 }
 
 impl Net {
+    /// GET a GitHub API path as JSON (with the token, when set); rate limits and errors as messages.
     async fn github(&self, path: &str) -> anyhow::Result<Value> {
         let mut headers = vec![("Accept", "application/vnd.github+json".to_string()), ("X-GitHub-Api-Version", "2022-11-28".to_string())];
         if !self.github_token.trim().is_empty() {
@@ -78,6 +90,7 @@ impl Net {
     }
 }
 
+/// The assets of a GitHub release.
 fn assets_of(r: &Value) -> Vec<Asset> {
     r["assets"]
         .as_array()
@@ -199,6 +212,7 @@ pub async fn huggingface_sha256(net: &Net, url: &str) -> Option<String> {
     v.as_array()?.iter().find(|f| f["path"].as_str() == Some(file))?["lfs"]["oid"].as_str().map(str::to_ascii_lowercase)
 }
 
+/// Percent-encode everything but unreserved characters (RFC 3986).
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
