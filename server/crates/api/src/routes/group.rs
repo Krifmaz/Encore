@@ -35,12 +35,19 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+/// The error while group listens are off.
 pub const OFF: &str = "Group listens are turned off on this server";
+/// The error for a code no group has.
 pub const NO_CODE: &str = "No group listen with that code";
+/// The error when a group has as many members as it may.
 pub const FULL: &str = "This group listen is full";
+/// The error past the wrong-code limits.
 pub const TOO_MANY: &str = "Too many tries. Wait a moment and try again.";
+/// The error past [`STARTS_PER_HOUR`].
 pub const STARTED_TOO_MANY: &str = "You started 10 group listens in the last hour. Try again later.";
+/// The error for a group the caller isn't in.
 pub const NOT_IN: &str = "You aren't in this group listen";
+/// The error for a guest when the group takes accounts only.
 pub const NO_GUESTS: &str = "Only people with an account on this server can join this group listen";
 /// The guest's token as a cookie, sent only to these routes.
 pub const GUEST_COOKIE: &str = "encore_guest";
@@ -50,15 +57,19 @@ pub const STARTS_PER_HOUR: usize = 10;
 /// Wrong codes (lookups and joins that answered 404) per account and per address in an hour; past it every
 /// lookup and join answers 429 until the hour has passed.
 pub const FAILED_PER_USER: usize = 30;
+/// Wrong codes per address in an hour.
 pub const FAILED_PER_IP: usize = 60;
 /// Wrong codes of everyone without an account together in an hour (the signed-out lookup and the guests'
 /// join): an address is whatever a caller's proxy says, so this budget is the one no caller can step around.
 pub const FAILED_SIGNED_OUT: usize = 300;
 /// Guests who may join one group in an hour, and from one address.
 pub const GUESTS_PER_GROUP: usize = 20;
+/// Guests who may join from one address in an hour.
 pub const GUESTS_PER_IP: usize = 60;
+/// An hour, in seconds.
 const HOUR: f64 = 3600.0;
 
+/// The group listen routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/time", get(time))
@@ -78,14 +89,17 @@ pub fn router() -> Router<AppState> {
         .route("/api/group/{id}/albums/{album}/cover", get(cover))
 }
 
+/// Now in milliseconds since the epoch.
 fn now_ms() -> i64 {
     (now() * 1000.0) as i64
 }
 
+/// The most members a group may have on this server (2 to 100).
 fn server_max(st: &AppState) -> i64 {
     st.cfg.int("group_listen_max").clamp(2, 100)
 }
 
+/// Whether guests without an account may join on this server.
 fn guests_possible(st: &AppState) -> bool {
     st.cfg.bool("group_listen_guests")
 }
@@ -157,6 +171,7 @@ fn avatar_of(st: &AppState, user: i64) -> String {
     if has { format!("/api/users/{user}/avatar") } else { String::new() }
 }
 
+/// A device id of 1 to 64 characters; 400 otherwise.
 fn device(id: &str) -> ApiResult<String> {
     let id = id.trim();
     if id.is_empty() || id.chars().count() > 64 {
@@ -165,14 +180,17 @@ fn device(id: &str) -> ApiResult<String> {
     Ok(id.to_string())
 }
 
+/// A device name, at most 60 characters.
 fn device_name(name: &str) -> String {
     name.trim().chars().take(60).collect()
 }
 
+/// Who added a song: this account.
 fn by_of(u: &Row) -> AddedBy {
     AddedBy { user: u.i("id"), name: u.s("username"), guest: false }
 }
 
+/// The account's device as a group member.
 fn member_of(st: &AppState, u: &Row, device: &str, name: &str, t: f64) -> Member {
     Member {
         member: String::new(), user: u.i("id"), guest: None, name: u.s("username"), avatar: avatar_of(st, u.i("id")), device_id: device.to_string(),
@@ -185,13 +203,17 @@ fn member_of(st: &AppState, u: &Row, device: &str, name: &str, t: f64) -> Member
 /// A guest, by the token it got from guest-join (a bearer token, or the `encore_guest` cookie).
 #[derive(Clone, Debug)]
 pub struct Guest {
+    /// the group it joined
     pub group: String,
+    /// its member id in the group
     pub member: String,
 }
 
 /// The signed-in account, or else a guest (only the routes a guest may use take this).
 pub enum Who {
+    /// a signed-in account
     Account(Row),
+    /// a guest of one group
     Guest(Guest),
 }
 
@@ -246,16 +268,21 @@ fn guest_of(st: &AppState, parts: &Parts) -> ApiResult<Option<Guest>> {
 /// Who a state is made for: the caller, its account (translations) and the address invite links start with.
 #[derive(Clone)]
 struct Viewer {
+    /// who is asking
     caller: Caller,
+    /// its account, for translations
     user: Option<Row>,
+    /// the address invite links start with
     base_url: String,
 }
 
 impl Viewer {
+    /// The viewer for an account's device.
     fn account(st: &AppState, u: &Row, device: &str, c: &ClientInfo) -> Viewer {
         Viewer { caller: Caller::Account { user: u.i("id"), device: device.to_string() }, user: Some(u.clone()), base_url: base_url(st, c) }
     }
 
+    /// The viewer for whoever is asking.
     fn of(st: &AppState, who: &Who, device: &str, c: &ClientInfo) -> Viewer {
         match who {
             Who::Account(u) => Viewer::account(st, u, device, c),
@@ -329,6 +356,7 @@ fn state_now(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
     Some(out)
 }
 
+/// The group's state as `v` sees it, on the blocking pool; `None` when `v` isn't in it.
 async fn state_for(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
     let (st, id, v) = (st.clone(), id.to_string(), v.clone());
     tokio::task::spawn_blocking(move || state_now(&st, &id, &v)).await.ok().flatten()
@@ -344,6 +372,7 @@ async fn answer(st: &AppState, id: &str, v: &Viewer) -> ApiResult<Json<Value>> {
 /// The key of the signed-out callers' shared budget of wrong codes.
 const SIGNED_OUT_KEY: &str = "group-code:signed-out";
 
+/// 429 when the caller (account, address, or everyone signed out) is past its wrong codes for the hour.
 fn tries_left(st: &AppState, user: Option<i64>, ip: &str) -> ApiResult<()> {
     let by_user = match user {
         Some(u) => st.limits.limited(&format!("group-code:u{u}"), FAILED_PER_USER, HOUR, false),
@@ -355,6 +384,7 @@ fn tries_left(st: &AppState, user: Option<i64>, ip: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Count a wrong code against the caller: the 404 to answer with.
 fn failed_try(st: &AppState, user: Option<i64>, ip: &str) -> ApiError {
     match user {
         Some(u) => st.limits.record(&format!("group-code:u{u}")),
@@ -390,6 +420,7 @@ fn take_out(inner: &mut Inner, id: &str, member: &str) -> Out {
     Out::Left(guest)
 }
 
+/// After a member left or the group ended: drop the guest tokens that no longer work.
 fn after_out(st: &AppState, id: &str, member: &str, out: &Out) {
     match out {
         Out::Left(true) => drop_guest_tokens(st, id, Some(member)),
@@ -436,9 +467,11 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
     Ok(Json(v))
 }
 
+/// A device id query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct DeviceQ {
+    /// the caller's device
     device_id: String,
 }
 
@@ -460,19 +493,29 @@ async fn lookup(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(code):
     Ok(Json(v))
 }
 
+/// `POST /api/group` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct StartB {
+    /// the host's device
     device_id: String,
+    /// the host's device name
     device_name: String,
+    /// "anyone" or "link": who can join
     visibility: String,
+    /// let every member control the music
     everyone_controls: bool,
+    /// the queue to start with
     tracks: Vec<Value>,
+    /// where in the queue it plays
     index: i64,
+    /// the position in that song (seconds)
     position: f64,
+    /// whether it plays
     playing: bool,
 }
 
+/// Who can join: "anyone" (the default) or "link"; 400 otherwise.
 fn visibility(v: &str) -> ApiResult<String> {
     match v {
         "" | gl::ANYONE => Ok(gl::ANYONE.into()),
@@ -516,11 +559,15 @@ async fn start(State(st): State<AppState>, User(u): User, c: ClientInfo, Json(b)
     answer(&st, &id, &Viewer::account(&st, &u, &dev, &c)).await
 }
 
+/// `POST /api/group/join` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JoinB {
+    /// the joining device
     device_id: String,
+    /// its name
     device_name: String,
+    /// the group's code
     code: String,
 }
 
@@ -563,13 +610,17 @@ async fn join_code(State(st): State<AppState>, User(u): User, c: ClientInfo, Jso
     join(&st, &u, &id, &dev, &b.device_name, &c).await
 }
 
+/// A body naming the caller's device.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct DeviceB {
+    /// the device's id
     device_id: String,
+    /// the device's name
     device_name: String,
 }
 
+/// The device body, or empty when there is none.
 fn device_body(body: &Bytes) -> DeviceB {
     serde_json::from_slice(body).unwrap_or_default()
 }
@@ -589,10 +640,13 @@ async fn join_id(State(st): State<AppState>, User(u): User, Path(id): Path<Strin
     join(&st, &u, &id, &dev, &b.device_name, &c).await
 }
 
+/// `POST /api/group/guest-join` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct GuestB {
+    /// the group's code
     code: String,
+    /// the guest's name
     name: String,
 }
 
@@ -734,13 +788,19 @@ async fn end(State(st): State<AppState>, User(u): User, Path(id): Path<String>, 
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PATCH /api/group/{id}` body: the host's settings to change.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct PatchB {
+    /// the caller's device
     device_id: String,
+    /// let every member control the music
     everyone_controls: Option<bool>,
+    /// "anyone" or "link"
     visibility: Option<String>,
+    /// let guests join
     guests_allowed: Option<bool>,
+    /// the most members
     max_members: Option<i64>,
 }
 
@@ -828,8 +888,11 @@ async fn remove_member(State(st): State<AppState>, User(u): User, Path((id, memb
 
 /// Counts an open event stream of a member; when its last one closes, the 2 minutes start.
 struct Watching {
+    /// the groups
     groups: encore_playback::group::Groups,
+    /// the group watched
     group: String,
+    /// the member watching
     member: String,
 }
 
@@ -848,18 +911,29 @@ impl Drop for Watching {
 /// How often an open event stream checks that its caller may still be in the group.
 const RECHECK: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
 
+/// One member's event stream.
 struct Feed {
+    /// the server
     st: AppState,
+    /// the group
     id: String,
+    /// who is watching
     viewer: Viewer,
+    /// their member id
     member: String,
+    /// the group's events
     rx: broadcast::Receiver<Event>,
+    /// the state sent first, on connect
     first: Option<Value>,
+    /// the last state's revision sent (an older one is never sent after it)
     last_rev: u64,
+    /// the stream has ended
     done: bool,
     /// the request's headers, for [`still_allowed`] every [`RECHECK`]
     headers: HeaderMap,
+    /// the [`RECHECK`] timer
     tick: tokio::time::Interval,
+    /// counts this stream as open while it lives
     _watching: Watching,
 }
 
@@ -1001,10 +1075,13 @@ async fn stream_track(State(st): State<AppState>, who: Who, Path((id, track)): P
     crate::routes::library::stream_track(&st, track, &q, req, user.as_ref()).await
 }
 
+/// `GET /api/group/{id}/albums/{album}/cover` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CoverQ {
+    /// the size in pixels
     s: u32,
+    /// the cover's version (for caching)
     v: String,
 }
 

@@ -15,21 +15,27 @@ use encore_system::update;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// `GET /api/system/update` query.
 #[derive(Deserialize)]
 pub struct UpdateQ {
+    /// "1", "true" or "yes" checks again instead of the cached answer
     force: Option<String>,
 }
 
+/// GET /api/system/update: the running version and the newest release (admins).
 pub async fn get_update(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<UpdateQ>) -> ApiResult<Json<Value>> {
     let force = matches!(q.force.as_deref(), Some("1" | "true" | "yes"));
     Ok(Json(update::status(&st, force).await))
 }
 
+/// `POST /api/system/update` body.
 #[derive(Deserialize, Default)]
 pub struct UpdateBody {
+    /// the release to update to (default: the newest)
     tag: Option<String>,
 }
 
+/// POST /api/system/update: update the server to a release (admins).
 pub async fn post_update(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<UpdateBody>>) -> ApiResult<(StatusCode, Json<Value>)> {
     match update::update_now(&st, &u.s("username"), body.and_then(|b| b.0.tag)).await {
         Ok(v) => Ok((StatusCode::ACCEPTED, Json(v))),

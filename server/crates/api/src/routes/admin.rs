@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+/// The admin routes: users, permissions, invites, settings, the API key and the activity log.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(users).post(create_user))
@@ -27,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/activity", get(activity))
 }
 
+/// GET /api/admin/users: every account with its invite.
 async fn users(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let rows = st.db.query(
         "SELECT u.id, u.username, u.email, u.role, u.disabled, u.auto_approve, u.request_limit, u.created_at, u.last_login, u.perms,
@@ -43,6 +45,7 @@ async fn users(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Va
     }).collect::<Vec<_>>())))
 }
 
+/// GET /api/admin/permissions: each permission and how many regular users have it.
 async fn permissions(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let users = st.db.query("SELECT id, role, auto_approve, perms FROM users WHERE role='user'", p![])?;
     let perms: Vec<Value> = encore_config::perms::PERMS.iter().map(|(k, label)| {
@@ -52,9 +55,12 @@ async fn permissions(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     Ok(Json(json!({ "perms": perms })))
 }
 
+/// `POST /api/admin/users/bulk` body.
 #[derive(Deserialize)]
 struct BulkPerm {
+    /// the permission's key
     perm: String,
+    /// on or off
     value: bool,
 }
 
@@ -75,18 +81,25 @@ async fn bulk(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<BulkPer
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/admin/users` body.
 #[derive(Deserialize)]
 struct UserCreate {
+    /// the username
     username: String,
+    /// the password
     password: String,
+    /// an email address
     email: Option<String>,
+    /// "user" or "admin"
     #[serde(default = "user_role")]
     role: String,
 }
+/// The default role: user.
 fn user_role() -> String {
     "user".into()
 }
 
+/// POST /api/admin/users: create an account.
 async fn create_user(State(st): State<AppState>, Admin(me): Admin, Json(b): Json<UserCreate>) -> ApiResult<Json<Value>> {
     if !matches!(b.role.as_str(), "user" | "admin") {
         return Err(err(400, "Invalid role"));
@@ -101,14 +114,22 @@ async fn create_user(State(st): State<AppState>, Admin(me): Admin, Json(b): Json
     Ok(Json(json!({ "id": id })))
 }
 
+/// `PATCH /api/admin/users/{uid}` body: what to change.
 #[derive(Deserialize)]
 struct UserUpdate {
+    /// "user" or "admin"
     role: Option<String>,
+    /// disable or enable the account
     disabled: Option<bool>,
+    /// approve the account's requests without an admin
     auto_approve: Option<bool>,
+    /// the most open requests (0 = no limit)
     request_limit: Option<i64>,
+    /// the email address
     email: Option<String>,
+    /// a new password
     password: Option<String>,
+    /// permissions to set
     perms: Option<Map<String, Value>>,
 }
 
@@ -124,6 +145,7 @@ fn may_manage(me: &encore_db::Row, target: &encore_db::Row) -> ApiResult<()> {
     Ok(())
 }
 
+/// PATCH /api/admin/users/{uid}: change an account.
 async fn update_user(State(st): State<AppState>, Admin(me): Admin, Path(uid): Path<i64>, Json(b): Json<UserUpdate>) -> ApiResult<Json<Value>> {
     let u = st.db.one("SELECT * FROM users WHERE id=?", p![uid])?.ok_or_else(|| err(404, "User not found"))?;
     may_manage(&me, &u)?;
@@ -186,6 +208,7 @@ async fn update_user(State(st): State<AppState>, Admin(me): Admin, Path(uid): Pa
     Ok(Json(json!({ "ok": true })))
 }
 
+/// DELETE /api/admin/users/{uid}: delete an account (not yourself, not the owner).
 async fn delete_user(State(st): State<AppState>, Admin(me): Admin, Path(uid): Path<i64>) -> ApiResult<Json<Value>> {
     if uid == me.i("id") {
         return Err(err(400, "You can't delete yourself"));
@@ -199,6 +222,7 @@ async fn delete_user(State(st): State<AppState>, Admin(me): Admin, Path(uid): Pa
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/admin/invites: the invites, with who made and who used them.
 async fn invites(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(json!(st.db.query(
         "SELECT i.*, u.username AS created_by_name,
@@ -208,19 +232,26 @@ async fn invites(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<
     )?)))
 }
 
+/// `POST /api/admin/invites` body.
 #[derive(Deserialize)]
 struct InviteCreate {
+    /// how many accounts it may make (default 1)
     #[serde(default = "one")]
     max_uses: i64,
+    /// days until it expires (none: never)
     expires_days: Option<f64>,
+    /// "user" or "admin"
     #[serde(default = "user_role")]
     role: String,
+    /// a note for the admins
     note: Option<String>,
 }
+/// The default for `max_uses`: 1.
 fn one() -> i64 {
     1
 }
 
+/// POST /api/admin/invites: make an invite code.
 async fn create_invite(State(st): State<AppState>, Admin(me): Admin, Json(b): Json<InviteCreate>) -> ApiResult<Json<Value>> {
     if !matches!(b.role.as_str(), "user" | "admin") {
         return Err(err(400, "Invalid role"));
@@ -237,11 +268,13 @@ async fn create_invite(State(st): State<AppState>, Admin(me): Admin, Json(b): Js
     Ok(Json(json!(st.db.one("SELECT * FROM invites WHERE id=?", p![id])?)))
 }
 
+/// DELETE /api/admin/invites/{iid}: delete an invite.
 async fn delete_invite(State(st): State<AppState>, Admin(_): Admin, Path(iid): Path<i64>) -> ApiResult<Json<Value>> {
     st.db.execute("DELETE FROM invites WHERE id=?", p![iid])?;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/admin/settings: every setting, secrets masked.
 async fn get_settings(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
     Json(st.cfg.public_dump())
 }
@@ -252,6 +285,7 @@ async fn settings_schema(State(st): State<AppState>, Admin(_): Admin) -> Json<Va
     Json(st.cfg.schema())
 }
 
+/// PUT /api/admin/settings: change settings (unknown, masked, locked and api_key values are left out).
 async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values): Json<Map<String, Value>>) -> ApiResult<Json<Value>> {
     let mut clean = Map::new();
     for (k, v) in values {
@@ -325,17 +359,21 @@ async fn reveal_secret(State(st): State<AppState>, Owner(me): Owner, Path(key): 
     Ok(Json(json!({ "key": key, "value": v.as_str().map(String::from).unwrap_or_else(|| v.to_string()) })))
 }
 
+/// POST /api/admin/settings/api-key: make a new API key (the owner).
 async fn regen_api_key(State(st): State<AppState>, Owner(_): Owner) -> Json<Value> {
     let key = encore_core::ids::random_hex(24);
     st.cfg.set_many(&json!({ "api_key": key }));
     Json(json!({ "api_key": key }))
 }
 
+/// An optional row limit query.
 #[derive(Deserialize)]
 struct Limit {
+    /// how many rows
     limit: Option<i64>,
 }
 
+/// GET /api/system/activity: the activity log, newest first (300 by default, at most 1000).
 async fn activity(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<Limit>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(st.db.query("SELECT * FROM activity ORDER BY id DESC LIMIT ?", p![q.limit.unwrap_or(300).clamp(1, 1000)])?)))
 }

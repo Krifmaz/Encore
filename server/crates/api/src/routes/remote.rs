@@ -22,6 +22,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
+/// The remote control routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/remote/heartbeat", post(heartbeat))
@@ -31,14 +32,19 @@ pub fn router() -> Router<AppState> {
         .route("/api/remote/{device}/command", post(command))
 }
 
+/// `POST /api/remote/heartbeat` body.
 #[derive(Deserialize)]
 struct Beat {
+    /// the device's id (at most 64 characters)
     id: String,
+    /// the device's name
     name: String,
+    /// what it plays now
     #[serde(default)]
     state: Value,
 }
 
+/// POST /api/remote/heartbeat: a device says it is alive and what it plays; the answer carries the user's devices.
 async fn heartbeat(State(st): State<AppState>, User(u): User, Json(b): Json<Beat>) -> ApiResult<Json<Value>> {
     if b.id.is_empty() || b.id.len() > 64 {
         return Err(err(400, "Bad device id"));
@@ -66,6 +72,7 @@ async fn heartbeat(State(st): State<AppState>, User(u): User, Json(b): Json<Beat
     Ok(Json(json!({ "commands": commands })))
 }
 
+/// GET /api/remote/devices: the user's devices that are online.
 async fn devices(State(st): State<AppState>, User(u): User) -> Json<Value> {
     let t = now();
     let mut v = {
@@ -84,11 +91,13 @@ async fn spot(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
     Ok(Json(v))
 }
 
+/// DELETE /api/remote/spot: forget where the user left off.
 async fn clear_spot(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.playback.spots.clear(&st.db, u.i("id"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/remote/{device}/command: send a player command to one of the user's devices.
 async fn command(State(st): State<AppState>, User(u): User, Path(device): Path<String>, Json(mut c): Json<Value>) -> ApiResult<Json<Value>> {
     if !ACTIONS.contains(&c["action"].as_str().unwrap_or("")) {
         return Err(err(400, "Unknown action"));
@@ -112,8 +121,10 @@ async fn command(State(st): State<AppState>, User(u): User, Path(device): Path<S
     Ok(Json(json!({ "ok": true, "pushed": pushed })))
 }
 
+/// `GET /api/remote/events` query.
 #[derive(Deserialize)]
 struct EventsQ {
+    /// the device listening
     device: String,
 }
 

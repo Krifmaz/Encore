@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 
+/// The collaborative playlist routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/playlists/{pid}/collaborators", get(members).post(invite))
@@ -35,7 +36,9 @@ pub fn router() -> Router<AppState> {
 /// Who the user is to a playlist they may open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
+    /// the playlist's owner
     Owner,
+    /// an account that joined it
     Collaborator,
 }
 
@@ -130,6 +133,7 @@ async fn members(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
     }).await
 }
 
+/// The playlist's members as the viewer may see them (pending invites only for the owner).
 fn members_json(st: &AppState, pl: &Row, role: Role) -> ApiResult<Value> {
     let owner = role == Role::Owner;
     let rows = st.db.query(
@@ -145,9 +149,11 @@ fn members_json(st: &AppState, pl: &Row, role: Role) -> ApiResult<Value> {
         "owner": owner_name(st, pl)?, "members": list, "invite_link": link }))
 }
 
+/// `POST /api/playlists/{pid}/collaborators` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct InviteBody {
+    /// the account to invite
     username: String,
 }
 
@@ -266,6 +272,7 @@ async fn decline(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
 
 /// An invite link's path anywhere in the text (`…/#/collab/<token>`, `/collab/<token>`), or a bare token.
 static IN_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"collab/([A-Za-z0-9_-]{8,64})(?:[^A-Za-z0-9_-]|$)").unwrap());
+/// A bare invite token.
 static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_-]{8,64}$").unwrap());
 
 /// The invite token in text as the user pasted or shared it. None when there is none.
@@ -277,9 +284,11 @@ pub(crate) fn invite_token_of(text: &str) -> Option<String> {
     BARE.is_match(t).then(|| t.to_string())
 }
 
+/// A body holding an invite link.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct LinkBody {
+    /// the text as the user pasted or shared it
     link: String,
 }
 

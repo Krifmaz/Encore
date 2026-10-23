@@ -4,10 +4,12 @@ use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
+/// Whether an SMTP server is set.
 pub fn enabled(st: &AppState) -> bool {
     !st.cfg.str("smtp_host").is_empty()
 }
 
+/// Send a plain text email through the configured SMTP server.
 pub async fn send(st: &AppState, to: &str, subject: &str, text: &str) -> anyhow::Result<()> {
     if !enabled(st) {
         anyhow::bail!("Email isn't set up – add an SMTP server under Settings → Email & notifications");

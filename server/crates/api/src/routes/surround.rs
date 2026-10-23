@@ -17,6 +17,7 @@ use encore_library::surround;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The surround routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/surround/albums", get(albums))
@@ -24,15 +25,21 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/tracks/{id}/surround", get(track_state).post(track_fetch))
 }
 
+/// `GET /api/surround/albums` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ListQ {
+    /// the sort order
     sort: String,
+    /// a filter text
     q: String,
+    /// the page size (0 = 100)
     limit: i64,
+    /// where the page starts
     offset: i64,
 }
 
+/// GET /api/surround/albums: the surround albums.
 async fn albums(State(st): State<AppState>, User(_): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let limit = if q.limit <= 0 { 100 } else { q.limit };
@@ -42,6 +49,7 @@ async fn albums(State(st): State<AppState>, User(_): User, Query(q): Query<ListQ
     .await
 }
 
+/// GET /api/library/albums/{id}/surround: whether an album has a surround copy, or one can be fetched.
 async fn album_state(State(st): State<AppState>, User(_): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if surround::is_album(&id) {
         return Err(err(400, "This is a Surround album already"));
@@ -49,6 +57,7 @@ async fn album_state(State(st): State<AppState>, User(_): User, Path(id): Path<S
     Ok(Json(encore_requests::surround::album_state(&st, &id)))
 }
 
+/// POST /api/library/albums/{id}/surround: fetch an album's surround copy (admins).
 async fn album_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if surround::is_album(&id) {
         return Err(err(400, "This is a Surround album already"));
@@ -57,6 +66,7 @@ async fn album_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path
     Ok(Json(json!({ "request_id": rid })))
 }
 
+/// GET /api/library/tracks/{id}/surround: whether a song has a surround copy, or one can be fetched.
 async fn track_state(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     if surround::is_track(id) {
         return Err(err(400, "This is a Surround song already"));
@@ -64,6 +74,7 @@ async fn track_state(State(st): State<AppState>, User(_): User, Path(id): Path<i
     Ok(Json(encore_requests::surround::track_state(&st, id)))
 }
 
+/// POST /api/library/tracks/{id}/surround: fetch a song's surround copy (admins).
 async fn track_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     if surround::is_track(id) {
         return Err(err(400, "This is a Surround song already"));

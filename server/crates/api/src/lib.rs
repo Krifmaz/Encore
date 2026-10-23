@@ -11,10 +11,12 @@ pub mod contribute;
 pub mod covers;
 pub mod email;
 pub mod enrich;
+/// The HTTP routes, one router per area.
 pub mod routes;
 pub mod scheduler;
 pub mod search;
 pub mod signin;
+/// The server state every handler gets.
 pub mod state;
 pub mod timing;
 pub mod translate;
@@ -36,6 +38,7 @@ use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Pr
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
+/// Middleware: the security headers, the `x-encore` mark and the cache policy on every answer.
 async fn security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
@@ -81,6 +84,7 @@ async fn next_alias(uri: axum::http::Uri) -> Redirect {
     Redirect::temporary(&format!("/{rest}{query}"))
 }
 
+/// The whole app: every router, the middlewares, and the web app's files served at `/`.
 pub fn app(st: AppState) -> Router {
     let static_dir = st.static_dir.clone();
     let busy = st.busy.clone();
@@ -202,6 +206,7 @@ pub fn start_plugins(st: &AppState) -> std::sync::Arc<AppState> {
     anchor
 }
 
+/// The server state from `ENCORE_CONFIG_DIR` (default /config) and `ENCORE_STATIC_DIR` (default /app/static).
 pub fn build_state() -> anyhow::Result<AppState> {
     let data = PathBuf::from(std::env::var("ENCORE_CONFIG_DIR").unwrap_or_else(|_| "/config".into()));
     let static_dir = PathBuf::from(std::env::var("ENCORE_STATIC_DIR").unwrap_or_else(|_| "/app/static".into()));

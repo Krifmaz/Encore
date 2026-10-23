@@ -19,6 +19,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The system routes: service tests, VPN and Soulseek state, streamrip's Tidal sign-in, downloads, tools, backups and updates.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system/test/{service}", post(test))
@@ -87,10 +88,12 @@ async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path
 
 // ---- database backups (Settings → Diagnostics → Backups) ----------------------------------------
 
+/// The backups list: `{backups, dir, schema}`.
 fn backups_json(st: &AppState) -> Value {
     json!({ "backups": backup::list(st.data_dir()).iter().map(|b| b.json()).collect::<Vec<_>>(), "dir": backup::dir(st.data_dir()), "schema": encore_db::SCHEMA_VERSION })
 }
 
+/// GET /api/system/backups: the database backups.
 async fn backups(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(backups_json(&st)))
 }
@@ -343,17 +346,20 @@ async fn tidal_login_start(State(st): State<AppState>, Admin(_): Admin) -> ApiRe
     }
 }
 
+/// GET /api/system/streamrip/tidal-login: where streamrip's Tidal sign-in stands.
 async fn tidal_login_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(streamrip::tidal_login_status(&st)))
 }
 
+/// `POST /api/system/streamrip/tidal-tokens` body.
 #[derive(Deserialize)]
 struct TidalTokens {
+    /// the `[tidal]` section of a signed-in streamrip config
     #[serde(default)]
     toml: String,
 }
 
-/// "Paste tokens instead": the [tidal] section of a streamrip config signed in on another computer.
+/// "Paste tokens instead": the `[tidal]` section of a streamrip config signed in on another computer.
 async fn tidal_tokens_save(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TidalTokens>) -> ApiResult<Json<Value>> {
     if b.toml.trim().is_empty() {
         return Err(err(400, "Paste the [tidal] section of streamrip's config.toml first"));
@@ -385,10 +391,12 @@ async fn streamrip_reset_config(State(st): State<AppState>, Admin(u): Admin) -> 
     Ok(Json(c.json()))
 }
 
+/// `{ok, message}`.
 fn msg(ok: bool, m: impl Into<String>) -> Value {
     json!({ "ok": ok, "message": m.into() })
 }
 
+/// POST /api/system/test/{service}: test a service's settings (admins).
 async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     match run_test(&st, &service, Some(&u)).await {
         Ok(v) => Ok(Json(v)),
@@ -569,6 +577,7 @@ pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) 
     }.await
 }
 
+/// GET /api/system/downloads: what slskd and the torrent and usenet clients are downloading.
 async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResult<Json<Value>> {
     let mut out = json!({ "slskd": [], "torrents": [], "errors": {} });
     if slskd::enabled(&st) {
@@ -583,16 +592,20 @@ async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResul
     Ok(Json(out))
 }
 
+/// POST /api/system/downloads/slskd/clear: take the finished downloads off slskd's list.
 async fn clear_slskd(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     slskd::clear_completed(&st).await.map_err(|e| err(502, e.to_string()))?;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `GET /api/discover/probe` query.
 #[derive(Deserialize)]
 struct ProbeQ {
+    /// the link to read
     url: String,
 }
 
+/// GET /api/discover/probe?url=: what yt-dlp reads from a link, enriched.
 async fn probe(State(st): State<AppState>, User(viewer): User, Query(q): Query<ProbeQ>) -> ApiResult<Json<Value>> {
     let mut info = ytdlp::probe(&st, &q.url).await.map_err(|e| err(400, format!("Unsupported or unreachable URL: {}", e.to_string().chars().take(200).collect::<String>())))?;
     info["source"] = json!("ytdlp");

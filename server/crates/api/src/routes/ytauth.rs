@@ -14,6 +14,7 @@ use encore_requests::ytauth::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The YouTube sign-in routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/youtube/auth", get(get_status))
@@ -23,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/youtube/extension-cookies", post(extension_cookies).options(preflight))
 }
 
+/// GET /api/youtube/auth: where the YouTube sign-in stands (admins).
 async fn get_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(tokio::task::spawn_blocking(move || status(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
@@ -54,12 +56,14 @@ async fn refresh_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
     Ok(Json(v))
 }
 
+/// `POST /api/youtube/signout` body.
 #[derive(Deserialize, Default)]
 struct SignOutBody {
     /// "handoff" | "extension" | "all" (default: all but the pasted cookies, which have their own clear)
     source: Option<String>,
 }
 
+/// POST /api/youtube/signout: forget a sign-in's cookies (admins).
 async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<SignOutBody>>) -> ApiResult<Json<Value>> {
     let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
     if !["handoff", "extension", "all"].contains(&which.as_str()) {
@@ -78,12 +82,14 @@ async fn new_token(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Jso
     Ok(Json(json!({ "token": token })))
 }
 
+/// The CORS preflight for the extension's cookie upload.
 async fn preflight() -> Response {
     let mut r = Response::new(axum::body::Body::empty());
     cors(r.headers_mut());
     r
 }
 
+/// Let any origin POST (the extension posts from its own origin; the token is the check).
 fn cors(h: &mut HeaderMap) {
     use axum::http::HeaderValue;
     h.insert("access-control-allow-origin", HeaderValue::from_static("*"));

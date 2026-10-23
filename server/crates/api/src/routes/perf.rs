@@ -8,10 +8,12 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+/// The performance report's route.
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/admin/perf", get(perf))
 }
 
+/// GET /api/admin/perf: the request timings, with the cover and background job progress.
 async fn perf(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
     let mut v = st.web.perf.report();
     let age = |a: Option<std::time::Duration>| a.map(|d| (d.as_secs_f64() * 10.0).round() / 10.0);

@@ -17,6 +17,7 @@ use encore_plugins::Refused;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+/// The plugin routes (all for admins).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/plugins", get(list))
@@ -50,6 +51,7 @@ async fn detached<T: Send + 'static>(work: impl std::future::Future<Output = T> 
     tokio::spawn(work).await.map_err(|e| err(500, format!("The plugin task stopped: {e}")))
 }
 
+/// 404 unless `id` is a catalog or installed plugin.
 fn known(st: &AppState, id: &str) -> ApiResult<()> {
     if st.plugins.manifest(id).is_none() {
         return Err(err(404, "Unknown plugin"));
@@ -72,11 +74,13 @@ async fn one(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>
     st.plugins.card(&id).map(Json).ok_or_else(|| err(404, "Unknown plugin"))
 }
 
+/// POST /api/plugins/check: look for updates of every plugin.
 async fn check_all(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let p = st.plugins.clone();
     Ok(Json(detached(async move { p.check_all().await }).await?))
 }
 
+/// POST /api/plugins/{id}/install: install a plugin.
 async fn install(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.db.log("info", &format!("{} started the install of plugin {id}", u.s("username")));
@@ -84,6 +88,7 @@ async fn install(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<Str
     detached(async move { p.install(&id).await }).await?.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/update: update a plugin.
 async fn update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.db.log("info", &format!("{} started an update of plugin {id}", u.s("username")));
@@ -91,24 +96,28 @@ async fn update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<Stri
     detached(async move { p.update(&id).await }).await?.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/check: look for an update of one plugin.
 async fn check(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     let p = st.plugins.clone();
     detached(async move { p.check(&id).await }).await?.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/enable: switch a plugin on.
 async fn enable(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.db.log("info", &format!("{} switched plugin {id} on", u.s("username")));
     st.plugins.enable(&id, true).await.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/disable: switch a plugin off.
 async fn disable(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.db.log("info", &format!("{} switched plugin {id} off", u.s("username")));
     st.plugins.enable(&id, false).await.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/remove: remove a plugin.
 async fn remove(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.db.log("info", &format!("{} removed plugin {id}", u.s("username")));
@@ -116,31 +125,39 @@ async fn remove(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<Stri
     detached(async move { p.remove(&id).await }).await?.map(Json).map_err(refused)
 }
 
+/// POST /api/plugins/{id}/test: run a plugin's test.
 async fn test(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     let p = st.plugins.clone();
     detached(async move { p.test(&id).await }).await?.map(Json).map_err(refused)
 }
 
+/// `POST /api/plugins/{id}/auto-update` body.
 #[derive(Deserialize)]
 struct On {
+    /// whether updates install by themselves
     on: bool,
 }
 
+/// POST /api/plugins/{id}/auto-update: switch a plugin's automatic updates.
 async fn auto_update(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>, Json(b): Json<On>) -> ApiResult<Json<Value>> {
     known(&st, &id)?;
     st.plugins.set_auto_update(&id, b.on).map(Json).map_err(refused)
 }
 
+/// `GET /api/plugins/{id}/logs` query.
 #[derive(Deserialize)]
 struct Lines {
+    /// how many lines (default 200)
     lines: Option<usize>,
 }
 
+/// GET /api/plugins/{id}/logs: the last lines of a plugin's log.
 async fn logs(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>, Query(q): Query<Lines>) -> ApiResult<Json<Value>> {
     st.plugins.logs(&id, q.lines.unwrap_or(200)).map(Json).map_err(refused)
 }
 
+/// GET /api/plugins/{id}/settings: a plugin's settings and their values.
 async fn settings(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     st.plugins.settings(&id).map(Json).map_err(refused)
 }
@@ -208,8 +225,10 @@ async fn upload(State(st): State<AppState>, Admin(u): Admin, mut form: Multipart
     .map_err(refused)
 }
 
+/// `POST /api/plugins/install-url` body.
 #[derive(Deserialize)]
 struct Url {
+    /// an https address or `owner/repo@ref`
     url: String,
 }
 

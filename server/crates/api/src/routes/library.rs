@@ -19,6 +19,7 @@ use std::sync::Arc;
 // how a stream is served (the one decision, codec negotiation, files with Range support) is encore_playback::stream
 use encore_playback::stream::{decoders, plan, serve_file, serve_stream, Listener, StreamQ};
 
+/// The library routes: lists, songs, albums, streams, covers, likes and share links.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/library/stats", get(stats))
@@ -254,12 +255,15 @@ async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
     Json(s)
 }
 
+/// `POST /api/library/scan` query.
 #[derive(Deserialize)]
 struct ScanQ {
+    /// read every file again (else only new and changed ones)
     #[serde(default)]
     full: bool,
 }
 
+/// POST /api/library/scan: scan the library in the background (admins).
 async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ>) -> ApiResult<Json<Value>> {
     if st.library.scan.lock().unwrap().scanning {
         return Err(err(409, "A scan is already running"));
@@ -270,6 +274,7 @@ async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The bytes under a folder (0 when it isn't set).
 fn dir_size(path: &str) -> u64 {
     if path.is_empty() {
         return 0;
@@ -277,6 +282,7 @@ fn dir_size(path: &str) -> u64 {
     walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()
 }
 
+/// `df` for the file system a folder is on: `{total, used, free}` in bytes.
 fn disk_usage(path: &str) -> Option<Value> {
     let out = std::process::Command::new("df").args(["-Pk", path]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -285,6 +291,7 @@ fn disk_usage(path: &str) -> Option<Value> {
     Some(json!({ "total": k(1)?, "used": k(2)?, "free": k(3)? }))
 }
 
+/// GET /api/library/storage: the library's and the downloads' sizes and the disks they are on.
 async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "storage") {
         return Err(err(403, "Storage isn't shared with your account"));
@@ -319,15 +326,23 @@ async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
     Ok(Json(v))
 }
 
+/// `GET /api/library/albums` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct AlbumQ {
+    /// a search text
     q: String,
+    /// the sort key
     sort: String,
+    /// the albums filter
     filter: String,
+    /// only this artist's albums
     artist: String,
+    /// the page size
     limit: Option<i64>,
+    /// where the page starts
     offset: i64,
+    /// the sort direction
     dir: String,
     /// `albums` (format Album), `singles` (Singles & EPs), or every album but the One-offs
     kind: String,
@@ -393,6 +408,7 @@ fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) 
     })
 }
 
+/// The albums answer for a query (on the blocking pool).
 fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
     let searching = !a.q.trim().is_empty();
     let pick = album_types::Pick::of(&a.types, &a.kind, searching).map_err(|e| err(400, e))?;
@@ -423,10 +439,13 @@ fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
     Ok(json!({ "total": total, "items": page }))
 }
 
+/// `GET /api/library/album-types` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct TypeCountsQ {
+    /// only this artist's albums
     artist: String,
+    /// the albums filter
     filter: String,
 }
 
@@ -445,8 +464,10 @@ async fn album_type_counts(State(st): State<AppState>, User(_): User, Query(q): 
     }).await
 }
 
+/// `PUT /api/library/albums/{id}/type` body.
 #[derive(Deserialize)]
 struct TypeBody {
+    /// Album, EP, Single or One-off; none: automatic again
     #[serde(default)]
     format: Option<String>,
 }
@@ -472,10 +493,13 @@ fn file_roots(st: &AppState) -> Vec<encore_files::roots::Root> {
     encore_files::roots::all(&st.cfg, st.data_dir(), &encore_requests::slskd_managed::download_dir(st))
 }
 
+/// `POST /api/library/albums/trash` body.
 #[derive(Deserialize)]
 struct TrashBody {
+    /// the albums
     #[serde(default)]
     ids: Vec<String>,
+    /// only say what it would do
     #[serde(default)]
     dry_run: bool,
 }
@@ -502,13 +526,19 @@ async fn track_added(State(st): State<AppState>, User(_): User, Path(id): Path<i
     })))
 }
 
+/// A list query: search, sort and page.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct SimpleQ {
+    /// a search text
     q: String,
+    /// the sort key
     sort: String,
+    /// the sort direction
     dir: String,
+    /// the page size
     limit: Option<i64>,
+    /// where the page starts
     offset: i64,
     /// `/tracks?ids=1,2,3`: these songs, in this order (unknown ids are left out)
     ids: Option<String>,
@@ -595,6 +625,7 @@ fn page_ids(all: &Value, offset: i64, limit: usize) -> Vec<i64> {
     all.as_array().map(|a| a.iter().skip(offset.max(0) as usize).take(limit).filter_map(|v| v.as_i64()).collect()).unwrap_or_default()
 }
 
+/// GET /api/library/tracks: the songs list (or `?ids=` those songs in that order).
 async fn tracks(State(st): State<AppState>, User(u): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
     if let Some(raw) = a.ids.as_deref() {
         let ids = parse_ids(raw)?;
@@ -620,6 +651,7 @@ async fn tracks(State(st): State<AppState>, User(u): User, Query(a): Query<Simpl
     }).await
 }
 
+/// GET /api/library/recent: the albums added last (18 by default, at most 200).
 async fn recent(State(st): State<AppState>, User(u): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
     let limit = a.limit.unwrap_or(18).clamp(1, 200);
     let rows = cached_read(&st, format!("recent\u{1f}{limit}"), move |c| Ok(json!(c.query(
@@ -630,15 +662,20 @@ async fn recent(State(st): State<AppState>, User(u): User, Query(a): Query<Simpl
     Ok(Json(v))
 }
 
+/// The song columns a shuffle answer has.
 const SHUFFLE_COLS: &str = "id, title, artist, album, album_id, format, bitrate, duration";
 
+/// `GET /api/library/shuffle` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ShuffleQ {
+    /// how many (default 50)
     limit: Option<i64>,
+    /// song ids to leave out, comma separated (at most 500)
     exclude: String,
 }
 
+/// GET /api/library/shuffle: random songs.
 async fn shuffle_get(State(st): State<AppState>, User(u): User, Query(q): Query<ShuffleQ>) -> ApiResult<Json<Value>> {
     let ex: Vec<i64> = q.exclude.split(',').filter_map(|x| x.trim().parse().ok()).take(500).collect();
     let Json(mut v) = shuffle_inner(&st, q.limit.unwrap_or(50), &ex)?;
@@ -646,10 +683,13 @@ async fn shuffle_get(State(st): State<AppState>, User(u): User, Query(q): Query<
     Ok(Json(v))
 }
 
+/// `POST /api/library/shuffle` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ShuffleBody {
+    /// how many (default 50)
     limit: Option<i64>,
+    /// song ids to leave out
     exclude: Vec<i64>,
 }
 
@@ -661,6 +701,7 @@ async fn shuffle_post(State(st): State<AppState>, User(_): User, Json(b): Json<S
     Ok(Json(v))
 }
 
+/// Random songs from the cached id list, without `exclude`.
 fn shuffle_inner(st: &AppState, limit: i64, exclude: &[i64]) -> ApiResult<Json<Value>> {
     let ex: std::collections::HashSet<i64> = exclude.iter().copied().collect();
     // random picks from the cached id list (`ORDER BY RANDOM()` read and sorted every song for 50 of them)
@@ -697,9 +738,12 @@ fn draw(pool: &[Value], n: usize, exclude: &std::collections::HashSet<i64>) -> V
 /// stamps it when the song is heard and sends it when the server is back; missing means now.
 #[derive(Deserialize)]
 struct Play {
+    /// the song played
     track_id: i64,
+    /// how long it played (seconds)
     #[serde(default)]
     seconds: f64,
+    /// when it was played (unix seconds; default now)
     #[serde(default)]
     played_at: Option<f64>,
 }
@@ -814,6 +858,7 @@ fn owns_song(st: &AppState, u: &encore_db::Row, t: &encore_db::Row) -> bool {
         || (t.i("added_by") == me && matches!(t.s("added_via").as_str(), "request" | "link" | "soulseek"))
 }
 
+/// DELETE /api/library/tracks/{id}: delete a song and its file (admins, or who brought it in).
 async fn delete_track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT path, artist, title, request_id, added_by, added_via FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     if !encore_config::perms::is_admin(&u) && !owns_song(&st, &u, &t) {
@@ -832,6 +877,7 @@ fn table_of(id: i64) -> &'static str {
     if encore_library::surround::is_track(id) { "surround_tracks" } else { "tracks" }
 }
 
+/// GET /api/library/tracks/{id}/file: the song's file as it is (a download).
 async fn track_file(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, req: Request) -> ApiResult<Response> {
     let t = st.db.one(&format!("SELECT path, artist, title FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "File not found"))?;
     let path = t.s("path");
@@ -853,6 +899,7 @@ pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, use
     serve_stream(st, id, &tr.s("path"), &tr.s("format"), q, req, listener).await
 }
 
+/// GET /api/library/tracks/{id}/stream: the song as the player streams it (as is, or transcoded / processed).
 async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     stream_track(&st, id, &q, req, Some(&u)).await
 }
@@ -870,9 +917,11 @@ async fn track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
     Ok(Json(v))
 }
 
+/// A row limit query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct LimitQ {
+    /// how many (0 = the default)
     limit: i64,
 }
 
@@ -889,6 +938,7 @@ async fn recent_plays(State(st): State<AppState>, User(u): User, Query(q): Query
     Ok(Json(v))
 }
 
+/// `GET /api/library/tracks/{id}/info` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct InfoQ {
@@ -931,10 +981,13 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
     Ok(Json(info))
 }
 
+/// `GET /api/library/tracks/{id}/lyrics` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct LyricsQ {
+    /// look them up when missing (default on)
     fetch: Option<bool>,
+    /// look them up again even when there are some
     force: Option<bool>,
 }
 
@@ -965,6 +1018,7 @@ async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
     encore_library::lyrics::fetch_for_track(&st, &t, q.force.unwrap_or(false)).await.map(Json).map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))
 }
 
+/// GET /api/library/albums/{id}: an album with its songs.
 async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if encore_library::surround::is_album(&id) {
         return surround_album(&st, &u, &id).await;
@@ -1139,9 +1193,11 @@ async fn surround_album(st: &AppState, u: &encore_db::Row, id: &str) -> ApiResul
     })))
 }
 
+/// A cover query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CoverQ {
+    /// the size in pixels (0 = the original)
     s: u32,
     /// the cover's version (`cover_v` from the JSON): the answer may then be cached for good
     v: String,
@@ -1194,10 +1250,12 @@ pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, r
     Ok(r)
 }
 
+/// GET /api/library/albums/{id}/cover: the album's cover.
 async fn cover(State(st): State<AppState>, User(_): User, Path(id): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
     cover_response(&st, &id, q.s, &q.v, req).await
 }
 
+/// GET /api/library/albums/{id}/download: the album's files as a zip.
 async fn album_zip(State(st): State<AppState>, User(_): User, Path(id): Path<String>, req: Request) -> ApiResult<Response> {
     let rows = st.db.query("SELECT path, albumartist, album FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![id])?;
     if rows.is_empty() {
@@ -1296,8 +1354,10 @@ async fn delete_album(State(st): State<AppState>, Admin(u): Admin, Path(id): Pat
     }).await
 }
 
+/// An artist name query.
 #[derive(Deserialize)]
 struct NameQ {
+    /// the artist's name
     name: String,
 }
 
@@ -1316,6 +1376,7 @@ async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Qu
     Ok(v)
 }
 
+/// Delete an artist's songs, follows and pending requests (see [`delete_artist`]): the answer and the deleted song ids.
 fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<(Json<Value>, Vec<i64>)> {
     let idx = st.library.artists.index(&st.db);
     // (an alias that is also another artist's name, kept apart by MusicBrainz, stays with that artist)
@@ -1353,12 +1414,16 @@ fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<
     Ok((Json(json!({ "ok": true, "removed": rows.len() })), open))
 }
 
+/// `POST /api/library/verify-manual` body.
 #[derive(Deserialize)]
 struct ManualVerify {
+    /// the songs
     track_ids: Vec<i64>,
+    /// right (default) or wrong
     #[serde(default = "yes")]
     correct: bool,
 }
+/// The default for flags that are on: true.
 fn yes() -> bool {
     true
 }
@@ -1379,6 +1444,7 @@ async fn verify_manual(State(st): State<AppState>, User(u): User, Json(b): Json<
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/library/mismatches: the songs the fingerprint check calls wrong (admins).
 async fn mismatches(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     let mut v = json!(st.db.query(
         "SELECT id, title, artist, album, album_id, verify_detail, format, bitrate, duration FROM tracks WHERE verify_status='mismatch' ORDER BY lower(artist), lower(album)", p![])?);
@@ -1388,6 +1454,7 @@ async fn mismatches(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Js
 
 // ---- likes ------------------------------------------------------------------------------------------
 
+/// The user's Liked Songs playlist, made on first use.
 fn liked_playlist(st: &AppState, uid: i64) -> ApiResult<i64> {
     if let Some(r) = st.db.one("SELECT id FROM playlists WHERE user_id=? AND kind='liked'", p![uid])? {
         return Ok(r.i("id"));
@@ -1395,6 +1462,7 @@ fn liked_playlist(st: &AppState, uid: i64) -> ApiResult<i64> {
     Ok(st.db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?, 'Liked Songs', 'liked', 'manual', '[]', ?, ?)", p![uid, now(), now()])?)
 }
 
+/// GET /api/likes: the user's liked songs.
 async fn likes(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pid = liked_playlist(st, u.i("id"))?;
@@ -1402,6 +1470,7 @@ async fn likes(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Valu
     }).await
 }
 
+/// POST /api/likes/{id}: like a song.
 async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT title, artist, album, duration, isrc, mb_trackid FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let pid = liked_playlist(&st, u.i("id"))?;
@@ -1415,6 +1484,7 @@ async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) ->
     Ok(Json(json!({ "liked": true, "added": 0 })))
 }
 
+/// DELETE /api/likes/{id}: unlike a song.
 async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     let pid = liked_playlist(&st, u.i("id"))?;
     // the song goes and the list is numbered 0, 1, 2 … again in one transaction on the write connection (off
@@ -1434,6 +1504,7 @@ async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) 
 
 // ---- share links ----------------------------------------------------------------------------------
 
+/// The 404 of a share link that no longer works.
 pub(super) fn link_gone() -> encore_core::error::ApiError {
     err(404, "This link doesn't work any more")
 }
@@ -1463,6 +1534,7 @@ pub(super) fn share_json(st: &AppState, token: &str) -> Value {
     json!({ "token": token, "path": format!("/s/{token}"), "url": format!("{}/s/{token}", base.trim_end_matches('/')) })
 }
 
+/// POST /api/library/tracks/{id}/share: a share link for a song.
 async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     if st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_none() {
         return Err(err(404, "Track not found"));
@@ -1470,6 +1542,7 @@ async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
     share_link(&st, u.i("id"), "track", id, "")
 }
 
+/// POST /api/library/albums/{id}/share: a share link for an album.
 async fn share_album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if st.db.one("SELECT 1 FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
         return Err(err(404, "Album not found"));
@@ -1477,9 +1550,11 @@ async fn share_album(State(st): State<AppState>, User(u): User, Path(id): Path<S
     share_link(&st, u.i("id"), "album", 0, &id)
 }
 
+/// `POST /api/library/artists/share` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ShareArtistB {
+    /// the artist's name as the library shows it
     name: String,
 }
 
@@ -1508,17 +1583,23 @@ async fn share_artist(State(st): State<AppState>, User(u): User, Json(b): Json<S
 /// What a token points at: kind "track" (track_id), "album" (ref = album id), "artist" (ref = name) or
 /// "playlist" (ref = playlist id). `user_id` is who made the link.
 pub(super) struct Shared {
+    /// "track", "album", "artist" or "playlist"
     pub(super) kind: String,
+    /// what it shares: the album id, the artist's name or the playlist id
     pub(super) r: String,
+    /// the song (track links)
     pub(super) track_id: i64,
+    /// who made the link
     pub(super) user_id: i64,
 }
 
+/// The share link with this token; 404 when it doesn't work.
 pub(super) fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
     let s = st.db.one("SELECT track_id, user_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
     Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id"), user_id: s.i("user_id") })
 }
 
+/// The song columns a share answer has.
 const SHARE_COLS: &str = "id, title, artist, album, albumartist, album_id, year, track, disc, duration, format, bitrate, path";
 
 /// Most songs an artist link lists.
@@ -1526,14 +1607,18 @@ const SHARE_ARTIST_MAX: usize = 100;
 
 /// Songs in one page of a playlist link (`?limit=` asks for up to [`SHARE_PAGE_MAX`]).
 const SHARE_PAGE: usize = 200;
+/// The most songs a playlist link page may ask for.
 const SHARE_PAGE_MAX: usize = 500;
 
 /// A shared playlist as it is now.
 pub(super) struct SharedPlaylist {
+    /// the playlist's id
     pub(super) id: i64,
     /// "Liked Songs" for the liked list
     pub(super) name: String,
+    /// whether it is the owner's Liked Songs
     pub(super) liked: bool,
+    /// its description
     pub(super) description: String,
     /// the owner's user name (the page shows it)
     pub(super) owner: String,
@@ -1651,7 +1736,9 @@ fn shared_cover_album(st: &AppState, s: &Shared, tracks: &[encore_db::Row]) -> S
 
 /// What stands for a link in its page and preview: an album's cover, or a playlist's mosaic.
 enum LinkCover {
+    /// an album's cover (the album id)
     Album(String),
+    /// a playlist's mosaic picture
     Mosaic(std::path::PathBuf),
 }
 
@@ -1852,6 +1939,7 @@ async fn shared(State(st): State<AppState>, MaybeUser(me): MaybeUser, Path(token
     Ok(Json(v))
 }
 
+/// `GET /api/share/{token}/stream` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct SharedTrackQ {
@@ -1859,6 +1947,7 @@ struct SharedTrackQ {
     track: Option<i64>,
 }
 
+/// GET /api/share/{token}/stream: a song of what the link shares, streamed.
 async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, Query(w): Query<SharedTrackQ>, req: Request) -> ApiResult<Response> {
     // only songs of what the link shares (checked on its own: the artist list changes with plays and a
     // playlist with its owner, so a song a page shows may have left it since); an artist link reads the
@@ -1890,6 +1979,7 @@ async fn share_live_file(path: &std::path::Path, req: Request, content_type: &st
     Ok(r)
 }
 
+/// GET /api/share/{token}/cover: the cover of what the link shares.
 async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
     let (cover, live) = st.blocking(move |st| {
         let s = share_row(st, &token)?;
@@ -1978,6 +2068,7 @@ async fn share_video(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
     tokio::spawn(async move { share_video_build(&st, &token).await }).await.ok().flatten()
 }
 
+/// Build the link's preview video: its songs, its cover and the first song's audio.
 async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
     // the link's songs, its cover album (an artist link reads the artist index) or a playlist's picture, and
     // the cover file, on the blocking pool
@@ -2126,12 +2217,14 @@ pub fn quality_line(m: &Value) -> String {
     parts.join(" · ")
 }
 
+/// Hz as kHz without trailing zeros ("44.1", "48").
 fn trim_khz(hz: u64) -> String {
     let k = hz as f64 / 1000.0;
     let s = format!("{k:.1}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// Seconds as "m:ss".
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0).round() as u64;
     format!("{}:{:02}", s / 60, s % 60)

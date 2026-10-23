@@ -15,12 +15,18 @@ use std::path::Path;
 use std::time::Instant;
 use tower::ServiceExt;
 
+/// The bench owner's username.
 const OWNER: &str = "benchowner";
+/// The bench owner's password.
 const PW: &str = "bench-password-1";
+/// Songs in the synthetic library.
 pub const TRACKS: usize = 60_000;
+/// Albums in the synthetic library.
 pub const ALBUMS: usize = 6_000;
+/// Artists in the synthetic library.
 pub const ARTISTS: usize = 2_500;
 
+/// A made-up artist name for number `i` ("The Echo Velvet 0042").
 fn artist_name(i: usize) -> String {
     const FIRST: &[&str] = &["The", "Los", "DJ", "Little", "Big", "Saint", "Lady", "MC", "Young", "Old"];
     const WORD: &[&str] = &["Echo", "Velvet", "Mirror", "Atlas", "Copper", "Sun", "River", "Neon", "Ghost", "Ivory", "Paper", "Static", "Honey", "Signal"];
@@ -125,12 +131,17 @@ async fn mock_mb() -> String {
     format!("http://{addr}")
 }
 
+/// A server under test.
 struct Server {
+    /// its state
     st: AppState,
+    /// its router
     app: Router,
+    /// the owner's session cookie
     cookie: String,
 }
 
+/// A server on the database in `dir`, MusicBrainz at `mb`, signed in as the owner.
 async fn start(dir: &Path, mb: &str) -> Server {
     let st = encore_api::test_support::state_in(dir);
     // the owner the server made at start, with the bench's name and password
@@ -177,11 +188,13 @@ async fn quiesce(st: &AppState) {
     }
 }
 
+/// The `p` percentile (0–1) of `v`.
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[((v.len() as f64 - 1.0) * p).round() as usize]
 }
 
+/// Copy the database files from `from` to a fresh folder `to`.
 fn copy_dir(from: &Path, to: &Path) {
     let _ = std::fs::remove_dir_all(to);
     std::fs::create_dir_all(to).unwrap();
@@ -199,6 +212,7 @@ fn main() {
     tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap().block_on(perf_bench());
 }
 
+/// Build the library, then time every endpoint cold and warm and print the table.
 async fn perf_bench() {
     let base = std::env::temp_dir().join(format!("encore-perf-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);

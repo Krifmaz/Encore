@@ -28,21 +28,30 @@ use encore_library::sections::{sections_for, Spec};
 #[cfg(test)]
 use encore_library::sections::{label, letters, By};
 
+/// `GET /api/library/index` query (see the module docs).
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct IndexQ {
+    /// albums, singles, artists or tracks
     kind: String,
+    /// the list's sort key
     sort: String,
+    /// the sort direction
     dir: String,
+    /// only this artist's albums
     artist: String,
+    /// the albums filter, as /albums takes it
     filter: String,
+    /// "albums" for the web's Albums tab
     album_kind: String,
     /// the Type filter, as /albums takes it
     #[serde(rename = "type")]
     types: String,
+    /// a search text: a searched list has no sections
     q: String,
 }
 
+/// GET /api/library/index: the list's sections, cached per query.
 pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<IndexQ>) -> ApiResult<Json<Value>> {
     if !a.q.trim().is_empty() {
         return Ok(Json(json!([])));

@@ -20,6 +20,7 @@ pub const KEEP: i64 = 50;
 /// A report's text is cut to this many bytes (an ANR trace holds every thread of the process).
 const MAX_TEXT: usize = 256 * 1024;
 
+/// Create the client_crashes table when it isn't there.
 fn ensure_table(st: &AppState) -> ApiResult<()> {
     // created on first use: an older server simply never reads it
     st.db.execute_batch(
@@ -43,18 +44,25 @@ fn ensure_table(st: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+/// `POST /api/diagnostics/client-crash` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct CrashBody {
+    /// what happened ("crash" when empty)
     kind: String,
+    /// the device's name
     device: String,
+    /// the device's id
     device_id: String,
+    /// the app's version
     app_version: String,
+    /// the operating system
     os: String,
     /// when it happened (epoch seconds); 0 = when it arrived
     time: f64,
     /// the exception line ("java.lang.IllegalStateException: …"); empty = the first line of `text`
     summary: String,
+    /// the stack trace and log
     text: String,
     /// the same crash sent twice (an upload whose answer got lost) is kept once: per device and key
     key: String,
@@ -78,6 +86,7 @@ pub fn first_line(summary: &str, text: &str) -> String {
     line.chars().take(300).collect()
 }
 
+/// POST /api/diagnostics/client-crash: keep a crash report from an app.
 pub async fn upload(State(st): State<AppState>, User(u): User, Json(b): Json<CrashBody>) -> ApiResult<Json<Value>> {
     if b.text.trim().is_empty() && b.summary.trim().is_empty() {
         return Err(err(400, "Empty crash report"));
@@ -103,6 +112,7 @@ pub async fn upload(State(st): State<AppState>, User(u): User, Json(b): Json<Cra
     Ok(Json(json!({ "ok": true, "id": id, "duplicate": false })))
 }
 
+/// GET /api/diagnostics/client-crash: the crash reports, newest first (admins).
 pub async fn list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let rows = st.db.query(
@@ -112,6 +122,7 @@ pub async fn list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     Ok(Json(json!({ "crashes": rows })))
 }
 
+/// DELETE /api/diagnostics/client-crash: delete every crash report (admins).
 pub async fn clear(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     st.db.execute("DELETE FROM client_crashes", p![])?;

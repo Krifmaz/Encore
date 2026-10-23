@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use totp_rs::{Algorithm, Secret, TOTP};
 
+/// The account routes: sign-in, sign-up, sessions, profile, password, 2FA and avatars.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/info", get(info))
@@ -45,6 +46,7 @@ pub fn router() -> Router<AppState> {
 /// Raised when native clients can rely on something new (see /api/auth/info `api`).
 pub const API_LEVEL: i64 = 2;
 
+/// The session cookie: HttpOnly, SameSite=Lax, Secure over HTTPS, for `max_age` seconds.
 fn session_cookie(token: String, max_age: i64, https: bool) -> Cookie<'static> {
     Cookie::build((auth::COOKIE, token))
         .path("/")
@@ -55,10 +57,12 @@ fn session_cookie(token: String, max_age: i64, https: bool) -> Cookie<'static> {
         .build()
 }
 
+/// `secs` seconds as a cookie duration.
 fn time_dur(secs: i64) -> cookie::time::Duration {
     cookie::time::Duration::seconds(secs)
 }
 
+/// GET /api/auth/info: what the server offers before signing in (features, sign-up mode, the API level).
 async fn info(State(st): State<AppState>) -> Json<Value> {
     // "surround" (0.35): the Surround library (its tab, the album pages' Stereo/Surround links, /api/surround/…)
     let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token", "surround"];
@@ -82,6 +86,7 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// An invite that exists, isn't expired and has uses left; 400 otherwise.
 fn valid_invite(st: &AppState, code: &str) -> ApiResult<encore_db::Row> {
     let inv = st.db.one("SELECT * FROM invites WHERE code=?", p![code.trim()])?;
     match inv {
@@ -90,22 +95,30 @@ fn valid_invite(st: &AppState, code: &str) -> ApiResult<encore_db::Row> {
     }
 }
 
+/// `POST /api/auth/login` body.
 #[derive(Deserialize)]
 struct Login {
+    /// the username or email
     username: String,
+    /// the password
     password: String,
+    /// the authenticator code, when 2FA is on
     code: Option<String>,
+    /// the native app's device, for a bearer token instead of a cookie
     app: Option<AppDevice>,
 }
 
 /// Sent by the native app instead of taking a cookie: it gets a bearer token for this device.
 #[derive(Deserialize)]
 struct AppDevice {
+    /// the device's id
     device_id: String,
+    /// the device's name
     #[serde(default)]
     device_name: Option<String>,
 }
 
+/// The TOTP (SHA-1, 6 digits, 30 s) of a base32 secret.
 fn totp_for(secret_b32: &str, account: &str, issuer: &str) -> Option<TOTP> {
     let bytes = Secret::Encoded(secret_b32.to_string()).to_bytes().ok()?;
     TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, Some(issuer.to_string()), account.to_string()).ok()
@@ -130,6 +143,7 @@ fn check_app(app: &Option<AppDevice>) -> ApiResult<()> {
     }
 }
 
+/// POST /api/auth/login: sign in (10 tries per address in 5 minutes).
 async fn login(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Login>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let key = format!("login:{}", c.ip);
@@ -163,15 +177,22 @@ async fn login(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b
     start_session(&st, jar, &c, user.i("id"), b.app.as_ref())
 }
 
+/// `POST /api/auth/signup` body.
 #[derive(Deserialize)]
 struct Signup {
+    /// the username
     username: String,
+    /// the password
     password: String,
+    /// an email address
     email: Option<String>,
+    /// the invite code, when sign-up needs one
     invite: Option<String>,
+    /// the native app's device, for a bearer token instead of a cookie
     app: Option<AppDevice>,
 }
 
+/// POST /api/auth/signup: make an account, as the sign-up mode allows, and sign it in.
 async fn signup(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Signup>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let mode = st.cfg.str("signup_mode");
@@ -205,6 +226,7 @@ async fn signup(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(
     start_session(&st, jar, &c, uid, b.app.as_ref())
 }
 
+/// POST /api/auth/logout: end this session (the app token or the cookie).
 async fn logout(State(st): State<AppState>, headers: HeaderMap, jar: CookieJar) -> ApiResult<(CookieJar, Json<Value>)> {
     if let Some(t) = auth::bearer(&headers) {
         st.db.execute("DELETE FROM sessions WHERE token=? AND kind='app'", p![auth::app_token_key(&t)])?;
@@ -223,6 +245,7 @@ async fn logout_all(State(st): State<AppState>, User(u): User, jar: CookieJar) -
     Ok((jar.remove(Cookie::build(auth::COOKIE).path("/")), Json(json!({ "ok": true }))))
 }
 
+/// GET /api/auth/me: the signed-in user, their permissions and their request quota.
 async fn me(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let used = st.db.one(
         "SELECT COUNT(*) n FROM requests WHERE user_id=? AND created_at > ? AND parent_id IS NULL",
@@ -233,9 +256,12 @@ async fn me(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>>
     Ok(Json(v))
 }
 
+/// `PUT /api/auth/profile` body.
 #[derive(Deserialize)]
 struct Profile {
+    /// a new email address
     email: Option<String>,
+    /// a new username
     username: Option<String>,
 }
 
@@ -267,6 +293,7 @@ async fn get_prefs(User(u): User) -> Json<Value> {
     Json(serde_json::from_str(&u.s("prefs")).unwrap_or(json!({})))
 }
 
+/// PUT /api/auth/prefs: merge preferences into the user's.
 async fn put_prefs(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let mut prefs: Value = serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}));
     if let (Some(p), Some(n)) = (prefs.as_object_mut(), b.as_object()) {
@@ -282,12 +309,16 @@ async fn put_prefs(State(st): State<AppState>, User(u): User, Json(b): Json<Valu
     Ok(Json(prefs))
 }
 
+/// `POST /api/auth/password` body.
 #[derive(Deserialize)]
 struct PasswordChange {
+    /// the current password
     current: String,
+    /// the new password
     new: String,
 }
 
+/// POST /api/auth/password: change the password (the other sessions end).
 async fn change_password(State(st): State<AppState>, User(u): User, headers: HeaderMap, Json(b): Json<PasswordChange>) -> ApiResult<Json<Value>> {
     let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if !auth::verify_password_off(b.current.clone(), full.s("password_hash")).await {
@@ -308,6 +339,7 @@ fn session_id(token: &str) -> String {
     token.chars().take(n).collect()
 }
 
+/// GET /api/auth/sessions: the user's sessions, the current one marked.
 async fn sessions(State(st): State<AppState>, User(u): User, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let cur = auth::session_key(&headers).unwrap_or_default();
     let rows = st.db.query(
@@ -334,9 +366,12 @@ pub fn device_name(ua: &str) -> String {
     if os.is_empty() { app.to_string() } else { format!("{app} on {os}") }
 }
 
+/// `POST /api/auth/app-token` body.
 #[derive(Deserialize)]
 struct AppTokenBody {
+    /// the device's id
     device_id: String,
+    /// the device's name
     #[serde(default)]
     device_name: Option<String>,
 }
@@ -354,6 +389,7 @@ async fn app_token(State(st): State<AppState>, User(u): User, c: ClientInfo, Jso
     Ok(Json(json!({ "token": token, "device_id": device_id })))
 }
 
+/// DELETE /api/auth/sessions/{sid}: end one of the user's sessions (by its short id).
 async fn revoke_session(State(st): State<AppState>, User(u): User, Path(sid): Path<String>) -> ApiResult<Json<Value>> {
     // a short id can't match a whole session family: ids are 10 (web) or 17 ("sha256:…", app) characters
     if sid.chars().count() < 10 {
@@ -365,11 +401,14 @@ async fn revoke_session(State(st): State<AppState>, User(u): User, Path(sid): Pa
 
 // ---- password reset & sign-in links -----------------------------------------------------------
 
+/// A body naming an account by username or email.
 #[derive(Deserialize)]
 struct LoginKey {
+    /// the username or email
     login: String,
 }
 
+/// The account with this username or email that has an email address.
 fn find_by_login(st: &AppState, key: &str) -> ApiResult<Option<encore_db::Row>> {
     Ok(st.db.one(
         "SELECT id, username, email, disabled FROM users WHERE (lower(username)=lower(?) OR lower(email)=lower(?)) AND email IS NOT NULL AND email != ''",
@@ -377,11 +416,13 @@ fn find_by_login(st: &AppState, key: &str) -> ApiResult<Option<encore_db::Row>> 
     )?)
 }
 
+/// The address links in emails point to: the base URL setting, else the one the request came to.
 fn base_url(st: &AppState, c: &ClientInfo) -> String {
     let b = st.cfg.str("base_url");
     if b.is_empty() { c.base_url.clone() } else { b.trim_end_matches('/').to_string() }
 }
 
+/// POST /api/auth/forgot: email a password reset link (the answer never says whether the account exists).
 async fn forgot(State(st): State<AppState>, c: ClientInfo, Json(b): Json<LoginKey>) -> ApiResult<Json<Value>> {
     if !email::enabled(&st) {
         return Err(err(400, "Password reset by email isn't set up – ask your admin to reset it"));
@@ -401,12 +442,16 @@ async fn forgot(State(st): State<AppState>, c: ClientInfo, Json(b): Json<LoginKe
     Ok(Json(json!({ "ok": true, "message": "If that account has an email address, a reset link is on its way." })))
 }
 
+/// `POST /api/auth/reset` body.
 #[derive(Deserialize)]
 struct ResetBody {
+    /// the token from the reset link
     token: String,
+    /// the new password
     password: String,
 }
 
+/// POST /api/auth/reset: set a new password with a reset link's token.
 async fn reset(State(st): State<AppState>, Json(b): Json<ResetBody>) -> ApiResult<Json<Value>> {
     let bad = || err(400, "This reset link is invalid or expired – request a new one");
     let (uid, token) = b.token.split_once('.').ok_or_else(bad)?;
@@ -445,13 +490,18 @@ async fn email_link(State(st): State<AppState>, c: ClientInfo, Json(b): Json<Log
     Ok(Json(json!({ "ok": true, "message": "If that account has an email address, a sign-in link is on its way." })))
 }
 
+/// `POST /api/auth/magic` body.
 #[derive(Deserialize)]
 struct MagicBody {
+    /// the token from the email link
     token: String,
+    /// the authenticator code, when 2FA is on
     code: Option<String>,
+    /// the native app's device, for a bearer token instead of a cookie
     app: Option<AppDevice>,
 }
 
+/// POST /api/auth/magic: sign in with an email link's token.
 async fn magic(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<MagicBody>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let digest = encore_core::ids::sha256_hex(&b.token);
@@ -471,6 +521,7 @@ async fn magic(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b
 
 // ---- authenticator app (TOTP) -------------------------------------------------------------------
 
+/// POST /api/auth/2fa/setup: a new authenticator secret and its QR link.
 async fn totp_setup(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if full.b("totp_enabled") {
@@ -482,12 +533,16 @@ async fn totp_setup(State(st): State<AppState>, User(u): User) -> ApiResult<Json
     Ok(Json(json!({ "secret": secret, "otpauth_url": t.get_url(), "qr": t.get_qr_base64().ok() })))
 }
 
+/// A body with an authenticator code or the password.
 #[derive(Deserialize)]
 struct CodeBody {
+    /// the authenticator code
     code: Option<String>,
+    /// the password
     password: Option<String>,
 }
 
+/// POST /api/auth/2fa/enable: turn 2FA on with a code from the new secret.
 async fn totp_enable(State(st): State<AppState>, User(u): User, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
     let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     let code = b.code.unwrap_or_default().replace(' ', "");
@@ -500,6 +555,7 @@ async fn totp_enable(State(st): State<AppState>, User(u): User, Json(b): Json<Co
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/auth/2fa/disable: turn 2FA off (the password asked for).
 async fn totp_disable(State(st): State<AppState>, User(u): User, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
     let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if !auth::verify_password_off(b.password.unwrap_or_default(), full.s("password_hash")).await {
@@ -512,10 +568,12 @@ async fn totp_disable(State(st): State<AppState>, User(u): User, Json(b): Json<C
 
 // ---- profile picture ---------------------------------------------------------------------------
 
+/// Where a user's avatar is kept.
 fn avatar_path(st: &AppState, id: i64) -> std::path::PathBuf {
     st.data_dir().join("avatars").join(format!("{id}.jpg"))
 }
 
+/// POST /api/auth/avatar: upload a profile picture (made a square JPEG).
 async fn upload_avatar(State(st): State<AppState>, User(u): User, mut form: Multipart) -> ApiResult<Json<Value>> {
     let mut data = Vec::new();
     while let Some(f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
@@ -544,12 +602,14 @@ async fn upload_avatar(State(st): State<AppState>, User(u): User, mut form: Mult
     Ok(Json(json!({ "ok": true, "avatar_at": t })))
 }
 
+/// DELETE /api/auth/avatar: remove the profile picture.
 async fn delete_avatar(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let _ = std::fs::remove_file(avatar_path(&st, u.i("id")));
     st.db.execute("UPDATE users SET avatar_at=NULL WHERE id=?", p![u.i("id")])?;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/users/{id}/avatar: a user's profile picture (signed-in viewers).
 async fn avatar(State(st): State<AppState>, MaybeUser(viewer): MaybeUser, Path(id): Path<i64>) -> ApiResult<Response> {
     if viewer.is_none() {
         return Err(err(401, "Not authenticated"));

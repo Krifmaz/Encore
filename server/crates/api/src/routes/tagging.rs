@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
+/// The tagging, artwork, organizing, verification and duplicate routes (mostly for admins).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/library/albums/{id}/match", get(match_album))
@@ -42,6 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/duplicates/ignore", post(ignore))
 }
 
+/// An album's files in disc and track order; 404 when it has none.
 fn album_paths(st: &AppState, id: &str) -> ApiResult<Vec<PathBuf>> {
     let paths: Vec<PathBuf> = st.db.query("SELECT path FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![id])?.iter().map(|r| PathBuf::from(r.s("path"))).collect();
     if paths.is_empty() {
@@ -50,6 +52,7 @@ fn album_paths(st: &AppState, id: &str) -> ApiResult<Vec<PathBuf>> {
     Ok(paths)
 }
 
+/// The album id of the song at `path`, or null.
 fn album_of(st: &AppState, path: &std::path::Path) -> Value {
     st.db.one("SELECT album_id FROM tracks WHERE path=?", p![path.to_string_lossy()]).ok().flatten().map(|r| json!(r.s("album_id"))).unwrap_or(Value::Null)
 }
@@ -61,14 +64,19 @@ fn mark_manual(st: &AppState, paths: &[PathBuf], who: &str) {
     }
 }
 
+/// `GET /api/library/albums/{id}/match` query: other words than the album's tags.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct MatchQ {
+    /// the artist to search for
     artist: Option<String>,
+    /// the album to search for
     album: Option<String>,
+    /// the metadata source (default MusicBrainz)
     provider: Option<String>,
 }
 
+/// GET /api/library/albums/{id}/match: releases from a metadata source that may be the album.
 async fn match_album(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Path<String>, Query(q): Query<MatchQ>) -> ApiResult<Json<Value>> {
     let provider = q.provider.unwrap_or("musicbrainz".into());
     let name = meta::PROVIDERS.iter().find(|(k, _)| *k == provider).map(|x| x.1).ok_or_else(|| err(400, "Unknown metadata source"))?;
@@ -92,11 +100,14 @@ async fn match_album(State(st): State<AppState>, Admin(viewer): Admin, Path(id):
     Ok(Json(v))
 }
 
+/// `GET /api/library/albums/{id}/preview` query.
 #[derive(Deserialize)]
 struct PreviewQ {
+    /// the release to preview
     release_id: String,
 }
 
+/// GET /api/library/albums/{id}/preview: the album's tags (and file names) as a release would make them.
 async fn preview(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Path<String>, Query(q): Query<PreviewQ>) -> ApiResult<Json<Value>> {
     let paths = album_paths(&st, &id)?;
     let mut pv = tagger::preview(&st, &paths, &q.release_id, false).await.map_err(|e| err(502, format!("Metadata lookup failed: {e}")))?;
@@ -115,12 +126,16 @@ async fn preview(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Pat
     Ok(Json(pv))
 }
 
+/// `POST /api/library/albums/{id}/retag` body.
 #[derive(Deserialize)]
 struct RetagBody {
+    /// the release to tag with
     release_id: String,
+    /// also rename the files (default: the setting)
     rename: Option<bool>,
 }
 
+/// POST /api/library/albums/{id}/retag: tag the album from a release, confirming it as picked by hand.
 async fn retag(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>, Json(b): Json<RetagBody>) -> ApiResult<Json<Value>> {
     let paths = tagger::retag_album(&st, &id, &b.release_id, b.rename).await.map_err(|e| err(500, format!("Tagging failed: {e}")))?;
     mark_manual(&st, &paths, &u.s("username"));
@@ -128,12 +143,15 @@ async fn retag(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<Strin
     Ok(Json(json!({ "ok": true, "album_id": paths.first().map(|p| album_of(&st, p)).unwrap_or(Value::Null) })))
 }
 
+/// `GET /api/library/albums/{id}/art-candidates` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ArtQ {
+    /// an album title to search for instead of the album's
     q: String,
 }
 
+/// GET /api/library/albums/{id}/art-candidates: covers to choose from (Cover Art Archive, Deezer, iTunes …).
 async fn art_candidates(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Path<String>, Query(q): Query<ArtQ>) -> ApiResult<Json<Value>> {
     let a = st.db.one("SELECT MAX(albumartist) artist, MAX(album) album, MAX(mb_releasegroupid) rg, MAX(mb_albumid) rel FROM tracks WHERE album_id=?", p![id])?
         .filter(|a| !a.s("artist").is_empty()).ok_or_else(|| err(404, "Album not found"))?;
@@ -185,13 +203,17 @@ async fn lookup_art(st: &AppState, id: &str) -> Option<Vec<u8>> {
     tagger::find_art(st, &t.s("albumartist"), Some(&album), if t.i("n") == 1 { Some(&title) } else { None }, None).await.map(|x| x.0)
 }
 
+/// `POST /api/library/albums/{id}/art` body: an image by link, or its data.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ArtBody {
+    /// the image's URL
     url: Option<String>,
+    /// the image as base64 (a data URL works too)
     data: Option<String>,
 }
 
+/// POST /api/library/albums/{id}/art: set an album's cover.
 async fn set_art(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>, Json(b): Json<ArtBody>) -> ApiResult<Json<Value>> {
     let data = if let Some(d) = b.data.filter(|d| !d.is_empty()) {
         let raw = d.split_once(',').map(|x| x.1).unwrap_or(&d);
@@ -223,6 +245,7 @@ async fn embed_off(st: &AppState, id: &str, data: Vec<u8>) -> usize {
     st.blocking(move |st| Ok(embed_album_art(st, &id, &data))).await.unwrap_or(0)
 }
 
+/// POST /api/library/albums/{id}/artwork: find the album's cover and embed it.
 async fn album_artwork(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let data = lookup_art(&st, &id).await.ok_or_else(|| err(404, "No artwork found on Cover Art Archive, Deezer or iTunes"))?;
     Ok(Json(json!({ "embedded": embed_off(&st, &id, data).await })))
@@ -268,6 +291,7 @@ pub async fn find_missing_artwork(st: AppState) -> String {
     msg
 }
 
+/// POST /api/library/artwork: find covers for every album without one, in the background.
 async fn missing_artwork(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     if st.jobs.running("artwork") {
         return Err(err(409, "Already running"));
@@ -276,14 +300,18 @@ async fn missing_artwork(State(st): State<AppState>, Admin(_): Admin) -> ApiResu
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/library/albums/{id}/lyrics: fetch the album's missing lyrics.
 async fn album_lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let ids: Vec<i64> = st.db.query("SELECT id FROM tracks WHERE album_id=?", p![id])?.iter().map(|r| r.i("id")).collect();
     Ok(Json(lyrics::fetch_missing(&st, Some(&ids), ids.len().max(1)).await))
 }
 
+/// `POST /api/library/tags` body.
 #[derive(Deserialize)]
 struct TagEdit {
+    /// the songs to edit
     track_ids: Vec<i64>,
+    /// the tags to set, by name
     values: Map<String, Value>,
     /// move the files to match the new names (naming template)
     #[serde(default)]
@@ -293,6 +321,7 @@ struct TagEdit {
     lock: bool,
 }
 
+/// POST /api/library/tags: edit songs' tags (and with `rename`, move their files).
 async fn edit_tags(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<TagEdit>) -> ApiResult<Json<Value>> {
     // the albums the songs were in: when every song of one was edited into one new album, its type (the owner's
     // choice) follows it
@@ -374,6 +403,7 @@ async fn run_bulk(st: AppState) {
     st.jobs.set("bulk", json!({ "running": false, "current": "" }));
 }
 
+/// POST /api/library/autotag: tag the whole library from MusicBrainz in the background.
 async fn autotag(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     if st.jobs.running("bulk") {
         return Err(err(409, "Auto-tagging already running"));
@@ -382,15 +412,19 @@ async fn autotag(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/library/organize` query.
 #[derive(Deserialize)]
 struct OrganizeQ {
+    /// fill missing tags while organizing (default on)
     #[serde(default = "yes")]
     fill_missing: bool,
 }
+/// The default for flags that are on: true.
 fn yes() -> bool {
     true
 }
 
+/// POST /api/library/organize: move the files to the naming template in the background.
 async fn organize_files(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<OrganizeQ>) -> ApiResult<Json<Value>> {
     if st.jobs.running("organize") {
         return Err(err(409, "Already organizing"));
@@ -406,6 +440,7 @@ async fn identify(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Pa
     Ok(Json(v))
 }
 
+/// The identify answer: recordings AcoustID finds for the song's fingerprint, each once.
 async fn identify_answer(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<i64>) -> ApiResult<Value> {
     let t = st.db.one("SELECT path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     if !acoustid::available(&st) {
@@ -428,8 +463,10 @@ async fn identify_answer(State(st): State<AppState>, Admin(_): Admin, Path(id): 
     Ok(json!(out))
 }
 
+/// `POST /api/library/tracks/{id}/fix` body.
 #[derive(Deserialize)]
 struct TrackFix {
+    /// the tags to set
     values: Map<String, Value>,
     #[serde(default = "yes")]
     r#move: bool,
@@ -451,12 +488,15 @@ async fn fix_track(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i
     Ok(Json(json!({ "ok": true, "album_id": album_of(&st, &new) })))
 }
 
+/// `POST /api/library/verify` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct AllQ {
+    /// check every song again (else only those not checked yet)
     all: bool,
 }
 
+/// POST /api/library/verify: check the library's songs by fingerprint in the background.
 async fn verify_all(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<AllQ>) -> ApiResult<Json<Value>> {
     if !acoustid::available(&st) {
         return Err(err(400, "Add an AcoustID API key in Settings → Library → Verification & duplicates (and make sure fpcalc is installed)"));
@@ -468,6 +508,7 @@ async fn verify_all(State(st): State<AppState>, Admin(_): Admin, Query(q): Query
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/library/duplicates: the groups of duplicate songs.
 async fn duplicates(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResult<Json<Value>> {
     let s2 = st.clone();
     let groups = tokio::task::spawn_blocking(move || dupes::find_duplicates(&s2)).await.map_err(|e| err(500, e.to_string()))?;
@@ -476,12 +517,16 @@ async fn duplicates(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResu
     Ok(Json(v))
 }
 
+/// `POST /api/library/duplicates/resolve` body.
 #[derive(Deserialize)]
 struct DupResolve {
+    /// the song to keep
     keep: i64,
+    /// the songs to delete
     delete: Vec<i64>,
 }
 
+/// POST /api/library/duplicates/resolve: keep one song of a group and delete the others.
 async fn resolve(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<DupResolve>) -> ApiResult<Json<Value>> {
     if b.delete.contains(&b.keep) {
         return Err(err(400, "Can't keep and delete the same track"));
@@ -491,6 +536,7 @@ async fn resolve(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<DupR
     Ok(Json(json!({ "deleted": n })))
 }
 
+/// POST /api/library/duplicates/resolve-all: resolve every group the way it suggests.
 async fn resolve_all(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     let groups = dupes::find_duplicates(&st);
     let mut n = 0;
@@ -503,6 +549,7 @@ async fn resolve_all(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
     Ok(Json(json!({ "groups": groups.len(), "deleted": n })))
 }
 
+/// POST /api/library/duplicates/ignore: never show this group (`{key}`) again.
 async fn ignore(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     st.db.execute("INSERT OR IGNORE INTO dup_ignore VALUES (?,?)", p![b["key"].as_str().unwrap_or(""), now()])?;
     Ok(Json(json!({ "ok": true })))

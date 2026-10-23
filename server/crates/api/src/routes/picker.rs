@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// The download picker's routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/picker/sources", get(sources))
@@ -36,6 +37,7 @@ const SOURCES: [(&str, &str, &str); 6] = [
     ("ytmusic", "YouTube Music", "ytdlp"),
 ];
 
+/// A source's display name; "" for an unknown id.
 fn source_name(id: &str) -> &'static str {
     SOURCES.iter().find(|s| s.0 == id).map(|s| s.1).unwrap_or("")
 }
@@ -44,11 +46,15 @@ fn source_name(id: &str) -> &'static str {
 /// not reachable right now) | not_installed | off. `hint` says why in a few words when not ready; `section`
 /// is the settings section where it is fixed.
 pub struct SourceState {
+    /// ready, sign_in, not_connected, not_installed or off
     pub state: &'static str,
+    /// why it isn't ready, in a few words
     pub hint: String,
+    /// the settings section that fixes it
     pub section: &'static str,
 }
 
+/// A source state.
 fn state(state: &'static str, hint: impl Into<String>, section: &'static str) -> SourceState {
     SourceState { state, hint: hint.into(), section }
 }
@@ -212,6 +218,7 @@ async fn sources(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
     }).await
 }
 
+/// The quality shown for a result: "FLAC 24-bit/96kHz", "MP3 320k".
 fn quality(fmt: &str, bitrate: i64, depth: i64, rate: i64) -> String {
     let f = fmt.to_lowercase();
     if LOSSLESS.contains(&f.as_str()) {
@@ -222,6 +229,7 @@ fn quality(fmt: &str, bitrate: i64, depth: i64, rate: i64) -> String {
     if bitrate > 0 { format!("{} {bitrate}k", f.to_uppercase()) } else { f.to_uppercase() }
 }
 
+/// How well a result matches what is wanted (0 when it doesn't match), to two decimals.
 fn score(want_t: &str, want_a: &str, t: &str, a: &str, len: Option<f64>, got: Option<f64>) -> f64 {
     let v = compare(&describe(want_t, want_a, len, None, None), &describe(t, a, got, None, None), true);
     if v.matched { (v.score * 100.0).round() / 100.0 } else { 0.0 }
@@ -238,18 +246,27 @@ fn contains(hay: &str, needle: &str) -> f64 {
     torznab::share(hay, needle)
 }
 
+/// `POST /api/picker/search` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct SearchBody {
+    /// the source to search ([`SOURCES`])
     pub source: String,
+    /// "album" or "track"
     pub kind: String,
+    /// the artist wanted
     pub artist: String,
+    /// the title wanted (the album's, for albums)
     pub title: String,
+    /// the words typed in the box, when they differ from artist and title
     pub query: Option<String>,
     /// For a song: the album it is on, when the client knows it.
     pub album: Option<String>,
+    /// the MusicBrainz id wanted
     pub mbid: Option<String>,
+    /// the album's song count
     pub track_count: Option<usize>,
+    /// the song's length (seconds)
     pub length: Option<f64>,
     /// The request the picker was opened for: its kept searches are looked up, and what this search finds
     /// is kept with it. Ignored when the caller may not see that request.
@@ -290,13 +307,18 @@ fn slskd_text(b: &SearchBody, q: &str) -> String {
 /// The request the picker was opened for, as far as its kept searches go.
 #[derive(Debug, Clone, Default)]
 pub struct ForRequest {
+    /// the request's id
     pub id: i64,
     /// kept searches written for this id before then belong to an earlier request of that id (a restored
     /// database)
     pub created_at: f64,
+    /// "album" or "track"
     pub kind: String,
+    /// the request's artist
     pub artist: String,
+    /// the request's title
     pub title: String,
+    /// the request's album
     pub album: String,
 }
 
@@ -317,6 +339,7 @@ impl ForRequest {
 /// One source's answer: its rows, and where they came from.
 #[derive(Debug, Default)]
 pub struct Answer {
+    /// the result rows
     pub items: Vec<Value>,
     /// when the kept search the rows come from ended (unix seconds); None for a live search
     pub cached_at: Option<f64>,
@@ -329,6 +352,7 @@ pub struct Answer {
 }
 
 impl Answer {
+    /// An answer of a live search.
     fn live(items: Vec<Value>, query: String) -> Answer {
         Answer { items, cached_at: None, query, can_search: true, notice: None }
     }
@@ -479,12 +503,14 @@ fn torznab_row(st: &AppState, r: &Value, sc: f64, album: Option<(&str, &str, Opt
         "score": (sc * 10.0).round() / 10.0, "payload": payload })
 }
 
+/// Whether a release can be downloaded: it has a link, and its protocol's client is ready.
 fn torznab_usable(st: &AppState, r: &Value) -> bool {
     let proto = r["protocol"].as_str().unwrap_or("torrent");
     let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("");
     !url.is_empty() && !(proto == "torrent" && !torznab::qbit_ready(st)) && !(proto == "usenet" && !torznab::sab_ready(st))
 }
 
+/// Sort results best score first.
 fn by_score(out: &mut [Value]) {
     out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
 }
@@ -498,7 +524,9 @@ fn lossless_re() -> regex::Regex {
 /// searched and kept (Prowlarr asks every indexer, which can take tens of seconds, and many indexers allow
 /// only so many searches a day). Notes the oldest kept answer used, for the answer's "Found at" line.
 struct Prowlarr<'a> {
+    /// the server
     st: &'a AppState,
+    /// search again instead of using what is kept
     fresh: bool,
     /// kept with what this search finds
     request_id: Option<i64>,
@@ -511,6 +539,7 @@ struct Prowlarr<'a> {
 }
 
 impl<'a> Prowlarr<'a> {
+    /// The searches for this picker search: kept with `req` when it is one.
     fn of(st: &'a AppState, b: &SearchBody, req: Option<&ForRequest>) -> Prowlarr<'a> {
         let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("torznab")));
         Prowlarr { st, fresh: b.fresh, request_id: req.map(|r| r.id), mine, kept: Default::default() }
@@ -545,6 +574,7 @@ async fn search_torznab(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
     search_torznab_in(&Prowlarr::of(st, b, None), b, q).await
 }
 
+/// Search the indexers through Prowlarr: a song's own search, else albums ranked by fit and quality.
 async fn search_torznab_in(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let st = p.st;
     if b.kind == "track" {
@@ -670,6 +700,7 @@ async fn search_torznab_song(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyho
     Ok(out)
 }
 
+/// Search Deezer for the picker: albums or songs with their fit and quality.
 async fn search_deezer(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let kind = if b.kind == "album" { "album" } else { "track" };
     let d: Value = deezer::search(st, kind, q, 25).send().await?.json().await?;
@@ -698,6 +729,7 @@ async fn search_deezer(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result
     Ok(out)
 }
 
+/// Search YouTube Music for the picker: its first 20 albums or songs, with their fit.
 async fn search_ytmusic(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let album = b.kind == "album";
     Ok(ytmusic::search(st, q, !album).await?.into_iter().take(20).filter_map(|x| {
@@ -1003,12 +1035,18 @@ async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchB
     })
 }
 
+/// `POST /api/picker/pick` body: the chosen result.
 #[derive(Deserialize)]
 struct PickBody {
+    /// the source it came from
     source: String,
+    /// the source's own data for downloading it
     payload: Value,
+    /// its title, for the request's message
     title: Option<String>,
+    /// an existing request to lock to it
     request_id: Option<i64>,
+    /// a new request to create for it
     request: Option<NewRequest>,
     /// "Don't check the audio": the pick is imported without the audio check (and its songs confirmed by
     /// the caller); off, a pick the check turns away is kept for Keep anyway

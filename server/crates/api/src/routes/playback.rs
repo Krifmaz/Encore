@@ -9,6 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+/// The server-side processing routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/playback/dsp", get(dsp_info))
@@ -41,13 +42,17 @@ async fn dsp_info(State(st): State<AppState>, User(u): User) -> Json<Value> {
     }))
 }
 
+/// `POST /api/playback/dsp/prepare` body.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct PrepareQ {
+    /// the song to render
     track_id: i64,
     /// output rate in Hz (0 = the highest multiple of the source rate the server allows)
     rate: u32,
+    /// the upsampling filter's id ("" = the server's default)
     filter: String,
+    /// the dither's id ("" = the server's default)
     dither: String,
 }
 

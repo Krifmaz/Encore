@@ -30,6 +30,7 @@ impl Tasks for AppState {
     }
 }
 
+/// Run the scheduled task `key`: its summary line.
 async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
     Ok(match key {
         "scan" => {

@@ -28,6 +28,7 @@ use std::sync::LazyLock;
 /// The `kind` of an entry added from someone else's link.
 pub const LINKED: &str = "linked";
 
+/// The shared playlist link routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/playlists/shared", post(add_shared))
@@ -68,9 +69,13 @@ pub(crate) fn share_token_of(text: &str) -> Option<String> {
 /// ended entry shows it, and the refusals name the owner. `owner_id` and `playlist` never reach clients.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LinkSnapshot {
+    /// the owner's name
     pub owner: String,
+    /// the owner's user id
     pub owner_id: i64,
+    /// the playlist's id
     pub playlist: i64,
+    /// whether it is the owner's Liked Songs
     pub liked: bool,
 }
 
@@ -87,15 +92,18 @@ impl LinkSnapshot {
         })
     }
 
+    /// The snapshot as a linked row's `remote_ids`.
     pub fn to_json(&self) -> String {
         json!({ "linked": { "owner": self.owner, "owner_id": self.owner_id, "playlist": self.playlist, "liked": self.liked } }).to_string()
     }
 
+    /// The snapshot of a playlist as it is now.
     fn of_live(owner_id: i64, pl: &SharedPlaylist) -> Self {
         LinkSnapshot { owner: pl.owner.clone(), owner_id, playlist: pl.id, liked: pl.liked }
     }
 }
 
+/// Whether a playlist row is a link to someone else's playlist.
 pub(super) fn is_linked(pl: &Row) -> bool {
     pl.s("kind") == LINKED
 }
@@ -268,6 +276,7 @@ pub(super) fn add_link(st: &AppState, u: &Row, token: &str) -> ApiResult<Value> 
     Ok(json!({ "id": id, "name": name, "added": added }))
 }
 
+/// A body holding a share link.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct LinkBody {
@@ -275,6 +284,7 @@ struct LinkBody {
     link: String,
 }
 
+/// The share token in the pasted link; 400 when there is none.
 fn token_in(body: &LinkBody) -> ApiResult<String> {
     share_token_of(&body.link).ok_or_else(|| err(400, "That isn't a share link"))
 }

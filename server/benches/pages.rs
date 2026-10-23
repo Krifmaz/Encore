@@ -22,7 +22,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
+/// The bench owner's username.
 const OWNER: &str = "benchowner";
+/// The bench owner's password.
 const PW: &str = "bench-password-1";
 /// How long the stand-in MusicBrainz takes for each answer (musicbrainz.org from Europe or the US: 200–400 ms).
 const MB_LATENCY: Duration = Duration::from_millis(250);
@@ -189,6 +191,7 @@ fn main() {
     tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap().block_on(bench());
 }
 
+/// Time every page scenario against the stand-in MusicBrainz and print the results.
 async fn bench() {
     let base = std::env::temp_dir().join(format!("encore-pages-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);

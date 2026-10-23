@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// The contribution routes (AcoustID, ISRCs, MusicBrainz seeding; admins, the seed page also by signed link).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/contribute", get(status))
@@ -31,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/contribute/mb-seed/{key}", get(seed_page))
 }
 
+/// The MusicBrainz OAuth redirect URI under the public base URL; `None` while that isn't set.
 fn mb_redirect_uri(st: &AppState) -> Option<String> {
     let base = st.cfg.str("base_url").trim_end_matches('/').to_string();
     (!base.is_empty()).then(|| format!("{base}/api/contribute/mb/callback"))
@@ -38,6 +40,7 @@ fn mb_redirect_uri(st: &AppState) -> Option<String> {
 
 // ---- routes: status, run now, connect --------------------------------------------------------------
 
+/// A contribution table's rows counted per status.
 fn counts(st: &AppState, table: &str) -> Value {
     let mut out = json!({});
     for r in st.db.query(&format!("SELECT status, COUNT(*) n FROM {table} GROUP BY status"), p![]).unwrap_or_default() {
@@ -46,6 +49,7 @@ fn counts(st: &AppState, table: &str) -> Value {
     out
 }
 
+/// GET /api/contribute: what was sent, what waits, and the accounts connected.
 async fn status(State(st): State<AppState>, Admin(viewer): Admin) -> Json<Value> {
     let ac = counts(&st, "contrib_acoustid");
     let ic = counts(&st, "contrib_isrc");
@@ -78,6 +82,7 @@ async fn status(State(st): State<AppState>, Admin(viewer): Admin) -> Json<Value>
     Json(v)
 }
 
+/// POST /api/contribute/acoustid/run: send up to 10 fingerprints to AcoustID now.
 async fn run_acoustid(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     contribute::acoustid_ready(&st).map_err(|e| err(400, e))?;
     match contribute::acoustid_pass(&st, 10).await {
@@ -93,6 +98,7 @@ async fn run_acoustid(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<
     }
 }
 
+/// POST /api/contribute/isrc/run: look for ISRCs to add (up to 40) and submit them to MusicBrainz now.
 async fn run_isrc(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     if st.cfg.str("mb_oauth_refresh_token").is_empty() {
         return Err(err(400, "Connect a MusicBrainz account first"));
@@ -111,6 +117,7 @@ async fn run_isrc(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     }
 }
 
+/// POST /api/contribute/mb/connect: the MusicBrainz sign-in link.
 async fn mb_connect(State(st): State<AppState>, Admin(u): Admin, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let cid = st.cfg.str("mb_client_id");
     if cid.is_empty() || st.cfg.str("mb_client_secret").is_empty() {
@@ -126,14 +133,19 @@ async fn mb_connect(State(st): State<AppState>, Admin(u): Admin, headers: axum::
     Ok(Json(json!({ "url": url })))
 }
 
+/// `GET /api/contribute/mb/callback` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CallbackQ {
+    /// the authorization code
     code: String,
+    /// the state the sign-in was started with
     state: String,
+    /// MusicBrainz's error, when the sign-in failed
     error: String,
 }
 
+/// Back to Settings → Contribute with a message (`mb=` or `error=`).
 fn back(msg: &str, ok: bool) -> Response {
     let k = if ok { "mb" } else { "error" };
     Redirect::to(&format!("/#/settings?s=contribute&{k}={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
@@ -180,6 +192,7 @@ pub fn mb_link(st: &AppState, u: &encore_db::Row, account: &str, d: &Value) -> R
     Ok(())
 }
 
+/// POST /api/contribute/mb/disconnect: forget the MusicBrainz account.
 async fn mb_disconnect(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
     st.cfg.set_many(&json!({ "mb_oauth_access_token": "", "mb_oauth_refresh_token": "", "mb_oauth_expires_at": 0.0, "mb_oauth_account": "" }));
     Json(json!({ "ok": true }))
@@ -222,11 +235,13 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 /// How long a signed seed link works.
 const SEED_LINK_SECS: i64 = 900;
 
+/// The seed link's signature: HMAC-SHA256 over the key, the query and the expiry.
 fn seed_sig(secret: &str, key: &str, q: &SeedQ, exp: i64) -> String {
     let msg = format!("mbseed\n{key}\n{}\n{}\n{}\n{exp}", q.apple, q.artist, q.artist_name);
     hex::encode(hmac_sha256(secret.as_bytes(), msg.as_bytes()))
 }
 
+/// `GET /api/contribute/mb-seed/{key}` query.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct SeedQ {
@@ -234,8 +249,11 @@ pub struct SeedQ {
     apple: String,
     /// the artist's MusicBrainz id and name (from the artist page) for the credits
     artist: String,
+    /// the artist's name
     artist_name: String,
+    /// the signed link's expiry (unix seconds)
     exp: i64,
+    /// the signed link's signature
     sig: String,
 }
 
@@ -253,6 +271,7 @@ fn parse_key(key: &str, q: &SeedQ) -> Option<(Option<String>, Option<String>)> {
     }
 }
 
+/// GET /api/contribute/mb-seed/{key}: the page that seeds the album's MusicBrainz release form (signed in, or by a signed link).
 async fn seed_page(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(key): Path<String>, Query(q): Query<SeedQ>) -> ApiResult<Response> {
     if u.is_none() {
         // the phone app opens this in the browser, which has no Encore session: a signed link instead
@@ -273,12 +292,17 @@ async fn seed_page(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(key
     Ok(resp)
 }
 
+/// `POST /api/contribute/mb-seed-link` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct LinkBody {
+    /// the album's key ("deezer-123", "apple-456")
     key: String,
+    /// an Apple Music id next to a Deezer key
     apple: String,
+    /// the artist's MusicBrainz id
     artist: String,
+    /// the artist's name
     artist_name: String,
 }
 

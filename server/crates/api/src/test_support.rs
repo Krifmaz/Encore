@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A server on its own config folder.
 pub struct TestServer {
+    /// the server's state
     pub st: AppState,
     /// the config folder (database, caches); the web app's folder is `static` inside it
     pub dir: PathBuf,
@@ -22,6 +23,7 @@ pub struct TestServer {
     _plugins: std::sync::Arc<AppState>,
 }
 
+/// Numbers the test folders, so parallel tests never share one.
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 impl TestServer {
@@ -90,8 +92,11 @@ pub fn user(st: &AppState, name: &str, role: &str) -> Row {
 
 /// An answer of the router, read whole.
 pub struct Resp {
+    /// the status code
     pub status: StatusCode,
+    /// the headers
     pub headers: HeaderMap,
+    /// the body
     pub body: Vec<u8>,
 }
 
@@ -104,6 +109,7 @@ impl Resp {
     pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
     }
+    /// The body as text.
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
@@ -158,11 +164,14 @@ pub fn state_in(dir: &Path) -> AppState {
 /// The state of a server on a new temp folder (named after `name`) that is removed again when this goes out
 /// of scope, also when the test fails. It derefs to the state; pass `&*st` where a function takes `&impl Ctx`.
 pub struct TempState {
+    /// the state
     st: AppState,
+    /// the folder removed on drop
     dir: PathBuf,
 }
 
 impl TempState {
+    /// A state on a new folder named after `name`.
     pub fn new(name: &str) -> TempState {
         let ts = TestServer::new(name);
         TempState { st: ts.st.clone(), dir: ts.dir.clone() }

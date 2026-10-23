@@ -77,6 +77,7 @@ fn target_of(user: Option<&Row>) -> Option<&'static str> {
     (mode != Mode::Off).then_some(target)
 }
 
+/// Stamp covers and translations into an answer in place; a panic leaves it as far as it got.
 fn apply(st: &AppState, covers: bool, target: Option<&'static str>, v: &mut Value) {
     // a panic in a stamp leaves the answer as far as it got, as the middlewares sent the body unchanged
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

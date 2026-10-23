@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Instant;
 
+/// The stats, diagnostics, auto-download and scheduled task routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/stats/me", get(me))
@@ -57,6 +58,7 @@ fn ranking(st: &AppState) -> Vec<Row> {
     rows
 }
 
+/// Every user's request counts for the leaderboard, worked out now.
 fn ranking_now(st: &AppState) -> Vec<Row> {
     st.db.query("SELECT u.id, u.username,
         (SELECT COUNT(*) FROM requests r WHERE r.user_id=u.id AND r.parent_id IS NULL) requests,
@@ -68,6 +70,7 @@ fn ranking_now(st: &AppState) -> Vec<Row> {
         FROM users u WHERE u.disabled=0", p![]).unwrap_or_default()
 }
 
+/// Seconds as "m:ss", or "h:mm:ss" from an hour.
 fn dur(s: f64) -> String {
     let s = s as i64;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
@@ -76,6 +79,7 @@ fn dur(s: f64) -> String {
 /// Seconds the library totals and facts are reused for.
 const STATS_TTL: u64 = 60;
 
+/// The library facts, cached for [`STATS_TTL`].
 fn cached_facts(st: &AppState) -> Vec<Value> {
     if let Some(Value::Array(v)) = st.cache_get("stats:facts") {
         return v;
@@ -85,6 +89,7 @@ fn cached_facts(st: &AppState) -> Vec<Value> {
     v
 }
 
+/// Facts about the library: its size, its length, its biggest artists and the like.
 fn facts(st: &AppState) -> Vec<Value> {
     let one = |sql: &str| st.db.one(sql, p![]).ok().flatten();
     let Some(lib) = one("SELECT COUNT(*) n, COALESCE(SUM(duration),0) d, COALESCE(SUM(size),0) s FROM tracks").filter(|l| l.i("n") > 0) else { return vec![] };
@@ -174,6 +179,7 @@ async fn me(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>>
     }).await
 }
 
+/// GET /api/stats/leaderboard: the users ranked by requests and more.
 async fn leaderboard(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let users = ranking(st);
@@ -210,6 +216,7 @@ async fn leaderboard(State(st): State<AppState>, User(u): User) -> ApiResult<Jso
 
 // ---- diagnostics --------------------------------------------------------------------------------
 
+/// `text` with every secret setting's value replaced.
 fn redact(st: &AppState, text: &str) -> String {
     let mut t = text.to_string();
     for (k, d) in st.cfg.defs.iter() {
@@ -223,6 +230,7 @@ fn redact(st: &AppState, text: &str) -> String {
     t
 }
 
+/// Check a service with a GET: whether it answered with an `ok` status, how fast, and the redacted request.
 async fn http_check(st: &AppState, name: &str, url: String, headers: Vec<(&str, String)>, ok: &[u16]) -> Value {
     let mut out = json!({ "name": name, "kind": "service", "request": format!("GET {}", redact(st, &url)) });
     let t0 = Instant::now();
@@ -249,6 +257,7 @@ async fn http_check(st: &AppState, name: &str, url: String, headers: Vec<(&str, 
     out
 }
 
+/// Check a folder: set, there, a folder and (with `write`) writable.
 fn path_check(label: &str, path: &str, write: bool) -> Value {
     let out = |ok: bool, d: String| json!({ "name": label, "kind": "path", "request": path, "ok": ok, "detail": d });
     if path.is_empty() {
@@ -295,6 +304,7 @@ async fn tool(st: &AppState, name: &str, cmd: &str, arg: &'static str) -> Value 
     json!({ "name": name, "kind": "tool", "request": format!("{cmd} {arg}"), "ok": ok, "detail": d })
 }
 
+/// GET /api/system/diagnostics: every service and folder checked at once (admins).
 async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let g = |k: &str| st.cfg.str(k).trim_end_matches('/').to_string();
     let mbu = if g("musicbrainz_url").is_empty() { "https://musicbrainz.org".into() } else { g("musicbrainz_url") };
@@ -423,15 +433,18 @@ fn cover_check(st: &AppState) -> Value {
     json!({ "name": "Cover thumbnails", "kind": "path", "request": "covers/thumbs", "ok": true, "detail": detail, "done": done, "total": total, "running": running })
 }
 
+/// Whether torrents can be fetched: the indexers on and a ready torrent client.
 fn torznab_on(st: &AppState) -> bool {
     st.cfg.bool("torznab_enabled") && Client::torrent(st).ready(st)
 }
 
 // ---- auto-download (admin) ----------------------------------------------------------------------
 
+/// The settings the auto-download page may change.
 const AUTO_KEYS: [&str; 11] = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first",
     "upgrade_lossy", "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order", "discover_auto_count", "discover_catalog_merge"];
 
+/// GET /api/admin/autodownload: the auto-download settings and what they did.
 async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let mut stats = st.db.one("SELECT
         SUM(CASE WHEN detail LIKE '%\"auto\": true%' AND status IN ('queued','searching','downloading','monitoring','importing','waiting') THEN 1 ELSE 0 END) auto_active,
@@ -450,13 +463,17 @@ async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     Ok(Json(json!({ "settings": settings, "users": users, "stats": stats })))
 }
 
+/// `PUT /api/admin/autodownload` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct AutoBody {
+    /// settings to change (only [`AUTO_KEYS`])
     settings: serde_json::Map<String, Value>,
+    /// auto-download on or off per user id
     users: serde_json::Map<String, Value>,
 }
 
+/// PUT /api/admin/autodownload: change the auto-download settings and users.
 async fn put_auto(State(st): State<AppState>, a: Admin, Json(b): Json<AutoBody>) -> ApiResult<Json<Value>> {
     let keep: serde_json::Map<String, Value> = b.settings.into_iter().filter(|(k, _)| AUTO_KEYS.contains(&k.as_str())).collect();
     st.cfg.set_many(&Value::Object(keep));
@@ -466,10 +483,12 @@ async fn put_auto(State(st): State<AppState>, a: Admin, Json(b): Json<AutoBody>)
     get_auto(State(st), a).await
 }
 
+/// POST /api/admin/autodownload/upgrade-now: queue up to 50 lossy upgrades now.
 async fn upgrade_now(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "queued": encore_requests::upkeep::queue_lossy_upgrades(&st, 50).map_err(|e| err(500, e.to_string()))? })))
 }
 
+/// POST /api/admin/autodownload/run-now: sync the followed artists and likes now.
 async fn run_sync_now(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     tokio::spawn(encore_sync::sync_all(st));
     Ok(Json(json!({ "ok": true })))
@@ -477,17 +496,22 @@ async fn run_sync_now(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<
 
 // ---- scheduled tasks ----------------------------------------------------------------------------
 
+/// GET /api/admin/tasks: the scheduled tasks.
 async fn tasks(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "tasks": scheduler::listing(&st), "cleanup_days": st.cfg.get("task_cleanup_days") })))
 }
 
+/// `PATCH /api/admin/tasks/{key}` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct TaskPatch {
+    /// switch it on or off
     enabled: Option<bool>,
+    /// how often it runs (minutes)
     minutes: Option<i64>,
 }
 
+/// PATCH /api/admin/tasks/{key}: change a scheduled task.
 async fn patch_task(State(st): State<AppState>, Admin(_): Admin, Path(key): Path<String>, Json(b): Json<TaskPatch>) -> ApiResult<Json<Value>> {
     if !encore_jobs::scheduler::TASKS.iter().any(|t| t.0 == key) {
         return Err(err(404, "No such task"));
@@ -496,6 +520,7 @@ async fn patch_task(State(st): State<AppState>, Admin(_): Admin, Path(key): Path
     Ok(Json(scheduler::listing(&st).into_iter().find(|t| t["key"] == key.as_str()).unwrap_or_default()))
 }
 
+/// POST /api/admin/tasks/{key}/run: run a scheduled task now.
 async fn run_task(State(st): State<AppState>, Admin(_): Admin, Path(key): Path<String>) -> ApiResult<Json<Value>> {
     if !encore_jobs::scheduler::TASKS.iter().any(|t| t.0 == key) {
         return Err(err(404, "No such task"));

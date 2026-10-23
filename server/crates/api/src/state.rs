@@ -12,18 +12,26 @@ use std::time::Duration;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The server state: the database, the settings, the HTTP clients and every crate's services. Clones share it.
 #[derive(Clone)]
 pub struct AppState {
+    /// the database
     pub db: Db,
+    /// the settings
     pub cfg: Config,
+    /// the HTTP client
     pub http: reqwest::Client,
     /// the client that leaves redirects to the caller (an indexer's .torrent link that redirects to a magnet)
     pub http_no_redirects: reqwest::Client,
     /// where Tidal, Qobuz and YouTube Music are (the real hosts; a test server points them at stand-ins)
     pub urls: Arc<encore_http::Urls>,
+    /// rate limits for sign-ins and other abuse-prone actions
     pub limits: Arc<RateLimiter>,
+    /// the web app's files
     pub static_dir: PathBuf,
+    /// the library's services (scans, covers, translation …)
     pub library: Library,
+    /// the MusicBrainz client
     pub mb: Mb,
     /// request pacing of the rate-limited services (Deezer, iTunes, AcoustID)
     pub pace: encore_http::Pace,
@@ -159,6 +167,7 @@ impl AppState {
         Ok(st)
     }
 
+    /// The config folder.
     pub fn data_dir(&self) -> &std::path::Path {
         &self.db.data_dir
     }
@@ -179,6 +188,7 @@ impl AppState {
     pub fn cache_get(&self, key: &str) -> Option<Value> {
         self.cache.get(key)
     }
+    /// Cache `v` under `key` for `secs` seconds.
     pub fn cache_put(&self, key: &str, v: Value, secs: u64) {
         let bytes = key.len() + json_bytes(&v);
         self.cache.insert(key, v, bytes, Some(Duration::from_secs(secs)), 0);

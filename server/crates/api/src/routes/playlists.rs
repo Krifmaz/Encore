@@ -21,6 +21,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The playlist and connection routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/playlists", get(list).post(create))
@@ -67,6 +68,7 @@ fn editable(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
     Ok(pl)
 }
 
+/// An error as a 400 with its words.
 fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
     err(400, e.to_string())
 }
@@ -151,18 +153,27 @@ async fn unshare(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/playlists/preview` and `/import` body: a link or pasted text.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ImportBody {
+    /// a playlist link
     url: Option<String>,
+    /// pasted text, one song per line (wins over `url`)
     text: Option<String>,
+    /// the new playlist's name (default: the source's)
     name: Option<String>,
+    /// keep it in step with the source
     follow: bool,
+    /// add the songs to this playlist instead of making one
     into: Option<i64>,
+    /// request the songs the library doesn't have
     request_missing: bool,
+    /// for those requests: "song" or "album"
     album_mode: Option<String>,
 }
 
+/// The source's songs: from the pasted text, else from the link.
 async fn fetch_source(st: &AppState, b: &ImportBody, uid: i64) -> ApiResult<Value> {
     match b.text.as_deref().filter(|t| !t.trim().is_empty()) {
         Some(t) => links::parse_text(t).map_err(bad),
@@ -170,6 +181,7 @@ async fn fetch_source(st: &AppState, b: &ImportBody, uid: i64) -> ApiResult<Valu
     }
 }
 
+/// POST /api/playlists/preview: the source's songs matched against the library, without saving anything.
 async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
     let data = fetch_source(&st, &b, u.i("id")).await?;
     // matching every song against the library (its index is kept while the songs are unchanged) on the
@@ -184,6 +196,7 @@ async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<Import
     }).await
 }
 
+/// Import into a new playlist or `into` (checked editable before the link is fetched).
 async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value> {
     // adding to a playlist that can't take songs is refused before the link is fetched
     if let Some(pid) = b.into {
@@ -195,6 +208,7 @@ async fn import_inner(st: &AppState, u: &Row, b: ImportBody) -> ApiResult<Value>
     st.blocking(move |st| import_now(st, &u, b, data)).await
 }
 
+/// Make or fill the playlist from the source's songs, and request the missing ones when asked.
 fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<Value> {
     let tracks = data["tracks"].as_array().cloned().unwrap_or_default();
     let source = data["source"].as_str().unwrap_or("web").to_string();
@@ -220,20 +234,28 @@ fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<V
     Ok(res)
 }
 
+/// POST /api/playlists/import: import a link or pasted text as a playlist.
 async fn import(State(st): State<AppState>, User(u): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
     Ok(Json(import_inner(&st, &u, b).await?))
 }
 
+/// A playlist's fields to set (create or `PATCH`).
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Patch {
+    /// the name
     name: Option<String>,
+    /// the description
     description: Option<String>,
+    /// keep it in step with its source
     follow: Option<bool>,
+    /// the services it is synced to
     sync_targets: Option<Vec<String>>,
+    /// let other accounts on this server add songs
     collaborative: Option<bool>,
 }
 
+/// POST /api/playlists: make a playlist ("New playlist" unless named).
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
     let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or("New playlist".into());
     st.blocking(move |st| {
@@ -277,6 +299,7 @@ async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
     }).await
 }
 
+/// PATCH /api/playlists/{pid}: change a playlist.
 async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
     let pl = own_writable(&st, pid, &u)?;
     let mut sets: Vec<(&str, Value)> = vec![];
@@ -343,6 +366,7 @@ async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
     }).await
 }
 
+/// POST /api/playlists/{pid}/rematch: match the playlist's missing songs against the library again.
 async fn rematch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         editable(st, pid, &u)?;
@@ -350,6 +374,7 @@ async fn rematch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
     }).await
 }
 
+/// POST /api/playlists/{pid}/request-missing: request the songs the library doesn't have.
 async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
     let mode = body.and_then(|b| b["album_mode"].as_str().map(String::from));
     // every song of the playlist is looked up: on the blocking pool
@@ -361,6 +386,7 @@ async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): P
     }).await
 }
 
+/// POST /api/playlists/{pid}/refresh: read the playlist's source again.
 async fn refresh(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     let pl = own_writable(&st, pid, &u)?;
     if pl.s("source_url").is_empty() {
@@ -370,11 +396,14 @@ async fn refresh(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
     Ok(Json(json!({ "added": added, "duplicates_skipped": dupes })))
 }
 
+/// `POST /api/playlists/{pid}/tracks` body.
 #[derive(Deserialize)]
 struct AddTracks {
+    /// the songs to add
     track_ids: Vec<i64>,
 }
 
+/// POST /api/playlists/{pid}/tracks: add songs to a playlist.
 async fn add_tracks(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<AddTracks>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         editable(st, pid, &u)?;
@@ -383,6 +412,7 @@ async fn add_tracks(State(st): State<AppState>, User(u): User, Path(pid): Path<i
     }).await
 }
 
+/// DELETE /api/playlists/{pid}/items/{iid}: take a song off a playlist.
 async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>) -> ApiResult<Json<Value>> {
     editable(&st, pid, &u)?;
     st.db.execute("DELETE FROM playlist_items WHERE id=? AND playlist_id=?", p![iid, pid])?;
@@ -390,6 +420,7 @@ async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid))
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/playlists/{pid}/move: move a song (`{item_id, to}`) to another place.
 async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     editable(&st, pid, &u)?;
     let mut ids: Vec<i64> = playlists::items(&st, pid).iter().map(|r| r.i("id")).collect();
@@ -404,11 +435,15 @@ async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i6
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/playlists/merge` body.
 #[derive(Deserialize)]
 struct MergeBody {
+    /// the playlists to merge
     ids: Vec<i64>,
+    /// the new playlist's name
     #[serde(default)]
     name: String,
+    /// delete the merged playlists afterwards
     #[serde(default)]
     delete_sources: bool,
     /// Merge into…: add the songs to this playlist (Liked Songs too) instead of making a new one.
@@ -416,6 +451,7 @@ struct MergeBody {
     into: Option<i64>,
 }
 
+/// POST /api/playlists/merge: merge playlists into a new one (or into an existing one).
 async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBody>) -> ApiResult<Json<Value>> {
     let into = b.into.filter(|i| *i != 0);
     let sources = b.ids.iter().filter(|i| Some(**i) != into).count();
@@ -455,6 +491,7 @@ async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBod
     }).await
 }
 
+/// POST /api/playlists/{pid}/sync: sync one playlist to the user's services now.
 async fn sync_me(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     own_writable(&st, pid, &u)?;
     let mut log = vec![];
@@ -463,6 +500,7 @@ async fn sync_me(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>
     Ok(Json(s))
 }
 
+/// POST /api/sync: sync all of the user's playlists and likes now.
 async fn sync_me_all(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let mut log = vec![];
     let mut s = encore_sync::sync_user(&st, u.i("id"), &mut log).await;
@@ -472,6 +510,7 @@ async fn sync_me_all(State(st): State<AppState>, User(u): User) -> ApiResult<Jso
 
 // ---- connections --------------------------------------------------------------------------------
 
+/// GET /api/connections: the user's connected services and which ones the server can connect.
 async fn list_connections(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let have: serde_json::Map<String, Value> = connections::list_for(&st, u.i("id")).iter().map(|c| (c.s("service"), connections::public(c))).collect();
     let has = |k: &str| !st.cfg.str(k).is_empty();
@@ -486,16 +525,23 @@ async fn list_connections(State(st): State<AppState>, User(u): User) -> ApiResul
         "sync": { "running": sync_state["running"], "last": sync_state["last"] }, "base_url": st.cfg.str("base_url") })))
 }
 
+/// `POST /api/connections/{service}` body: what the service signs in with.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ConnectBody {
+    /// the username (Jellyfin, Navidrome …)
     username: Option<String>,
+    /// the password
     password: Option<String>,
+    /// a token (ListenBrainz …)
     token: Option<String>,
+    /// a profile link or id (Deezer)
     profile: Option<String>,
+    /// request headers copied from the browser (YouTube Music)
     headers: Option<String>,
 }
 
+/// POST /api/connections/{service}: connect a service (or start its sign-in).
 async fn connect(State(st): State<AppState>, User(u): User, headers: HeaderMap, Path(service): Path<String>, Json(b): Json<ConnectBody>) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let s = |o: &Option<String>| o.clone().unwrap_or_default().trim().to_string();
@@ -521,21 +567,28 @@ async fn connect(State(st): State<AppState>, User(u): User, headers: HeaderMap, 
     res.map(Json).map_err(bad)
 }
 
+/// POST /api/connections/plex/check: whether the Plex PIN sign-in has finished.
 async fn plex_check(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let pin = b["pin_id"].as_i64().or(b["pin_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
     connections::plex_pin_check(&st, u.i("id"), pin).await.map(Json).map_err(bad)
 }
 
+/// POST /api/connections/ytmusic/check: whether the YouTube Music device sign-in has finished.
 async fn ytmusic_check(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     connections::ytmusic_oauth_check(&st, u.i("id"), b["device_code"].as_str().unwrap_or("")).await.map(Json).map_err(bad)
 }
 
+/// `GET /api/connections/{service}/callback` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CallbackQ {
+    /// the authorization code (Spotify, Tidal)
     code: String,
+    /// the token (Last.fm)
     token: String,
+    /// the state the sign-in was started with
     state: String,
+    /// the service's error, when the sign-in failed
     error: String,
 }
 
@@ -559,14 +612,19 @@ async fn callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(serv
     }).await
 }
 
+/// `PATCH /api/connections/{service}` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ConnPatch {
+    /// scrobble plays to it
     scrobble: Option<bool>,
+    /// sync likes with it
     sync_likes: Option<bool>,
+    /// sync playlists with it
     sync_playlists: Option<bool>,
 }
 
+/// PATCH /api/connections/{service}: change what is synced with a service.
 async fn patch_connection(State(st): State<AppState>, User(u): User, Path(service): Path<String>, Json(b): Json<ConnPatch>) -> ApiResult<Json<Value>> {
     let c = connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
     if let Some(v) = b.sync_likes {
@@ -583,6 +641,7 @@ async fn patch_connection(State(st): State<AppState>, User(u): User, Path(servic
     Ok(Json(json!({ "ok": true })))
 }
 
+/// DELETE /api/connections/{service}: disconnect a service and forget its sync state.
 async fn disconnect(State(st): State<AppState>, User(u): User, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     if let Some(c) = connections::get(&st, u.i("id"), &service) {
         st.db.execute("DELETE FROM sync_state WHERE connection_id=?", p![c.i("id")])?;
@@ -591,11 +650,13 @@ async fn disconnect(State(st): State<AppState>, User(u): User, Path(service): Pa
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/connections/{service}/playlists: the playlists on the connected service.
 async fn remote_playlists(State(st): State<AppState>, User(u): User, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     let c = connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
     Adapter::new(&st, c).playlists().await.map(|v| Json(json!(v))).map_err(|e| err(502, e.to_string().chars().take(300).collect::<String>()))
 }
 
+/// POST /api/connections/{service}/playlists/{rid}/import: import one of the service's playlists.
 async fn import_remote(State(st): State<AppState>, User(u): User, Path((service, rid)): Path<(String, String)>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
     let name = b["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("Imported playlist").to_string();

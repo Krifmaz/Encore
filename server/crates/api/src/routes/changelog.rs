@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
+/// The release notes the build script embeds ([`generated::NOTES`]).
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/changelog_gen.rs"));
 }
@@ -27,6 +28,7 @@ pub const POPUP_RELEASES: usize = 4;
 /// Highlights per release in the popup.
 pub const HIGHLIGHTS: usize = 6;
 
+/// The What's new routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/changelog", get(all))
@@ -39,20 +41,36 @@ pub fn router() -> Router<AppState> {
 #[serde(tag = "k", rename_all = "lowercase")]
 pub enum Block {
     /// `### Library`
-    H { text: String },
-    P { text: String },
+    H {
+        /// the heading's text
+        text: String,
+    },
+    /// A paragraph.
+    P {
+        /// the paragraph's text
+        text: String,
+    },
     /// A bullet; `lead` is its bold start ("Delete albums by type."), when it has one.
     Li {
+        /// the bold start, or ""
         #[serde(skip_serializing_if = "String::is_empty")]
         lead: String,
+        /// the rest of the bullet
         text: String,
     },
     /// A table row; `head` for the first.
-    Row { cells: Vec<String>, head: bool },
+    Row {
+        /// the cells' texts
+        cells: Vec<String>,
+        /// the header row
+        head: bool,
+    },
 }
 
+/// One release's notes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Release {
+    /// its version ("0.36.0")
     pub version: String,
     /// "Encore 0.36.0", or what follows the version in the heading ("Encore 2 (Rust) is here").
     pub title: String,
@@ -60,6 +78,7 @@ pub struct Release {
     pub summary: String,
     /// What the popup lists: the bold leads of the bullets, else the first bullets.
     pub highlights: Vec<String>,
+    /// the notes, part by part
     pub blocks: Vec<Block>,
 }
 
@@ -138,6 +157,7 @@ fn lead(text: &str) -> (String, String) {
     (String::new(), plain(text))
 }
 
+/// `s` cut to about `max` characters, ending on a sentence or a word, with "…".
 fn short(s: &str, max: usize) -> String {
     if s.chars().count() <= max { return s.to_string(); }
     let cut: String = s.chars().take(max).collect();
@@ -210,6 +230,7 @@ pub fn parse(ver: &str, md: &str) -> Release {
     Release { version: ver.to_string(), title, summary, highlights, blocks }
 }
 
+/// A user's preferences.
 fn prefs(u: &encore_db::Row) -> Value {
     serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}))
 }
@@ -219,8 +240,10 @@ fn popup_on(prefs: &Value) -> bool {
     prefs.get("whats_new_popup").and_then(Value::as_bool).unwrap_or(true)
 }
 
+/// `GET /api/changelog` query.
 #[derive(Deserialize)]
 struct AllQuery {
+    /// how many releases (default: all)
     #[serde(default)]
     limit: Option<usize>,
 }

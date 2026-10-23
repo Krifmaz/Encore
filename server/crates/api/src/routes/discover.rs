@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// The Discover routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/discover/search", get(search))
@@ -27,10 +28,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/discover/new-releases", get(new_releases))
 }
 
+/// A MusicBrainz error as a 502.
 fn mb_err(e: anyhow::Error) -> ApiError {
     err(502, format!("MusicBrainz error: {e}"))
 }
 
+/// The request status of each MusicBrainz id that has a request.
 pub(crate) fn req_status(st: &AppState, ids: &[String]) -> HashMap<String, String> {
     req_info(st, ids).into_iter().map(|(k, (s, _))| (k, s)).collect()
 }
@@ -62,16 +65,20 @@ pub(crate) fn annotate_albums(st: &AppState, items: &mut [Value]) {
     }
 }
 
+/// `GET /api/discover/search` query.
 #[derive(Deserialize)]
 struct SearchQ {
+    /// the search text
     q: String,
     #[serde(default = "all")]
     r#type: String,
 }
+/// The default search type: everything.
 fn all() -> String {
     "all".into()
 }
 
+/// Songs Deezer finds for `q`, as (artist, title).
 async fn deezer_guesses(st: &AppState, q: &str) -> Vec<(String, String)> {
     let Ok(r) = encore_http::deezer::search(st, "track", q, 6).send().await else { return vec![] };
     let v: Value = r.json().await.unwrap_or_default();
@@ -79,6 +86,7 @@ async fn deezer_guesses(st: &AppState, q: &str) -> Vec<(String, String)> {
         .filter_map(|t| Some((t["title"].as_str()?.to_string(), t["artist"]["name"].as_str().unwrap_or("").to_string()))).collect()
 }
 
+/// Songs whose lyrics hold `words` (LRCLIB), as (artist, title), each once.
 async fn lyric_guesses(st: &AppState, words: &str) -> Vec<(String, String)> {
     let Ok(r) = encore_http::lrclib::search(st, words).send().await else { return vec![] };
     let v: Value = r.json().await.unwrap_or_default();
@@ -105,12 +113,14 @@ fn discover_plan(q: &str, p: &nlsearch::Parsed) -> Option<(String, Option<String
     Some((dq, alt))
 }
 
+/// GET /api/discover/search?q=&type=: artists, albums and songs, enriched.
 async fn search(State(st): State<AppState>, User(viewer): User, Query(sq): Query<SearchQ>) -> ApiResult<Json<Value>> {
     let mut v = search_answer(State(st.clone()), User(viewer.clone()), Query(sq)).await?;
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
 }
 
+/// The search answer before enrichment.
 async fn search_answer(State(st): State<AppState>, User(_): User, Query(sq): Query<SearchQ>) -> ApiResult<Value> {
     let q = sq.q.trim();
     if q.chars().count() < 2 {
@@ -242,10 +252,13 @@ async fn artist(State(st): State<AppState>, User(u): User, Path(mbid): Path<Stri
     }).await
 }
 
+/// An artist name query (`limit` for new releases).
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct NameQ {
+    /// the artist's name
     name: String,
+    /// how many
     limit: Option<usize>,
 }
 
@@ -265,6 +278,7 @@ async fn artist_library_tracks(State(st): State<AppState>, User(u): User, Path(m
     }).await
 }
 
+/// GET /api/discover/artist-lookup?name=: the MusicBrainz artist for a library artist name.
 async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
     let name = q.name.trim();
     if name.is_empty() {
@@ -282,9 +296,12 @@ async fn artist_lookup(State(st): State<AppState>, User(_): User, Query(q): Quer
     Ok(Json(json!({ "mbid": id })))
 }
 
+/// `GET /api/discover/album-lookup` query.
 #[derive(serde::Deserialize)]
 struct AlbumQ {
+    /// the album's artist
     artist: String,
+    /// the album's title
     album: String,
 }
 
@@ -353,6 +370,7 @@ pub(crate) fn pick_artist(hits: &[Value], name: &str) -> Option<String> {
         .map(|h| h["id"].as_str().unwrap_or("").to_string())
 }
 
+/// GET /api/discover/album/{rgid}: a MusicBrainz release group with its tracks, the library copies and the requests.
 async fn album(State(st): State<AppState>, User(viewer): User, Path(rgid): Path<String>) -> ApiResult<Json<Value>> {
     if rgid.starts_with("ext-") {
         return Err(err(404, "This album is only on Deezer / Apple Music, not MusicBrainz – update the app to open it"));
@@ -453,6 +471,7 @@ fn name_key(s: &str) -> String {
 /// fresh one is made in the background (60 Deezer lookups take seconds on a cold cache).
 const NEW_RELEASES_FRESH: u64 = 15 * 60;
 
+/// GET /api/discover/new-releases?limit=: new albums by the library's biggest artists (24 by default, at most 60).
 async fn new_releases(State(st): State<AppState>, User(viewer): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
     let limit = q.limit.unwrap_or(24).min(60);
     let mut v = new_releases_answer(&st, limit).await?;
@@ -471,6 +490,7 @@ pub async fn warm_new_releases(st: &AppState) {
     }
 }
 
+/// New releases from the cache: fresh for 15 minutes, then served while they are worked out again.
 async fn new_releases_answer(st: &AppState, limit: usize) -> ApiResult<Value> {
     let (fresh_key, keep_key) = (format!("new-releases:fresh:{limit}"), format!("new-releases:{limit}"));
     if let Some(v) = st.cache_get(&keep_key) {
@@ -497,6 +517,7 @@ async fn new_releases_answer(st: &AppState, limit: usize) -> ApiResult<Value> {
     Ok(v)
 }
 
+/// Work out the new releases: the latest albums of the library's 60 biggest artists.
 async fn compute_new_releases(st: &AppState, limit: usize) -> ApiResult<Value> {
     // the library's 60 biggest artists: a GROUP BY over every song, on a read connection
     let names: Vec<String> = st.db.read(|c| c.query(
@@ -543,9 +564,11 @@ async fn compute_new_releases(st: &AppState, limit: usize) -> ApiResult<Value> {
     Ok(json!({ "releases": res }))
 }
 
+/// Today as YYYY-MM-DD.
 fn chrono_today() -> String {
     encore_core::time::ymd(encore_db::now())
 }
+/// The day `n` days ago as YYYY-MM-DD.
 fn days_ago(n: i64) -> String {
     encore_core::time::ymd(encore_db::now() - (n * 86400) as f64)
 }

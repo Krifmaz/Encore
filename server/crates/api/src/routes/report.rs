@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 // The report itself (blocks, the trash, the replacement) lives in encore_requests::report.
 use encore_requests::report::*;
 
+/// The report routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/report", post(report))
@@ -29,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/quality/tracks/{id}/check", post(check_track))
 }
 
+/// POST /api/report: file a report on songs or an album.
 async fn report(State(st): State<AppState>, User(u): User, Json(b): Json<ReportBody>) -> ApiResult<Json<Value>> {
     Ok(Json(file_report(&st, &u, &b)?))
 }
@@ -57,11 +59,13 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
     Ok(Json(retry_report(&st, &u, &r)?))
 }
 
+/// POST /api/reports/{id}/dismiss: dismiss a report (admins).
 async fn dismiss(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     dismiss_report(&st, id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// GET /api/blocks: the source blocks reports made, newest first (admins, at most 500).
 async fn blocks(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResult<Json<Value>> {
     let rows = st.db.query("SELECT b.*, u.username, r.reason, r.artist, r.title, r.kind report_kind FROM source_block b LEFT JOIN users u ON u.id=b.user_id
                             LEFT JOIN reports r ON r.id=b.report_id ORDER BY b.id DESC LIMIT 500", p![])?;

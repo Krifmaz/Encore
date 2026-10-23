@@ -14,6 +14,7 @@ use encore_library::catalog::*;
 use encore_db::{p, RowExt};
 use serde_json::{json, Value};
 
+/// The Discover catalog routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/discover/artist/{mbid}/catalog", get(artist_catalog))
@@ -66,12 +67,15 @@ pub(crate) fn annotate(st: &AppState, items: &mut [Value]) {
     }
 }
 
+/// GET /api/discover/artist/{mbid}/catalog: the artist's releases on other services that MusicBrainz lacks, enriched.
 async fn artist_catalog(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let mut v = artist_catalog_answer(State(st.clone()), User(viewer.clone()), Path(mbid)).await?;
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
 }
 
+/// The catalog answer before enrichment: the releases found elsewhere, marked with library copies and requests,
+/// without those already in MusicBrainz.
 async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(mbid): Path<String>) -> ApiResult<Value> {
     if !st.cfg.bool("discover_catalog_merge") {
         return Ok(json!({ "enabled": false, "releases": [] }));

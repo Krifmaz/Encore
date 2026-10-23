@@ -37,19 +37,30 @@ use std::sync::{Arc, Weak};
 /// What a builtin plugin is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
+    /// yt-dlp
     Ytdlp,
+    /// streamrip
     Streamrip,
+    /// zotify (Spotify)
     Zotify,
+    /// gamdl (Apple Music)
     Gamdl,
+    /// slskd (Soulseek)
     Slskd,
+    /// the torrent and usenet indexers (Prowlarr)
     Torznab,
+    /// a download client
     Client(Client),
+    /// Cadenza, the processing engine
     Cadenza,
+    /// the lyrics and title translator
     Translator,
+    /// a media server connection (Jellyfin, Plex, Navidrome)
     Connection,
 }
 
 impl Kind {
+    /// The kind of a catalog plugin id; `None` for one Encore has no adapter for.
     fn of(id: &str) -> Option<Kind> {
         Some(match id {
             "ytdlp" => Kind::Ytdlp,
@@ -68,8 +79,11 @@ impl Kind {
 
 /// One builtin plugin.
 pub struct Builtin {
+    /// its manifest
     m: Manifest,
+    /// which builtin it is
     kind: Kind,
+    /// the server, while it runs
     st: Weak<AppState>,
 }
 
@@ -85,6 +99,7 @@ pub fn register(st: &AppState) -> Arc<AppState> {
     anchor
 }
 
+/// An error as a plugin failure: NotFound when something isn't installed, else Internal.
 fn fail(e: anyhow::Error) -> Failure {
     let code = if e.to_string().contains("not installed") { Code::NotFound } else { Code::Internal };
     Failure::new(code, encore_core::fsx::explain(&e))
@@ -96,11 +111,13 @@ fn tested(v: Value) -> Result<String, Failure> {
     if v["ok"].as_bool().unwrap_or(false) { Ok(m) } else { Err(Failure::internal(if m.is_empty() { "The test failed".into() } else { m })) }
 }
 
+/// A status answer.
 fn ready(message: impl Into<String>, signed_in: Option<bool>) -> Result<Status, Failure> {
     Ok(Status { message: message.into(), signed_in })
 }
 
 impl Builtin {
+    /// The server's state; an error once it is stopping.
     fn state(&self) -> Result<Arc<AppState>, Failure> {
         self.st.upgrade().ok_or_else(|| Failure::internal("Encore is stopping"))
     }
@@ -117,6 +134,7 @@ impl Builtin {
         }
     }
 
+    /// The status line of this builtin's card.
     async fn status_of(&self, st: &AppState) -> Result<Status, Failure> {
         match self.kind {
             Kind::Zotify => zotify::status(st).await,
@@ -214,6 +232,7 @@ impl Builtin {
         }
     }
 
+    /// This builtin's Test: what it checked, in words.
     async fn test_of(&self, st: &AppState) -> Result<String, Failure> {
         match self.kind {
             Kind::Zotify => zotify::test(st).await,
@@ -295,6 +314,7 @@ impl Builtin {
         }
     }
 
+    /// Download a request's link with this builtin into `folder`.
     async fn download_of(&self, st: &AppState, call: &Call, request: &Value, folder: &Path) -> Result<Downloaded, Failure> {
         let url = request["payload"]["url"].as_str().or(request["url"].as_str()).unwrap_or("").to_string();
         let entries = |files: Vec<std::path::PathBuf>| -> Vec<FileEntry> {

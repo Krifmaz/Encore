@@ -23,12 +23,17 @@ use encore_library::lists::TRACK_COLS;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The artist songs query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub(super) struct ArtistSongsQ {
+    /// the artist's name (`?name=`, else the path segment)
     name: Option<String>,
+    /// the artist's MBID
     mbid: String,
+    /// where the page starts
     offset: i64,
+    /// the page size
     limit: Option<i64>,
 }
 

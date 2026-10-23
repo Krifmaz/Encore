@@ -77,10 +77,13 @@ pub fn annotate(st: &AppState, out: &mut Value) {
     out["top"] = match item { Some(it) => json!({ "kind": kind, "item": it }), None => Value::Null };
 }
 
+/// `GET /api/library/search` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct LibSearchQ {
+    /// the search text
     q: String,
+    /// how many per kind
     limit: Option<usize>,
 }
 

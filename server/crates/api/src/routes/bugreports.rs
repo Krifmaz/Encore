@@ -41,15 +41,20 @@ pub const MAX_FILE: usize = 8 * 1024 * 1024;
 pub const MAX_FILES: usize = 6;
 /// The whole upload: the files plus the text.
 const UPLOAD_LIMIT: usize = MAX_FILES * MAX_FILE + 2 * 1024 * 1024;
+/// Characters of a report's title.
 const MAX_TITLE: usize = 200;
+/// Characters of a report's or a reply's text.
 const MAX_BODY: usize = 20_000;
+/// Characters of an attached file's name.
 const MAX_NAME: usize = 120;
 /// What an image may decode to: 128 MiB holds a 5K screenshot (5120×2880 RGBA8 is 56 MB, RGBA16 twice that), and a
 /// 400 KB PNG claiming 11000×11000 is refused instead of taking half a gigabyte.
 const MAX_PIXEL_BYTES: u64 = 128 * 1024 * 1024;
+/// The most pixels an image may have a side.
 const MAX_SIDE: u32 = 8192;
 /// Reports a user may file, and replies they may send, in an hour.
 const REPORTS_PER_HOUR: usize = 20;
+/// Replies a user may send in an hour.
 const REPLIES_PER_HOUR: usize = 60;
 /// Bytes of files one user's reports may hold in all (admins are not held back).
 const MAX_USER_BYTES: i64 = 500 * 1024 * 1024;
@@ -58,8 +63,10 @@ const MAX_EXPORT_BYTES: i64 = 512 * 1024 * 1024;
 
 /// `crash`: a crash log the phone app sends (This device → App crashes), the Crash logs section of the list.
 pub const KINDS: [&str; 4] = ["bug", "not_bug", "howto", "crash"];
+/// A report's statuses.
 pub const STATUSES: [&str; 5] = ["new", "looking", "fixed", "wontfix", "answered"];
 
+/// The bug report routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/bug-reports", get(list).post(create).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
@@ -71,6 +78,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/bug-reports/{id}/files/{fid}", get(file))
 }
 
+/// Create the bug report tables when they aren't there.
 fn ensure_table(st: &AppState) -> ApiResult<()> {
     // created on first use: an older server simply never reads these
     st.db.execute_batch(
@@ -116,6 +124,7 @@ fn ensure_table(st: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+/// Where the reports' files are kept.
 fn reports_dir(st: &AppState) -> PathBuf {
     st.data_dir().join("reports")
 }
@@ -162,18 +171,26 @@ fn line(s: &str) -> String {
 
 /// A file taken from the form, checked and ready to be written.
 struct Pending {
+    /// the file's name, made safe
     name: String,
+    /// its type
     mime: &'static str,
+    /// the extension it is saved with
     ext: &'static str,
+    /// its bytes
     data: Vec<u8>,
 }
 
+/// A bug report form: its text fields and its files.
 struct Form {
+    /// the text fields
     fields: HashMap<String, String>,
+    /// the checked files
     files: Vec<Pending>,
 }
 
 impl Form {
+    /// A text field's value; "" when it isn't there.
     fn text(&self, key: &str) -> &str {
         self.fields.get(key).map(|s| s.as_str()).unwrap_or("")
     }
@@ -226,6 +243,7 @@ pub fn check_file(name: &str, data: &[u8]) -> ApiResult<(&'static str, &'static 
     Ok(("text/plain", ext))
 }
 
+/// A form error in words: too big, or the form's own error.
 fn form_error(e: axum::extract::multipart::MultipartError) -> ApiError {
     if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
         err(400, format!("That upload is too big: at most {MAX_FILES} files of {} MB each", MAX_FILE >> 20))
@@ -331,11 +349,15 @@ fn load(st: &AppState, id: i64, u: &Row) -> ApiResult<Row> {
 
 /// A report with its files and its thread.
 struct Full {
+    /// the report's row
     report: Row,
+    /// the files attached to the report itself
     files: Vec<Row>,
+    /// the replies, each with its files
     messages: Vec<(Row, Vec<Row>)>,
 }
 
+/// A report with its files and its replies.
 fn load_full(st: &AppState, report: Row) -> ApiResult<Full> {
     let id = report.i("id");
     let all = st.db.query("SELECT id, message_id, name, mime, size, path FROM bug_report_files WHERE report_id=? ORDER BY id", p![id])?;
@@ -350,15 +372,18 @@ fn load_full(st: &AppState, report: Row) -> ApiResult<Full> {
     Ok(Full { report, files, messages })
 }
 
+/// A file as the API gives it, with its download URL.
 fn file_json(report_id: i64, f: &Row) -> Value {
     json!({ "id": f.i("id"), "name": f.s("name"), "mime": f.s("mime"), "size": f.i("size"), "url": format!("/api/bug-reports/{report_id}/files/{}", f.i("id")) })
 }
 
+/// A reply as the API gives it.
 fn message_json(report_id: i64, m: &Row, files: &[Row]) -> Value {
     json!({ "id": m.i("id"), "username": m.s("username"), "is_admin": m.b("is_admin"), "body": m.s("body"), "created_at": m.f("created_at"),
             "files": files.iter().map(|f| file_json(report_id, f)).collect::<Vec<_>>() })
 }
 
+/// A report as the API gives it, with its files and its thread.
 fn report_json(full: &Full) -> Value {
     let r = &full.report;
     let id = r.i("id");
@@ -373,6 +398,7 @@ fn report_json(full: &Full) -> Value {
     })
 }
 
+/// SQL: when the report's last reply came (0 without one).
 const LAST_MESSAGE: &str = "COALESCE((SELECT MAX(m.created_at) FROM bug_report_messages m WHERE m.report_id=r.id), 0)";
 
 /// The SQL of "this report has something the viewer hasn't seen": for an admin a report nobody looked at
@@ -385,12 +411,17 @@ fn unread_sql(admin: bool) -> String {
     }
 }
 
+/// `GET /api/bug-reports` (and export) query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ListQ {
+    /// only this status
     status: String,
+    /// only this kind
     kind: String,
+    /// a search text
     q: String,
+    /// "1" for the caller's own only (admins)
     mine: String,
     /// export only: `1,2,3`
     ids: String,
@@ -430,6 +461,7 @@ fn filter_sql(q: &ListQ, u: &Row, admin: bool) -> (String, Vec<Value>) {
 
 // ---- handlers ----------------------------------------------------------------------------------
 
+/// POST /api/bug-reports: file a report with up to [`MAX_FILES`] files (20 an hour for non-admins).
 pub async fn create(State(st): State<AppState>, User(u): User, form: Multipart) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let admin = encore_config::perms::is_admin(&u);
@@ -471,6 +503,7 @@ pub async fn create(State(st): State<AppState>, User(u): User, form: Multipart) 
     Ok(Json(json!({ "ok": true, "id": id })))
 }
 
+/// GET /api/bug-reports: the reports the caller may see.
 pub async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let admin = encore_config::perms::is_admin(&u);
@@ -496,6 +529,7 @@ pub async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<Lis
     Ok(Json(v))
 }
 
+/// GET /api/bug-reports/unread: how many reports have something the caller hasn't seen.
 pub async fn unread(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let admin = encore_config::perms::is_admin(&u);
@@ -505,6 +539,7 @@ pub async fn unread(State(st): State<AppState>, User(u): User) -> ApiResult<Json
     Ok(Json(json!({ "count": r.map(|r| r.i("n")).unwrap_or(0) })))
 }
 
+/// GET /api/bug-reports/{id}: a report with its thread; marks it seen.
 pub async fn detail(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let r = load(&st, id, &u)?;
@@ -520,6 +555,7 @@ pub async fn detail(State(st): State<AppState>, User(u): User, Path(id): Path<i6
     Ok(Json(v))
 }
 
+/// POST /api/bug-reports/{id}/messages: reply to a report.
 pub async fn reply(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, form: Multipart) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let r = load(&st, id, &u)?;
@@ -574,12 +610,15 @@ pub async fn reply(State(st): State<AppState>, User(u): User, Path(id): Path<i64
     Ok(Json(json!({ "ok": true, "id": mid })))
 }
 
+/// `POST /api/bug-reports/{id}/status` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct StatusBody {
+    /// one of [`STATUSES`]
     status: String,
 }
 
+/// POST /api/bug-reports/{id}/status: set a report's status (admins).
 pub async fn set_status(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i64>, Json(b): Json<StatusBody>) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let status = b.status.trim();
@@ -592,6 +631,7 @@ pub async fn set_status(State(st): State<AppState>, Admin(u): Admin, Path(id): P
     Ok(Json(json!({ "ok": true })))
 }
 
+/// DELETE /api/bug-reports/{id}: delete a report and its files (admins).
 pub async fn remove(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     ensure_table(&st)?;
     let r = load(&st, id, &u)?;
@@ -610,6 +650,7 @@ fn disposition(inline: bool, name: &str) -> HeaderValue {
     HeaderValue::from_str(&v).unwrap_or(HeaderValue::from_static("attachment"))
 }
 
+/// GET /api/bug-reports/{id}/files/{fid}: an attached file.
 pub async fn file(State(st): State<AppState>, User(u): User, Path((id, fid)): Path<(i64, i64)>) -> ApiResult<Response> {
     ensure_table(&st)?;
     load(&st, id, &u)?;
@@ -736,6 +777,7 @@ fn render_json(reports: &[Full], exported: &str) -> Value {
     json!({ "version": crate::VERSION, "exported": exported, "reports": list })
 }
 
+/// GET /api/bug-reports/export: the matching reports as a zip (or one text file with `format=txt`).
 pub async fn export(State(st): State<AppState>, Admin(u): Admin, Query(q): Query<ListQ>) -> ApiResult<Response> {
     ensure_table(&st)?;
     let (where_, params) = filter_sql(&q, &u, true);

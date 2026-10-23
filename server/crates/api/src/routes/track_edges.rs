@@ -16,6 +16,7 @@ use std::time::Duration;
 pub const SILENCE_DB: i32 = -50;
 /// A quiet stretch shorter than this inside a song is not an edge (only stretches touching the start or the end count anyway).
 const MIN_SILENCE_S: f64 = 0.2;
+/// Create the track_edges cache table when it isn't there.
 fn ensure_table(st: &AppState) -> ApiResult<()> {
     // a cache, not data: created on first use (an older server simply never reads it)
     st.db.execute_batch(
@@ -24,6 +25,7 @@ fn ensure_table(st: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+/// GET /api/library/tracks/{id}/edges: where the song's sound starts and ends (seconds), cached per file.
 pub async fn edges(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     let t = st.db.one("SELECT id, path, duration, mtime, size FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     ensure_table(&st)?;
@@ -125,6 +127,7 @@ fn decoded_end(log: &str) -> Option<f64> {
     Some(secs)
 }
 
+/// `v` rounded to three decimals.
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }

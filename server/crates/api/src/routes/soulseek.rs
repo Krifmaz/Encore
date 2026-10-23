@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+/// The Soulseek page's routes (for those who may pick downloads).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/soulseek/status", get(status))
@@ -34,14 +35,19 @@ pub fn router() -> Router<AppState> {
 
 /// A search the page is polling: what was asked and when, so GET /search/{id} can say and expire it.
 pub(crate) struct Session {
+    /// the search text
     q: String,
+    /// when it started
     started: Instant,
+    /// the search is over
     done: bool,
 }
+/// A search the page stopped polling is forgotten after this.
 const SESSION_TTL: Duration = Duration::from_secs(300);
 /// Share lists are slow to fetch and don't change much.
 const BROWSE_CACHE_SECS: u64 = 600;
 
+/// 403 unless the user may pick downloads.
 fn gate(st: &AppState, u: &Row) -> ApiResult<()> {
     if !auth::can(st, u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
@@ -172,11 +178,14 @@ async fn start(State(st): State<AppState>, Admin(me): Admin) -> ApiResult<Json<V
 
 // ---- search --------------------------------------------------------------------------------------
 
+/// `POST /api/soulseek/search` body.
 #[derive(Deserialize)]
 struct SearchBody {
+    /// the search text
     q: String,
 }
 
+/// POST /api/soulseek/search: start a search; its id to poll.
 async fn search_start(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     let q = b.q.trim().to_string();
@@ -189,6 +198,7 @@ async fn search_start(State(st): State<AppState>, User(u): User, Json(b): Json<S
     Ok(Json(json!({ "id": id, "seconds": slskd::search_timeout(&st) })))
 }
 
+/// GET /api/soulseek/search/{id}: a search's answers so far.
 async fn search_poll(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     sweep(&st);
@@ -254,6 +264,7 @@ fn file_json(f: &Value) -> Option<Value> {
 
 // ---- browse --------------------------------------------------------------------------------------
 
+/// GET /api/soulseek/browse/{username}: a user's shared folders, cached for 10 minutes.
 async fn browse(State(st): State<AppState>, User(u): User, Path(username): Path<String>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     // share lists are big: their own cache, held to a number of bytes and of lists, rather than the general one
@@ -276,19 +287,27 @@ async fn browse(State(st): State<AppState>, User(u): User, Path(username): Path<
 
 // ---- download ------------------------------------------------------------------------------------
 
+/// `POST /api/soulseek/download` body: files of one folder of one user.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct DownloadBody {
+    /// the user sharing them
     username: String,
+    /// their folder
     directory: String,
     /// { filename, size } – a bitRate, when the page has one, only decorates the request's message
     files: Vec<Value>,
+    /// "album" or "track", when the page knows
     kind: Option<String>,
+    /// the artist, when the page knows
     artist: Option<String>,
+    /// the song's title, when the page knows
     title: Option<String>,
+    /// the album, when the page knows
     album: Option<String>,
 }
 
+/// The text when it isn't blank, trimmed.
 fn given(s: &Option<String>) -> Option<String> {
     s.as_deref().map(str::trim).filter(|x| !x.is_empty()).map(String::from)
 }
@@ -337,7 +356,7 @@ async fn download(State(st): State<AppState>, User(u): User, Json(b): Json<Downl
 static TRACK_NO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:[A-Da-d]?\d{1,3}\s*[.\-_)]\s*|[A-Da-d]\d{1,2}\s+|\d{2,3}\s+)").unwrap());
 /// "2001 - " or "(2001) " in front of a folder name.
 static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\(\[]?(?:19|20)\d{2}[\)\]]?\s*[-–.]?\s+").unwrap());
-/// "[FLAC]", "(2001)", "(Remastered)" at the end of a folder name.
+/// "\[FLAC\]", "(2001)", "(Remastered)" at the end of a folder name.
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]\s*$").unwrap());
 
 /// (artist, album, title) read off a remote path: the album is the last folder and the artist the
@@ -380,6 +399,7 @@ fn guess(directory: &str, filename: &str) -> (String, String, String) {
 
 // ---- transfers -----------------------------------------------------------------------------------
 
+/// GET /api/soulseek/transfers: slskd's downloads.
 async fn transfers(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     let dir_of = |n: &str| n.rsplit_once('\\').map(|(d, _)| d.to_string()).unwrap_or_default();
@@ -397,12 +417,14 @@ async fn transfers(State(st): State<AppState>, User(u): User) -> ApiResult<Json<
     Ok(Json(json!({ "downloads": downloads, "uploads": uploads })))
 }
 
+/// DELETE /api/soulseek/transfers/{username}/{id}: cancel a download.
 async fn cancel(State(st): State<AppState>, User(u): User, Path((username, id)): Path<(String, String)>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     slskd::cancel(&st, &username, &id).await;
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/soulseek/transfers/clear: take the finished downloads off slskd's list.
 async fn clear(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     slskd::clear_completed(&st).await.map_err(upstream)?;

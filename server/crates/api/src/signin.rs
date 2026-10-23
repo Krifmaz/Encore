@@ -55,6 +55,7 @@ pub const EXPIRED: &str = "This sign-in expired or was already used. Start it ag
 /// A sign-in in progress.
 #[derive(Clone, Debug)]
 pub struct Pending {
+    /// the Encore user signing in
     pub user_id: i64,
     /// "spotify", "tidal", "lastfm" or "musicbrainz"
     pub service: String,
@@ -62,6 +63,7 @@ pub struct Pending {
     pub device: String,
     /// the PKCE code verifier (Spotify, Tidal), else ""
     pub verifier: String,
+    /// when it started
     pub started: Instant,
     /// the account the service signed in, once the callback came back to a browser that has to confirm it
     pub linked: Option<Linked>,
@@ -91,11 +93,13 @@ pub fn new_state() -> String {
     encore_core::ids::random_hex(32)
 }
 
+/// Whether a sign-in is still within its time.
 fn alive(p: &Pending) -> bool {
     p.started.elapsed() < Duration::from_secs(STATE_SECS)
 }
 
 impl SignIns {
+    /// Keep a sign-in under `key`, dropping the expired ones and the oldest past the limits.
     fn put(&self, key: String, p: Pending) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         m.retain(|_, x| alive(x));
@@ -115,6 +119,7 @@ impl SignIns {
         m.insert(key, p);
     }
 
+    /// Take the sign-in under `key`, when it is still alive.
     fn take(&self, key: &str) -> Option<Pending> {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         m.remove(key).filter(alive)
@@ -281,14 +286,18 @@ pub async fn callback(st: &AppState, browser: Option<Row>, service: &str, state:
     confirm_page(&p, &linked, &owner, browser.as_ref().map(|u| u.s("username")), &key)
 }
 
+/// The sign-in confirmation route.
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/sign-in/confirm", post(confirm))
 }
 
+/// The confirmation page's form.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ConfirmForm {
+    /// the confirmation key
     confirm: String,
+    /// "link" to link the account, anything else cancels
     answer: String,
 }
 
@@ -333,6 +342,7 @@ fn confirm_page(p: &Pending, l: &Linked, owner: &str, browser_user: Option<Strin
     page(StatusCode::OK, &format!("Link {svc} account"), &body)
 }
 
+/// The page that says the sign-in failed, with why.
 fn error_page(msg: &str) -> Response {
     let msg: String = msg.chars().take(300).collect();
     page(StatusCode::BAD_REQUEST, "The sign-in did not work", &format!("<h1>The sign-in did not work</h1><p>{}</p><p>You can close this page and start the sign-in again in Encore.</p>", e(&msg)))

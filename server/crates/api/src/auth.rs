@@ -15,21 +15,25 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use subtle::ConstantTimeEq;
 
+/// The web session cookie's name.
 pub const COOKIE: &str = "encore_session";
 
 use encore_core::ids::random_token;
 
+/// Compare two secrets in constant time.
 pub fn ct_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
 }
 
 // ---- passwords --------------------------------------------------------------------------------
 
+/// A bcrypt hash (cost 12) of the password's first 72 bytes.
 pub fn hash_password(pw: &str) -> String {
     let b = &pw.as_bytes()[..pw.len().min(72)];
     bcrypt::hash(b, 12).unwrap_or_default()
 }
 
+/// Whether the password matches a bcrypt hash.
 pub fn verify_password(pw: &str, hashed: &str) -> bool {
     let b = &pw.as_bytes()[..pw.len().min(72)];
     bcrypt::verify(b, hashed).unwrap_or(false)
@@ -46,6 +50,7 @@ pub async fn verify_password_off(pw: String, hashed: String) -> bool {
     tokio::task::spawn_blocking(move || verify_password(&pw, &hashed)).await.unwrap_or(false)
 }
 
+/// A username of 3 to 32 letters, digits, `_`, `-` and `.`; 400 otherwise.
 pub fn validate_username(username: &str) -> ApiResult<()> {
     let ok_name = (3..=32).contains(&username.chars().count())
         && username.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
@@ -55,6 +60,7 @@ pub fn validate_username(username: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// A valid username and a password of at least 8 characters; 400 otherwise.
 pub fn validate_credentials(username: &str, password: &str) -> ApiResult<()> {
     validate_username(username)?;
     if password.chars().count() < 8 {
@@ -76,9 +82,12 @@ const SWEEP_EVERY: u64 = 256;
 #[derive(Default)]
 pub struct RateLimiter(Mutex<Limits>);
 
+/// The events behind [`RateLimiter`]'s lock.
 #[derive(Default)]
 struct Limits {
+    /// the times of each key's recent events
     keys: HashMap<String, VecDeque<f64>>,
+    /// calls since the last sweep
     calls: u64,
 }
 
@@ -120,6 +129,7 @@ impl RateLimiter {
         false
     }
 
+    /// Record an event for `key`.
     pub fn record(&self, key: &str) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let t = now();
@@ -194,10 +204,12 @@ mod limiter_tests {
 
 use encore_config::perms::{is_admin, is_owner};
 
+/// The user's permissions, by name.
 pub fn perms_of(st: &AppState, u: &Row) -> Map<String, Value> {
     encore_config::perms::perms_of(&st.cfg, u)
 }
 
+/// Whether the user has permission `perm`.
 pub fn can(st: &AppState, u: &Row, perm: &str) -> bool {
     encore_config::perms::can(&st.cfg, u, perm)
 }
@@ -217,6 +229,7 @@ pub fn public_user(st: &AppState, u: &Row) -> Value {
 
 // ---- users & sessions -------------------------------------------------------------------------
 
+/// Create an account (the credentials checked, the username free); its id.
 pub fn create_user(st: &AppState, username: &str, password: &str, role: &str, email: Option<&str>, invite_id: Option<i64>) -> ApiResult<i64> {
     validate_credentials(username, password)?;
     if st.db.one("SELECT id FROM users WHERE username=?", p![username])?.is_some() {
@@ -235,6 +248,7 @@ pub fn create_user(st: &AppState, username: &str, password: &str, role: &str, em
     )?)
 }
 
+/// Create a web session for the user: its token and how long it lasts (seconds).
 pub fn create_session(st: &AppState, user_id: i64, ua: &str, ip: &str) -> ApiResult<(String, i64)> {
     let token = random_token(32);
     let max_age = st.cfg.int("session_days").max(1) * 86400;
@@ -332,7 +346,7 @@ pub fn ensure_owner(st: &AppState) -> anyhow::Result<()> {
 /// in another container or on the same LAN), shared address space (Tailscale) and link-local.
 const DEFAULT_PROXIES: &[&str] = &["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"];
 
-/// An address, also with a port ("1.2.3.4:80", "[::1]:80"); IPv4-mapped IPv6 as IPv4.
+/// An address, also with a port ("1.2.3.4:80", "\[::1\]:80"); IPv4-mapped IPv6 as IPv4.
 fn parse_ip(s: &str) -> Option<std::net::IpAddr> {
     let s = s.trim();
     s.parse::<std::net::IpAddr>().ok().or_else(|| s.parse::<std::net::SocketAddr>().ok().map(|a| a.ip())).map(|ip| ip.to_canonical())
@@ -395,11 +409,15 @@ pub fn client_ip(st: &AppState, parts: &Parts) -> String {
 /// How a request signed in. Only cookies need the CSRF header: a browser never adds the other two on its own.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Via {
+    /// the server's API key (`x-api-key`), as the first admin
     ApiKey,
+    /// an app token (`Authorization: Bearer`)
     Bearer,
+    /// the web session cookie
     Cookie,
 }
 
+/// The signed-in user of a request, and how it signed in; `None` when it isn't signed in.
 fn user_from_parts(st: &AppState, parts: &Parts) -> ApiResult<Option<(Row, Via)>> {
     if let Some(key) = parts.headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         let want = st.cfg.str("api_key");
@@ -459,7 +477,9 @@ pub fn current_user(st: &AppState, headers: &HeaderMap) -> Option<Row> {
 /// The signed-in user. Mutating cookie requests must carry `X-Requested-With: encore` (CSRF); API-key and
 /// bearer requests are exempt.
 pub struct User(pub Row);
+/// A signed-in admin (or the owner); 403 otherwise.
 pub struct Admin(pub Row);
+/// The signed-in owner; 403 otherwise.
 pub struct Owner(pub Row);
 /// Signed in or not.
 pub struct MaybeUser(pub Option<Row>);
@@ -510,9 +530,13 @@ impl FromRequestParts<AppState> for MaybeUser {
 
 /// Client address + user agent, for sessions and rate limits.
 pub struct ClientInfo {
+    /// the client's address (forwarded by a trusted proxy)
     pub ip: String,
+    /// its User-Agent
     pub ua: String,
+    /// whether the request came over HTTPS
     pub https: bool,
+    /// the address the client reached the server at ("https://music.example.com")
     pub base_url: String,
 }
 

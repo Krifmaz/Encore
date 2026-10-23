@@ -25,7 +25,7 @@ fn main() {
             Vec::new()
         });
     notes.sort();
-    let mut code = String::from("pub static NOTES: &[(&str, &str)] = &[\n");
+    let mut code = String::from("/// The release notes as (version, Markdown), in version order.\npub static NOTES: &[(&str, &str)] = &[\n");
     for (v, path) in &notes {
         code.push_str(&format!("    ({v:?}, include_str!({path:?})),\n"));
     }

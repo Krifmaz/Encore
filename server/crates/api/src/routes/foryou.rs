@@ -17,10 +17,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+/// The ListenBrainz recommendation algorithm "For you" asks for.
 const LB_ALGO: &str = "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30";
+/// The JSPF extension key of a playlist's ListenBrainz data.
 const JSPF_PL: &str = "https://musicbrainz.org/doc/jspf#playlist";
+/// The JSPF extension key of a track's ListenBrainz data.
 const JSPF_TR: &str = "https://musicbrainz.org/doc/jspf#track";
 
+/// The For you / Made for you / similar / tags routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/discover/for-you", get(for_you))
@@ -33,6 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/discover/tag/{name}", get(tag))
 }
 
+/// The last path segment of a URL (an MBID out of a MusicBrainz link).
 fn last_seg(s: &str) -> String {
     s.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
 }
@@ -59,6 +64,7 @@ where F: FnOnce() -> Fut, Fut: std::future::Future<Output = anyhow::Result<Value
 
 // ---- ListenBrainz "For you" -------------------------------------------------------------------
 
+/// A ListenBrainz playlist's kind ("weekly-exploration", "daily-jams", "weekly-jams" or "other").
 fn kind(pl: &Value) -> String {
     let patch = s(&pl["extension"][JSPF_PL]["additional_metadata"]["algorithm_metadata"]["source_patch"]);
     if !patch.is_empty() {
@@ -68,6 +74,7 @@ fn kind(pl: &Value) -> String {
     if t.contains("exploration") { "weekly-exploration" } else if t.contains("daily") { "daily-jams" } else if t.contains("weekly jams") { "weekly-jams" } else { "other" }.into()
 }
 
+/// A JSPF track as a song: title, artist, album, MBIDs, length and a Cover Art Archive cover.
 fn lb_track(t: &Value) -> Value {
     let ids: Vec<String> = match &t["identifier"] { Value::Array(a) => a.iter().map(s).collect(), Value::String(s) => vec![s.clone()], _ => vec![] };
     let rec = ids.iter().find(|i| i.contains("musicbrainz.org/recording/")).map(|i| last_seg(i));
@@ -85,6 +92,7 @@ fn lb_track(t: &Value) -> Value {
             "release_mbid": rel, "length": if dur > 0.0 { json!(dur) } else { Value::Null }, "cover": cover })
 }
 
+/// The playlists ListenBrainz made for `user` (cached for an hour).
 pub async fn lb_playlists(st: &AppState, user: &str) -> anyhow::Result<Vec<Value>> {
     let v = cached(st, &format!("lbpl:{user}"), 3600, || async {
         let r = listenbrainz::created_for(st, user, 25).send().await?;
@@ -109,6 +117,7 @@ pub async fn lb_playlists(st: &AppState, user: &str) -> anyhow::Result<Vec<Value
     Ok(v.as_array().cloned().unwrap_or_default())
 }
 
+/// A ListenBrainz playlist's songs (cached for 6 hours).
 pub async fn lb_playlist_tracks(st: &AppState, pid: &str) -> anyhow::Result<Vec<Value>> {
     let v = cached(st, &format!("lbtr:{pid}"), 6 * 3600, || async {
         let d = encore_http::json(listenbrainz::playlist(st, pid, None)).await?;
@@ -135,12 +144,14 @@ pub fn annotate_tracks(st: &AppState, tracks: Vec<Value>) -> Vec<Value> {
     }).collect()
 }
 
+/// The user's ListenBrainz name, when ListenBrainz is connected.
 pub fn lb_user(st: &AppState, user_id: i64) -> Option<String> {
     let c = st.db.one("SELECT data FROM connections WHERE user_id=? AND service='listenbrainz'", p![user_id]).ok()??;
     let d: Value = serde_json::from_str(&c.s("data")).ok()?;
     d["user"].as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
+/// The user's Last.fm name, when Last.fm is connected.
 fn lastfm_user(st: &AppState, user_id: i64) -> Option<String> {
     let c = st.db.one("SELECT data FROM connections WHERE user_id=? AND service='lastfm'", p![user_id]).ok()??;
     let d: Value = serde_json::from_str(&c.s("data")).ok()?;
@@ -253,6 +264,7 @@ async fn made_for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Js
     Ok(Json(v))
 }
 
+/// The Made for you answer before enrichment: the user's ListenBrainz playlists with their songs.
 async fn made_for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<Value> {
     let uid = u.i("id");
     let Some(name) = st.blocking(move |st| Ok(lb_user(st, uid))).await? else { return Ok(json!({ "connected": false, "playlists": [] })) };
@@ -289,12 +301,14 @@ async fn made_for_you_answer(State(st): State<AppState>, User(u): User) -> ApiRe
     Ok(json!({ "connected": true, "user": name, "playlists": out, "error": error }))
 }
 
+/// GET /api/discover/for-you: recommendations from ListenBrainz and Last.fm, enriched.
 async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let mut v = for_you_answer(State(st.clone()), User(u.clone())).await?;
     enrich(&st, Some(&u), &mut v).await;
     Ok(Json(v))
 }
 
+/// The For you answer before enrichment.
 async fn for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<Value> {
     let uid = u.i("id");
     let (lb, lf) = st.blocking(move |st| Ok((lb_user(st, uid), lastfm_user(st, uid)))).await?;
@@ -381,8 +395,10 @@ async fn with_pictures(st: &AppState, items: Vec<Value>) -> Vec<Value> {
     }).collect()
 }
 
+/// `GET /api/discover/artist-picture` query.
 #[derive(Deserialize)]
 struct PictureQ {
+    /// the artist's name
     name: String,
 }
 
@@ -395,6 +411,7 @@ async fn artist_picture(State(st): State<AppState>, User(_): User, Query(q): Que
     }
 }
 
+/// Mark the artists the library has (`in_library`).
 async fn mark_library(st: &AppState, mut res: Value) -> Value {
     let have = library_artists(st).await;
     if let Some(arr) = res["artists"].as_array_mut() {
@@ -405,6 +422,7 @@ async fn mark_library(st: &AppState, mut res: Value) -> Value {
     res
 }
 
+/// Similar artists from Last.fm, else ListenBrainz, else Deezer (cached for a day), marked with the library's.
 pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize) -> Value {
     let res = cached(st, &format!("sim:{}", if mbid.is_empty() { norm_keep_underscore(name) } else { mbid.into() }), 86400, || async {
         let lim = limit.to_string();
@@ -460,6 +478,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
     mark_library(st, res).await
 }
 
+/// GET /api/discover/artist/{mbid}/similar: 18 similar artists, enriched.
 async fn artist_similar(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let mut v = similar_artists(&st, &mbid, a["name"].as_str().unwrap_or(""), 18).await;
@@ -467,10 +486,14 @@ async fn artist_similar(State(st): State<AppState>, User(viewer): User, Path(mbi
     Ok(Json(v))
 }
 
+/// `GET /api/discover/similar-tracks` query.
 #[derive(Deserialize)]
 struct SimTrQ {
+    /// the song's artist
     artist: String,
+    /// the song's title
     title: String,
+    /// its recording MBID
     mbid: Option<String>,
 }
 
@@ -513,9 +536,11 @@ async fn similar_tracks(State(st): State<AppState>, User(viewer): User, Query(q)
 
 // ---- genres / tags ----------------------------------------------------------------------------
 
+/// The genres shown when Last.fm has no top tags.
 const FALLBACK_TAGS: [&str; 22] = ["rock", "pop", "electronic", "hip hop", "jazz", "metal", "indie", "folk", "punk", "soul", "r&b", "ambient",
     "house", "techno", "classical", "country", "blues", "reggae", "experimental", "shoegaze", "drum and bass", "dubstep"];
 
+/// GET /api/discover/tags: the top genres (Last.fm, cached for a week; else a fixed list).
 async fn tags(State(st): State<AppState>, User(viewer): User) -> ApiResult<Json<Value>> {
     let top = cached(&st, "toptags", 7 * 86400, || async {
         if let Ok(d) = lastfm(&st, "tag.getTopTags", &[]).await {
@@ -536,12 +561,15 @@ async fn tags(State(st): State<AppState>, User(viewer): User) -> ApiResult<Json<
     Ok(Json(v))
 }
 
+/// A page number query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct PageQ {
+    /// the page (from 1)
     page: Option<i64>,
 }
 
+/// GET /api/discover/tag/{name}?page=: a genre's top artists (cached for a day).
 async fn tag(State(st): State<AppState>, User(viewer): User, Path(name): Path<String>, Query(q): Query<PageQ>) -> ApiResult<Json<Value>> {
     let page = q.page.unwrap_or(1).max(1);
     let res = cached(&st, &format!("tag:{}:{page}", name.to_lowercase()), 86400, || async {
@@ -569,6 +597,7 @@ async fn tag(State(st): State<AppState>, User(viewer): User, Path(name): Path<St
 
 // ---- artist page extras: photo, Wikipedia bio, popular tracks ------------------------------------
 
+/// The artist's photo and popular songs from Deezer.
 async fn deezer_extras(st: &AppState, name: &str) -> anyhow::Result<Value> {
     let mut out = json!({});
     let Some(a) = deezer_artist(st, name).await? else { return Ok(out) };
@@ -583,6 +612,7 @@ async fn deezer_extras(st: &AppState, name: &str) -> anyhow::Result<Value> {
     Ok(out)
 }
 
+/// The artist's Wikipedia summary, by the English Wikipedia link MusicBrainz has.
 async fn wikipedia(st: &AppState, links: &Value) -> anyhow::Result<Value> {
     let wp = s(&links["wikipedia"]);
     let mut title = None;
@@ -602,6 +632,7 @@ async fn wikipedia(st: &AppState, links: &Value) -> anyhow::Result<Value> {
     Ok(out)
 }
 
+/// GET /api/discover/artist/{mbid}/extras: the artist's photo, bio and popular songs (cached for a day).
 async fn artist_extras(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
     let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
     let name = s(&a["name"]);

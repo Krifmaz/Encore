@@ -22,6 +22,7 @@ use std::sync::LazyLock;
 // The new request itself (checks, the row) lives in encore_requests::create.
 use encore_requests::create::*;
 
+/// The request routes.
 pub fn router() -> Router<AppState> {
     let r = Router::new()
         .route("/api/requests", get(list).post(create))
@@ -49,6 +50,7 @@ pub fn router() -> Router<AppState> {
     r
 }
 
+/// A request row with its detail parsed; 404 when there is none.
 fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
     let mut r = st.db.one("SELECT * FROM requests WHERE id=?", p![id])?.ok_or_else(|| err(404, "Request not found"))?;
     let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
@@ -56,13 +58,17 @@ fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
     Ok(Value::Object(r))
 }
 
+/// `GET /api/requests` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ListQ {
+    /// only requests in this status
     status: Option<String>,
+    /// an admin's own requests only
     mine: bool,
     /// an admin's look at one person's requests (a user id; empty: everyone's)
     user: Option<String>,
+    /// how many (newest first)
     limit: Option<i64>,
 }
 
@@ -80,6 +86,7 @@ fn user_id(user: Option<&str>) -> Option<i64> {
     user.and_then(|x| x.trim().parse().ok())
 }
 
+/// GET /api/requests: the requests the caller may see, newest first.
 async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let mut sql = "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1".to_string();
     let mut params = vec![];
@@ -203,6 +210,7 @@ fn library_links(st: &AppState, rows: &mut [Row]) {
     }
 }
 
+/// POST /api/requests: make a request (within the caller's quota).
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequest>) -> ApiResult<Json<Value>> {
     quota(&st, &u, 1)?;
     let id = create_request(&st, &u, &b, None, None)?;
@@ -217,9 +225,12 @@ async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequ
     Ok(Json(r))
 }
 
+/// `POST /api/requests/from-link` body.
 #[derive(Deserialize)]
 struct LinkBody {
+    /// the link
     url: String,
+    /// for songs: "song" (only it) or "album" (its whole album)
     album_mode: Option<String>,
 }
 
@@ -242,12 +253,15 @@ async fn from_link_inner(st: &AppState, u: &Row, url: &str, album_mode: Option<S
     Ok(json!({ "requested": made.len(), "already_requested": skipped, "name": data["name"], "status": status, "ids": made }))
 }
 
+/// POST /api/requests/from-link: request every song behind a link.
 async fn from_link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
     Ok(Json(from_link_inner(&st, &u, b.url.trim(), b.album_mode).await?))
 }
 
 // links that only describe music (no downloadable audio) → matched song by song
+/// Links that only describe music (no downloadable audio): matched song by song.
 static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|amazon\.[a-z.]+/music/player/|amzn\.to/|music\.youtube\.com/(playlist|browse)").unwrap());
+/// Links streamrip can rip directly.
 static RIP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 
 /// One box for any link: streaming-service links are matched song by song (best quality from any source);
@@ -269,6 +283,7 @@ async fn link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>
     Ok(Json(json!({ "requested": 1, "already_requested": 0, "ids": [id], "status": get_request(&st, id)?["status"], "mode": "direct" })))
 }
 
+/// A request the caller may act on: their own, or any for admins; 403 otherwise.
 pub fn get_owned(st: &AppState, id: i64, u: &Row) -> ApiResult<Value> {
     let r = get_request(st, id)?;
     if !encore_config::perms::is_admin(u) && r["user_id"].as_i64() != Some(u.i("id")) {
@@ -277,18 +292,21 @@ pub fn get_owned(st: &AppState, id: i64, u: &Row) -> ApiResult<Value> {
     Ok(r)
 }
 
+/// A request and its child requests (an album's songs).
 fn family(st: &AppState, id: i64) -> Vec<i64> {
     let mut v = vec![id];
     v.extend(st.db.query("SELECT id FROM requests WHERE parent_id=?", p![id]).unwrap_or_default().into_iter().map(|r| r.i("id")));
     v
 }
 
+/// Set a request's status and message, and tell the listeners.
 fn set(st: &AppState, id: i64, status: &str, message: &str) -> Result<i64, ApiError> {
     let n = st.db.execute("UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id])?;
     encore_requests::events::emit(st, id);
     Ok(n)
 }
 
+/// POST /api/requests/{rid}/approve: approve a pending request and its songs (admins).
 async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
     for i in family(&st, rid) {
         if let Ok(r) = get_request(&st, i) {
@@ -300,6 +318,7 @@ async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i6
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/requests/{rid}/deny: deny a pending request and its songs (admins).
 async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
     for i in family(&st, rid) {
         if let Ok(r) = get_request(&st, i) {
@@ -311,6 +330,7 @@ async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>)
     Ok(Json(json!({ "ok": true })))
 }
 
+/// POST /api/requests/{rid}/retry: queue a request again.
 async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
     retry_request(&st, &u, rid, &r)?;
@@ -322,9 +342,12 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) 
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct RetryFailedBody {
+    /// only the admin's own
     mine: bool,
+    /// only this person's
     user: Option<i64>,
 }
+/// POST /api/requests/retry-failed: queue every failed request again.
 async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Json<RetryFailedBody>>) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let mut sql = "SELECT id FROM requests WHERE parent_id IS NULL AND status='failed'".to_string();
@@ -415,6 +438,7 @@ async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct AnywayBody {
+    /// the rejected download's id
     rejected: Option<i64>,
 }
 
@@ -496,10 +520,13 @@ async fn download_now(State(st): State<AppState>, User(u): User, Path(rid): Path
     Ok(Json(v))
 }
 
+/// `POST /api/requests/download-now` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct AllNowBody {
+    /// only the admin's own
     mine: bool,
+    /// only this person's
     user: Option<i64>,
 }
 
@@ -512,6 +539,7 @@ async fn download_all_now(State(st): State<AppState>, Admin(a): Admin, body: Opt
     Ok(Json(worker::now::download_all_now(&st, &a.s("username"), owner, owner == Some(a.i("id"))).await))
 }
 
+/// POST /api/requests/{rid}/cancel: cancel a request and its songs.
 async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
     get_owned(&st, rid, &u)?;
     for i in family(&st, rid) {
@@ -554,9 +582,11 @@ fn delete_files(st: &AppState, r: &Value) -> usize {
     n
 }
 
+/// `DELETE /api/requests/{rid}` query.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct FilesQ {
+    /// also delete what it downloaded (admins)
     files: bool,
 }
 
@@ -581,12 +611,17 @@ async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>,
     Ok(Json(json!({ "ok": true, "deleted_files": n })))
 }
 
+/// `POST /api/requests/clear` body.
 #[derive(Deserialize)]
 #[serde(default)]
 struct ClearBody {
+    /// the statuses to clear (default: completed, denied, cancelled)
     statuses: Vec<String>,
+    /// also delete their files
     files: bool,
+    /// only the admin's own
     mine: bool,
+    /// only this person's
     user: Option<i64>,
 }
 impl Default for ClearBody {
@@ -639,11 +674,15 @@ fn holds_files(detail: &str) -> bool {
     d["kept"].is_object() || d["wait"]["reason"] == worker::storage::STORAGE_IMPORT
 }
 
+/// `POST /api/requests/clear-waiting` body.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ClearWaitingBody {
+    /// only the admin's own
     mine: bool,
+    /// only this person's
     user: Option<i64>,
+    /// only count them
     dry_run: bool,
 }
 

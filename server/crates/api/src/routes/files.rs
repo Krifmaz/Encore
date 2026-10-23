@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 /// The most an upload request may carry: the backups upload's limit (routes::system).
 pub const UPLOAD_LIMIT: usize = 4 << 30;
 
+/// The file manager routes (admins).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/files/roots", get(get_roots))
@@ -55,21 +56,30 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> ApiResult<T> + Send + '
     tokio::task::spawn_blocking(f).await.map_err(|e| err(500, format!("The file operation stopped: {e}")))?
 }
 
+/// GET /api/files/roots: the folders the file manager may open.
 async fn get_roots(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     blocking(move || Ok(Json(Value::Array(roots_of(&st).iter().map(Root::json).collect())))).await
 }
 
+/// `GET /api/files/list` query.
 #[derive(Deserialize)]
 struct ListQ {
+    /// the root folder's key
     root: String,
+    /// the folder under the root ("" = the root)
     #[serde(default)]
     path: String,
+    /// name, size or mtime
     sort: Option<String>,
+    /// asc or desc
     dir: Option<String>,
+    /// where the page starts
     offset: Option<usize>,
+    /// the page size
     limit: Option<usize>,
 }
 
+/// GET /api/files/list: a folder's entries, sorted and paged.
 async fn list_dir(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let query = ListQuery::parse(q.sort.as_deref(), q.dir.as_deref(), q.offset, q.limit)?;
     blocking(move || {
@@ -79,14 +89,19 @@ async fn list_dir(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<L
     }).await
 }
 
+/// `POST /api/files/mkdir` and `/rename` body.
 #[derive(Deserialize)]
 struct NameBody {
+    /// the root folder's key
     root: String,
+    /// the folder (mkdir) or the item (rename) under the root
     #[serde(default)]
     path: String,
+    /// the new name
     name: String,
 }
 
+/// POST /api/files/mkdir: make a folder.
 async fn mkdir(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
@@ -94,6 +109,7 @@ async fn mkdir(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameBo
     }).await
 }
 
+/// POST /api/files/rename: rename a file or folder (the library's rows follow).
 async fn rename(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
@@ -101,15 +117,21 @@ async fn rename(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameB
     }).await
 }
 
+/// `POST /api/files/move` body.
 #[derive(Deserialize)]
 struct MoveBody {
+    /// the root the items are under
     root: String,
+    /// the items' paths under it
     from: Vec<String>,
+    /// the root to move them to
     to_root: String,
+    /// the folder under it
     #[serde(default)]
     to_path: String,
 }
 
+/// POST /api/files/move: move items to another folder (the library's rows follow).
 async fn move_items(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<MoveBody>) -> ApiResult<Json<Value>> {
     if b.from.is_empty() {
         return Err(err(400, "Nothing to move"));
@@ -122,12 +144,16 @@ async fn move_items(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<M
     }).await
 }
 
+/// `POST /api/files/trash` body.
 #[derive(Deserialize)]
 struct TrashBody {
+    /// the root the items are under
     root: String,
+    /// the items' paths under it
     paths: Vec<String>,
 }
 
+/// POST /api/files/trash: move items to the trash.
 async fn to_trash(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TrashBody>) -> ApiResult<Json<Value>> {
     if b.paths.is_empty() {
         return Err(err(400, "Nothing to move to trash"));
@@ -139,19 +165,24 @@ async fn to_trash(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<Tra
     }).await
 }
 
+/// GET /api/files/trash: what the trash holds.
 async fn trash_items(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     blocking(move || trash::list(&st).map(Json)).await
 }
 
+/// `POST /api/files/restore` body.
 #[derive(Deserialize)]
 struct RestoreBody {
+    /// the trash items' ids
     items: Vec<String>,
 }
 
+/// POST /api/files/restore: put trash items back where they were.
 async fn restore(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<RestoreBody>) -> ApiResult<Json<Value>> {
     blocking(move || trash::restore(&st, &Who::of(&u), &roots_of(&st), &b.items).map(Json)).await
 }
 
+/// DELETE /api/files/trash/{id}: delete one trash item for good.
 async fn delete_forever(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<StatusCode> {
     if !trash::valid_id(&id) {
         return Err(err(404, "That isn't in the trash"));
@@ -159,27 +190,37 @@ async fn delete_forever(State(st): State<AppState>, Admin(u): Admin, Path(id): P
     blocking(move || trash::delete(&st, &Who::of(&u), &id).map(|_| StatusCode::NO_CONTENT)).await
 }
 
+/// POST /api/files/empty-trash: delete everything in the trash for good.
 async fn empty_trash(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<StatusCode> {
     blocking(move || trash::empty(&st, &Who::of(&u)).map(|_| StatusCode::NO_CONTENT)).await
 }
 
+/// `GET /api/files/tags` query.
 #[derive(Deserialize)]
 struct FileQ {
+    /// the root folder's key
     root: String,
+    /// the file under it
     path: String,
 }
 
+/// GET /api/files/tags: a file's tags.
 async fn get_tags(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<FileQ>) -> ApiResult<Json<Value>> {
     blocking(move || tags::get(&target(&roots_of(&st), &q.root, &q.path)?).map(Json)).await
 }
 
+/// `PUT /api/files/tags` body.
 #[derive(Deserialize)]
 struct TagsBody {
+    /// the root folder's key
     root: String,
+    /// the file under it
     path: String,
+    /// the tags to write, by name
     tags: Map<String, Value>,
 }
 
+/// PUT /api/files/tags: write a file's tags (its library row follows).
 async fn put_tags(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TagsBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
@@ -187,11 +228,15 @@ async fn put_tags(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<Tag
     }).await
 }
 
+/// `POST /api/files/upload` query.
 #[derive(Deserialize)]
 struct UploadQ {
+    /// the root folder's key
     root: String,
+    /// the folder under it
     #[serde(default)]
     path: String,
+    /// rename (the default), replace or skip a file that is there
     conflict: Option<String>,
 }
 
@@ -199,11 +244,14 @@ struct UploadQ {
 /// dropped part way (the client went away), whoever holds it last – the request or a finishing file's
 /// blocking step – writes what is left, so a file that landed is never left without its row.
 struct PendingRows {
+    /// the server
     st: AppState,
+    /// the rows still to write
     change: std::sync::Mutex<Change>,
 }
 
 impl PendingRows {
+    /// The rows still to write, taking them.
     fn take(&self) -> Change {
         std::mem::take(&mut *self.change.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -321,33 +369,46 @@ async fn upload_files(State(st): State<AppState>, Admin(u): Admin, Query(q): Que
     }
 }
 
+/// `POST /api/files/import/preview` body.
 #[derive(Deserialize)]
 struct PreviewBody {
+    /// the root folder's key
     root: String,
+    /// the folder to import
     #[serde(default)]
     path: String,
+    /// "move" (the default) or "in_place"
     #[serde(default)]
     mode: String,
+    /// a release to match the folder's album to
     release_id: Option<String>,
 }
 
+/// POST /api/files/import/preview: how a folder would be imported: its albums, their matches and the new paths.
 async fn import_preview(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<PreviewBody>) -> ApiResult<Json<Value>> {
     let mode = Mode::parse(&b.mode)?;
     let t = target(&roots_of(&st), &b.root, &b.path)?;
     import::preview(&st, &t, mode, b.release_id.as_deref().filter(|r| !r.is_empty())).await.map(Json)
 }
 
+/// `POST /api/files/import/match` body.
 #[derive(Deserialize)]
 struct MatchBody {
+    /// the root folder's key
     root: String,
+    /// the album's folder under it
     path: String,
+    /// the artist to search for (default: the files' tags)
     #[serde(default)]
     artist: String,
+    /// the album to search for (default: the files' tags)
     #[serde(default)]
     album: String,
+    /// the metadata source (default MusicBrainz)
     provider: Option<String>,
 }
 
+/// POST /api/files/import/match: releases that may be a folder's album.
 async fn import_match(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<MatchBody>) -> ApiResult<Json<Value>> {
     let t = target(&roots_of(&st), &b.root, &b.path)?;
     let f = {
@@ -358,22 +419,31 @@ async fn import_match(State(st): State<AppState>, Admin(_): Admin, Json(b): Json
     import::candidates(&st, &f, &b.artist, &b.album, &provider).await.map(Json)
 }
 
+/// One album of an import: its folder and the release to tag it with.
 #[derive(Deserialize)]
 struct ApplyAlbum {
+    /// the album's folder
     folder: String,
+    /// the release chosen (none: tag as it is)
     release_id: Option<String>,
 }
 
+/// `POST /api/files/import/apply` body.
 #[derive(Deserialize)]
 struct ApplyBody {
+    /// the root folder's key
     root: String,
+    /// the folder to import
     #[serde(default)]
     path: String,
+    /// "move" (the default) or "in_place"
     #[serde(default)]
     mode: String,
+    /// the albums and their releases
     albums: Vec<ApplyAlbum>,
 }
 
+/// POST /api/files/import/apply: import a folder's albums into the library.
 async fn import_apply(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<ApplyBody>) -> ApiResult<Json<Value>> {
     let mode = Mode::parse(&b.mode)?;
     let t = target(&roots_of(&st), &b.root, &b.path)?;

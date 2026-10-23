@@ -21,32 +21,48 @@ const SAMPLES: usize = 512;
 /// One slow call.
 #[derive(Clone, Debug)]
 struct Slow {
+    /// when it ended (unix seconds)
     at: f64,
+    /// the HTTP method
     method: String,
+    /// the path, without tokens ([`shown_path`])
     path: String,
+    /// the route's pattern
     route: String,
+    /// the status code
     status: u16,
+    /// how long it took (ms)
     ms: f64,
 }
 
+/// The times of one route and method.
 #[derive(Default)]
 struct RouteTimes {
+    /// calls so far
     count: u64,
+    /// calls that were slow
     slow: u64,
+    /// the slowest call (ms)
     max_ms: f64,
+    /// the last [`SAMPLES`] times (ms)
     last: VecDeque<f32>,
 }
 
+/// The times behind [`Perf`]'s lock.
 #[derive(Default)]
 struct Inner {
+    /// the last [`SLOW_KEPT`] slow calls
     slow: VecDeque<Slow>,
+    /// the times per "METHOD route"
     routes: HashMap<String, RouteTimes>,
 }
 
 /// The server's request times. Clones share them.
 #[derive(Clone)]
 pub struct Perf {
+    /// the times, shared by clones
     inner: Arc<Mutex<Inner>>,
+    /// when the server started counting (unix seconds)
     since: f64,
 }
 
@@ -75,6 +91,7 @@ fn quantile(sorted: &[f32], q: f64) -> f64 {
     sorted[rank - 1] as f64
 }
 
+/// `x` rounded to one decimal.
 fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }

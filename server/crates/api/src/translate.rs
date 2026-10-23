@@ -41,6 +41,7 @@ pub fn tool_info(st: &AppState, last: &Value) -> ToolInfo {
 
 // ---- routes -------------------------------------------------------------------------------------
 
+/// The translation routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/translate/languages", get(languages))
@@ -82,13 +83,17 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     Ok(Json(out))
 }
 
+/// `GET /api/translate/entry` query.
 #[derive(Deserialize)]
 struct EntryQ {
+    /// the text looked up
     text: String,
+    /// the language ("" = the listener's own)
     #[serde(default)]
     target: String,
 }
 
+/// The language to use: the one asked for, else the listener's preference.
 fn target_for(u: &Row, asked: &str) -> &'static str {
     if asked.trim().is_empty() { prefs_of(u).1 } else { script::target(asked) }
 }
@@ -102,14 +107,20 @@ async fn get_entry(State(st): State<AppState>, User(u): User, Query(q): Query<En
     Ok(Json(tokio::task::spawn_blocking(move || store::entry(&st.db, &q.text, target)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
+/// `PUT /api/translate/entry` body: a manual correction.
 #[derive(Deserialize)]
 struct EntryBody {
+    /// the text corrected
     text: String,
+    /// what the text is (a title, an artist …)
     #[serde(default)]
     kind: String,
+    /// the language ("" = the listener's own)
     #[serde(default)]
     target: String,
+    /// the translation to show
     translation: Option<String>,
+    /// the romanization to show
     romanization: Option<String>,
 }
 
