@@ -120,11 +120,59 @@ pub(super) async fn start_slskd(st: &impl Ctx, r: &mut Req, lossless_only: bool)
 pub(super) async fn slskd_cancel_current(st: &impl Ctx, c: &Value) {
     let wanted: Vec<&str> = c["files"].as_array().map(|a| a.iter().filter_map(|f| f["filename"].as_str()).collect()).unwrap_or_default();
     let user = c["username"].as_str().unwrap_or("");
-    for f in slskd::user_downloads(st, user).await {
-        if wanted.contains(&f["filename"].as_str().unwrap_or("")) && !f["state"].as_str().unwrap_or("").starts_with("Completed") {
-            slskd::cancel(st, user, &f["id"].as_str().map(String::from).unwrap_or(f["id"].to_string())).await;
-        }
+    // the ones still under way are cancelled, the failed ones only taken off the list: none of them is
+    // wanted any more, and the list shouldn't read as a row of failures
+    let ids: Vec<String> = slskd::user_downloads(st, user).await.iter()
+        .filter(|f| wanted.contains(&f["filename"].as_str().unwrap_or("")) && f["state"].as_str().unwrap_or("") != "Completed, Succeeded")
+        .map(file_id).collect();
+    slskd::cancel_and_remove(st, user, &ids).await;
+}
+
+/// A transfer's id in slskd.
+fn file_id(f: &Value) -> String {
+    f["id"].as_str().map(String::from).unwrap_or(f["id"].to_string())
+}
+
+/// How many times a user's files are asked for again after a [`slskd::Failure::Transient`] failure before
+/// the next user is tried; and after slskd restarted under them ([`slskd::Failure::Restart`]).
+const SLSKD_RETRIES: i64 = 1;
+const SLSKD_RESTARTS: i64 = 3;
+
+/// The current user's failed files (`bad`), asked for again from the same user when the failure says it is
+/// worth it: slskd restarted under them, or the user's client timed out or dropped the upload (once).
+/// Some(()) when they were asked for again; None to go on to the next user.
+async fn slskd_retry(st: &impl Ctx, r: &mut Req, c: &Value, bad: &[Value]) -> anyhow::Result<Option<()>> {
+    let user = c["username"].as_str().unwrap_or("").to_string();
+    let worst = bad.iter().map(|f| slskd::failure_of(f["state"].as_str().unwrap_or(""), f["exception"].as_str().unwrap_or(""))).max();
+    let (key, max, why) = match worst {
+        Some(slskd::Failure::Restart) => ("restarts", SLSKD_RESTARTS, "the Soulseek engine restarted".to_string()),
+        Some(slskd::Failure::Transient) => ("retries", SLSKD_RETRIES, slskd::transfer_error(&user, "", bad.iter().find_map(|f| f["exception"].as_str()).unwrap_or(""))),
+        _ => return Ok(None),
+    };
+    let n = r.d["slskd"][key].as_i64().unwrap_or(0);
+    if n >= max {
+        return Ok(None);
     }
+    let names: Vec<&str> = bad.iter().filter_map(|f| f["filename"].as_str()).collect();
+    let files: Vec<Value> = c["files"].as_array().map(|a| a.iter().filter(|f| names.contains(&f["filename"].as_str().unwrap_or(""))).cloned().collect()).unwrap_or_default();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    // the failed entries off slskd's list first: the new ones are then the only ones under these names
+    for f in bad {
+        slskd::cancel(st, &user, &file_id(f)).await;
+    }
+    if let Err(e) = slskd::enqueue(st, &user, &files).await {
+        if e.is::<slskd::NotConnected>() {
+            return Err(e);
+        }
+        return Ok(None);
+    }
+    r.d["slskd"][key] = json!(n + 1);
+    r.d["slskd"]["last_change"] = json!(now());
+    log_push(r, format!("slskd: asked {user} again for {} file(s) ({why})", files.len()));
+    upd(st, r, &[("message", json!(format!("Retrying {} file(s) from {user} – {why}", files.len())))]);
+    Ok(Some(()))
 }
 
 /// How long a download slskd is too busy to take is asked for again before the user counts as failed.
@@ -301,7 +349,8 @@ async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let mut latest: HashMap<String, Value> = HashMap::new();
     for f in slskd::user_downloads(st, &user).await {
         let n = f["filename"].as_str().unwrap_or("").to_string();
-        if wanted.contains(&n) {
+        let newer = |old: &Value| f["requestedAt"].as_str().unwrap_or("") >= old["requestedAt"].as_str().unwrap_or("");
+        if wanted.contains(&n) && latest.get(&n).is_none_or(newer) {
             latest.insert(n, f);
         }
     }
@@ -326,8 +375,18 @@ async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
         if parked_for_the_session(st, r).await? {
             return Ok(());
         }
-        st.db().log("warning", &format!("Soulseek transfer from {user} failed for {}; trying next source", r.label()));
-        let o = slskd_try_next(st, r, "transfer failed").await?;
+        let bad: Vec<Value> = latest.values().filter(|f| slskd::DONE_BAD.iter().any(|b| f["state"].as_str().unwrap_or("").contains(b))).cloned().collect();
+        if slskd_retry(st, r, &c, &bad).await?.is_some() {
+            return Ok(());
+        }
+        let said = bad.iter().map(|f| slskd::transfer_error(&user, f["state"].as_str().unwrap_or(""), f["exception"].as_str().unwrap_or("")))
+            .find(|e| !e.is_empty());
+        let reason = match &said {
+            Some(e) => format!("transfer failed: {e}"),
+            None => "transfer failed".to_string(),
+        };
+        st.db().log("warning", &format!("Soulseek transfer from {user} failed for {} ({}); trying next source", r.label(), said.as_deref().unwrap_or("no reason given")));
+        let o = slskd_try_next(st, r, &reason).await?;
         return after_slskd(st, r, o).await;
     }
     let total: f64 = latest.values().map(|f| f["size"].as_f64().unwrap_or(0.0)).sum::<f64>().max(1.0);

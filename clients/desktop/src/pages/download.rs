@@ -791,7 +791,7 @@ fn slskd_row<'a>(f: &Value, _ctx: &Ctx<'a>) -> El<'a, Message> {
     let state = fmt::s(f, "state");
     let kind = if state.contains("Succeeded") {
         Badge::Ok
-    } else if ["Errored", "Rejected", "TimedOut", "Cancelled"].iter().any(|k| state.contains(k)) {
+    } else if ["Errored", "Rejected", "TimedOut", "Failed", "Aborted"].iter().any(|k| state.contains(k)) {
         Badge::Err
     } else {
         Badge::Info

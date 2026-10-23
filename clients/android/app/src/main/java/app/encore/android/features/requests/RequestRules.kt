@@ -647,7 +647,7 @@ object RequestRules {
     /** A Soulseek transfer's state badge kind on Activity (activity.rs `slskd_row`). */
     fun transferKind(state: String): String = when {
         state.contains("Succeeded") -> "ok"
-        listOf("Errored", "Rejected", "TimedOut", "Cancelled").any { state.contains(it) } -> "err"
+        listOf("Errored", "Rejected", "TimedOut", "Failed", "Aborted").any { state.contains(it) } -> "err"
         else -> "info"
     }
 

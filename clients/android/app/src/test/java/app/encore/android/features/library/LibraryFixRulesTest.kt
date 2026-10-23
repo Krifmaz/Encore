@@ -90,5 +90,7 @@ class LibraryFixRulesTest {
         assertEquals("err", RequestRules.transferKind("Completed, Rejected"))
         assertEquals("err", RequestRules.transferKind("Completed, TimedOut"))
         assertEquals("info", RequestRules.transferKind("InProgress"))
+        // a cancel is not a failure: Encore cancels the rest of a user's files when it moves to another user
+        assertEquals("info", RequestRules.transferKind("Completed, Cancelled"))
     }
 }

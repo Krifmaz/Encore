@@ -114,6 +114,8 @@ pub(super) struct Fake {
     pub(super) answers: HashMap<String, Value>,
     /// users gone offline: a download from them is refused as slskd refuses it ("User x appears to be offline")
     pub(super) offline: Vec<String>,
+    /// slskd's exception for a failed download, per file name
+    pub(super) exceptions: HashMap<String, String>,
 }
 
 pub(super) type Shared = Arc<Mutex<Fake>>;
@@ -539,7 +541,8 @@ async fn user_transfers(State(sh): State<Shared>, Path(user): Path<String>) -> (
         return down();
     }
     let files: Vec<Value> = f.transfers.get(&user).map(|l| l.iter().enumerate().map(|(i, (n, s))| json!({ "id": format!("{user}-{i}"), "filename": n,
-        "state": s, "size": 1000, "bytesTransferred": 0 })).collect()).unwrap_or_default();
+        "state": s, "size": 1000, "bytesTransferred": 0,
+        "exception": f.exceptions.get(n) })).collect()).unwrap_or_default();
     (StatusCode::OK, Json(json!({ "username": user, "directories": [{ "directory": "Music\\Album", "files": files }] })))
 }
 
@@ -579,6 +582,7 @@ pub(super) fn setup(name: &str) -> (TestServer, Shared) {
         puts: vec![], deletes: vec![], posts: vec![], refused: vec![], too_many: 0, searches: HashMap::new(), stopped: vec![], most: 0,
         search_secs: 10, down: false, session: m.session().clone(), transfers: HashMap::new(), enqueues: vec![], enqueue_refused: vec![],
         enqueue_too_many: 0, enqueuing: 0, most_enqueuing: 0, enqueue_secs: 1, enqueue_not_connected: false, answers: HashMap::new(), offline: vec![],
+        exceptions: HashMap::new(),
     }));
     m.set_target(Target::App(fake_slskd(f.clone())));
     (ts, f)
@@ -1222,6 +1226,45 @@ async fn a_download_slskd_is_too_busy_to_take_is_asked_again_not_failed() {
     assert_eq!(tried(&d), vec!["u1|Music\\Album".to_string()]);
     assert!(!d["slskd"]["pending"].is_object());
     assert_eq!(f.lock().unwrap().enqueues.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>(), vec!["u2"]);
+    ts.remove();
+}
+
+/// A transfer slskd ended because it shut down (an update or a restart of Encore's) is asked for again from
+/// the same user, without counting the user as failed; one the user's client timed out on is asked for again
+/// once, and the second time the next user is tried, with the reason in words.
+#[tokio::test(start_paused = true)]
+async fn transient_transfer_failures_are_asked_for_again_before_the_next_user() {
+    let (ts, f) = setup("retry");
+    let st = ts.st.clone();
+    logged_in_already(&st, &f);
+    let file = "Music\\Album\\01 u1.flac".to_string();
+    let id = downloading(&st, &f, &["u1", "u2"], "Completed, Errored", json!([]));
+    f.lock().unwrap().exceptions.insert(file.clone(), "Application shut down".into());
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, _, d, _) = row(&st, id);
+    assert_eq!(status, "downloading", "{message}");
+    assert!(message.starts_with("Retrying 1 file(s) from u1 – the Soulseek engine restarted"), "{message}");
+    assert!(tried(&d).is_empty(), "{d}");
+    assert_eq!(f.lock().unwrap().enqueues.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>(), vec!["u1"]);
+    // the user's client times out: once more from u1, then u2
+    {
+        let mut f = f.lock().unwrap();
+        f.transfers.insert("u1".into(), vec![(file.clone(), "Completed, TimedOut".into())]);
+        f.exceptions.insert(file.clone(), "The wait timed out after 15000 milliseconds".into());
+    }
+    encore_requests::worker::step(st.clone(), id).await;
+    let (_, message, _, d, _) = row(&st, id);
+    assert!(message.starts_with("Retrying 1 file(s) from u1 – u1 didn't answer in time"), "{message}");
+    assert!(tried(&d).is_empty(), "{d}");
+    f.lock().unwrap().transfers.insert("u1".into(), vec![(file.clone(), "Completed, TimedOut".into())]);
+    encore_requests::worker::step(st.clone(), id).await;
+    let (status, message, _, d, _) = row(&st, id);
+    assert_eq!(status, "downloading");
+    assert!(message.starts_with("Downloading 1 file(s) from u2"), "{message}");
+    assert_eq!(tried(&d), vec!["u1|Music\\Album".to_string()]);
+    assert_eq!(f.lock().unwrap().enqueues.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>(), vec!["u1", "u1", "u2"]);
+    let warned = st.db.one("SELECT message FROM activity WHERE message LIKE 'Soulseek transfer from%'", p![]).unwrap().unwrap().s("message");
+    assert!(warned.contains("u1 didn't answer in time"), "{warned}");
     ts.remove();
 }
 

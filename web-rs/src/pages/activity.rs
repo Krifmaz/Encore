@@ -97,7 +97,7 @@ fn set_in(view: &Element, sel: &str, html: &str) {
 fn slskd_row(f: &Value) -> String {
     let state = f.s("state");
     let cls = if state.contains("Succeeded") { "ok" }
-        else if ["Errored", "Rejected", "TimedOut", "Cancelled"].iter().any(|k| state.contains(k)) { "err" }
+        else if ["Errored", "Rejected", "TimedOut", "Failed", "Aborted"].iter().any(|k| state.contains(k)) { "err" }
         else { "info" };
     let speed = if f.truthy("speed") { format!(" · {}/s", fmt::size(f.f("speed"))) } else { String::new() };
     // slskd's reason for a failed transfer, whole on a click, with Copy (R1)

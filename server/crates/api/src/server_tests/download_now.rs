@@ -478,7 +478,8 @@ async fn a_soulseek_queue_switches_to_a_user_with_a_free_slot() {
         (Some(true), Some("switched"), Some("Switched to bob, who has a free upload slot (FLAC, 4 files)"), Some("downloading")), "{v}");
     let calls = e.sh.lock().unwrap().calls.clone();
     assert_eq!(calls[0], "POST bob", "{calls:?}");
-    assert_eq!(calls.iter().filter(|c| c.starts_with("DELETE alice/")).count(), 4, "{calls:?}");
+    // each cancelled, then taken off slskd's list once the cancel has ended it
+    assert_eq!(calls.iter().filter(|c| c.starts_with("DELETE alice/")).count(), 8, "{calls:?}");
     let (_, message, d) = row(&st, id);
     assert_eq!(message, "Downloading 4 file(s) from bob (FLAC)");
     assert_eq!((d["slskd"]["idx"].as_i64(), d["slskd"]["candidates"][1]["username"].as_str()), (Some(1), Some("bob")), "{d}");
@@ -542,7 +543,7 @@ async fn a_soulseek_queue_switches_to_a_user_with_a_free_slot() {
     assert_eq!(dn::download_now(&st, id, "carol", true).await.unwrap_err(), (409, "It started downloading meanwhile".to_string()));
     let calls = e.sh.lock().unwrap().calls.clone();
     assert_eq!(calls.first().map(String::as_str), Some("POST bob"), "{calls:?}");
-    assert_eq!(calls.iter().filter(|c| c.starts_with("DELETE bob/")).count(), 4, "{calls:?}");
+    assert_eq!(calls.iter().filter(|c| c.starts_with("DELETE bob/")).count(), 8, "cancelled, then removed: {calls:?}");
     assert!(!calls.iter().any(|c| c.starts_with("DELETE alice/")), "alice untouched: {calls:?}");
     let (_, message, d) = row(&st, id);
     assert_eq!((message.as_str(), d["slskd"]["idx"].as_i64(), d["slskd_tried"].clone()), ("Queued by alice – 0/4 files", Some(0), Value::Null), "{d}");

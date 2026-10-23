@@ -443,7 +443,9 @@ fn flatten_transfers(d: &Value) -> Vec<Value> {
                 out.push(json!({ "id": f["id"], "username": u["username"], "filename": tail(f["filename"].as_str().unwrap_or("")),
                     "directory": tail(dir["directory"].as_str().unwrap_or("")), "state": f["state"].as_str().unwrap_or(""),
                     "progress": (f["percentComplete"].as_f64().unwrap_or(0.0) * 10.0).round() / 10.0, "size": f["size"], "speed": f["averageSpeed"],
-                    "path": f["filename"], "bytes": f["bytesTransferred"], "error": f["exception"] }));
+                    "path": f["filename"], "bytes": f["bytesTransferred"],
+                    "error": transfer_error(u["username"].as_str().unwrap_or(""), f["state"].as_str().unwrap_or(""), f["exception"].as_str().unwrap_or("")),
+                    "error_raw": f["exception"] }));
             }
         }
     }
@@ -461,6 +463,81 @@ pub async fn all_uploads(st: &impl Ctx) -> anyhow::Result<Vec<Value>> {
 
 pub async fn cancel(st: &impl Ctx, username: &str, file_id: &str) {
     let _ = req(st, reqwest::Method::DELETE, &format!("transfers/downloads/{}/{file_id}", urlencoding::encode(username)), None, &[("remove", "true")]).await;
+}
+
+/// How long slskd takes to end a cancelled transfer, before it can be taken off its list.
+const CANCEL_SETTLE: Duration = Duration::from_millis(1500);
+
+/// Cancel the worker's own transfers from `username` (it moved on to another user) and take them off
+/// slskd's list: slskd only removes a transfer that has ended, and a cancel ends it a moment later, so the
+/// remove is asked again once it has. Otherwise they stay on the Activity page as "Completed, Cancelled –
+/// A task was canceled", read as failures though nothing failed.
+pub async fn cancel_and_remove(st: &impl Ctx, username: &str, file_ids: &[String]) {
+    if file_ids.is_empty() {
+        return;
+    }
+    for id in file_ids {
+        cancel(st, username, id).await;
+    }
+    tokio::time::sleep(CANCEL_SETTLE).await;
+    for id in file_ids {
+        cancel(st, username, id).await;
+    }
+}
+
+/// Why a Soulseek transfer ended badly, as far as trying again goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Failure {
+    /// slskd stopped under it ("Application shut down": Encore restarted it, or the server restarted):
+    /// nothing to do with the user, the same files are asked for again
+    Restart,
+    /// the user's client didn't answer in time or dropped the upload: worth one more try from the same user
+    Transient,
+    /// the user can't be reached, refused the file, or the transfer was cancelled: on to the next user
+    Final,
+}
+
+/// [`Failure`] from slskd's state and exception text (Soulseek.NET's messages).
+pub fn failure_of(state: &str, exception: &str) -> Failure {
+    let e = exception.to_lowercase();
+    if e.contains("application shut down") {
+        Failure::Restart
+    } else if state.contains("Rejected") || state.contains("Cancelled") || e.contains("canceled") || e.contains("cancelled") {
+        Failure::Final
+    } else if e.contains("wait timed out") || e.contains("reported as failed by remote client") || e.contains("remote connection closed")
+        || e.contains("connection reset") || e.contains("inactivity") {
+        Failure::Transient
+    } else {
+        Failure::Final
+    }
+}
+
+/// slskd's reason for a failed transfer in plain words, with the user's name ("SnowLiON didn't answer in
+/// time"); slskd's own words when they are not one of Soulseek's usual ones. Empty when there is none.
+pub fn transfer_error(user: &str, state: &str, exception: &str) -> String {
+    let e = exception.trim();
+    if e.is_empty() {
+        return String::new();
+    }
+    let low = e.to_lowercase();
+    let who = if user.is_empty() { "The user" } else { user };
+    if low.contains("application shut down") {
+        "Interrupted: the Soulseek engine restarted".into()
+    } else if low.contains("canceled") || low.contains("cancelled") {
+        "Cancelled".into()
+    } else if low.contains("wait timed out") {
+        format!("{who} didn't answer in time (Soulseek timeout)")
+    } else if low.contains("failed to establish a direct or indirect") {
+        format!("Couldn't connect to {who} (offline, or behind a firewall that blocks transfers)")
+    } else if low.contains("reported as failed by remote client") {
+        format!("{who}'s client couldn't send the file")
+    } else if low.contains("remote connection closed") || low.contains("connection reset") {
+        format!("{who} dropped the connection")
+    } else if state.contains("Rejected") {
+        format!("{who} refused the download: {e}")
+    } else {
+        e.to_string()
+    }
 }
 
 pub async fn clear_completed(st: &impl Ctx) -> anyhow::Result<()> {
@@ -659,4 +736,31 @@ pub fn local_path_in(root: &std::path::Path, remote: &str) -> Option<std::path::
     // never a half-downloaded copy from slskd's incomplete folder (downloads/.incomplete)
     walkdir::WalkDir::new(root).into_iter().filter_entry(|e| e.depth() == 0 || e.file_name() != ".incomplete").flatten()
         .find(|e| e.file_type().is_file() && e.file_name() == base).map(|e| e.into_path())
+}
+
+#[cfg(test)]
+mod transfer_error_tests {
+    use super::{failure_of, transfer_error, Failure};
+
+    /// Soulseek.NET's reasons, as the Activity page shows them, and whether the same user is tried again.
+    #[test]
+    fn soulseeks_reasons_read_in_words() {
+        let cases = [
+            ("Completed, Errored", "Application shut down", Failure::Restart, "Interrupted: the Soulseek engine restarted"),
+            ("Completed, Cancelled", "A task was canceled.", Failure::Final, "Cancelled"),
+            ("Completed, Cancelled", "The operation was canceled.", Failure::Final, "Cancelled"),
+            ("Completed, TimedOut", "The wait timed out after 15000 milliseconds", Failure::Transient, "bob didn't answer in time (Soulseek timeout)"),
+            ("Completed, Errored", "Failed to establish a direct or indirect message connection to bob (1.2.3.4:5)", Failure::Final,
+             "Couldn't connect to bob (offline, or behind a firewall that blocks transfers)"),
+            ("Completed, Errored", "Download reported as failed by remote client", Failure::Transient, "bob's client couldn't send the file"),
+            ("Completed, Rejected", "File not shared.", Failure::Final, "bob refused the download: File not shared."),
+            ("Completed, Errored", "something new", Failure::Final, "something new"),
+        ];
+        for (state, e, failure, words) in cases {
+            assert_eq!(failure_of(state, e), failure, "{e}");
+            assert_eq!(transfer_error("bob", state, e), words);
+        }
+        assert_eq!(transfer_error("bob", "Completed, Errored", ""), "");
+        assert!(Failure::Final > Failure::Transient && Failure::Transient > Failure::Restart, "the worst decides");
+    }
 }
