@@ -32,6 +32,8 @@ async fn main() -> anyhow::Result<()> {
             return Err(e);
         }
     };
+    // only the newest backups are kept: an older server's pile goes at the first start
+    backup::prune(st.data_dir());
     // a copy of the database at least once a day, even when the server is restarted all the time
     if backup::newest_copy(st.data_dir()).map(|b| now() - b.time > 86400.0).unwrap_or(true) {
         match st.db.backup(backup::Kind::Scheduled) {

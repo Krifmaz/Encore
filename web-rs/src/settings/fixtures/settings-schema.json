@@ -363,6 +363,52 @@
           "test": null,
           "test_label": null,
           "title": "Group listens"
+        },
+        {
+          "desc": "Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.",
+          "fields": [
+            {
+              "advanced": false,
+              "default": 3,
+              "env": "ENCORE_BACKUP_KEEP",
+              "env_locked": false,
+              "full": false,
+              "help": "Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.",
+              "key": "backup_keep",
+              "label": "Backups to keep",
+              "max": 60,
+              "min": 1,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": 1,
+              "env": "ENCORE_BACKUP_KEEP_UPGRADE",
+              "env_locked": false,
+              "full": false,
+              "help": "The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.",
+              "key": "backup_keep_upgrade",
+              "label": "Pre-upgrade copies to keep",
+              "max": 10,
+              "min": 0,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": null,
+              "when": null
+            }
+          ],
+          "id": "backups",
+          "part": "",
+          "test": null,
+          "test_label": null,
+          "title": "Database backups"
         }
       ],
       "id": "general",

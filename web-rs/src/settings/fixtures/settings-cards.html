@@ -28,6 +28,16 @@
     value="20" autocomplete="off" ><small>Guests count too. A host can set a lower limit for their group.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_MAX</span></small></label><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_keep" checked ><i></i>Keep group listens through a server restart</label><small>They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_KEEP</span></small></div></div>
       
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
+    </details><details class="card settings-card" data-sec="backups" >
+      <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>Database backups</h2><div class="small muted" style="margin-top:4px;font-weight:400">Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.</div></div>
+        <span class="row" style="gap:8px"><span class="chev"><svg/></span></span></summary>
+      <div style="height:14px"></div>
+      <div data-out></div>
+      <div class="form-grid"><label class="field "><span>Backups to keep</span><input class="input" type="number" data-k="backup_keep" 
+    value="3" autocomplete="off" ><small>Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP</span></small></label><label class="field "><span>Pre-upgrade copies to keep</span><input class="input" type="number" data-k="backup_keep_upgrade" 
+    value="1" autocomplete="off" ><small>The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP_UPGRADE</span></small></label></div>
+      
+      <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
     </details>
 <!-- page library, defaults values, reveal false -->
 <details class="card settings-card" data-sec="library" open>
@@ -231,6 +241,16 @@
       <div data-out></div>
       <div class="form-grid"><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen" checked ><i></i>Allow group listens</label><small>Off hides every group listen entry in the apps and ends the ones that are running</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN</span></small></div><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_guests"  ><i></i>Let people without an account join with the invite link</label><small>The host also switches “Guests can join with the link” on for their group; both must be on. Guests listen on a web page: they can&#39;t add songs or control playback, and nothing they hear is logged or scrobbled. Their access ends with the group, when they leave, or after 12 hours.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_GUESTS</span></small></div><label class="field "><span>Most people in one group listen</span><input class="input" type="number" data-k="group_listen_max" 
     value="20" autocomplete="off" ><small>Guests count too. A host can set a lower limit for their group.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_MAX</span></small></label><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_keep" checked ><i></i>Keep group listens through a server restart</label><small>They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_KEEP</span></small></div></div>
+      
+      <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
+    </details><details class="card settings-card" data-sec="backups" >
+      <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>Database backups</h2><div class="small muted" style="margin-top:4px;font-weight:400">Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.</div></div>
+        <span class="row" style="gap:8px"><span class="chev"><svg/></span></span></summary>
+      <div style="height:14px"></div>
+      <div data-out></div>
+      <div class="form-grid"><label class="field "><span>Backups to keep</span><input class="input" type="number" data-k="backup_keep" 
+    value="3" autocomplete="off" ><small>Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP</span></small></label><label class="field "><span>Pre-upgrade copies to keep</span><input class="input" type="number" data-k="backup_keep_upgrade" 
+    value="1" autocomplete="off" ><small>The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP_UPGRADE</span></small></label></div>
       
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
     </details>
@@ -438,6 +458,16 @@
     value="20" autocomplete="off" ><small>Guests count too. A host can set a lower limit for their group.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_MAX</span></small></label><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_keep" checked ><i></i>Keep group listens through a server restart</label><small>They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_KEEP</span></small></div></div>
       
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
+    </details><details class="card settings-card" data-sec="backups" >
+      <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>Database backups</h2><div class="small muted" style="margin-top:4px;font-weight:400">Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.</div></div>
+        <span class="row" style="gap:8px"><span class="chev"><svg/></span></span></summary>
+      <div style="height:14px"></div>
+      <div data-out></div>
+      <div class="form-grid"><label class="field "><span>Backups to keep</span><input class="input" type="number" data-k="backup_keep" 
+    value="3" autocomplete="off" ><small>Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP</span></small></label><label class="field "><span>Pre-upgrade copies to keep</span><input class="input" type="number" data-k="backup_keep_upgrade" 
+    value="1" autocomplete="off" ><small>The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP_UPGRADE</span></small></label></div>
+      
+      <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
     </details>
 <!-- page library, changed values, reveal false -->
 <details class="card settings-card" data-sec="library" open>
@@ -616,6 +646,16 @@
       <div data-out></div>
       <div class="form-grid"><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen" checked ><i></i>Allow group listens</label><small>Off hides every group listen entry in the apps and ends the ones that are running</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN</span></small></div><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_guests"  ><i></i>Let people without an account join with the invite link</label><small>The host also switches “Guests can join with the link” on for their group; both must be on. Guests listen on a web page: they can&#39;t add songs or control playback, and nothing they hear is logged or scrobbled. Their access ends with the group, when they leave, or after 12 hours.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_GUESTS</span></small></div><label class="field "><span>Most people in one group listen</span><input class="input" type="number" data-k="group_listen_max" 
     value="20" autocomplete="off" ><small>Guests count too. A host can set a lower limit for their group.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_MAX</span></small></label><div class="field " style="justify-content:center"><label class="switch"><input type="checkbox" data-k="group_listen_keep" checked ><i></i>Keep group listens through a server restart</label><small>They come back paused where they were, the apps join again by themselves and the host presses play. Off: a restart ends them. Group listens nobody used for 12 hours end either way.</small><small class="src faint">Default · env var <span class="mono">ENCORE_GROUP_LISTEN_KEEP</span></small></div></div>
+      
+      <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
+    </details><details class="card settings-card" data-sec="backups" >
+      <summary class="row between" style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><div style="min-width:0"><h2>Database backups</h2><div class="small muted" style="margin-top:4px;font-weight:400">Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.</div></div>
+        <span class="row" style="gap:8px"><span class="chev"><svg/></span></span></summary>
+      <div style="height:14px"></div>
+      <div data-out></div>
+      <div class="form-grid"><label class="field "><span>Backups to keep</span><input class="input" type="number" data-k="backup_keep" 
+    value="3" autocomplete="off" ><small>Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP</span></small></label><label class="field "><span>Pre-upgrade copies to keep</span><input class="input" type="number" data-k="backup_keep_upgrade" 
+    value="1" autocomplete="off" ><small>The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.</small><small class="src faint">Default · env var <span class="mono">ENCORE_BACKUP_KEEP_UPGRADE</span></small></label></div>
       
       <div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-save><svg/>Save</button></div>
     </details>

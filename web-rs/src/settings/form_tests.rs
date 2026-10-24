@@ -157,7 +157,7 @@ const LINKS: &[(&str, &str)] = &[
     ("integrations", "integrations"), ("spotify", "integrations"), ("media", "integrations"), ("roon", "integrations"),
     ("processing", "processing"), ("cadenza", "processing"),
     ("accounts", "accounts"), ("email", "accounts"), ("notify", "accounts"), ("autodownload", "autodownload"),
-    ("contribute", "contribute"), ("blocked", "blocked"), ("tasks", "tasks"), ("sync", "tasks"), ("trash", "library"),
+    ("contribute", "contribute"), ("blocked", "blocked"), ("tasks", "tasks"), ("sync", "tasks"), ("trash", "library"), ("backups", "general"),
     ("about", "about"), ("api", "api"), ("keys", "keys"), ("account", "account"), ("users", "users"), ("nothing", "nothing"),
 ];
 

@@ -39,7 +39,8 @@ listed_last = [
     "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
     "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
     "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
-    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days",
+    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days", "backup_keep",
+    "backup_keep_upgrade",
 ]
 
 [sections.general]
@@ -111,6 +112,11 @@ desc = "Dolby Atmos and other 5.1 and 7.1 versions of songs, in a Surround libra
 section = "library"
 title = "Deleting files"
 desc = "What happens to a file when you delete an album, a song or a file. Off: it is deleted for good straight away. On: it waits in the Trash (Settings → System → Files → Trash, on the music disk) and can be restored until the days run out."
+
+[groups.backups]
+section = "general"
+title = "Database backups"
+desc = "Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted."
 
 [groups.pipeline]
 section = "downloads"
@@ -1694,6 +1700,26 @@ help = "Update plugins task on/off."
 [keys.task_tools_minutes]
 default = 1440
 help = "How often the Update plugins task runs, in minutes."
+
+[keys.backup_keep]
+env = "ENCORE_BACKUP_KEEP"
+default = 3
+group = "backups"
+label = "Backups to keep"
+type = "number"
+min = 1
+max = 60
+help = "Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each."
+
+[keys.backup_keep_upgrade]
+env = "ENCORE_BACKUP_KEEP_UPGRADE"
+default = 1
+group = "backups"
+label = "Pre-upgrade copies to keep"
+type = "number"
+min = 0
+max = 10
+help = "The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above."
 
 [keys.task_backup_enabled]
 env = "TASK_BACKUP_ENABLED"

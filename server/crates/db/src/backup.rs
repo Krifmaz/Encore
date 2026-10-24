@@ -11,9 +11,11 @@
 //! `ENCORE_SKIP_MIGRATION_BACKUP=1` skips the copy altogether.
 //!
 //! File names are `encore-YYYYMMDD-HHMMSS.db` (UTC), with a suffix saying why the copy was made
-//! (`-before-upgrade`, `-before-restore`, `-uploaded`). Retention: everything from the last 7 days,
-//! then the newest of each week for 8 weeks, plus the last 3 pre-upgrade copies (pre-upgrade copies only
-//! count there, so a run of updates doesn't pile them up); the newest backup is never deleted.
+//! (`-before-upgrade`, `-before-restore`, `-uploaded`). Retention ([`Retention`]): Settings → General →
+//! Database backups → Backups to keep (`backup_keep`, 3) is shared out daily, weekly, monthly – 3 is the
+//! newest copy of the latest day, one of an earlier week and one of an earlier month – plus the newest
+//! `backup_keep_upgrade` (1) pre-upgrade copies. The rest is deleted at every start and after every
+//! backup. Uploaded files are someone's own and are never deleted.
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -29,6 +31,60 @@ pub const ENV_REQUIRE_MIGRATION_BACKUP: &str = "ENCORE_REQUIRE_MIGRATION_BACKUP"
 /// The folder in the library folder that takes the backups when the backups folder's disk is full (a dot
 /// name, so the scan never reads it; .plexignore and .ndignore keep media servers out).
 pub const SPILL_NAME: &str = ".encore-backups";
+/// The setting with how many daily/weekly/monthly copies are kept in all (`ENCORE_BACKUP_KEEP`).
+pub const KEEP_KEY: &str = "backup_keep";
+/// The setting with how many pre-upgrade copies are kept besides (`ENCORE_BACKUP_KEEP_UPGRADE`).
+pub const KEEP_UPGRADE_KEY: &str = "backup_keep_upgrade";
+
+/// How many copies of each kind [`prune`] keeps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Retention {
+    /// the newest copy of this many days
+    pub daily: usize,
+    /// then the newest copy of this many earlier weeks
+    pub weekly: usize,
+    /// then the newest copy of this many earlier months
+    pub monthly: usize,
+    /// the newest pre-upgrade copies kept besides
+    pub upgrade: usize,
+}
+
+impl Retention {
+    /// `keep` copies in all (at least 1) shared out daily first, then weekly, then monthly – 3 is one of
+    /// each, 4 is two daily, 6 two of each – and `upgrade` pre-upgrade copies (0 or more).
+    pub fn new(keep: i64, upgrade: i64) -> Retention {
+        let keep = keep.clamp(1, 1000) as usize;
+        let daily = keep.div_ceil(3);
+        let weekly = (keep - daily).div_ceil(2);
+        Retention { daily, weekly, monthly: keep - daily - weekly, upgrade: upgrade.clamp(0, 100) as usize }
+    }
+
+    /// The retention in effect for the database in `data_dir`, as the settings say (the environment
+    /// variable, then the saved value, then the default 3 and 1). The value is read straight from the
+    /// settings table, so this works before the server's settings are loaded (a schema upgrade).
+    pub fn read(data_dir: &Path) -> Retention {
+        let conn = Connection::open_with_flags(data_dir.join("encore.db"), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok();
+        let get = |key: &str, env: &str, default: i64| -> i64 {
+            if let Some(n) = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()) {
+                return n;
+            }
+            // saved values are JSON: 3 or "3"
+            let saved: Option<String> = conn.as_ref().and_then(|c| c.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).ok());
+            saved
+                .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+                .unwrap_or(default)
+        };
+        Retention::new(get(KEEP_KEY, "ENCORE_BACKUP_KEEP", 3), get(KEEP_UPGRADE_KEY, "ENCORE_BACKUP_KEEP_UPGRADE", 1))
+    }
+}
+
+impl Default for Retention {
+    /// 3 in all (one daily, one weekly, one monthly) and the newest pre-upgrade copy.
+    fn default() -> Retention {
+        Retention::new(3, 1)
+    }
+}
 /// Copies of this server's own database that freeing room never removes (the newest ones).
 pub const KEEP_WHEN_FULL: usize = 2;
 /// Room left over on top of the database's size before a copy is started: SQLite's own bookkeeping and
@@ -412,11 +468,16 @@ pub fn validate_file(path: &Path) -> anyhow::Result<i64> {
     Ok(v)
 }
 
-/// Applies the retention rules and returns the names that were deleted.
+/// Applies the retention the settings ask for ([`Retention::read`]) and returns the names that were deleted.
 pub fn prune(data_dir: &Path) -> Vec<String> {
+    prune_with(data_dir, Retention::read(data_dir))
+}
+
+/// Applies the retention `r` and returns the names that were deleted.
+pub fn prune_with(data_dir: &Path, r: Retention) -> Vec<String> {
     let all = list(data_dir);
     let mut removed = Vec::new();
-    for name in to_prune(&all, now()) {
+    for name in to_prune(&all, r) {
         // the file where the listing found it (the backups folder or the spill folder)
         let Some(p) = all.iter().find(|b| b.name == name).map(|b| b.path.clone()) else { continue };
         match std::fs::remove_file(&p) {
@@ -430,33 +491,56 @@ pub fn prune(data_dir: &Path) -> Vec<String> {
     removed
 }
 
-/// The retention rules, as a pure function of the listing (newest first) and the current time.
-pub fn to_prune(all: &[Info], now: f64) -> Vec<String> {
+/// The retention rule, as a pure function of the listing (newest first): what isn't kept goes.
+///
+/// Kept: the newest `r.upgrade` pre-upgrade copies; of the other copies of this server's own database
+/// (newest first), the newest of each day until `r.daily` days have one, then the newest of each earlier
+/// week until `r.weekly` weeks have one, then of each earlier month until `r.monthly` months have one. A
+/// week or month that already has a kept copy doesn't take another, so the tiers reach further back
+/// instead of overlapping. Uploaded files always stay.
+pub fn to_prune(all: &[Info], r: Retention) -> Vec<String> {
+    use std::collections::HashSet;
     const DAY: f64 = 86400.0;
-    let mut keep: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    // the newest copy always stays – never delete the only backup
-    if let Some(n) = all.first() {
-        keep.insert(&n.name);
-    }
-    // the last 3 pre-upgrade copies
-    for b in all.iter().filter(|b| b.kind == Kind::BeforeUpgrade).take(3) {
+    let mut keep: HashSet<&str> = HashSet::new();
+    for b in all.iter().filter(|b| b.kind == Kind::BeforeUpgrade).take(r.upgrade) {
         keep.insert(&b.name);
     }
-    // everything from the last 7 days, then one per week (the newest of each) for 8 more weeks; pre-upgrade
-    // copies only count above (a run of updates in a week would otherwise keep one copy per update)
-    let mut weeks_seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for b in all.iter().filter(|b| b.kind != Kind::BeforeUpgrade) {
-        let age = now - b.time;
-        if age < 7.0 * DAY {
+    // the day, week and month (year * 12 + month) a copy was made in, in UTC
+    let buckets = |b: &Info| {
+        let day = (b.time / DAY).floor() as i64;
+        let (y, m, _) = civil_from_days(day);
+        (day, day.div_euclid(7), y * 12 + m as i64)
+    };
+    // the days, weeks and months that have a kept copy, and how many each tier took
+    let (mut days, mut weeks, mut months) = (HashSet::new(), HashSet::new(), HashSet::new());
+    let (mut n_weekly, mut n_monthly) = (0, 0);
+    for b in all.iter().filter(|b| !matches!(b.kind, Kind::BeforeUpgrade | Kind::Uploaded)) {
+        let (d, w, m) = buckets(b);
+        let kept = if days.len() < r.daily && !days.contains(&d) {
+            days.insert(d)
+        } else if days.len() < r.daily {
+            // a later copy of a day that has its copy
+            false
+        } else if n_weekly < r.weekly {
+            // a week that already has a kept copy (a daily one) doesn't take another
+            let new = !weeks.contains(&w);
+            n_weekly += new as usize;
+            new
+        } else if n_monthly < r.monthly {
+            // likewise a month that has a daily or weekly copy
+            let new = !months.contains(&m);
+            n_monthly += new as usize;
+            new
+        } else {
+            false
+        };
+        if kept {
             keep.insert(&b.name);
-        } else if age < (7.0 + 8.0 * 7.0) * DAY {
-            let week = ((b.time / DAY).floor() as i64).div_euclid(7);
-            if weeks_seen.insert(week) {
-                keep.insert(&b.name);
-            }
+            weeks.insert(w);
+            months.insert(m);
         }
     }
-    all.iter().filter(|b| !keep.contains(b.name.as_str())).map(|b| b.name.clone()).collect()
+    all.iter().filter(|b| b.kind != Kind::Uploaded && !keep.contains(b.name.as_str())).map(|b| b.name.clone()).collect()
 }
 
 #[cfg(test)]
@@ -493,52 +577,67 @@ mod tests {
     }
 
     #[test]
-    fn retention_rules() {
-        const DAY: f64 = 86400.0;
-        let now = 1_800_000_000.0;
-        let mut all = Vec::new();
-        // one per day for 100 days
-        for d in 0..100 {
-            all.push(info(Kind::Scheduled, now - d as f64 * DAY - 3600.0));
-        }
-        // pre-upgrade copies: 5, all older than the window
-        for d in [70, 80, 90, 95, 99] {
-            all.push(info(Kind::BeforeUpgrade, now - d as f64 * DAY - 7200.0));
-        }
-        all.sort_by(|a, b| b.time.partial_cmp(&a.time).unwrap());
-        let gone: std::collections::HashSet<String> = to_prune(&all, now).into_iter().collect();
-        let kept: Vec<&Info> = all.iter().filter(|b| !gone.contains(&b.name)).collect();
-        // all of the last 7 days
-        assert_eq!(kept.iter().filter(|b| now - b.time < 7.0 * DAY).count(), 7);
-        // weekly after that: at most one per week bucket, none older than 63 days (except pre-upgrade)
-        let weekly: Vec<&&Info> = kept.iter().filter(|b| now - b.time >= 7.0 * DAY && b.kind == Kind::Scheduled).collect();
-        assert!(weekly.len() >= 8 && weekly.len() <= 9, "{}", weekly.len());
-        let mut weeks: Vec<i64> = weekly.iter().map(|b| ((b.time / DAY).floor() as i64).div_euclid(7)).collect();
-        weeks.dedup();
-        assert_eq!(weeks.len(), weekly.len());
-        assert!(weekly.iter().all(|b| now - b.time < 63.0 * DAY));
-        // exactly the 3 newest pre-upgrade copies
-        let up: Vec<&&Info> = kept.iter().filter(|b| b.kind == Kind::BeforeUpgrade).collect();
-        assert_eq!(up.len(), 3);
-        assert!(up.iter().all(|b| now - b.time < 91.0 * DAY));
-        // a lone, ancient backup is never deleted
-        let lone = vec![info(Kind::Scheduled, now - 400.0 * DAY)];
-        assert!(to_prune(&lone, now).is_empty());
-        let two = vec![info(Kind::Scheduled, now - 400.0 * DAY), info(Kind::Scheduled, now - 500.0 * DAY)];
-        assert_eq!(to_prune(&two, now), vec![two[1].name.clone()]);
+    fn the_count_is_shared_out_daily_weekly_monthly() {
+        let t = |k, u| { let r = Retention::new(k, u); (r.daily, r.weekly, r.monthly, r.upgrade) };
+        assert_eq!(t(3, 1), (1, 1, 1, 1));
+        assert_eq!(Retention::default(), Retention::new(3, 1));
+        assert_eq!(t(1, 0), (1, 0, 0, 0));
+        assert_eq!(t(2, 1), (1, 1, 0, 1));
+        assert_eq!(t(4, 1), (2, 1, 1, 1));
+        assert_eq!(t(6, 3), (2, 2, 2, 3));
+        // nonsense is clamped: always one copy, never a negative count
+        assert_eq!(t(0, -5), (1, 0, 0, 0));
     }
 
     #[test]
-    fn pre_upgrade_copies_dont_pile_up_in_the_window() {
+    fn keeps_one_daily_one_weekly_one_monthly_and_the_newest_pre_upgrade() {
         const DAY: f64 = 86400.0;
         let now = 1_800_000_000.0;
-        // five updates in two days, then a daily copy: only the last 3 pre-upgrade copies stay
-        let mut all: Vec<Info> = (0..5).map(|i| info(Kind::BeforeUpgrade, now - i as f64 * 0.4 * DAY - 60.0)).collect();
-        all.push(info(Kind::Scheduled, now - 30.0));
+        // a daily copy for 200 days, five pre-upgrade copies in the last two days, an old upload
+        let mut all: Vec<Info> = (0..200).map(|d| info(Kind::Scheduled, now - d as f64 * DAY - 3600.0)).collect();
+        all.extend((0..5).map(|i| info(Kind::BeforeUpgrade, now - i as f64 * 0.4 * DAY - 60.0)));
+        all.push(info(Kind::Uploaded, now - 50.0 * DAY));
         all.sort_by(|a, b| b.time.partial_cmp(&a.time).unwrap());
-        let gone = to_prune(&all, now);
-        assert_eq!(gone.len(), 2, "{gone:?}");
-        assert!(gone.iter().all(|n| n.ends_with("-before-upgrade.db")));
+        let week = |b: &Info| ((b.time / DAY).floor() as i64).div_euclid(7);
+        let month = |b: &Info| { let (y, m, _) = civil_from_days((b.time / DAY).floor() as i64); y * 12 + m as i64 };
+        let kept_with = |r| { let gone: std::collections::HashSet<String> = to_prune(&all, r).into_iter().collect(); all.iter().filter(|b| !gone.contains(&b.name)).cloned().collect::<Vec<Info>>() };
+        // the default: 3 copies (the newest, one of an earlier week, one of an earlier month) + 1 pre-upgrade
+        let kept = kept_with(Retention::default());
+        let sched: Vec<&Info> = kept.iter().filter(|b| b.kind == Kind::Scheduled).collect();
+        assert_eq!(sched.len(), 3);
+        assert_eq!(sched[0].name, all.iter().find(|b| b.kind == Kind::Scheduled).unwrap().name);
+        assert_ne!(week(sched[1]), week(sched[0]));
+        assert!(month(sched[2]) != month(sched[0]) && month(sched[2]) != month(sched[1]));
+        assert_eq!(kept.iter().filter(|b| b.kind == Kind::BeforeUpgrade).count(), 1);
+        assert_eq!(kept.iter().filter(|b| b.kind == Kind::Uploaded).count(), 1);
+        // 9 in all: 3 days, 3 earlier weeks, 3 earlier months; 3 pre-upgrade
+        let kept = kept_with(Retention::new(9, 3));
+        let sched: Vec<&Info> = kept.iter().filter(|b| b.kind == Kind::Scheduled).collect();
+        assert_eq!(sched.len(), 9);
+        let ages: Vec<f64> = sched.iter().map(|b| (now - b.time) / DAY).collect();
+        assert!(ages[..3].iter().all(|a| *a < 3.0), "{ages:?}");
+        let weeks: std::collections::HashSet<i64> = sched[..6].iter().map(|b| week(b)).collect();
+        assert!(weeks.len() >= 4, "{ages:?}");
+        let months: std::collections::HashSet<i64> = sched[6..].iter().map(|b| month(b)).collect();
+        assert_eq!(months.len(), 3, "{ages:?}");
+        assert!(sched[6..].iter().all(|b| sched[..6].iter().all(|k| month(k) != month(b))), "{ages:?}");
+        assert_eq!(kept.iter().filter(|b| b.kind == Kind::BeforeUpgrade).count(), 3);
+        // four copies on the same day: that day's newest stays, the rest go
+        let same: Vec<Info> = (0..4).map(|i| info(Kind::Scheduled, now - 3600.0 - i as f64 * 60.0)).collect();
+        assert_eq!(to_prune(&same, Retention::default()), same[1..].iter().map(|b| b.name.clone()).collect::<Vec<_>>());
+        // a lone, ancient copy is never deleted
+        assert!(to_prune(&[info(Kind::Scheduled, now - 400.0 * DAY)], Retention::new(1, 0)).is_empty());
+    }
+
+    #[test]
+    fn the_saved_setting_decides_the_retention() {
+        let dir = encore_core::tmp::dir("backup-keep");
+        // no database yet: the defaults
+        assert_eq!(Retention::read(&dir), Retention::default());
+        let conn = Connection::open(dir.join("encore.db")).unwrap();
+        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); INSERT INTO settings VALUES ('backup_keep', '6'), ('backup_keep_upgrade', '\"2\"');").unwrap();
+        assert_eq!(Retention::read(&dir), Retention::new(6, 2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -610,13 +709,15 @@ mod tests {
         assert_eq!(list(&dir)[0].kind, Kind::Uploaded);
         assert_eq!(newest_copy(&dir).unwrap().name, b.name);
         std::fs::remove_file(&up).unwrap();
-        // an old file is pruned, the newest stays
-        let old = dir.join("backups").join(file_name(Kind::Scheduled, 1_000_000_000.0));
-        std::fs::copy(&b.path, &old).unwrap();
-        assert_eq!(list(&dir).len(), 2);
-        let removed = prune(&dir);
-        assert_eq!(removed.len(), 1);
-        assert!(!old.exists() && b.path.exists());
+        // three older files on one day: that day keeps its newest, the other two go, the newest copy stays
+        let olds: Vec<PathBuf> = [1_000_000_000.0, 1_000_000_060.0, 1_000_000_120.0].iter().map(|t| dir.join("backups").join(file_name(Kind::Scheduled, *t))).collect();
+        for o in &olds {
+            std::fs::copy(&b.path, o).unwrap();
+        }
+        assert_eq!(list(&dir).len(), 4);
+        let removed = prune_with(&dir, Retention::default());
+        assert_eq!(removed.len(), 2);
+        assert!(!olds[0].exists() && !olds[1].exists() && olds[2].exists() && b.path.exists());
         // garbage is not a database
         std::fs::write(dir.join("x.db"), b"hello").unwrap();
         assert!(validate_file(&dir.join("x.db")).is_err());
