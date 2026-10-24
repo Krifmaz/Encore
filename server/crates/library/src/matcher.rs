@@ -383,7 +383,43 @@ impl LibraryIndex {
         }
         best.map(|(i, vv)| (&self.rows[i], vv))
     }
+
+    /// The library song for a playlist item whose artist is only a guess (a video's uploader, see
+    /// [`crate::video_title`]): the same title and version, a length within [`TITLE_ONLY_SECS`], by one
+    /// artist only. Two artists with such a song (a cover, a common title) is no match: the uploader can't
+    /// tell which one it is. The item needs a length: a title alone is too little.
+    pub fn find_by_title(&self, want: &Desc) -> Option<(&encore_db::Row, Verdict)> {
+        let len = want.length?;
+        let word = want.base.split_whitespace().next()?;
+        // (row, title similarity, length difference) of every song that fits
+        let mut hits: Vec<(usize, f64, f64, &str)> = vec![];
+        for (d, i) in self.by_word.get(word).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let Some(l) = d.length else { continue };
+            let (tsim, diff) = (sim(&want.base, &d.base), (l - len).abs());
+            if tsim < 0.92 || diff > TITLE_ONLY_SECS || d.versions != want.versions {
+                continue;
+            }
+            if want.versions.contains("remix") && !want.remixer.is_empty() && !d.remixer.is_empty() && sim(&want.remixer, &d.remixer) < 0.7 {
+                continue;
+            }
+            hits.push((*i, tsim, diff, d.artists.first().map(String::as_str).unwrap_or("")));
+        }
+        let first = hits.first()?.3;
+        if hits.iter().any(|h| sim(h.3, first) < 0.75) {
+            return None;
+        }
+        let (i, tsim, diff, _) = hits.into_iter().max_by(|a, b| (a.1, -a.2).partial_cmp(&(b.1, -b.2)).unwrap_or(std::cmp::Ordering::Equal))?;
+        let score = (0.6 * tsim + 0.3 + if diff <= 1.0 { 0.1 } else { 0.05 }).min(0.95);
+        Some((&self.rows[i], v(true, (score * 1000.0).round() / 1000.0, TITLE_ONLY_REASON)))
+    }
 }
+
+/// How far apart (seconds) the lengths of a song and a playlist item matched by title alone may be
+/// ([`LibraryIndex::find_by_title`]): tighter than a full match, the artist doesn't back it up.
+pub const TITLE_ONLY_SECS: f64 = 3.0;
+
+/// The match reason of [`LibraryIndex::find_by_title`], as the playlist page shows it.
+pub const TITLE_ONLY_REASON: &str = "same title and length (the uploader isn't the artist)";
 
 /// How long the kept [`LibraryIndex`] stays after its last use: it holds every song (tens of megabytes on a
 /// big library), so a server that is not matching anything gives the memory back.
@@ -572,6 +608,29 @@ mod tests {
         assert!(c.find(&d("Second Song", "Band")).is_some());
         assert!(songs.is_kept());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A song whose artist is only the uploader's name is found by its title and length, when only one
+    /// artist has it; never another version, and never when two artists have a song of that name.
+    #[test]
+    fn songs_by_title_and_length() {
+        use encore_db::{Row, RowExt};
+        let row = |id: i64, title: &str, artist: &str, dur: f64| -> Row {
+            serde_json::from_value(serde_json::json!({ "id": id, "title": title, "artist": artist, "duration": dur, "isrc": "", "mb_trackid": "" })).unwrap()
+        };
+        let ix = LibraryIndex::new(vec![row(1, "Blinding Lights", "The Weeknd", 200.0), row(2, "Blinding Lights (Remix)", "The Weeknd", 210.0),
+                                        row(3, "Hello", "Adele", 295.0), row(4, "Hello", "Lionel Richie", 296.0)]);
+        let want = |t: &str, l: Option<f64>| describe(t, "7clouds", l, None, None);
+        // the uploader isn't the artist: the full match finds nothing, the title-only one does
+        assert!(ix.find(&want("Blinding Lights", Some(201.0))).is_none());
+        let (hit, v) = ix.find_by_title(&want("Blinding Lights", Some(201.0))).unwrap();
+        assert_eq!((hit.i("id"), v.reason.as_str()), (1, TITLE_ONLY_REASON));
+        // too far apart, no length, or a version the library lacks
+        assert!(ix.find_by_title(&want("Blinding Lights", Some(190.0))).is_none());
+        assert!(ix.find_by_title(&want("Blinding Lights", None)).is_none());
+        assert!(ix.find_by_title(&want("Blinding Lights (Live)", Some(200.0))).is_none());
+        // two artists have a "Hello" of that length: which one is it?
+        assert!(ix.find_by_title(&want("Hello", Some(295.0))).is_none());
     }
 
     #[test]

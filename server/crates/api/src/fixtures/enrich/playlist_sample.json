@@ -12,6 +12,7 @@
       "album": "Second Album",
       "album_id": "1ef99653a54aa327",
       "artist": "Beta Band",
+      "artist_guessed": null,
       "artists": [
         {
           "in_library": true,
@@ -35,6 +36,7 @@
       "request_status": null,
       "source": "library",
       "source_id": null,
+      "source_title": null,
       "title": "Song 1 of Second Album",
       "track_id": 19,
       "verify_status": null
@@ -44,6 +46,7 @@
       "album": "Second Album",
       "album_id": "761bb0aaa0c97236",
       "artist": "Alpha Artist",
+      "artist_guessed": null,
       "artists": [
         {
           "in_library": true,
@@ -67,6 +70,7 @@
       "request_status": null,
       "source": "library",
       "source_id": null,
+      "source_title": null,
       "title": "Song 1 of Second Album",
       "track_id": 25,
       "verify_status": null
@@ -76,6 +80,7 @@
       "album": "First Album",
       "album_id": "150c2e63e67a8f86",
       "artist": "Alpha Artist",
+      "artist_guessed": null,
       "artists": [
         {
           "in_library": true,
@@ -99,6 +104,7 @@
       "request_status": null,
       "source": "library",
       "source_id": null,
+      "source_title": null,
       "title": "Song 1 of First Album",
       "track_id": 28,
       "verify_status": null
@@ -108,6 +114,7 @@
       "album": "ペルソナ4 サウンドトラック",
       "album_id": "52b52b2323b5df9d",
       "artist": "平田志穂子",
+      "artist_guessed": null,
       "artists": [
         {
           "in_library": true,
@@ -131,6 +138,7 @@
       "request_status": null,
       "source": "library",
       "source_id": null,
+      "source_title": null,
       "title": "Reach Out To The Truth",
       "track_id": 32,
       "verify_status": null
@@ -140,6 +148,7 @@
       "album": "“Quoted” Album",
       "album_id": "ea9795066f904928",
       "artist": "Artist",
+      "artist_guessed": null,
       "artists": [
         {
           "in_library": true,
@@ -163,6 +172,7 @@
       "request_status": null,
       "source": "library",
       "source_id": null,
+      "source_title": null,
       "title": "“Hey” Song",
       "track_id": 36,
       "verify_status": null

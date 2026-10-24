@@ -51,17 +51,22 @@ fn secs(s: &str) -> Option<f64> {
     Some(p.iter().fold(0.0, |a, x| a * 60.0 + x.parse::<f64>().unwrap_or(0.0)))
 }
 
-/// One search row → {title, artist, album, album_id, duration, videoId, browseId, cover}
+/// One search row → {title, artist, album, album_id, duration, videoId, browseId, cover, artist_is_channel}.
+/// `artist_is_channel`: the artist is a user channel (an uploaded video, not a song), so possibly not
+/// the song's artist at all (encore_library::video_title reads the real one from the title).
 fn item(r: &Value) -> Value {
     let cols = r["flexColumns"].as_array().cloned().unwrap_or_default();
     let runs = |i: usize| cols.get(i).and_then(|c| c["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"].as_array().cloned()).unwrap_or_default();
     let title: String = runs(0).iter().filter_map(|x| x["text"].as_str()).collect();
     let (mut artists, mut album, mut album_id, mut dur) = (vec![], Value::Null, Value::Null, Value::Null);
+    // only user channels named the artist (no artist page among them)
+    let (mut channels, mut artist_pages) = (0, 0);
     let meta = runs(1);
     for x in &meta {
         let t = x["text"].as_str().unwrap_or("");
         let page = x["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"].as_str().unwrap_or("");
         if page == "MUSIC_PAGE_TYPE_ARTIST" || page == "MUSIC_PAGE_TYPE_USER_CHANNEL" {
+            if page == "MUSIC_PAGE_TYPE_ARTIST" { artist_pages += 1 } else { channels += 1 }
             artists.push(t.to_string());
         } else if page == "MUSIC_PAGE_TYPE_ALBUM" {
             album = json!(t);
@@ -81,7 +86,8 @@ fn item(r: &Value) -> Value {
     let video = r["playlistItemData"]["videoId"].as_str().map(String::from).or_else(|| find(r, "videoId").and_then(|v| v.as_str()).map(String::from));
     let cover = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|t| t.last()).map(|t| t["url"].clone()).unwrap_or(Value::Null);
     json!({ "title": title, "artist": artists.join(", "), "album": album, "album_id": album_id, "duration": dur, "videoId": video,
-            "browseId": r["navigationEndpoint"]["browseEndpoint"]["browseId"], "cover": cover })
+            "browseId": r["navigationEndpoint"]["browseEndpoint"]["browseId"], "cover": cover,
+            "artist_is_channel": channels > 0 && artist_pages == 0 })
 }
 
 /// Search YouTube Music for songs (or albums): one row per result (see [`item`]).

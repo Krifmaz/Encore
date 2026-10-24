@@ -511,29 +511,30 @@ async fn listenbrainz(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 
 // ---- YouTube / SoundCloud / Bandcamp / … via yt-dlp ------------------------------------------------
 
-/// Import a YouTube / SoundCloud / Bandcamp / … playlist through yt-dlp, cleaning "(Official Video)" style tags from titles.
+/// A YouTube / SoundCloud / Bandcamp … playlist (or one video) read by yt-dlp. A video names its uploader,
+/// which is often not the song's artist: the artist and title come from the tags and the video title first
+/// ([`encore_library::video_title::parse`]). Each track also carries `artist_guessed` (only the uploader
+/// named the artist: the playlist matches it by title and length too) and `source_title` (the video's own
+/// title, shown next to what it matched).
 async fn ytdlp_playlist(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let info = super::ytdlp::playlist(st, url).await.map_err(|e| anyhow::anyhow!("Couldn't read that link: {}", e.to_string().chars().take(200).collect::<String>()))?;
     let entries = info["entries"].as_array().cloned().unwrap_or_else(|| vec![info.clone()]);
-    let junk = Regex::new(r"(?i)\s*[\(\[](official|lyric|audio|music video|visuali[sz]er|hd|hq|4k)[^\)\]]*[\)\]]").unwrap();
-    let tracks: Vec<Value> = entries.iter().filter(|e| e.is_object()).map(|e| {
-        let mut title = e["track"].as_str().or(e["title"].as_str()).unwrap_or("").to_string();
-        let mut artist = e["artist"].as_str().or(e["creator"].as_str()).unwrap_or("").to_string();
-        let ch = e["channel"].as_str().or(e["uploader"].as_str()).unwrap_or("");
-        if artist.is_empty() {
-            if title.contains(" - ") && !ch.ends_with(" - Topic") {
-                let (a, b) = title.split_once(" - ").unwrap();
-                (artist, title) = (a.to_string(), b.to_string());
-            } else {
-                artist = ch.replace(" - Topic", "");
-            }
-        }
-        let title = junk.replace_all(&title, "").to_string();
-        let sid = e["url"].as_str().or(e["webpage_url"].as_str()).or(e["id"].as_str()).map(String::from);
-        t(&title, &artist, e["album"].as_str(), e["duration"].as_f64(), None, None, sid, None)
-    }).collect();
+    let tracks: Vec<Value> = entries.iter().filter(|e| e.is_object()).map(ytdlp_track).collect();
     let name = info["title"].as_str().unwrap_or("Imported playlist");
     Ok(json!({ "name": name, "description": s(&info["description"]), "cover": info["thumbnail"], "tracks": tracks }))
+}
+
+/// One yt-dlp playlist entry → a track ([`t`]) with `artist_guessed` and `source_title`.
+fn ytdlp_track(e: &Value) -> Value {
+    let video_title = s(&e["title"]);
+    let channel = e["channel"].as_str().or(e["uploader"].as_str()).unwrap_or("");
+    let artist_tag = e["artist"].as_str().or(e["creator"].as_str()).unwrap_or("");
+    let song = encore_library::video_title::parse(video_title, channel, artist_tag, s(&e["track"]));
+    let sid = e["url"].as_str().or(e["webpage_url"].as_str()).or(e["id"].as_str()).map(String::from);
+    let mut tr = t(&song.title, &song.artist, e["album"].as_str(), e["duration"].as_f64(), None, None, sid, None);
+    tr["artist_guessed"] = json!(song.artist_guessed as i64);
+    tr["source_title"] = json!(Some(video_title.trim()).filter(|v| !v.is_empty()));
+    tr
 }
 
 #[cfg(test)]
@@ -558,5 +559,17 @@ mod tests {
                              ("JAMIE PAIGE + UNBEATABLE", "NO EULOGIES"), ("ど～ぱみん", "「アポカリゴットタレント」feat.初音ミク"), ("Moe Shop", "NEWLY HUMAN FEELING"),
                              ("初音ミク", "ミクだし"), ("", "AC/DC"), ("Mac DeMarco", "On the Level"),
                              ("", "dialing+darling (feat. A (CV:B), C &..."), ("#電音部", "DIVE")]);
+    }
+
+    /// A video's uploader isn't taken for the artist when the title names one; when only the uploader
+    /// does, the track says the artist is a guess. The video's own title is kept.
+    #[test]
+    fn youtube_entries() {
+        use serde_json::json;
+        let a = super::ytdlp_track(&json!({ "title": "Avicii - Levels (Lyrics)", "channel": "7clouds", "duration": 200.0, "id": "abc" }));
+        assert_eq!((a["artist"].as_str(), a["title"].as_str(), a["artist_guessed"].as_i64()), (Some("Avicii"), Some("Levels"), Some(0)));
+        assert_eq!(a["source_title"], "Avicii - Levels (Lyrics)");
+        let b = super::ytdlp_track(&json!({ "title": "Levels (Lyrics)", "channel": "7clouds", "id": "abd" }));
+        assert_eq!((b["artist"].as_str(), b["title"].as_str(), b["artist_guessed"].as_i64()), (Some("7clouds"), Some("Levels"), Some(1)));
     }
 }

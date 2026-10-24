@@ -236,7 +236,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
             "ytmusic" => {
                 let d = self.yt().await?;
                 encore_http::ytmusic::browse_rows(self.st, &d, "FEmusic_liked_videos", 50).await?.into_iter().filter(|x| x["videoId"].is_string())
-                    .map(|x| json!({ "title": x["title"], "artist": x["artist"], "album": x["album"], "duration": x["duration"], "source_id": x["videoId"], "cover": x["cover"] })).collect()
+                    .map(|x| ytm_liked(&x)).collect()
             }
             "tidal" => self.tidal_likes().await?,
             _ => vec![],
@@ -516,6 +516,20 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         }
         encore_http::ytmusic::create_playlist(self.st, &d, name, &vids).await
     }
+}
+
+/// A liked YouTube Music row → a liked-songs track. A liked video (not a song) names its uploader's
+/// channel as the artist: the artist and title are read from the video title then
+/// ([`encore_library::video_title::parse`]), and the track says when the artist is only the uploader
+/// (`artist_guessed`), so it is also matched by title and length.
+fn ytm_liked(x: &Value) -> Value {
+    let mut t = json!({ "title": x["title"], "artist": x["artist"], "album": x["album"], "duration": x["duration"], "source_id": x["videoId"], "cover": x["cover"] });
+    if x["artist_is_channel"].as_bool() == Some(true) {
+        let song = encore_library::video_title::parse(&s(&x["title"]), &s(&x["artist"]), "", "");
+        t["source_title"] = x["title"].clone();
+        (t["title"], t["artist"], t["artist_guessed"]) = (json!(song.title), json!(song.artist), json!(song.artist_guessed as i64));
+    }
+    t
 }
 
 /// A Subsonic song as Encore's server item.

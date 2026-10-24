@@ -538,7 +538,8 @@ async fn resolve(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<DupR
 
 /// POST /api/library/duplicates/resolve-all: resolve every group the way it suggests.
 async fn resolve_all(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
-    let groups = dupes::find_duplicates(&st);
+    // groups to look at first (a YouTube copy under the uploader's name) are left for a click each
+    let groups: Vec<Value> = dupes::find_duplicates(&st).into_iter().filter(|g| g["review"] != true).collect();
     let mut n = 0;
     for g in &groups {
         let keep = g["keep"].as_i64().unwrap_or(0);

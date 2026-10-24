@@ -34,7 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/playlists/{pid}/request-missing", post(request_missing))
         .route("/api/playlists/{pid}/refresh", post(refresh))
         .route("/api/playlists/{pid}/tracks", post(add_tracks))
-        .route("/api/playlists/{pid}/items/{iid}", delete(remove_item))
+        .route("/api/playlists/{pid}/items/{iid}", delete(remove_item).patch(match_item))
         .route("/api/playlists/{pid}/move", post(move_item))
         .route("/api/playlists/{pid}/sync", post(sync_me))
         .route("/api/playlists/{pid}/share", post(share).delete(unshare))
@@ -420,6 +420,26 @@ async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid))
     Ok(Json(json!({ "ok": true })))
 }
 
+/// PATCH /api/playlists/{pid}/items/{iid} body: {"track_id": <library song> | null}.
+#[derive(Deserialize)]
+struct MatchBody {
+    /// The library song the item is, or null to unlink it.
+    track_id: Option<i64>,
+}
+
+/// Link an item to a library song by hand (or unlink it), for one the matching got wrong or couldn't find
+/// (`playlists::set_match`). → {ok, duplicates_removed}
+async fn match_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>, Json(b): Json<MatchBody>) -> ApiResult<Json<Value>> {
+    st.blocking(move |st| {
+        own_writable(st, pid, &u)?;
+        let (found, dropped) = playlists::set_match(st, pid, iid, b.track_id.filter(|t| *t > 0)).map_err(bad)?;
+        if !found {
+            return Err(err(404, "Item not found"));
+        }
+        Ok(Json(json!({ "ok": true, "duplicates_removed": dropped })))
+    }).await
+}
+
 /// POST /api/playlists/{pid}/move: move a song (`{item_id, to}`) to another place.
 async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     editable(&st, pid, &u)?;
@@ -673,3 +693,7 @@ async fn import_remote(State(st): State<AppState>, User(u): User, Path((service,
 #[cfg(test)]
 #[path = "playlists_tests.rs"]
 mod playlists_tests;
+
+#[cfg(test)]
+#[path = "playlist_match_tests.rs"]
+mod playlist_match_tests;

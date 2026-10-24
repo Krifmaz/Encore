@@ -3,7 +3,7 @@
 //! `playlists.kind`: playlist | liked | linked (someone else's playlist added through its share link;
 //! read-only, it has no items of its own: the API shows the owner's playlist through the link).
 use encore_db::{now, Row, RowExt};
-use encore_library::matcher::{altered_words, compare, describe, key, parse_title, sim, Desc, LibraryIndex};
+use encore_library::matcher::{altered_words, compare, describe, key, parse_title, sim, Desc, LibraryIndex, Verdict};
 use encore_db::p;
 use crate::Ctx;
 use serde_json::{json, Value};
@@ -106,13 +106,39 @@ pub fn dedupe_rows(rows: Vec<Row>) -> (Vec<Row>, usize) {
     (out, dropped)
 }
 
-/// Link rows to library tracks. → how many matched
+/// The match reason of an item linked to a library song by hand ([`set_match`]): the re-check of the
+/// library leaves it as it is.
+pub const MATCHED_BY_HAND: &str = "matched by hand";
+
+/// The match reason of an item unlinked by hand ([`set_match`] with no song): the re-check of the library
+/// doesn't link it again.
+pub const UNLINKED_BY_HAND: &str = "unlinked by hand";
+
+/// Was this item linked or unlinked by hand? The re-check of the library leaves such an item alone.
+pub fn by_hand(r: &Row) -> bool {
+    matches!(r.s("match_reason").as_str(), MATCHED_BY_HAND | UNLINKED_BY_HAND)
+}
+
+/// The library song for a playlist item: the version-aware match of its title and artist, and for an
+/// item whose artist is only a guess (`artist_guessed`: a video's uploader) also the song of that title
+/// and length by one artist ([`LibraryIndex::find_by_title`]).
+pub fn find_item<'a>(ix: &'a LibraryIndex, r: &Row) -> Option<(&'a Row, Verdict)> {
+    let d = item_desc(r);
+    ix.find(&d).or_else(|| if r.i("artist_guessed") == 1 { ix.find_by_title(&d) } else { None })
+}
+
+/// Link rows to library tracks. → how many matched. A row whose guessed artist (an uploader) found its
+/// song by title takes the song's artist, and isn't a guess any more.
 pub fn match_rows(rows: &mut [Row], ix: &LibraryIndex) -> usize {
     let mut n = 0;
     for r in rows.iter_mut() {
-        match ix.find(&item_desc(r)) {
+        match find_item(ix, r) {
             Some((hit, v)) => {
                 r.insert("track_id".into(), json!(hit.i("id")));
+                if r.i("artist_guessed") == 1 {
+                    r.insert("artist".into(), json!(hit.s("artist")));
+                    r.insert("artist_guessed".into(), json!(0));
+                }
                 r.insert("match_reason".into(), json!(v.reason));
                 n += 1;
             }
@@ -125,11 +151,13 @@ pub fn match_rows(rows: &mut [Row], ix: &LibraryIndex) -> usize {
     n
 }
 
-/// Imported/fetched track (title, artist, album, duration, isrc, mbid, cover, source_id[, track_id]) → playlist row.
+/// Imported/fetched track (title, artist, album, duration, isrc, mbid, cover, source_id[, track_id,
+/// artist_guessed, source_title]) → playlist row.
 fn row_from(t: &Value, source: &str) -> Row {
     let mut r = Row::new();
     for (k, src) in [("title", "title"), ("artist", "artist"), ("album", "album"), ("duration", "duration"), ("isrc", "isrc"), ("mbid", "mbid"),
-                     ("cover_url", "cover"), ("source_id", "source_id"), ("track_id", "track_id")] {
+                     ("cover_url", "cover"), ("source_id", "source_id"), ("track_id", "track_id"),
+                     ("artist_guessed", "artist_guessed"), ("source_title", "source_title")] {
         r.insert(k.into(), t.get(src).cloned().unwrap_or(Value::Null));
     }
     r.insert("source".into(), json!(source));
@@ -167,10 +195,11 @@ pub fn add_tracks(st: &impl Ctx, pid: i64, tracks: &[Value], source: &str) -> an
     let pos = existing.iter().map(|e| e.i("position")).max().map(|m| m + 1).unwrap_or(0);
     let t = now();
     for (i, r) in new_rows.iter().enumerate() {
-        st.db().execute("INSERT INTO playlist_items (playlist_id, position, title, artist, album, duration, isrc, mbid, cover_url, source, source_id, track_id, match_reason, added_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        st.db().execute("INSERT INTO playlist_items (playlist_id, position, title, artist, album, duration, isrc, mbid, cover_url, source, source_id, track_id, match_reason,
+                       artist_guessed, source_title, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             p![pid, pos + i as i64, r["title"], r["artist"], r["album"], r["duration"], r["isrc"], r["mbid"], r["cover_url"], r["source"], r["source_id"],
-               r.get("track_id").filter(|v| v.as_i64().is_some_and(|x| x > 0)).cloned().unwrap_or(Value::Null), r.get("match_reason").cloned().unwrap_or(Value::Null), t])?;
+               r.get("track_id").filter(|v| v.as_i64().is_some_and(|x| x > 0)).cloned().unwrap_or(Value::Null), r.get("match_reason").cloned().unwrap_or(Value::Null),
+               r.get("artist_guessed").cloned().unwrap_or(Value::Null), r.get("source_title").cloned().unwrap_or(Value::Null), t])?;
     }
     st.db().execute("UPDATE playlists SET updated_at=? WHERE id=?", p![t, pid])?;
     Ok((new_rows.len(), dropped))
@@ -213,7 +242,13 @@ pub fn dedupe(st: &impl Ctx, pid: i64) -> usize {
     dropped
 }
 
-/// Link items to library tracks (after downloads, rescans, retags…). → newly matched
+/// One item [`rematch`] changes: (its new track, the match reason, the song's artist when the item's was
+/// a guess, the item's id).
+type Rematched = (Option<i64>, Option<String>, Option<String>, i64);
+
+/// Link items to library tracks (after downloads, rescans, retags…). → newly matched. Items linked or
+/// unlinked by hand ([`by_hand`]) stay as they are; an item whose guessed artist found its song by title
+/// takes the song's artist.
 pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
     let mut sql = "SELECT * FROM playlist_items WHERE 1=1".to_string();
     let mut params = vec![];
@@ -230,13 +265,14 @@ pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
     }
     let ix = st.library().songs.get(st.db());
     let mut n = 0;
-    let mut changed: Vec<(Option<i64>, Option<String>, i64)> = vec![];
-    for r in &rows {
-        let hit = ix.find(&item_desc(r));
+    let mut changed: Vec<Rematched> = vec![];
+    for r in rows.iter().filter(|r| !by_hand(r)) {
+        let hit = find_item(&ix, r);
         let new = hit.as_ref().map(|(h, _)| h.i("id"));
         let cur = Some(r.i("track_id")).filter(|x| *x > 0);
         if new != cur {
-            changed.push((new, hit.map(|(_, v)| v.reason), r.i("id")));
+            let artist = hit.as_ref().filter(|_| r.i("artist_guessed") == 1).map(|(h, _)| h.s("artist"));
+            changed.push((new, hit.map(|(_, v)| v.reason), artist, r.i("id")));
             n += new.is_some() as usize;
         }
     }
@@ -244,8 +280,11 @@ pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
     // every changed item in one transaction (a rematch of all playlists after a scan can touch thousands)
     if !changed.is_empty() {
         let saved = st.db().write_now(|c| c.transaction(|c| {
-            for (new, reason, id) in &changed {
+            for (new, reason, artist, id) in &changed {
                 c.execute("UPDATE playlist_items SET track_id=?, match_reason=? WHERE id=?", p![new, reason, id])?;
+                if let Some(a) = artist {
+                    c.execute("UPDATE playlist_items SET artist=?, artist_guessed=0 WHERE id=?", p![a, id])?;
+                }
             }
             Ok::<_, anyhow::Error>(())
         }));
@@ -259,6 +298,29 @@ pub fn rematch(st: &impl Ctx, pid: Option<i64>, only_unmatched: bool) -> usize {
         dedupe(st, p);
     }
     n
+}
+
+/// Link a playlist item to a library song by hand, or unlink it (`track_id` None), for an item the matching
+/// got wrong or couldn't find. A linked item takes the song's title, artist, album and length; the name it
+/// had before is kept in `source_title` (when it had none there yet), so the page can show what it was. The
+/// re-check of the library leaves the item as it is from then on ([`by_hand`]). Linking can make the item a
+/// duplicate of another one in the playlist, which goes then. → (found the item, duplicates removed)
+pub fn set_match(st: &impl Ctx, pid: i64, iid: i64, track_id: Option<i64>) -> anyhow::Result<(bool, usize)> {
+    let Some(it) = st.db().one("SELECT * FROM playlist_items WHERE id=? AND playlist_id=?", p![iid, pid])? else { return Ok((false, 0)) };
+    let Some(tid) = track_id else {
+        st.db().execute("UPDATE playlist_items SET track_id=NULL, match_reason=? WHERE id=?", p![UNLINKED_BY_HAND, iid])?;
+        return Ok((true, 0));
+    };
+    let Some(t) = st.db().one("SELECT title, artist, album, duration FROM tracks WHERE id=?", p![tid])? else { anyhow::bail!("That song isn't in the library") };
+    // what the item was called before (its source's name for it), shown next to the song it is now
+    let was = opt(&it, "source_title").unwrap_or_else(|| match (it.s("artist"), it.s("title")) {
+        (a, t) if a.is_empty() => t,
+        (a, t) => format!("{a} - {t}"),
+    });
+    st.db().execute("UPDATE playlist_items SET track_id=?, match_reason=?, title=?, artist=?, album=?, duration=?, artist_guessed=0, source_title=? WHERE id=?",
+        p![tid, MATCHED_BY_HAND, t["title"], t["artist"], t["album"], t["duration"], was, iid])?;
+    st.db().execute("UPDATE playlists SET updated_at=? WHERE id=?", p![now(), pid])?;
+    Ok((true, dedupe(st, pid)))
 }
 
 /// The songs of the user's own playlists and Liked Songs among `ids` (not someone else's added from a link: it

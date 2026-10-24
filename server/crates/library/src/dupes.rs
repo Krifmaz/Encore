@@ -48,9 +48,50 @@ pub async fn verify_library(st: impl Ctx, only_new: bool) {
     st.jobs().set("verify", json!({ "running": false, "current": "" }));
 }
 
-/// Groups of files that hold the same song, best copy first.
+/// The reason of a group that holds a song downloaded from YouTube under its uploader's name and the
+/// library's own copy ([`youtube_copies`]).
+pub const YOUTUBE_COPY_REASON: &str = "YouTube copy (the uploader was taken for the artist)";
+
+/// Was this song downloaded from YouTube (yt-dlp)?
+fn from_youtube(r: &Row) -> bool {
+    let url = r.s("source_url").to_lowercase();
+    r.s("source") == "ytdlp" || url.contains("youtube.com/") || url.contains("youtu.be/")
+}
+
+/// Pairs (YouTube song, library copy) of songs downloaded from YouTube under another artist's name (the
+/// uploader's: a lyrics channel, a fan) that the library already had: the same title and version and a
+/// length within 3 s, the other copy not from YouTube, by one artist only (two artists with such a song is
+/// no pair: a cover or a common title). Same-artist copies are found by the other rules already.
+pub fn youtube_copies(rows: &[Row]) -> Vec<(i64, i64)> {
+    let mut buckets: HashMap<String, Vec<(&Row, crate::matcher::Desc)>> = HashMap::new();
+    for r in rows {
+        let d = describe(&r.s("title"), &r.s("artist"), Some(r.f("duration")), None, None);
+        if !d.base.is_empty() && d.length.is_some() {
+            let k = format!("{}|{}|{}", d.base, d.versions.iter().copied().collect::<Vec<_>>().join(","), d.remixer);
+            buckets.entry(k).or_default().push((r, d));
+        }
+    }
+    let mut out = vec![];
+    for items in buckets.values() {
+        let (yt, other): (Vec<_>, Vec<_>) = items.iter().partition(|(r, _)| from_youtube(r));
+        for (y, yd) in &yt {
+            let near: Vec<&(&Row, crate::matcher::Desc)> = other.iter().copied()
+                .filter(|(_, d)| (d.length.unwrap_or(0.0) - yd.length.unwrap_or(0.0)).abs() <= 3.0 && d.artists.first() != yd.artists.first()).collect();
+            let Some(first) = near.first() else { continue };
+            if near.iter().all(|(_, d)| d.artists.first() == first.1.artists.first()) {
+                out.push((y.i("id"), first.0.i("id")));
+            }
+        }
+    }
+    out
+}
+
+/// Groups of files that hold the same song, best copy first. A group with a YouTube copy under the
+/// uploader's name ([`youtube_copies`]) says `review: true`: its songs only share a title and a length, so
+/// someone looks at it before a copy goes ("Resolve all" leaves it alone).
 pub fn find_duplicates(st: &impl Ctx) -> Vec<Value> {
-    let rows = st.db().query("SELECT id, path, title, artist, album, albumartist, album_id, duration, format, bitrate, size, isrc, mb_trackid, acoustid_id, verify_status FROM tracks", p![]).unwrap_or_default();
+    let rows = st.db().query("SELECT id, path, title, artist, album, albumartist, album_id, duration, format, bitrate, size, isrc, mb_trackid, acoustid_id, verify_status,
+                              source, source_url FROM tracks", p![]).unwrap_or_default();
     let ids: Vec<i64> = rows.iter().map(|r| r.i("id")).collect();
     let mut parent: HashMap<i64, i64> = ids.iter().map(|i| (*i, *i)).collect();
     let mut reason: HashMap<i64, String> = HashMap::new();
@@ -96,6 +137,12 @@ pub fn find_duplicates(st: &impl Ctx) -> Vec<Value> {
             }
         }
     }
+    // songs from YouTube under the uploader's name, joined to the library's copy (to be looked at first)
+    let mut review: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (y, other) in youtube_copies(&rows) {
+        union(&mut parent, other, y, YOUTUBE_COPY_REASON);
+        review.insert(y);
+    }
     let mut groups: HashMap<i64, Vec<Row>> = HashMap::new();
     for r in &rows {
         let root = find(&mut parent, r.i("id"));
@@ -119,8 +166,31 @@ pub fn find_duplicates(st: &impl Ctx) -> Vec<Value> {
             let p = i.s("path");
             i.insert("relpath".into(), json!(p.strip_prefix(&lib).unwrap_or(&p)));
         }
-        out.push(json!({ "key": gkey, "reason": reason.get(&root).cloned().unwrap_or_default(), "keep": items[0].i("id"), "tracks": items }));
+        let looks = items.iter().any(|i| review.contains(&i.i("id")));
+        // a YouTube copy's group says so, whatever rule joined it first
+        let why = if looks { YOUTUBE_COPY_REASON.to_string() } else { reason.get(&root).cloned().unwrap_or_default() };
+        out.push(json!({ "key": gkey, "reason": why, "keep": items[0].i("id"), "tracks": items, "review": looks }));
     }
     out.sort_by_key(|g| g["tracks"][0]["artist"].as_str().unwrap_or("").to_lowercase());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A library row for [`youtube_copies`].
+    fn row(id: i64, title: &str, artist: &str, dur: f64, source: &str) -> Row {
+        serde_json::from_value(json!({ "id": id, "title": title, "artist": artist, "duration": dur, "source": source, "source_url": "" })).unwrap()
+    }
+
+    /// A YouTube download under a lyrics channel's name pairs with the library's copy; not another
+    /// version, not a length far off, not when two artists have the song.
+    #[test]
+    fn youtube_copies_under_the_uploaders_name() {
+        let rows = vec![row(1, "Levels", "Avicii", 200.0, "slskd"), row(2, "Levels (Lyrics)", "7clouds", 201.5, "ytdlp"),
+                        row(3, "Levels (Live)", "fan", 200.0, "ytdlp"), row(4, "Levels", "fan2", 230.0, "ytdlp"),
+                        row(5, "Hello", "Adele", 295.0, "scan"), row(6, "Hello", "Lionel Richie", 296.0, "scan"), row(7, "Hello", "fan", 295.0, "ytdlp")];
+        assert_eq!(youtube_copies(&rows), vec![(2, 1)]);
+    }
 }

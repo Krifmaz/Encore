@@ -851,10 +851,10 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let sync_targets = pl.a("sync_targets");
         let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-q="{q}">
         <td class="num">{n}</td>
-        <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
+        <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div>{was}</td>
         <td class="hide-sm muted">{album}</td>
         <td>{status}</td>
-        <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
+        <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost icon" data-match="{i}" aria-label="{match_label}" title="{match_label}">{link}</button><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
             item = it.s("id"), q = esc(&item_haystack(it)), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
             album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
             status = if it.truthy("track_id") {
@@ -870,7 +870,9 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                     None => status_badge(s),
                 }
             } else { r#"<span class="badge">missing</span>"#.to_string() },
-            x = icon("x"),
+            x = icon("x"), link = icon("link"),
+            was = was_line(it),
+            match_label = if it.truthy("track_id") { "Match to another library song" } else { "Match to a library song" },
             // the song's ⋯ (Play next, Add to queue, Download for offline …) for rows in the library
             tmenu = if it.truthy("track_id") { format!(r#"<button class="btn sm ghost icon" data-ptmenu="{i}" aria-label="More" title="More">{}</button>"#, icon("more")) } else { String::new() },
         )).collect();
@@ -1108,6 +1110,15 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         {
+            // Match… on a row: pick the library song it is
+            let (id2, items2) = (id.clone(), items.clone());
+            dom::on_sel(&view, "tbody", "click", move |e| {
+                let Some(b) = dom::closest(e, "[data-match]") else { return };
+                let Some(it) = dom::data(&b, "match").parse::<usize>().ok().and_then(|i| items2.get(i)) else { return };
+                match_modal(&id2, it);
+            });
+        }
+        {
             let id2 = id.clone();
             dom::on_sel(&view, "tbody", "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-rm]") else { return };
@@ -1120,6 +1131,97 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+/// The line under a row that says what the item was called at its source (a YouTube video's own title)
+/// when that isn't what it shows now: the video an item came from, next to the song it matched. '' none.
+pub fn was_line(it: &Value) -> String {
+    let was = it.s("source_title");
+    let now = it.s("title");
+    if was.trim().is_empty() || was == now || was == format!("{} - {now}", it.s("artist")) {
+        return String::new();
+    }
+    let guess = if it.s("artist_guessed") == "1" { " · artist is the uploader" } else { "" };
+    format!(r#"<div class="small faint" title="As it was imported">from “{}”{guess}</div>"#, esc(&was))
+}
+
+/// What a match search starts with: the item's title, with its artist unless that is only the uploader.
+pub fn match_query(it: &Value) -> String {
+    let (t, a) = (it.s("title"), it.s("artist"));
+    if a.is_empty() || it.s("artist_guessed") == "1" { t } else { format!("{a} {t}") }
+}
+
+/// One library song in the match list: a button that links the item to it.
+fn match_choice(t: &Value) -> String {
+    let len = t.f("duration");
+    format!(r#"<button class="list-item btn ghost" style="justify-content:flex-start;border-radius:0;text-align:left" data-tid="{id}">
+      <span class="grow"><b>{title}</b><span class="small muted"> · {artist}{album}</span></span><span class="small faint">{len}</span></button>"#,
+        id = t.s("id"), title = esc(&t.s("title")), artist = esc(&t.s("artist")),
+        album = if t.s("album").is_empty() { String::new() } else { format!(" · {}", esc(&t.s("album"))) },
+        len = if len > 0.0 { crate::ui::fmt::dur(len) } else { String::new() })
+}
+
+/// Match an item to a library song by hand: a search of the library (starting with the item's title), a
+/// click on a song links the item to it, Not this song unlinks a wrong match. The re-check of the library
+/// keeps either choice.
+fn match_modal(pid: &str, it: &Value) {
+    let (pid, iid) = (pid.to_string(), it.s("id"));
+    let matched = it.truthy("track_id");
+    let was = Some(it.s("source_title")).filter(|w| !w.trim().is_empty()).unwrap_or_else(|| format!("{} – {}", it.s("artist"), it.s("title")));
+    let now = if matched { format!(r#"<div class="small muted mt">Now: <b>{}</b> · {} <span class="faint">({})</span></div>"#, esc(&it.s("title")), esc(&it.s("artist")), esc(&it.s("match_reason"))) } else { String::new() };
+    let body = format!(r#"<div class="muted">Imported as <b>“{}”</b></div>{now}
+      <div class="search mt">{}<input class="input" id="mq" placeholder="Search your library…" value="{}"></div>
+      <div class="list card flat mt" id="mres" style="max-height:50vh;overflow:auto"></div>"#, esc(&was), icon("search"), esc(&match_query(it)));
+    let foot = if matched { r#"<button class="btn danger ghost" id="munlink">Not this song</button>"# } else { "" };
+    let m = modal(ModalOpts::new("Match to a library song", &body).footer(foot));
+    // the newest search wins: an older answer that arrives late is dropped
+    let gen = Rc::new(RefCell::new(0u32));
+    let search: Rc<dyn Fn()> = {
+        let (m2, gen) = (m.clone(), gen.clone());
+        Rc::new(move || {
+            let q = dom::value_of(&m2.el, "#mq").trim().to_string();
+            *gen.borrow_mut() += 1;
+            let (me, gen, m3) = (*gen.borrow(), gen.clone(), m2.clone());
+            dom::spawn(async move {
+                dom::sleep(250).await;
+                if *gen.borrow() != me { return; }
+                let Some(res) = m3.qs("#mres") else { return };
+                if q.is_empty() { dom::set_html(&res, ""); return; }
+                let rows = api::get(&format!("/library/tracks?q={}&limit=25", String::from(js_sys::encode_uri_component(&q)))).await.map(|v| v.items()).unwrap_or_default();
+                if *gen.borrow() != me { return; }
+                dom::set_html(&res, &if rows.is_empty() { r#"<div class="muted small" style="padding:12px">No songs like that in the library.</div>"#.to_string() } else { rows.iter().map(match_choice).collect() });
+            });
+        })
+    };
+    search();
+    if let Some(q) = m.qs("#mq") {
+        let s2 = search.clone();
+        dom::on(&q, "input", move |_| s2());
+    }
+    let set: Rc<dyn Fn(Value)> = {
+        let m2 = m.clone();
+        Rc::new(move |tid: Value| {
+            let (m3, path) = (m2.clone(), format!("/playlists/{pid}/items/{iid}"));
+            dom::spawn(async move {
+                let linked = !tid.is_null();
+                let Ok(r) = api::patch(&path, json!({ "track_id": tid })).await else { return };
+                toast(if !linked { "Unlinked" } else if r.truthy("duplicates_removed") { "Matched (it was already in the playlist: the copy went)" } else { "Matched" }, "ok");
+                m3.close();
+                reload();
+            });
+        })
+    };
+    {
+        let set2 = set.clone();
+        dom::on(&m.el, "click", move |e| {
+            if let Some(b) = dom::closest(e, "[data-tid]") {
+                if let Ok(t) = dom::data(&b, "tid").parse::<i64>() { set2(json!(t)); }
+            }
+        });
+    }
+    if let Some(b) = m.qs("#munlink") {
+        dom::on(&b, "click", move |_| set(Value::Null));
+    }
 }
 
 /// What Stop sharing asks first.
@@ -1192,6 +1294,18 @@ pub fn add_to_playlist_modal(track_ids: Vec<i64>) {
 #[cfg(test)]
 mod share_tests {
     use super::*;
+
+    /// The imported name shows only when it says something the row doesn't; the search leaves out an
+    /// uploader taken for the artist.
+    #[test]
+    fn the_imported_name_and_the_match_search() {
+        assert_eq!(was_line(&json!({ "title": "Levels", "artist": "Avicii", "source_title": "Avicii - Levels" })), "");
+        assert_eq!(was_line(&json!({ "title": "Levels", "artist": "Avicii" })), "");
+        let l = was_line(&json!({ "title": "Levels", "artist": "7clouds", "source_title": "Levels (Lyrics)", "artist_guessed": 1 }));
+        assert!(l.contains("Levels (Lyrics)") && l.contains("uploader"), "{l}");
+        assert_eq!(match_query(&json!({ "title": "Levels", "artist": "7clouds", "artist_guessed": 1 })), "Levels");
+        assert_eq!(match_query(&json!({ "title": "Levels", "artist": "Avicii", "artist_guessed": 0 })), "Avicii Levels");
+    }
 
     #[test]
     fn the_share_line_shows_only_when_shared() {

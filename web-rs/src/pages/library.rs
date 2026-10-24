@@ -828,30 +828,36 @@ impl Lib {
             let first = tracks.first().cloned().unwrap_or(Value::Null);
             format!(r##"<div class="card flat mt" data-key="{key}">
       <div class="row between" style="padding:12px 16px;border-bottom:1px solid var(--border)">
-        <div><b>{artist} – {title}</b> <span class="badge accent">{reason}</span></div>
+        <div><b>{artist} – {title}</b> <span class="badge accent">{reason}</span>{review}</div>
         <div class="row"><button class="btn sm ghost" data-ignore>Not duplicates</button><button class="btn sm danger" data-resolve>Delete unchecked</button></div>
       </div>
       <div class="list">{list}</div></div>"##,
                 key = esck(g, "key"), artist = esck(&first, "artist"), title = esck(&first, "title"), reason = esck(g, "reason"),
+                // a YouTube copy under its uploader's name only shares a title and a length: "Resolve all" skips it
+                review = if g.truthy("review") { r#" <span class="badge" title="Same title and length only: check before deleting. Resolve all leaves it.">check first</span>"# } else { "" },
                 list = tracks.iter().map(|t| format!(r##"<label class="list-item" style="cursor:pointer">
         <input type="radio" name="keep-{key}" value="{id}" {checked}>
-        <div class="grow"><div class="ellipsis">{title} <span class="muted">· {album}</span></div>
+        <div class="grow"><div class="ellipsis">{title} <span class="muted">{by}· {album}</span></div>
           <div class="small faint ellipsis">{relpath}</div></div>
         <span class="badge">{fmt}</span>
         {vb}<span class="small muted">{dur} · {size}</span>
       </label>"##,
                     key = esck(g, "key"), id = t.s("id"), checked = if t.g("id") == g.g("keep") { "checked" } else { "" },
-                    title = esck(t, "title"), album = esck(t, "album"), relpath = esck(t, "relpath"), fmt = format_text(t), vb = verify_badge(t),
+                    title = esck(t, "title"), album = esck(t, "album"),
+                    // each copy's artist when the copies disagree (a YouTube copy under the uploader's name)
+                    by = if t.s("artist") != first.s("artist") { format!("· {} ", esck(t, "artist")) } else { String::new() }, relpath = esck(t, "relpath"), fmt = format_text(t), vb = verify_badge(t),
                     dur = ui::fmt::dur(t.f("duration")), size = ui::fmt::size(t.f("size")))).collect::<String>())
         }).collect();
+        // the groups "Resolve all" deletes in: not the ones to check first (see dupes::find_duplicates)
+        let sure = groups.iter().filter(|g| !g.truthy("review")).count();
         dom::set_html(&self.body, &format!(r##"
     <div class="card row wrap between" style="margin-bottom:16px">
       <div class="muted small">The best copy (verified → lossless → bitrate → tagged) is preselected to keep. Playlists pointing at removed copies are moved to the kept one.</div>
       <button class="btn danger" id="dup-all">{}Resolve all {n}</button>
     </div>
-    {cards}"##, icon("trash"), n = groups.len()));
+    {cards}"##, icon("trash"), n = sure));
         {
-            let (me, n) = (self.clone(), groups.len());
+            let (me, n) = (self.clone(), sure);
             dom::on_sel(&self.body, "#dup-all", "click", move |_| {
                 let me = me.clone();
                 dom::spawn(async move {
