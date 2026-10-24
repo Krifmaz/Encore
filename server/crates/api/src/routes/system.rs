@@ -114,7 +114,8 @@ async fn backup_download(State(st): State<AppState>, Admin(_): Admin, Path(name)
     if !backup::valid_name(&name) {
         return Err(err(400, "Not a backup name"));
     }
-    let path = backup::dir(st.data_dir()).join(&name);
+    // the backups folder or the spill folder on the music disk
+    let path = backup::find(st.data_dir(), &name).ok_or_else(|| err(404, "No such backup"))?;
     let f = tokio::fs::File::open(&path).await.map_err(|_| err(404, "No such backup"))?;
     let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
     let body = Body::from_stream(tokio_util::io::ReaderStream::new(f));
@@ -131,10 +132,8 @@ async fn backup_restore(State(st): State<AppState>, Admin(u): Admin, Path(name):
     if !backup::valid_name(&name) {
         return Err(err(400, "Not a backup name"));
     }
-    let path = backup::dir(st.data_dir()).join(&name);
-    if !path.is_file() {
-        return Err(err(404, "No such backup"));
-    }
+    // the backups folder or the spill folder on the music disk
+    let path = backup::find(st.data_dir(), &name).ok_or_else(|| err(404, "No such backup"))?;
     let db = st.db.clone();
     let safety = tokio::task::spawn_blocking(move || db.restore(&path)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
     // everything cached from the old database is stale now

@@ -208,6 +208,22 @@ impl std::fmt::Display for NewerDatabase {
 }
 impl std::error::Error for NewerDatabase {}
 
+/// A failed open or migration because the disk is full says which folder that is, what it has free and
+/// how big the database is, so the owner knows what to clear; any other error is returned as it is.
+fn full_disk_hint(e: anyhow::Error, data_dir: &Path) -> anyhow::Error {
+    let text = e.to_string();
+    if !(text.contains("disk is full") || text.contains("No space left")) {
+        return e;
+    }
+    let free = encore_core::fsinfo::free_bytes(data_dir).map(encore_core::text::size_text).unwrap_or_else(|| "nothing".into());
+    let db = encore_core::text::size_text(crate::backup::needed_bytes(data_dir));
+    e.context(format!(
+        "the disk of {} is full ({free} free; the database needs about {db} to work in): free space there (old copies in {}, the cache folder) and start again",
+        data_dir.display(),
+        crate::backup::dir(data_dir).display()
+    ))
+}
+
 /// Pragmas, then every migration (tables, missing columns, indexes), then the version stamp: run on
 /// every open.
 fn prepare(conn: &Connection) -> anyhow::Result<()> {
@@ -425,9 +441,10 @@ impl Db {
         let conn = Connection::open(&path)?;
         if let Some(found) = upgrade_from {
             tracing::info!("database schema {found} → {SCHEMA_VERSION}: backing up first");
-            crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
+            // a full disk is a warning here, not a start that fails over and over (see before_upgrade)
+            crate::backup::before_upgrade(&conn, data_dir)?;
         }
-        prepare(&conn)?;
+        prepare(&conn).map_err(|e| full_disk_hint(e, data_dir))?;
         if upgrade_from.is_some() {
             analyze(&conn);
         }

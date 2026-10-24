@@ -22,7 +22,7 @@ pub const TASKS: [(&str, &str, &str); 15] = [
     ("types", "Sort albums by type", "Work out which albums are live, compilations, remixes, soundtracks, singles or one-offs: reads the type the files' tags give and, for albums without one, asks MusicBrainz at low priority. Imports record the type themselves."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
     ("tools", "Update plugins", "Check the installed plugins (yt-dlp, streamrip, Soulseek, Cadenza, the Translator and the ones you added) for new versions and install them for the plugins switched to update automatically under Settings → Plugins – no new Encore image needed. A plugin that is switched on but whose program is missing is installed again."),
-    ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
+    ("backup", "Back up the database", "Copy the database to config/backups, or the music folder's .encore-backups when that disk is full (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
     ("update", "Check for Encore updates", "Look for a new Encore release on GitHub. Settings → Diagnostics shows what changed, with Restart server and, when the Docker socket is mounted, Update now."),
 ];
 
