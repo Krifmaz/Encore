@@ -153,6 +153,13 @@ pub struct Output {
     pub stderr: String,
 }
 
+impl Output {
+    /// What it printed: its output, then its errors.
+    pub fn text(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
 /// Run a program to its end (at most `limit`), its output kept (1 MB each). "Text file busy" (a file just
 /// written) is tried again a few times.
 pub fn output(spawn: &Spawn, limit: Duration) -> anyhow::Result<Output> {
@@ -463,6 +470,148 @@ pub fn find_uv() -> Option<PathBuf> {
     if pinned.is_file() { Some(pinned.to_path_buf()) } else { encore_core::which::which("uv") }
 }
 
+/// The Pythons the image ships (uv's standalone builds, made by the Dockerfile): looked in first.
+pub const IMAGE_PYTHONS: &str = "/opt/python";
+
+/// Where the plugins keep the Pythons uv fetches for them when a release needs one the image lacks:
+/// `<config>/plugins/.python`, beside the plugins' own folders (a dot folder, so it is never taken for a plugin).
+pub fn pythons_dir(versions: &Versions) -> PathBuf {
+    versions.root.parent().unwrap_or(&versions.root).join(".python")
+}
+
+/// The environment every uv run starts from: a plain PATH, a private HOME, no cache, no progress bars, Python
+/// downloads off (only [`Uv::provide_python`] turns them on), and the proxy and index settings of the server's
+/// own environment passed through.
+fn uv_env(home: &Path) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = vec![
+        ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+        ("HOME".into(), home.display().to_string()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("UV_PYTHON_INSTALL_DIR".into(), IMAGE_PYTHONS.into()),
+        ("UV_PYTHON_DOWNLOADS".into(), "never".into()),
+        ("UV_NO_CACHE".into(), "1".into()),
+        ("UV_NO_PROGRESS".into(), "1".into()),
+    ];
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_PYTHON_INSTALL_MIRROR"] {
+        if let Ok(v) = std::env::var(k) {
+            env.push((k.into(), v));
+        }
+    }
+    env
+}
+
+/// uv as the Python installs run it: limits only (it needs the network and the plugin's folders), low priority.
+struct Uv {
+    /// the uv program ([`find_uv`])
+    program: PathBuf,
+    /// its working folder and HOME (removed after the install)
+    home: PathBuf,
+    /// [`uv_env`]
+    env: Vec<(String, String)>,
+}
+
+impl Uv {
+    /// Run uv with `args` (at most `limit` seconds); `set` replaces variables of the base environment.
+    fn run(&self, args: Vec<String>, set: &[(&str, String)], limit: u64) -> anyhow::Result<Output> {
+        let mut env = self.env.clone();
+        for (k, v) in set {
+            env.retain(|(name, _)| name != k);
+            env.push((k.to_string(), v.clone()));
+        }
+        let spawn = Spawn::new(&Sandbox::limits_only(), &self.program).args(args).env(env).cwd(&self.home).limits(Limits::NONE).low_priority(true);
+        output(&spawn, Duration::from_secs(limit))
+    }
+
+    /// The folder (uv's `UV_PYTHON_INSTALL_DIR`) that has a Python `minor` ("3.15"): the image's when it ships
+    /// one, else the plugins' own ([`pythons_dir`]), where uv downloads it when it is not there yet. The error is
+    /// why none could be had (uv's own words: offline, or a uv too old to know that Python).
+    fn provide_python(&self, minor: &str, own: &Path) -> Result<PathBuf, String> {
+        // `python find --managed-python`: only the standalone builds in that folder count (not Debian's python3)
+        let has = |dir: &Path| -> bool {
+            self.run(vec!["python".into(), "find".into(), "--managed-python".into(), minor.into()], &[("UV_PYTHON_INSTALL_DIR", dir.display().to_string())], 60).is_ok_and(|o| o.ok)
+        };
+        for dir in [Path::new(IMAGE_PYTHONS), own] {
+            if has(dir) {
+                return Ok(dir.to_path_buf());
+            }
+        }
+        fsx::mkdir_all(own, Step::Plugin).map_err(|e| e.to_string())?;
+        let set = [("UV_PYTHON_INSTALL_DIR", own.display().to_string()), ("UV_PYTHON_DOWNLOADS", "automatic".to_string())];
+        let o = self.run(vec!["python".into(), "install".into(), minor.into()], &set, 900).map_err(|e| e.to_string())?;
+        if !o.ok {
+            return Err(encore_core::text::last_lines(&o.text(), 4));
+        }
+        if has(own) { Ok(own.to_path_buf()) } else { Err(format!("uv installed Python {minor} but cannot find it in {}", own.display())) }
+    }
+}
+
+/// A release's own Python requirement that the venv's Python does not meet, read from uv's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonNeed {
+    /// the venv's Python ("3.14.7")
+    pub found: String,
+    /// what the release asks for (">=3.15,<3.16")
+    pub wants: String,
+}
+
+/// uv's "No solution found" answer when the venv's Python is the reason: "the current Python version (3.14.7)
+/// does not satisfy Python>=3.15,<3.16 and streamrip==2.6.1 depends on …". None for any other failure.
+pub fn python_mismatch(uv_answer: &str) -> Option<PythonNeed> {
+    const SAYS: &str = "Python version (";
+    const WANTS: &str = "does not satisfy Python";
+    let at = uv_answer.find(SAYS)? + SAYS.len();
+    let rest = &uv_answer[at..];
+    let found = rest[..rest.find(')')?].trim().to_string();
+    let rest = &rest[rest.find(WANTS)? + WANTS.len()..];
+    // the requirement runs to the next blank ("Python>=3.15,<3.16 and …"); a trailing comma or full stop is prose
+    let wants = rest.split_whitespace().next()?.trim_end_matches(['.', ',']).to_string();
+    (!found.is_empty() && !wants.is_empty()).then_some(PythonNeed { found, wants })
+}
+
+/// The Python minor version ("3.15") to fetch for a `Requires-Python` range: its lowest allowed minor (the
+/// lower bound of `>=`, `==`, `~=` or `>`). None when the range only caps the version (`<3.14`: an older
+/// Python, which Encore does not fetch) or names no major.minor.
+pub fn python_for(wants: &str) -> Option<String> {
+    let mut best: Option<(u64, u64)> = None;
+    for clause in wants.split(',').map(str::trim) {
+        // only the clauses that set a floor; `<`, `<=` and `!=` say nothing about which Python to fetch
+        let Some((op, v)) = ["~=", "==", ">=", ">"].iter().find_map(|op| clause.strip_prefix(op).map(|v| (*op, v.trim()))) else { continue };
+        let mut parts = v.trim_end_matches(".*").split('.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next().unwrap_or("0").parse().ok()?;
+        let patch_given = parts.next().is_some();
+        // `>3.14` excludes 3.14.0 only, but no 3.14 patch answers it better than the next minor: `>3.14.2` still
+        // is a 3.14, `>3.14` is read as the next minor
+        let minor = if op == ">" && !patch_given { minor + 1 } else { minor };
+        if best.is_none_or(|b| (major, minor) > b) {
+            best = Some((major, minor));
+        }
+    }
+    best.map(|(a, b)| format!("{a}.{b}"))
+}
+
+/// The error of a Python install whose release needs a Python this server cannot get (none in the image, and
+/// uv could not fetch it): the registry then keeps or picks a release that runs on what is here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonUnavailable {
+    /// the release that was tried
+    pub version: String,
+    /// what it asks for (">=3.15,<3.16")
+    pub wants: String,
+    /// the Python minor that was looked for ("3.15")
+    pub python: String,
+    /// why it could not be had (uv's words)
+    pub why: String,
+}
+
+impl std::fmt::Display for PythonUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} needs Python {} ({}), which this server does not have and could not download: {}", self.version, self.python, self.wants, self.why)
+    }
+}
+
+impl std::error::Error for PythonUnavailable {}
+
 /// Make `<versions>/<version>/venv` with uv and the `[python]` packages (`{version}` and `{tag}` filled in),
 /// check `[[install.check]]` and the version command, then switch to it. The venv is made where it stays (a
 /// venv's scripts name their own path), so it is made in the version folder itself and only `current` moves.
@@ -484,43 +633,50 @@ pub async fn install_python_reporting(m: &Manifest, versions: &Versions, version
         fsx::remove_dir_all(&dir, Step::Plugin)?;
     }
     let venv = dir.join("venv");
+    let own_pythons = pythons_dir(versions);
     let (m2, uv2, venv2, py2, tag2, version2, root) = (m.clone(), uv.to_path_buf(), venv.clone(), py.clone(), tag.to_string(), version.to_string(), versions.root.clone());
     let res = tokio::task::spawn_blocking(move || -> anyhow::Result<(PathBuf, Option<String>)> {
         let home = root.join(".home");
         fsx::mkdir_all(&home, Step::Plugin)?;
-        let mut env: Vec<(String, String)> = vec![
-            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-            ("HOME".into(), home.display().to_string()),
-            ("LANG".into(), "C.UTF-8".into()),
-            ("UV_PYTHON_INSTALL_DIR".into(), "/opt/python".into()),
-            ("UV_PYTHON_DOWNLOADS".into(), "never".into()),
-            ("UV_NO_CACHE".into(), "1".into()),
-            ("UV_NO_PROGRESS".into(), "1".into()),
-        ];
-        for k in ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "UV_INDEX_URL", "UV_DEFAULT_INDEX"] {
-            if let Ok(v) = std::env::var(k) {
-                env.push((k.into(), v));
-            }
-        }
+        let uv = Uv { program: uv2, home: home.clone(), env: uv_env(&home) };
         let uv_run = |args: Vec<String>, what: &str, limit: u64| -> anyhow::Result<()> {
-            let spawn = Spawn::new(&Sandbox::limits_only(), &uv2).args(args).env(env.clone()).cwd(&home).limits(Limits::NONE).low_priority(true);
-            let o = output(&spawn, Duration::from_secs(limit))?;
+            let o = uv.run(args, &[], limit)?;
             if !o.ok {
-                anyhow::bail!("{what} failed: {}", encore_core::text::last_lines(&format!("{}{}", o.stdout, o.stderr), 8));
+                anyhow::bail!("{what} failed: {}", encore_core::text::last_lines(&o.text(), 8));
             }
             Ok(())
         };
-        uv_run(vec!["venv".into(), "--python".into(), py2.python.clone(), venv2.display().to_string()], "Making the venv", 300)?;
         let mut args: Vec<String> = vec!["pip".into(), "install".into(), "--python".into(), venv2.join("bin/python").display().to_string()];
         if !py2.overrides.is_empty() {
             // one requirement per line, beside the venv (removed with the version that made it)
             let file = venv2.with_file_name("overrides.txt");
+            fsx::mkdir_all(venv2.parent().unwrap_or(&venv2), Step::Plugin)?;
             let lines: Vec<String> = py2.overrides.iter().map(|o| crate::manifest::fill(o, &version2, &tag2)).collect();
             std::fs::write(&file, lines.join("\n") + "\n")?;
             args.extend(["--override".into(), file.display().to_string()]);
         }
         args.extend(py2.packages.iter().map(|p| crate::manifest::fill(p, &version2, &tag2)));
-        uv_run(args, &format!("Installing {}", m2.plugin.name), 900)?;
+        let what = format!("Installing {}", m2.plugin.name);
+        uv_run(vec!["venv".into(), "--python".into(), py2.python.clone(), venv2.display().to_string()], "Making the venv", 300)?;
+        let o = uv.run(args.clone(), &[], 900)?;
+        if !o.ok {
+            let text = o.text();
+            // The release asks for another Python than the manifest's (streamrip 2.6.1: Python>=3.15,<3.16 on an
+            // image with 3.14): find or fetch that Python and make the venv again with it. Any other failure, or
+            // a Python this server cannot get, is the install's error as it was.
+            let Some(need) = python_mismatch(&text) else { anyhow::bail!("{what} failed: {}", encore_core::text::last_lines(&text, 8)) };
+            // the same minor as the venv's (a newer patch asked for) is not fetched: that Python is the one here
+            let Some(minor) = python_for(&need.wants).filter(|m| !need.found.starts_with(&format!("{m}."))) else { anyhow::bail!("{what} failed: {}", encore_core::text::last_lines(&text, 8)) };
+            let pythons = uv.provide_python(&minor, &own_pythons).map_err(|why| anyhow::Error::new(PythonUnavailable { version: version2.clone(), wants: need.wants.clone(), python: minor.clone(), why }))?;
+            let _ = std::fs::remove_dir_all(&venv2);
+            // asked for by version in the folder that has it, so uv names its minor-version link in the venv
+            // (cpython-3.15-…) and the venv keeps working when that Python gets a patch release
+            let o = uv.run(vec!["venv".into(), "--python".into(), minor.clone(), venv2.display().to_string()], &[("UV_PYTHON_INSTALL_DIR", pythons.display().to_string())], 300)?;
+            if !o.ok {
+                anyhow::bail!("Making the venv with Python {minor} failed: {}", encore_core::text::last_lines(&o.text(), 8));
+            }
+            uv_run(args, &what, 900)?;
+        }
         let bin = py2.bin.0.iter().map(|b| venv2.join("bin").join(b)).find(|p| p.is_file()).ok_or_else(|| anyhow::anyhow!("{} was installed but its program is missing", m2.plugin.name))?;
         check_files(&m2.install.as_ref().map(|i| i.checks.clone()).unwrap_or_default(), &venv2)?;
         let env = run_env(&m2, &bin, &root);

@@ -33,7 +33,7 @@ IPC, host name (UTS), cgroup and, unless its manifest asks for the network, netw
   `/etc` that programs need to start, resolve names and check certificates (`/etc/ssl`,
   `/etc/ca-certificates`, `/etc/pki`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`,
   `/etc/host.conf`, `/etc/alternatives`, `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/localtime`,
-  `/etc/mime.types`) and `/opt/python` (the image's Python 3.14);
+  `/etc/mime.types`) and `/opt/python` (the image's Pythons, 3.14 and 3.15);
 - its installed version read-only (`<config>/plugins/<id>/<version>/`), and its data folder, home and
   temporary folder writable (`data/`, `home/`, `tmp/` beside it);
 - the request's download folder, writable, while a download runs;

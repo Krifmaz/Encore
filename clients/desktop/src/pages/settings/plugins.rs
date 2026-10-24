@@ -159,10 +159,13 @@ pub fn done_words(act: &str, before: &Value, after: &Value) -> String {
             }
         }
         "update" => {
-            if fmt::s(before, "installed_version") == fmt::s(after, "installed_version") {
-                format!("{name} is up to date")
-            } else {
+            if fmt::s(before, "installed_version") != fmt::s(after, "installed_version") {
                 format!("{name} updated to {v}")
+            } else if fmt::truthy(after, "last_error") {
+                // the newest release could not run here (it needs a newer Python): the card's note says why
+                format!("{name} stays on {v}")
+            } else {
+                format!("{name} is up to date")
             }
         }
         "remove" => format!("{name} removed"),
@@ -2150,6 +2153,10 @@ mod tests {
         let before = card("ytdlp", true);
         let mut after = before.clone();
         assert_eq!(done_words("update", &before, &after), "ytdlp is up to date");
+        // the newest release needs a Python the server cannot get: it stayed, and the card's note says why
+        after["last_error"] = json!("Staying on ytdlp …");
+        assert_eq!(done_words("update", &before, &after), format!("ytdlp stays on {}", version_text(&after)));
+        after["last_error"] = Value::Null;
         after["installed_version"] = json!("2.0");
         assert_eq!(done_words("update", &before, &after), "ytdlp updated to 2.0");
         assert_eq!(done_words("install", &card("plex", false), &json!({ "name": "Plex", "installed": true })), "Plex installed");

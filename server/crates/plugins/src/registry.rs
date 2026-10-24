@@ -61,6 +61,9 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// How many older releases an update tries when the newest needs a Python this server cannot get.
+const OLDER_TRIES: usize = 3;
+
 impl From<anyhow::Error> for Refused {
     fn from(e: anyhow::Error) -> Refused {
         match e.downcast::<Refused>() {
@@ -956,6 +959,8 @@ impl Registry {
         let versions = Versions::new(&self.folders(id).root);
         let mut version: Option<String> = None;
         let mut sha = None;
+        // why the version installed is not the newest (kept as the card's last error, which the install clears)
+        let mut notice: Option<String> = None;
         if m.installs_program() {
             let u = m.update.clone().unwrap_or_default();
             let net = self.release_net();
@@ -972,8 +977,18 @@ impl Registry {
                 let uv = self.0.opts.read().unwrap().uv.clone().or_else(install::find_uv).ok_or_else(|| Refused::new(400, "uv is not installed on this server, so Python programs cannot be installed"))?;
                 // the pinned release must call itself what it did when Encore was tested with it ([update] pin_reports)
                 let reports = if pinned && u.pin.as_deref() == Some(tag.as_str()) { u.pin_reports.as_deref() } else { None };
-                let inst = install::install_python_reporting(m, &versions, &ver, &tag, &uv, reports).await?;
-                version = Some(inst.version);
+                match install::install_python_reporting(m, &versions, &ver, &tag, &uv, reports).await {
+                    Ok(inst) => version = Some(inst.version),
+                    // the release needs a Python this server cannot get: an older release that runs here, or the
+                    // one in use, with a note that says so instead of a failed update
+                    Err(e) if e.downcast_ref::<install::PythonUnavailable>().is_some() && !pinned => {
+                        let need = e.downcast::<install::PythonUnavailable>().expect("checked above");
+                        let (kept, note) = self.older_python_release(m, &versions, &uv, &need).await?;
+                        version = Some(kept);
+                        notice = Some(note);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             } else {
                 let arch = std::env::consts::ARCH;
                 let b = m.binary_for(arch).ok_or_else(|| Refused::new(400, format!("{} has no program for this server ({arch})", m.plugin.name)))?;
@@ -1030,7 +1045,44 @@ impl Registry {
             )
             .map_err(|e| Refused::new(500, e.to_string()))?;
         self.log(id).line("install", &format!("installed{}", version.as_ref().map(|v| format!(" {v}")).unwrap_or_default()));
+        if let Some(n) = &notice {
+            self.set_error(id, Some(n));
+            self.log(id).line("install", n);
+        }
         Ok(version)
+    }
+
+    /// After `need` (the newest release wants a Python this server cannot get): install the newest older release
+    /// that runs on the Python here (newer than the one in use, at most [`OLDER_TRIES`] tried), else keep the one
+    /// in use. → the version now in use and the note for the card. With nothing in use and nothing older that
+    /// installs, the error is `need`'s.
+    async fn older_python_release(&self, m: &Manifest, versions: &Versions, uv: &Path, need: &install::PythonUnavailable) -> std::result::Result<(String, String), Refused> {
+        let name = &m.plugin.name;
+        let current = versions.current();
+        let why = format!("{name} {} needs Python {}, which this server does not have and could not download ({})", need.version, need.python, need.why.lines().last().unwrap_or("").trim());
+        let candidates = match m.update.as_ref().filter(|u| u.source() == "github") {
+            Some(u) => releases::all(&self.release_net(), u, &|_| true).await.unwrap_or_default(),
+            None => vec![],
+        };
+        let older = candidates
+            .into_iter()
+            .filter(|r| encore_core::version::newer(&need.version, &r.version))
+            .filter(|r| current.as_deref().is_none_or(|c| encore_core::version::newer(&r.version, c)))
+            .take(OLDER_TRIES);
+        for r in older {
+            match install::install_python(m, versions, &r.version, &r.tag, uv).await {
+                Ok(inst) => return Ok((inst.version.clone(), format!("Installed {name} {}, the newest release that runs on this server: {why}.", inst.version))),
+                Err(e) if e.downcast_ref::<install::PythonUnavailable>().is_some() => continue,
+                Err(e) => {
+                    self.log(m.id()).line("update", &format!("{} could not be installed either: {e}", r.version));
+                    break;
+                }
+            }
+        }
+        match current {
+            Some(c) => Ok((c.clone(), format!("Staying on {name} {c}: {why}. A server update that ships that Python lets it update."))),
+            None => Err(Refused::new(400, format!("Installing {name} failed: {why}"))),
+        }
     }
 
     /// `[[download]]` files whose rule holds now (a model chosen by a setting); the files of other values go.

@@ -291,6 +291,10 @@ fn words_of_actions_tests_and_failures() {
     before["name"] = json!("yt-dlp");
     let mut after = before.clone();
     assert_eq!(done_words("update", &before, &after), "yt-dlp is up to date");
+    // the newest release needs a Python the server cannot get: it stayed, and the card's note says why
+    after["last_error"] = json!("Staying on yt-dlp …");
+    assert_eq!(done_words("update", &before, &after), "yt-dlp stays on 1.2.3");
+    after["last_error"] = json!(null);
     after["installed_version"] = json!("2026.11.01");
     assert_eq!(done_words("update", &before, &after), "yt-dlp updated to 2026.11.01");
     assert_eq!(done_words("install", &card("torznab", false), &json!({ "name": "Torrents & Usenet (Prowlarr)", "installed": true })), "Torrents & Usenet (Prowlarr) installed");

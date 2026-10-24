@@ -369,3 +369,38 @@ fn origins_are_kept_in_the_table() {
     let ids: Vec<String> = e.reg.list()["plugins"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect();
     assert!(!ids.contains(&"broken".to_string()));
 }
+
+/// streamrip 2.6.1 needs Python 3.15. Offline (no way to fetch it), Update installs the newest older release that
+/// runs here and says why, or stays on the one in use and says why – never a failed update. Once that Python can
+/// be had, Update installs 2.6.1 and the note goes.
+#[tokio::test]
+async fn an_update_that_needs_a_newer_python_falls_back_then_goes_through() {
+    let s = StandIn::start().await;
+    let e = env("python-fallback", Sandbox::limits_only());
+    e.reg.set_hosts(Hosts { github_api: s.base.clone(), github: s.base.clone(), pypi: s.base.clone(), huggingface: s.base.clone() });
+    let uv = crate::test_util::python_aware_uv(&e.dir);
+    e.reg.set_uv(&uv);
+    let release = |v: &str| json!({ "tag_name": format!("v{v}"), "draft": false, "prerelease": false, "assets": [] });
+    let list = |vs: &[&str]| serde_json::to_vec(&json!(vs.iter().map(|v| release(v)).collect::<Vec<_>>())).unwrap();
+    s.put("/repos/Stensel8/streamrip/releases?per_page=50", list(&["2.4.10"]));
+    let card = e.reg.install("streamrip").await.unwrap_or_else(|r| panic!("{}", r.message));
+    assert_eq!(card["installed_version"], "2.4.10");
+    std::fs::write(e.dir.join("offline"), "").unwrap();
+    // 2.6.1 and 2.6.0 need 3.15; 2.5.1 is the newest that runs here
+    s.put("/repos/Stensel8/streamrip/releases?per_page=50", list(&["2.6.1", "2.6.0", "2.5.1", "2.4.10"]));
+    let c = e.reg.update("streamrip").await.unwrap_or_else(|r| panic!("{}", r.message));
+    assert_eq!(c["installed_version"], "2.5.1");
+    let note = c["last_error"].as_str().unwrap();
+    assert!(note.starts_with("Installed streamrip 2.5.1, the newest release that runs on this server") && note.contains("2.6.1 needs Python 3.15"), "{note}");
+    // again: nothing between 2.5.1 and 2.6.1 runs here, so 2.5.1 stays and keeps working
+    let c = e.reg.update("streamrip").await.unwrap_or_else(|r| panic!("{}", r.message));
+    assert_eq!(c["installed_version"], "2.5.1");
+    assert!(c["last_error"].as_str().unwrap().starts_with("Staying on streamrip 2.5.1: streamrip 2.6.1 needs Python 3.15"), "{c}");
+    assert!(e.dir.join("plugins/streamrip/2.5.1/venv/bin/rip").is_file());
+    // online again: uv fetches 3.15, 2.6.1 goes in, and the red line is gone
+    std::fs::remove_file(e.dir.join("offline")).unwrap();
+    let c = e.reg.update("streamrip").await.unwrap_or_else(|r| panic!("{}", r.message));
+    assert_eq!(c["installed_version"], "2.6.1");
+    assert!(c["last_error"].is_null(), "{c}");
+    assert_eq!(std::fs::read_to_string(e.dir.join("plugins/streamrip/2.6.1/venv/python-asked")).unwrap().trim(), "3.15");
+}

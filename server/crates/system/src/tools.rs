@@ -511,6 +511,18 @@ pub fn plan(t: &Seen, auto: bool) -> Plan {
     Plan::Install { from: t.installed.clone(), to }
 }
 
+/// The task's line for an update that went through (`c`: the card after it): "name from → to", or, when the
+/// newest release could not run here and the plugin stayed on (or moved to) another version, the card's note
+/// saying why (a release that needs a newer Python than the server has).
+pub fn installed_line(name: &str, from: Option<String>, to: &str, c: &Value) -> String {
+    let now = c["installed_version"].as_str().map(String::from).unwrap_or_else(|| to.to_string());
+    let note = c["last_error"].as_str().filter(|e| !e.is_empty());
+    match note {
+        Some(n) if now != to => n.to_string(),
+        _ => format!("{name} {} → {now}", from.unwrap_or_else(|| "not installed".into())),
+    }
+}
+
 /// Whether the task may update plugin `id` by itself: its auto-update is on, yt-dlp isn't held back by the
 /// environment (YTDLP_AUTO_UPDATE=false), and streamrip is switched on (a streamrip the owner turned off is only
 /// reported), and its program is not the owner's own copy.
@@ -546,7 +558,7 @@ pub async fn scheduled(st: &impl Ctx) -> anyhow::Result<String> {
             Plan::Say(s) => parts.push(s),
             Plan::Error(e) => errors.push(e),
             Plan::Install { from, to } => match st.plugins().update_unattended(&id).await {
-                Ok(c) => parts.push(format!("{} {} → {}", seen.name, from.unwrap_or_else(|| "not installed".into()), c["installed_version"].as_str().map(String::from).unwrap_or(to))),
+                Ok(c) => parts.push(installed_line(&seen.name, from, &to, &c)),
                 Err(e) => errors.push(format!("{}: {}", seen.name, e.message.lines().next().unwrap_or(""))),
             },
         }
@@ -585,6 +597,16 @@ mod tests {
         assert_eq!(plan(&t, task_auto("streamrip", true, false, true)), Plan::Say("streamrip 2.5.0 available".into()));
         let t = seen("streamrip", Some("2.5.0"), Some("2.5.0"));
         assert_eq!(plan(&t, false), Plan::Say("streamrip up to date".into()));
+    }
+
+    /// An update whose newest release needs a Python the server lacks reports the card's note, not "2.5.1 → 2.5.1".
+    #[test]
+    fn a_kept_version_is_reported_with_its_reason() {
+        let ok = serde_json::json!({ "installed_version": "2.6.1", "last_error": null });
+        assert_eq!(installed_line("streamrip", Some("2.5.1".into()), "2.6.1", &ok), "streamrip 2.5.1 → 2.6.1");
+        let kept = serde_json::json!({ "installed_version": "2.5.1", "last_error": "Staying on streamrip 2.5.1: streamrip 2.6.1 needs Python 3.15" });
+        assert_eq!(installed_line("streamrip", Some("2.5.1".into()), "2.6.1", &kept), "Staying on streamrip 2.5.1: streamrip 2.6.1 needs Python 3.15");
+        assert_eq!(installed_line("streamrip", None, "2.6.1", &ok), "streamrip not installed → 2.6.1");
     }
 
     #[test]

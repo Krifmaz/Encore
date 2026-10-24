@@ -122,13 +122,37 @@ object PluginRules {
         val v = versionText(after)
         return when (act) {
             "install" -> if (after.str("installed_version").isNotEmpty()) "$name $v installed" else "$name installed"
-            "update" -> if (before.str("installed_version") == after.str("installed_version")) "$name is up to date" else "$name updated to $v"
+            "update" -> when {
+                before.str("installed_version") != after.str("installed_version") -> "$name updated to $v"
+                // the newest release could not run here (it needs a newer Python): the card's note says why
+                after.str("last_error").isNotEmpty() -> "$name stays on $v"
+                else -> "$name is up to date"
+            }
             "remove" -> "$name removed"
             "enable" -> "$name enabled"
             "disable" -> "$name disabled"
             else -> "Done"
         }
     }
+
+    /**
+     * A card as it was right after an action on it failed: the version installed then and when it was last
+     * installed or updated (`updated_at`, which the server moves only when an install or update goes through).
+     */
+    data class Failed(val version: String, val updatedAt: Double) {
+        companion object {
+            /** The snapshot of card [c]. */
+            fun of(c: JsonObject): Failed = Failed(c.str("installed_version"), c.dbl("updated_at"))
+        }
+    }
+
+    /**
+     * Whether card [c] shows the plugin got past a failed action ([failed]): another version is installed, or an
+     * install or update went through since (a retry by hand or the scheduled task's). The server's last error
+     * alone does not count: a successful update check clears it while the update itself may still fail.
+     */
+    fun pastFailure(failed: Failed, c: JsonObject): Boolean =
+        c.str("installed_version") != failed.version || c.dbl("updated_at") != failed.updatedAt
 
     /** The toast after an upload or a URL install: "Name 1.2 installed". */
     fun addedWords(c: JsonObject): String = listOf(c.str("name"), versionText(c)).filter { it.isNotEmpty() }.joinToString(" ") + " installed"

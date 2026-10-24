@@ -25,7 +25,7 @@ Encore starts the plugin once per command and waits for it to end:
 ```
 
 `interpreter` and `script` come from `[run]` in the manifest (no interpreter: the script is started itself,
-and Encore makes it executable at install). `python3` is the image's Python 3.14 under `/opt/python` (else
+and Encore makes it executable at install). `python3` is the image's newest Python under `/opt/python`, 3.15 (else
 `python3` on `PATH`); `node` and `sh` are the system's. Nothing else is on the command line: no settings, no
 secrets, no paths. Nothing goes through a shell.
 

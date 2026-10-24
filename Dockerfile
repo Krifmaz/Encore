@@ -48,22 +48,29 @@ RUN apt-get update \
 # Plugins (Settings → Plugins) install the programs Encore runs – yt-dlp and streamrip into venvs of their own under
 # /config/plugins/<id>/, slskd, Cadenza and llama.cpp from their releases – so the image ships none of them. What it
 # keeps for them: a pinned uv (/opt/uv/bin/uv, the plugins' installer for Python programs) and the standalone
-# Python 3.14 uv fetches (/opt/python: the streamrip fork needs 3.14+, newer than Debian's python3), bubblewrap for
-# the plugins' sandbox, nodejs (yt-dlp's JavaScript runtime for YouTube) and ffmpeg.
+# Pythons uv fetches (/opt/python: 3.14, which the streamrip fork needed first, and 3.15, which its 2.6 releases
+# require – both newer than Debian's python3), bubblewrap for the plugins' sandbox, nodejs (yt-dlp's JavaScript
+# runtime for YouTube) and ffmpeg. A release that needs a Python the image lacks gets it from uv at install time,
+# into /config/plugins/.python (the plugins crate's install.rs); uv 0.13 is the first that knows 3.15.0 final.
 # A venv an Encore before 0.32 made in /config/tools/venv names the 3.14 it was made with by its full version
-# (/opt/python/cpython-3.14.N-…); every 3.14.N name points at the 3.14 installed here (one ABI within 3.14), so those
-# venvs keep running on this image and the plugins adopt them in place.
-ARG UV_VERSION=0.12.21
+# (/opt/python/cpython-3.14.N-…); every 3.X.N name points at the 3.X installed here (one ABI within a minor), so
+# those venvs keep running on this image and the plugins adopt them in place. The 3.X name (uv's own minor link,
+# which new venvs name) is made too when uv did not make it.
+ARG UV_VERSION=0.13.5
+ARG PYTHONS="3.14 3.15"
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
 RUN python3 -m venv /opt/uv && /opt/uv/bin/pip install --no-cache-dir "uv==${UV_VERSION}" \
- && UV_PYTHON_DOWNLOADS=automatic /opt/uv/bin/uv python install 3.14 \
- && cd /opt/python && real="$(ls -d cpython-3.14.*-linux-*-gnu | grep -v '\.lock$' | sort -V | tail -1)" \
- && [ -x "$real/bin/python3.14" ] || { echo "uv ${UV_VERSION} or Python 3.14 failed to install"; exit 1; } \
- && tail="${real#cpython-3.14.*-}" \
- && for n in $(seq 0 30); do [ -e "cpython-3.14.$n-$tail" ] || ln -s "$real" "cpython-3.14.$n-$tail"; done \
- && { [ -e "cpython-3.14-$tail" ] || ln -s "$real" "cpython-3.14-$tail"; } \
+ && UV_PYTHON_DOWNLOADS=automatic /opt/uv/bin/uv python install ${PYTHONS} \
+ && cd /opt/python && for minor in ${PYTHONS}; do \
+      real="$(ls -d cpython-${minor}.*-linux-*-gnu | grep -v '\.lock$' | grep -v -- '-freethreaded' | sort -V | tail -1)"; \
+      [ -n "$real" ] && [ ! -L "$real" ] && [ -x "$real/bin/python${minor}" ] || { echo "uv ${UV_VERSION} or Python ${minor} failed to install"; exit 1; }; \
+      tail="${real#cpython-${minor}.*-}"; \
+      for n in $(seq 0 30); do [ -e "cpython-${minor}.$n-$tail" ] || ln -s "$real" "cpython-${minor}.$n-$tail"; done; \
+      [ -e "cpython-${minor}-$tail" ] || ln -s "$real" "cpython-${minor}-$tail"; \
+      "/opt/python/$real/bin/python${minor}" --version; \
+    done \
  && chmod -R a+rX /opt/python /opt/uv \
- && /opt/uv/bin/uv --version && "/opt/python/$real/bin/python3.14" --version
+ && /opt/uv/bin/uv --version
 ENV ENCORE_CONFIG_DIR=/config ENCORE_STATIC_DIR=/app/static ENCORE_PORT=8080 \
     PUID=1000 PGID=1000 TZ=UTC
 COPY --from=build /encore /usr/local/bin/encore

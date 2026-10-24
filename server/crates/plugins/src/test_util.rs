@@ -202,3 +202,30 @@ pub fn script(path: &Path, body: &str) {
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::rename(&tmp, path).unwrap();
 }
+
+/// A stand-in for uv that knows Pythons: `venv --python <py> <dir>` records the Python, `pip install` refuses a
+/// v2.6.x spec (streamrip's releases that need 3.15) on anything but 3.15 with uv's own words, `python find`
+/// answers from `$UV_PYTHON_INSTALL_DIR`, and `python install` puts the Python there (or fails when
+/// `<d>/offline` exists, as with no network).
+pub fn python_aware_uv(d: &Path) -> PathBuf {
+    let uv = d.join("fake-uv");
+    script(&uv, &format!(r#"set -e
+case "$1" in
+  venv) mkdir -p "$4/bin" "$4/lib/python3/site-packages/streamrip"; echo "$3" > "$4/python-asked"
+        echo "$UV_PYTHON_INSTALL_DIR" > "$4/python-from"; echo '#!/bin/sh' > "$4/bin/python"; chmod +x "$4/bin/python" ;;
+  pip) venv=$(dirname "$(dirname "$4")"); spec="$5"
+       case "$spec" in *v2.6.*) if [ "$(cat "$venv/python-asked")" != "3.15" ]; then
+         echo "error: No solution found when resolving dependencies:" >&2
+         echo "  Because the current Python version (3.14.7) does not satisfy Python>=3.15,<3.16 and streamrip==2.6.1 depends on Python>=3.15,<3.16, we can conclude that streamrip==2.6.1 cannot be used." >&2
+         exit 1; fi ;; esac
+       # the v2.4.10 tag calls itself 2.4.9, as the real one does
+       printf '#!/bin/sh\necho "rip, version %s"\n' "$(echo "$spec" | sed 's/.*tags\/v//; s/\.zip//; s/^2\.4\.10$/2.4.9/')" > "$venv/bin/rip"; chmod +x "$venv/bin/rip"
+       echo 'no_update_check = 1' > "$venv/lib/python3/site-packages/streamrip/config.py" ;;
+  python) case "$2" in
+    find) [ -d "$UV_PYTHON_INSTALL_DIR/$4" ] ;;
+    install) if [ -e "{offline}" ]; then echo "error: Failed to download cpython-$3: network unreachable" >&2; exit 1; fi
+             [ "$UV_PYTHON_DOWNLOADS" = automatic ]; mkdir -p "$UV_PYTHON_INSTALL_DIR/$3" ;;
+  esac ;;
+esac"#, offline = d.join("offline").display()));
+    uv
+}

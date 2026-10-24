@@ -135,6 +135,14 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
     /** The line under a card's buttons: a Test's answer, or a failure in full. */
     val outs = mutableStateMapOf<String, List<ResultLine>>()
 
+    /**
+     * The cards whose line under the buttons is a failed Install/Update/Enable/Disable, with the card as it was
+     * right after that failure ([PluginRules.Failed]). A later card that shows the plugin got past it (another
+     * version installed, or the server's error cleared, as after the scheduled update's successful retry) takes
+     * the stale red box away, so it does not outlive the problem it reported.
+     */
+    val failedActs = HashMap<String, PluginRules.Failed>()
+
     /** The lines of a part's Test (YouTube sign-in's Test cookies), by "<plugin>/<part>"; true while it runs. */
     val partOuts = mutableStateMapOf<String, List<ResultLine>>()
     val partTesting = mutableStateMapOf<String, Boolean>()
@@ -162,6 +170,17 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
         val id = c.str("id")
         if (id.isEmpty()) return
         plugins = plugins.map { if (it.str("id") == id) c else it }
+        dropStaleFailure(c)
+    }
+
+    /** Take away a failed action's box once card [c] shows the plugin got past it ([failedActs]). */
+    fun dropStaleFailure(c: JsonObject) {
+        val id = c.str("id")
+        val failed = failedActs[id] ?: return
+        if (PluginRules.pastFailure(failed, c)) {
+            failedActs.remove(id)
+            outs.remove(id)
+        }
     }
 
     val installedIds: Set<String> get() = plugins.filter { it.bool("installed") }.map { it.str("id") }.toSet()
@@ -202,6 +221,7 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
             }
             head = JsonObject(l.filterKeys { it != "plugins" })
             plugins = cards
+            cards.forEach { dropStaleFailure(it) }
             loadError = null
         } catch (e: CancellationException) {
             throw e
@@ -237,6 +257,7 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
         val before = card(id)
         acting[id] = act
         outs.remove(id)
+        failedActs.remove(id)
         try {
             val c = withContext(Dispatchers.IO) { api.pluginAction(id, act) }
             acting.remove(id)
@@ -264,8 +285,9 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
         } catch (e: Exception) {
             acting.remove(id)
             outs[id] = listOf(ResultLine(false, PluginRules.errorText(e.message, (e as? ApiException)?.body)))
-            // the card as the server has it now (its last error)
+            // the card as the server has it now (its last error), which the box is measured against from now on
             statusOf(id)
+            failedActs[id] = PluginRules.Failed.of(card(id))
         }
     }
 
@@ -274,6 +296,7 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
         if (acting[id] != null) return
         acting[id] = "test"
         outs.remove(id)
+        failedActs.remove(id)
         try {
             val answer = forms[id]
             val state = stateFor(id)

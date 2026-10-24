@@ -4,7 +4,7 @@
 use crate::fetch;
 use crate::install::{self, Net, Program, Versions};
 use crate::manifest::{parse_for, Origin};
-use crate::test_util::{script, tar_gz, file, StandIn};
+use crate::test_util::{python_aware_uv, script, tar_gz, file, StandIn};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -232,6 +232,64 @@ esac"#);
     assert!(e.contains("no_update_check"), "{e}");
     assert!(!v.dir("9.9.9").exists());
     assert_eq!(v.current().as_deref(), Some("2.4.10"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// uv's answer when a release's Requires-Python rules out the venv's Python (streamrip 2.6.1 on the 3.14 image),
+/// and the Python to fetch for a range.
+#[test]
+fn a_python_requirement_is_read_from_uvs_answer() {
+    let uv = "Using Python 3.14.7 environment at: /config/plugins/streamrip/2.6.1/venv\nerror: No solution found when resolving dependencies:\n  ╰─▶ Because the current Python version (3.14.7) does not satisfy Python>=3.15,<3.16 and streamrip==2.6.1 depends on Python>=3.15,<3.16, we can conclude that streamrip==2.6.1 cannot be used.\n      And because only streamrip==2.6.1 is available and you require streamrip, we can conclude that your requirements are unsatisfiable.";
+    let need = install::python_mismatch(uv).unwrap();
+    assert_eq!(need, install::PythonNeed { found: "3.14.7".into(), wants: ">=3.15,<3.16".into() });
+    assert_eq!(install::python_mismatch("error: Failed to fetch: https://github.com/…/v9.zip (404)"), None, "another failure is not a Python one");
+    assert_eq!(install::python_for(">=3.15,<3.16").as_deref(), Some("3.15"));
+    assert_eq!(install::python_for(">=3.15.2").as_deref(), Some("3.15"));
+    assert_eq!(install::python_for("~=3.16").as_deref(), Some("3.16"));
+    assert_eq!(install::python_for("==3.15.*").as_deref(), Some("3.15"));
+    assert_eq!(install::python_for(">3.14").as_deref(), Some("3.15"), "above 3.14 is the next minor");
+    assert_eq!(install::python_for(">=3.9,!=3.10.*,>=3.15").as_deref(), Some("3.15"), "the highest floor counts");
+    assert_eq!(install::python_for("<3.14"), None, "an older Python is not fetched");
+}
+
+/// A release that needs a newer Python gets it: uv fetches it into the plugins' own Python folder and the venv
+/// is made again with it, so the update goes through instead of failing on the image's Python.
+#[tokio::test]
+async fn a_release_that_needs_a_newer_python_gets_it() {
+    let d = tmp("python-newer");
+    let uv = python_aware_uv(&d);
+    let m = crate::catalog::find("streamrip").unwrap();
+    let v = Versions::new(&d.join("plugins/streamrip"));
+    install::install_python(m, &v, "2.5.1", "v2.5.1", &uv).await.unwrap();
+    let inst = install::install_python(m, &v, "2.6.1", "v2.6.1", &uv).await.unwrap();
+    assert_eq!(inst.reports.as_deref(), Some("2.6.1"));
+    assert_eq!(v.current().as_deref(), Some("2.6.1"));
+    let venv = v.dir("2.6.1").join("venv");
+    assert_eq!(std::fs::read_to_string(venv.join("python-asked")).unwrap().trim(), "3.15");
+    let own = install::pythons_dir(&v);
+    assert_eq!(own, d.join("plugins/.python"));
+    assert_eq!(std::fs::read_to_string(venv.join("python-from")).unwrap().trim(), own.display().to_string(), "made with the fetched Python");
+    assert!(own.join("3.15").is_dir());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// No way to get that Python (offline): a typed error the registry turns into "staying on …", and the version in
+/// use is untouched.
+#[tokio::test]
+async fn a_python_that_cannot_be_had_leaves_the_version_in_use() {
+    let d = tmp("python-offline");
+    let uv = python_aware_uv(&d);
+    std::fs::write(d.join("offline"), "").unwrap();
+    let m = crate::catalog::find("streamrip").unwrap();
+    let v = Versions::new(&d.join("plugins/streamrip"));
+    install::install_python(m, &v, "2.5.1", "v2.5.1", &uv).await.unwrap();
+    let e = install::install_python(m, &v, "2.6.1", "v2.6.1", &uv).await.unwrap_err();
+    let need = e.downcast_ref::<install::PythonUnavailable>().expect("a typed error");
+    assert_eq!((need.version.as_str(), need.python.as_str(), need.wants.as_str()), ("2.6.1", "3.15", ">=3.15,<3.16"));
+    assert!(need.why.contains("network unreachable"), "{}", need.why);
+    assert_eq!(v.current().as_deref(), Some("2.5.1"));
+    assert!(!v.dir("2.6.1").exists());
+    assert!(v.dir("2.5.1").join("venv/bin/rip").is_file());
     let _ = std::fs::remove_dir_all(&d);
 }
 

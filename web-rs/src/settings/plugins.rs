@@ -118,7 +118,10 @@ pub fn done_words(act: &str, before: &Value, after: &Value) -> String {
     match act {
         "install" => if after.truthy("installed_version") { format!("{name} {v} installed") } else { format!("{name} installed") },
         "update" => {
-            if before.s("installed_version") == after.s("installed_version") { format!("{name} is up to date") } else { format!("{name} updated to {v}") }
+            if before.s("installed_version") != after.s("installed_version") { format!("{name} updated to {v}") }
+            // the newest release could not run here (it needs a newer Python): the card's note says why
+            else if after.truthy("last_error") { format!("{name} stays on {v}") }
+            else { format!("{name} is up to date") }
         }
         "remove" => format!("{name} removed"),
         "enable" => format!("{name} enabled"),

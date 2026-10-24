@@ -83,7 +83,7 @@ answer on stdout ([the contract](../plugins/CONTRACT.md)).
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `script` | text | a program | The program, relative to the plugin's folder (no `..`, not absolute). A builtin plugin has none |
-| `interpreter` | text | no | `python3` (the image's Python: 3.14 under /opt/python, else `python3` on PATH), `node`, `sh`. Left out: the script is a program itself (its mode must allow running it) |
+| `interpreter` | text | no | `python3` (the image's Python: the highest under /opt/python, 3.15, else `python3` on PATH), `node`, `sh`. Left out: the script is a program itself (its mode must allow running it) |
 | `shell` | bool | no | **Extension.** Must be absent or `false`: nothing is started through a shell, every program gets an argv. (The old `streamrip_command` template, run through `sh -c` until 0.31, is split into an argv by the streamrip plugin) |
 | `env` | table | no | **Extension.** Fixed environment variables for the program, on top of the ones Encore sets ([the contract](../plugins/CONTRACT.md#environment)). `{bin}` (the installed program), `{bin_dir}` (its folder), `{data}` (the plugin's data folder) and `{plugin}` (its folder) are filled in. An uploaded plugin may not set `PATH`, `HOME`, `TMPDIR`, `PYTHONPATH`, `PYTHONHOME`, `NODE_OPTIONS` or any `LD_*` or `ENCORE_*` variable |
 | `[run.timeouts]` | table | no | Seconds per command, 1 to 86400. The defaults: `describe` 10, `status` 15, `test` 30, `search` 60, `download` 3600, `update` 600 |
@@ -173,7 +173,7 @@ A venv made with uv and the image's Python, for programs published as Python pac
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `python` | text | yes | The Python the venv is made with (`3.14`): the image's, under /opt/python, which uv finds with `uv venv --python 3.14` (no download) |
+| `python` | text | yes | The Python the venv is made with (`3.14`): the image's, under /opt/python, which uv finds with `uv venv --python 3.14` (no download). A release whose own `Requires-Python` rules it out gets the Python it asks for instead (below) |
 | `packages` | list | yes | What `uv pip install` puts in, `{version}` and `{tag}` filled in: `yt-dlp[default]=={version}`, `streamrip @ https://github.com/Stensel8/streamrip/archive/refs/tags/{tag}.zip`. A requirement, never an option (nothing starting with `-`) |
 | `bin` | text or list | yes | The program in the venv's `bin` folder; a list: the first one that is there (`["rip", "streamrip"]`) |
 | `overrides` | list | no | Requirements that replace what the packages ask for the same project (`uv pip install --override`), `{version}` and `{tag}` filled in. zotify names librespot by a git URL and the image has no git: `librespot @ https://github.com/…/archive/<commit>.zip`. A requirement, never an option |
@@ -181,6 +181,16 @@ A venv made with uv and the image's Python, for programs published as Python pac
 The venv is made where it stays (`<plugin>/<version>/venv`): a venv's scripts name their own path, so it is
 never moved after it is made. The image keeps uv (pinned) and /opt/python at the same path, so an adopted
 venv (`tools/venv`, made by 0.31's image) keeps running. A Python plugin is catalog only in 0.32.
+
+**A release that needs another Python** (streamrip 2.6.1: `Python>=3.15,<3.16`, on an image with 3.14): when
+uv refuses the packages because of the venv's Python, Encore reads the range from uv's answer, takes its lowest
+allowed minor (`3.15`) and makes the venv again with that Python: the image's (`/opt/python`, which ships 3.14
+and 3.15), else one uv downloads into `<config>/plugins/.python` (kept for the next install, shared by every
+Python plugin). When that Python cannot be had (no network to python-build-standalone, or a uv too old to know
+it), an Update installs the newest older release that runs here (at most three tried, newer than the one in
+use) or keeps the one in use; either way the update goes through and the card's note says which release needs
+which Python. The note goes with the next install that is the newest. A first install (the pinned release) is
+not walked back: it fails as before.
 
 ## `[[download]]` (extension)
 

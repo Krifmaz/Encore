@@ -73,6 +73,8 @@ class PluginRulesTest {
         assertEquals("Torznab installed", PluginRules.doneWords("install", before, obj("""{"name":"Torznab","installed":true}""")))
         assertEquals("slskd updated to 0.24.1", PluginRules.doneWords("update", before, obj("""{"name":"slskd","installed":true,"installed_version":"0.24.1"}""")))
         assertEquals("slskd is up to date", PluginRules.doneWords("update", before, obj("""{"name":"slskd","installed":true,"installed_version":"0.24.0"}""")))
+        // the newest release needs a Python the server cannot get: it stayed, and the card's note says why
+        assertEquals("slskd stays on 0.24.0", PluginRules.doneWords("update", before, obj("""{"name":"slskd","installed":true,"installed_version":"0.24.0","last_error":"Staying on slskd 0.24.0: …"}""")))
         assertEquals("slskd disabled", PluginRules.doneWords("disable", before, obj("{}")))
         assertEquals("Internet Archive 0.1.0 installed", PluginRules.addedWords(obj("""{"name":"Internet Archive","installed":true,"installed_version":"0.1.0"}""")))
         assertEquals("No updates found", PluginRules.checkWords(0))
@@ -82,6 +84,17 @@ class PluginRulesTest {
         assertEquals("Remove IA? Its program, data, log and settings are deleted.", PluginRules.removeText(obj("""{"name":"IA","origin":"upload"}""")))
         assertTrue(PluginRules.trustText(true).contains("full isolation"))
         assertTrue(PluginRules.trustText(false).contains("can read what Encore can"))
+    }
+
+    /** A failed Update's red box goes once the plugin got past it (a retry went through), not before. */
+    @Test
+    fun aFailedActionsBoxGoesOnceARetryWentThrough() {
+        val failed = PluginRules.Failed.of(obj("""{"installed_version":"2.5.1","updated_at":100,"last_error":"Update failed: …"}"""))
+        assertEquals(PluginRules.Failed("2.5.1", 100.0), failed)
+        assertFalse(PluginRules.pastFailure(failed, obj("""{"installed_version":"2.5.1","updated_at":100,"last_error":"Update failed: …"}""")))
+        assertFalse("a cleared error alone (a successful check) is not a retry", PluginRules.pastFailure(failed, obj("""{"installed_version":"2.5.1","updated_at":100,"last_error":null}""")))
+        assertTrue(PluginRules.pastFailure(failed, obj("""{"installed_version":"2.6.1","updated_at":200,"last_error":null}""")))
+        assertTrue("stayed on 2.5.1 with a note: the box makes way for it", PluginRules.pastFailure(failed, obj("""{"installed_version":"2.5.1","updated_at":200,"last_error":"Staying on …"}""")))
     }
 
     @Test

@@ -111,37 +111,31 @@ fn assets_of(r: &Value) -> Vec<Asset> {
 /// From GitHub's release list: the highest version whose tag fits `[update] tag`, not a draft, a pre-release
 /// only with `prerelease`, and with an asset `has_asset` accepts.
 pub fn pick(list: &Value, u: &Update, has_asset: &(dyn Fn(&Release) -> bool + Sync)) -> Option<Release> {
-    let mut best: Option<Release> = None;
-    for r in list.as_array()? {
+    fitting(list, u, has_asset).into_iter().next()
+}
+
+/// Every release of GitHub's list that [`pick`] would take, the highest version first.
+pub fn fitting(list: &Value, u: &Update, has_asset: &(dyn Fn(&Release) -> bool + Sync)) -> Vec<Release> {
+    let mut found: Vec<Release> = vec![];
+    for r in list.as_array().into_iter().flatten() {
         if r["draft"].as_bool().unwrap_or(false) || (r["prerelease"].as_bool().unwrap_or(false) && !u.prerelease) {
             continue;
         }
         let Some(tag) = r["tag_name"].as_str() else { continue };
         let Some(version) = u.version_in_tag(tag) else { continue };
         let rel = Release { tag: tag.to_string(), version, assets: assets_of(r) };
-        if !has_asset(&rel) {
-            continue;
-        }
-        if best.as_ref().is_none_or(|b| encore_core::version::compare(&rel.version, &b.version) == std::cmp::Ordering::Greater) {
-            best = Some(rel);
+        if has_asset(&rel) {
+            found.push(rel);
         }
     }
-    best
+    // stable: of two releases with the same version, the one GitHub lists first stays first
+    found.sort_by(|a, b| encore_core::version::compare(&b.version, &a.version));
+    found
 }
 
-/// The newest release of a manifest's `[update] github` that `has_asset` accepts (with `tags`, the highest tag
-/// that fits when no release does).
-pub async fn newest(net: &Net, u: &Update, has_asset: &(dyn Fn(&Release) -> bool + Sync)) -> anyhow::Result<Option<Release>> {
-    let repo = u.github.as_deref().ok_or_else(|| anyhow::anyhow!("no GitHub repository to check"))?;
-    let list = net.github(&format!("/repos/{repo}/releases?per_page=50")).await?;
-    if let Some(r) = pick(&list, u, has_asset) {
-        return Ok(Some(r));
-    }
-    if !u.tags {
-        return Ok(None);
-    }
-    let tags = net.github(&format!("/repos/{repo}/tags?per_page=100")).await?;
-    let best = tags
+/// The tags of GitHub's tag list that fit `[update] tag`, the highest version first (no assets: a tag has none).
+fn fitting_tags(tags: &Value, u: &Update) -> Vec<Release> {
+    let mut found: Vec<Release> = tags
         .as_array()
         .into_iter()
         .flatten()
@@ -149,8 +143,28 @@ pub async fn newest(net: &Net, u: &Update, has_asset: &(dyn Fn(&Release) -> bool
             let tag = t["name"].as_str()?;
             Some(Release { tag: tag.to_string(), version: u.version_in_tag(tag)?, assets: vec![] })
         })
-        .max_by(|a, b| encore_core::version::compare(&a.version, &b.version));
-    Ok(best)
+        .collect();
+    found.sort_by(|a, b| encore_core::version::compare(&b.version, &a.version));
+    found
+}
+
+/// The newest release of a manifest's `[update] github` that `has_asset` accepts (with `tags`, the highest tag
+/// that fits when no release does).
+pub async fn newest(net: &Net, u: &Update, has_asset: &(dyn Fn(&Release) -> bool + Sync)) -> anyhow::Result<Option<Release>> {
+    Ok(all(net, u, has_asset).await?.into_iter().next())
+}
+
+/// Every release [`newest`] chooses from, the highest version first: the fitting releases, else (with `tags`)
+/// the fitting tags. An update that cannot install the newest one walks down this list.
+pub async fn all(net: &Net, u: &Update, has_asset: &(dyn Fn(&Release) -> bool + Sync)) -> anyhow::Result<Vec<Release>> {
+    let repo = u.github.as_deref().ok_or_else(|| anyhow::anyhow!("no GitHub repository to check"))?;
+    let list = net.github(&format!("/repos/{repo}/releases?per_page=50")).await?;
+    let found = fitting(&list, u, has_asset);
+    if !found.is_empty() || !u.tags {
+        return Ok(found);
+    }
+    let tags = net.github(&format!("/repos/{repo}/tags?per_page=100")).await?;
+    Ok(fitting_tags(&tags, u))
 }
 
 /// The release with this tag.
