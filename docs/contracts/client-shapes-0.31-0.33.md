@@ -62,6 +62,7 @@ New or changed routes:
 | 4.14 | `POST /api/files/import/preview` | new | p8 | `FilesApi.importPreview` |
 | 4.15 | `POST /api/files/import/match` | new | p8 | `FilesApi.importMatch` |
 | 4.16 | `POST /api/files/import/apply` | new | p8 | `FilesApi.importApply` |
+| 4.18 | `GET /api/files/search` | new in 0.37.1 | – | `FilesApi.search` |
 
 Existing routes the new phone features call as they are today (only their track rows gain the §2.1 fields):
 
@@ -729,6 +730,26 @@ The review fixes of Oct 20 (P8 fix stage) add:
   (an empty mount point): its songs stay, and the line ends "(looks empty, so its songs were kept: <folder>)". A
   part the walk can't read keeps the songs under it. Each such warning goes to the activity log once until the
   folder is fine again, not on every scan.
+
+### 4.18 `GET /api/files/search?root=&path=&q=&limit=` (0.37.1)
+
+Search by name, at any depth, under `path` of `root` (`path` "" = the whole root; the clients search the whole root
+and filter the open folder themselves as the admin types). Admin only, like the rest of Part 4.
+
+- `q`: the words a name must hold. Names and words are folded (lowercase, accents dropped, punctuation read as
+  spaces) and every word must appear in the name, in any order ("beyonce lemonade" finds "Lemonade (Beyoncé)").
+  Blank (or only punctuation) → 400 "Type a name to search for"; over 200 characters → 400.
+- `limit`: default 200, at most 1000.
+- 200 `{"root": "library", "path": "", "q": "teardrop", "truncated": false, "scanned": 5120, "results": [hit]}`, hit =
+  `{name, kind, path, parent, size, mtime, image}` (`kind` `dir` | `file` | `link`; `path` and `parent` from the root,
+  `parent` "" for the root itself), plus `target_kind` for a link and `audio: {format}` for an audio file. The
+  nearest come first (breadth-first), folders before files at each depth, then by path, case-insensitively.
+- `truncated`: there may be more: the limit was reached, or the walk stopped after 250,000 entries.
+- A link is found by its own name but never walked into (a search can't leave the roots or loop); Encore's config
+  folder is never walked; names that aren't UTF-8 are left out; a folder that can't be read is passed over.
+- `root=trash` → 400 "Search the trash from its list" (the clients filter §4.8's items instead). A path out of the
+  root → 403, a missing root or folder → 404, as §4.2.
+- A click on a hit opens `parent` with the hit picked; a folder (or a link to one) opens `path` itself.
 
 ## Part 5 — No endpoint: settings, rules, the car, the words
 

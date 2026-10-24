@@ -599,6 +599,36 @@ async fn listing_sorts_folders_first_and_pages() {
     e.done();
 }
 
+/// Search by name: every depth of a root or of a folder in it, the paths from the root, a link found but not
+/// walked, Trash and empty queries refused, admins only.
+#[tokio::test]
+async fn search_finds_names_at_any_depth_for_admins_only() {
+    let e = env("search").await;
+    std::fs::create_dir_all(e.lib.join("Massive Attack/Mezzanine")).unwrap();
+    std::fs::write(e.lib.join("Massive Attack/Mezzanine/03 Teardrop.flac"), "x").unwrap();
+    std::fs::create_dir_all(e.outside.join("Teardrop elsewhere")).unwrap();
+    std::os::unix::fs::symlink(&e.outside, e.lib.join("teardrop link")).unwrap();
+    let r = e.get("/api/files/search?root=library&q=teardrop").await;
+    assert_eq!(r.status, StatusCode::OK);
+    let v = r.json();
+    let paths: Vec<&str> = v["results"].as_array().unwrap().iter().map(|x| x["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["teardrop link", "Massive Attack/Mezzanine/03 Teardrop.flac"], "{v}");
+    assert_eq!(v["results"][1]["parent"], "Massive Attack/Mezzanine");
+    assert_eq!((v["root"].as_str(), v["truncated"].as_bool()), (Some("library"), Some(false)));
+    // from a folder, words in any order, accents folded
+    let v = e.get("/api/files/search?root=library&path=Massive%20Attack&q=MEZZ%C3%A0nine").await.json();
+    assert_eq!(v["results"][0]["path"], "Massive Attack/Mezzanine");
+    // refused: nothing to look for, the trash, paths out of the root, a missing root
+    for (uri, status) in [("/api/files/search?root=library&q=%20", StatusCode::BAD_REQUEST), ("/api/files/search?root=trash&q=a", StatusCode::BAD_REQUEST),
+                          ("/api/files/search?root=library&path=..&q=a", StatusCode::FORBIDDEN), ("/api/files/search?root=elsewhere&q=a", StatusCode::NOT_FOUND)] {
+        assert_eq!(e.get(uri).await.status, status, "{uri}");
+    }
+    user(e.st(), "member2", "user");
+    let member = login(&e.app, "member2").await;
+    assert_eq!(send(&e.app, "GET", "/api/files/search?root=library&q=teardrop", &member, None, &[]).await.status, StatusCode::FORBIDDEN);
+    e.done();
+}
+
 /// The kept folders of an import in place: the scheduler's scan and Rescan walk them with the library folder,
 /// a kept folder that isn't there keeps its songs, they are storage roots, and neither Edit details with
 /// renaming, a release's tags (the match review's retag) nor the automatic re-tag moves their songs.

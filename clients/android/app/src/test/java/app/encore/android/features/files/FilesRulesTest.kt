@@ -31,6 +31,29 @@ class FilesRulesTest {
         assertEquals("From Staging", FilesRules.trashFrom("Staging", "Album"))
     }
 
+    /** The folder's filter, a search answer (server/crates/files/src/search.rs) and where a result goes. */
+    @Test
+    fun searchFiltersReadsResultsAndJumps() {
+        assertTrue(FilesRules.matches("Blur – Parklife", "  PARK  blur "))
+        assertFalse(FilesRules.matches("Blur – Parklife", "blur nope"))
+        assertTrue("a blank search lets everything through", FilesRules.matches("anything", "  "))
+        val hits = FileHits.from(json("""{"root": "library", "path": "", "q": "teardrop", "truncated": false, "scanned": 12, "results": [
+            {"name": "Mezzanine", "kind": "dir", "path": "Massive Attack/Mezzanine", "parent": "Massive Attack", "size": 0, "mtime": 1, "image": false},
+            {"name": "03 Teardrop.flac", "kind": "file", "path": "Massive Attack/Mezzanine/03 Teardrop.flac", "parent": "Massive Attack/Mezzanine", "size": 9, "mtime": 1, "image": false, "audio": {"format": "flac"}},
+            {"name": "to elsewhere", "kind": "link", "target_kind": "dir", "path": "to elsewhere", "parent": ""},
+            {"name": "", "path": "nameless"}]}"""))
+        assertEquals(3, hits.hits.size)
+        assertFalse(hits.truncated)
+        assertEquals(Triple("Massive Attack/Mezzanine", false, null), FilesRules.hitTarget(hits.hits[0]))
+        assertEquals(Triple("Massive Attack/Mezzanine", false, "03 Teardrop.flac"), FilesRules.hitTarget(hits.hits[1]))
+        assertTrue(hits.hits[1].entry.isAudio)
+        assertEquals(Triple("to elsewhere", true, null), FilesRules.hitTarget(hits.hits[2]))
+        assertEquals("1 found in Library", FilesRules.foundLine(1, false, "Library"))
+        assertEquals("3 found in Library", FilesRules.foundLine(3, false, "Library"))
+        assertEquals("200+ found in Library (the nearest first; type more to narrow it)", FilesRules.foundLine(200, true, "Library"))
+        assertEquals("Nothing in Staging is called that", FilesRules.foundLine(0, false, "Staging"))
+    }
+
     @Test
     fun theFirstLinkOnTheWayIsKept() {
         // opening a link to a folder: it is the link from now on

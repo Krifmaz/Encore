@@ -13,6 +13,11 @@
 //! disk, with a progress panel and Stop. Edit tags for audio files, Import… with the match review and
 //! "Keep the files where they are". Rows get one ⋯ button; a right-click opens the same menu.
 //!
+//! A search box over the list: as you type it filters the open folder, and once typing pauses it
+//! searches the whole root by name at any depth (`GET /api/files/search`, 0.37.1); each result shows
+//! its folder's path, and a click opens that folder with the file picked (a folder opens itself).
+//! Ctrl/⌘+F or `/` on the list goes to the box.
+//!
 //! Only admins see the section; the server answers 403 to anyone else and 404 before 0.33.
 
 use crate::api::{Api, ApiError};
@@ -69,6 +74,12 @@ const TREE_W: f32 = 230.0;
 /// The ids of the name box of a dialog and of the path box.
 const NAME_ID: &str = "files-name";
 const PATH_ID: &str = "files-path";
+/// The id of the search box.
+const FIND_ID: &str = "files-find";
+/// How long typing must pause before the whole root is searched (the open folder is filtered at once).
+const FIND_PAUSE: Duration = Duration::from_millis(250);
+/// The most search results asked for (the server gives the nearest first).
+const FIND_LIMIT: usize = 200;
 /// Where the chosen sort is kept on this computer (the web's localStorage key).
 const SORT_KEY: &str = "encore.filesSort";
 
@@ -247,6 +258,84 @@ impl Listing {
             total,
             via_link: fmt::truthy(v, "via_link"),
         }
+    }
+}
+
+/// One result of a search across a root (`GET /api/files/search`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    /// The entry as a folder listing would show it (name, kind, size, link target kind, audio).
+    pub entry: Entry,
+    /// Its path from the root.
+    pub path: String,
+    /// The folder it is in, from the root ("" = the root itself).
+    pub parent: String,
+}
+
+impl Hit {
+    /// A result of the answer's `results`; None without a name or a path.
+    pub fn from(v: &Value) -> Option<Hit> {
+        let entry = Entry::from(v)?;
+        let path = fmt::s(v, "path");
+        if path.is_empty() {
+            return None;
+        }
+        let parent = match v.get("parent") {
+            Some(Value::String(p)) => p.clone(),
+            _ => parent_of(&path),
+        };
+        Some(Hit { entry, path, parent })
+    }
+
+    /// Where a click goes: (the folder to open, it is a link, the name to pick there). A folder (or a
+    /// link to one) opens itself; a file opens its folder with it picked.
+    pub fn target(&self) -> (String, bool, Option<String>) {
+        if self.entry.is_dir() {
+            (self.path.clone(), self.entry.is_link(), None)
+        } else {
+            (self.parent.clone(), false, Some(self.entry.name.clone()))
+        }
+    }
+}
+
+/// The answer of a search: the results, the nearest first, and whether the server stopped early.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hits {
+    /// The results.
+    pub hits: Vec<Hit>,
+    /// There may be more than were given (the server's limit, or its walk's budget).
+    pub truncated: bool,
+}
+
+impl Hits {
+    /// `{results, truncated}`.
+    pub fn from(v: &Value) -> Hits {
+        let list = v.get("results").map(fmt::items).unwrap_or_default();
+        Hits { hits: list.iter().filter_map(Hit::from).collect(), truncated: fmt::truthy(v, "truncated") }
+    }
+}
+
+/// The words of a search, lowercased (none when nothing was typed).
+pub fn find_words(q: &str) -> Vec<String> {
+    q.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether a name holds every word (lowercased, anywhere, in any order): the open folder's filter.
+/// The server's search also drops accents; the filter only lowercases.
+pub fn name_matches(name: &str, words: &[String]) -> bool {
+    let n = name.to_lowercase();
+    words.iter().all(|w| n.contains(w.as_str()))
+}
+
+/// The heading of the search's results: "3 found in Library", "200+ found in Library …" when the
+/// server stopped early, "Nothing in Library is called that".
+pub fn found_line(n: usize, truncated: bool, place: &str) -> String {
+    match (n, truncated) {
+        (0, false) => format!("Nothing in {place} is called that"),
+        (0, true) => format!("Nothing found yet in {place}: the search stopped early, try more words"),
+        (n, true) => format!("{n}+ found in {place} (the nearest first; type more to narrow it)"),
+        (1, false) => format!("1 found in {place}"),
+        (n, false) => format!("{n} found in {place}"),
     }
 }
 
@@ -847,6 +936,8 @@ pub enum KeyAct {
     Jump(char),
     /// One row down (1) or up (-1); with Shift the selection grows.
     Step(i32, bool),
+    /// Ctrl/⌘+F or `/`: to the search box.
+    Find,
 }
 
 #[derive(Debug)]
@@ -882,6 +973,16 @@ pub struct State {
     shared: library::Shared,
     /// The saved sort was read.
     sort_read: bool,
+    /// What the search box holds.
+    find: String,
+    /// The open folder's entries the search's words let through (None while the box is blank).
+    shown: Option<Vec<Entry>>,
+    /// The search across the open root: None before it answers (or while the box is blank).
+    hits: Option<Result<Hits, String>>,
+    /// A search is on its way (after the pause).
+    finding: bool,
+    /// Bumped by every change of the box: an older search (or pause) is dropped.
+    find_seq: u64,
 }
 
 impl Default for State {
@@ -910,6 +1011,11 @@ impl Default for State {
             hover: false,
             shared: library::Shared::default(),
             sort_read: false,
+            find: String::new(),
+            shown: None,
+            hits: None,
+            finding: false,
+            find_seq: 0,
         }
     }
 }
@@ -927,11 +1033,41 @@ impl State {
         self.roots().iter().find(|r| r.id == id)
     }
 
+    /// The rows shown: the folder's entries, filtered by the search box when it holds words.
     fn entries(&self) -> &[Entry] {
+        if let Some(shown) = &self.shown {
+            return shown;
+        }
         match &self.listing {
             Some(Ok(l)) => &l.entries,
             _ => &[],
         }
+    }
+
+    /// The filter again from the folder's entries and the box's words; the picked names that are
+    /// filtered out are let go (nothing hidden is moved or trashed).
+    fn refilter(&mut self) {
+        let words = find_words(&self.find);
+        self.shown = match (&self.listing, words.is_empty()) {
+            (_, true) => None,
+            (Some(Ok(l)), false) => Some(l.entries.iter().filter(|e| name_matches(&e.name, &words)).cloned().collect()),
+            (_, false) => Some(Vec::new()),
+        };
+        if self.shown.is_some() {
+            let shown: HashSet<String> = self.entries().iter().map(|e| e.name.clone()).collect();
+            self.selected.retain(|n| shown.contains(n));
+            self.anchor = None;
+            self.cursor = None;
+        }
+    }
+
+    /// The search box, its filter and its results emptied (a folder is opened next).
+    fn clear_find(&mut self) {
+        self.find.clear();
+        self.shown = None;
+        self.hits = None;
+        self.finding = false;
+        self.find_seq += 1;
     }
 
     /// The open folder was reached through a link.
@@ -1048,6 +1184,18 @@ pub enum Message {
     Restore(String),
     AskDeleteForever(String),
     AskEmptyTrash,
+    /// The search box changed.
+    FindInput(String),
+    /// Typing paused: search the root (dropped when the box changed since).
+    FindRun(u64),
+    /// The search's answer.
+    Found(u64, Result<Value, ApiError>),
+    /// Enter in the search box: the first row the filter left, else the first result.
+    FindSubmit,
+    /// A search result clicked.
+    FindGo(usize),
+    /// Empty the search box.
+    FindClear,
 }
 
 fn list_url(root: &str, path: &str, sort: &str, dir: &str, offset: usize) -> String {
@@ -1092,6 +1240,8 @@ fn load(state: &mut State, ctx: &Ctx, fresh: bool) -> Task<Message> {
 
 /// Open `path` of the open root with `link_at` as the link folder on the way.
 fn go_at(state: &mut State, path: String, link_at: Option<String>, ctx: &Ctx) -> Task<Message> {
+    // the search's words were for the folder left; they'd hide what the new one holds
+    state.clear_find();
     state.link_at = link_at;
     state.path_box = path.clone();
     state.path = path;
@@ -1332,7 +1482,13 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 Ok(v) => {
                     let l = Listing::from(&v, 0);
                     state.selected.retain(|n| l.entries.iter().any(|e| &e.name == n));
+                    // a search result's file picked before its folder was there: the cursor on it
+                    if let Some(i) = l.entries.iter().position(|e| state.selected.len() == 1 && state.selected.contains(&e.name)) {
+                        state.anchor = Some(i);
+                        state.cursor = Some(i);
+                    }
                     state.listing = Some(Ok(l));
+                    state.refilter();
                 }
                 Err(e) => {
                     state.listing = Some(Err(if e.message.is_empty() {
@@ -1366,6 +1522,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                     let known: HashSet<String> = l.entries.iter().map(|e| e.name.clone()).collect();
                     l.entries.extend(more.entries.into_iter().filter(|e| !known.contains(&e.name)));
                     l.total = more.total.max(l.entries.len());
+                    if state.shown.is_some() {
+                        state.refilter();
+                    }
                 }
                 (Err(e), _) => ctx.toast_err(e.message),
                 _ => {}
@@ -1388,6 +1547,64 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load(state, ctx, false);
         }
         Message::SortMenu => state.menu = Some((ctx.cursor, Menu::Sort)),
+        Message::FindInput(q) => {
+            state.find = q;
+            state.refilter();
+            state.find_seq += 1;
+            let seq = state.find_seq;
+            if find_words(&state.find).is_empty() || state.root.is_none() {
+                state.hits = None;
+                state.finding = false;
+                return Task::none();
+            }
+            // the whole root once typing pauses
+            return Task::perform(tokio::time::sleep(FIND_PAUSE), move |_| Message::FindRun(seq));
+        }
+        Message::FindRun(seq) => {
+            let Some(root) = state.root.clone().filter(|_| seq == state.find_seq) else {
+                return Task::none();
+            };
+            state.finding = true;
+            let url = format!("/files/search?root={}&q={}&limit={FIND_LIMIT}", urlencode(&root), urlencode(state.find.trim()));
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.get(&url).await }, move |r| Message::Found(seq, r));
+        }
+        Message::Found(seq, r) => {
+            if seq != state.find_seq {
+                return Task::none();
+            }
+            state.finding = false;
+            state.hits = Some(match r {
+                Ok(v) => Ok(Hits::from(&v)),
+                Err(e) if e.message.is_empty() => Err("Couldn't search".to_string()),
+                Err(e) => Err(e.message),
+            });
+        }
+        Message::FindSubmit => {
+            if let Some(first) = state.entries().first().map(|e| e.name.clone()) {
+                state.selected = BTreeSet::from([first]);
+                state.anchor = Some(0);
+                state.cursor = Some(0);
+            } else if matches!(&state.hits, Some(Ok(h)) if !h.hits.is_empty()) {
+                return update(state, Message::FindGo(0), ctx);
+            }
+        }
+        Message::FindGo(i) => {
+            let Some(hit) = state.hits.as_ref().and_then(|h| h.as_ref().ok()).and_then(|h| h.hits.get(i)).cloned() else {
+                return Task::none();
+            };
+            let (path, link, pick) = hit.target();
+            let task = go(state, path, link, ctx);
+            // picked now, kept by the listing's answer (it keeps the picked names that are there)
+            if let Some(name) = pick {
+                state.selected = BTreeSet::from([name]);
+            }
+            return task;
+        }
+        Message::FindClear => {
+            state.clear_find();
+            state.refilter();
+        }
         Message::Click(i) => {
             state.menu = None;
             let (set, anchor) = click_select(
@@ -1980,10 +2197,16 @@ fn key(state: &mut State, k: KeyAct, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         KeyAct::All => state.selected = state.entries().iter().map(|e| e.name.clone()).collect(),
+        KeyAct::Clear if state.selected.is_empty() && !state.find.is_empty() => {
+            // Escape with nothing picked: the search's filter goes
+            state.clear_find();
+            state.refilter();
+        }
         KeyAct::Clear => {
             state.selected.clear();
             state.anchor = None;
         }
+        KeyAct::Find => return operation::focus(FIND_ID).chain(operation::select_all(FIND_ID)),
         KeyAct::Step(d, shift) => {
             if n == 0 {
                 return Task::none();
@@ -2371,6 +2594,20 @@ fn folder_view<'a>(state: &'a State, root: &'a Root, ctx: &Ctx<'a>) -> El<'a, Me
             .size(13)
             .style(theme::input),
     );
+    // the search: filters this folder as you type, and searches the whole root by name
+    let mut find = row![text_input(&format!("Search {} by name", root.name), &state.find)
+        .id(FIND_ID)
+        .on_input(Message::FindInput)
+        .on_submit(Message::FindSubmit)
+        .padding([7, 10])
+        .size(13)
+        .style(theme::input)]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if !state.find.is_empty() {
+        find = find.push(btn_sm("Clear", Btn::Ghost, Some(Message::FindClear)));
+    }
+    col = col.push(find);
     if via {
         col = col.push(small_muted(LINK_NOTE));
     }
@@ -2382,6 +2619,22 @@ fn folder_view<'a>(state: &'a State, root: &'a Root, ctx: &Ctx<'a>) -> El<'a, Me
         None => col = col.push(skeleton_rows(8)),
         Some(Err(e)) => {
             col = col.push(error_line(e));
+        }
+        Some(Ok(l)) if state.entries().is_empty() && !l.entries.is_empty() => {
+            col = col.push(
+                container(
+                    column![
+                        icon(Icon::Search, 30.0, p.faint),
+                        t(format!("Nothing in this folder matches “{}”", state.find.trim())).size(15).font(theme::semibold()),
+                        widgets::muted("The search below looks in every folder.").size(13),
+                    ]
+                    .spacing(10)
+                    .align_x(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([30, 20])
+                .center_x(Length::Fill),
+            );
         }
         Some(Ok(l)) if l.entries.is_empty() => {
             let mut c = column![ficon(F::Folder, 34.0, p.faint), t("This folder is empty").size(15).font(theme::semibold())]
@@ -2395,7 +2648,7 @@ fn folder_view<'a>(state: &'a State, root: &'a Root, ctx: &Ctx<'a>) -> El<'a, Me
         Some(Ok(l)) => {
             col = col.push(list_head(state));
             let mut rows = column![].spacing(1);
-            for (i, e) in l.entries.iter().enumerate() {
+            for (i, e) in state.entries().iter().enumerate() {
                 rows = rows.push(entry_row(i, e, state.selected.contains(&e.name)));
             }
             col = col.push(rows);
@@ -2411,7 +2664,59 @@ fn folder_view<'a>(state: &'a State, root: &'a Root, ctx: &Ctx<'a>) -> El<'a, Me
             }
         }
     }
+    if let Some(found) = found_view(state, root) {
+        col = col.push(space().height(6)).push(found);
+    }
     col.into()
+}
+
+/// The search's results across the root: a heading with the count, then one row per result with
+/// the path of its folder; a click opens it. None while the box is blank.
+fn found_view<'a>(state: &'a State, root: &'a Root) -> Option<El<'a, Message>> {
+    let p = theme::look();
+    if find_words(&state.find).is_empty() {
+        return None;
+    }
+    let head = |words: String| -> El<'a, Message> {
+        row![icon(Icon::Search, 16.0, p.muted), t(words).size(14).font(theme::semibold())]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+    };
+    Some(match &state.hits {
+        _ if state.finding => head(format!("Searching {}…", root.name)),
+        None => return None,
+        Some(Err(e)) => error_line(e),
+        Some(Ok(h)) => {
+            let mut c = column![head(found_line(h.hits.len(), h.truncated, &root.name))].spacing(8);
+            if !h.hits.is_empty() {
+                let rows: Vec<El<'a, Message>> = h
+                    .hits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, hit)| {
+                        let e = &hit.entry;
+                        let ic: El<'a, Message> = if e.is_link() {
+                            icon(Icon::Link, 20.0, p.muted)
+                        } else if e.kind == "dir" {
+                            ficon(F::Folder, 20.0, p.accent)
+                        } else if e.is_audio() {
+                            icon(Icon::Music, 20.0, p.muted)
+                        } else if e.image {
+                            ficon(F::Image, 20.0, p.muted)
+                        } else {
+                            ficon(F::File, 20.0, p.muted)
+                        };
+                        let size: Vec<El<'a, Message>> =
+                            if e.is_dir() { Vec::new() } else { vec![small_muted(fmt::size(e.size)).into()] };
+                        list_row(Some(ic), e.name.clone(), place(&root.name, &hit.parent), size, Some(Message::FindGo(i)))
+                    })
+                    .collect();
+                c = c.push(card_flat(column(rows)).width(Length::Fill));
+            }
+            c.into()
+        }
+    })
 }
 
 fn toolbar<'a>(state: &'a State, can_write: bool, via: bool) -> El<'a, Message> {
@@ -3114,8 +3419,9 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 // ----- keys, drops and the upload's progress -----------------------------------------------------
 
 /// What a key does in the list: Enter opens, Backspace goes up one folder, Delete (or ⌘/Ctrl +
-/// Backspace, the Finder's) moves to trash, ⌘/Ctrl+A selects all, Escape clears the selection, the
-/// arrows move it (with Shift it grows).
+/// Backspace, the Finder's) moves to trash, ⌘/Ctrl+A selects all, Escape clears the selection (or,
+/// with none, the search), the arrows move it (with Shift it grows), ⌘/Ctrl+F or `/` goes to the
+/// search box.
 pub fn key_act(key: &Key, m: Modifiers) -> Option<KeyAct> {
     let cmd = m.command();
     match key.as_ref() {
@@ -3128,6 +3434,8 @@ pub fn key_act(key: &Key, m: Modifiers) -> Option<KeyAct> {
         Key::Named(Named::ArrowDown) => Some(KeyAct::Step(1, m.shift())),
         Key::Named(Named::ArrowUp) => Some(KeyAct::Step(-1, m.shift())),
         Key::Character(c) if cmd && c.eq_ignore_ascii_case("a") => Some(KeyAct::All),
+        Key::Character(c) if cmd && c.eq_ignore_ascii_case("f") => Some(KeyAct::Find),
+        Key::Character("/") if !cmd && !m.alt() => Some(KeyAct::Find),
         Key::Character(c) if !cmd && !m.alt() && !m.control() && !m.logo() => {
             let mut chars = c.chars();
             match (chars.next(), chars.next()) {
@@ -3404,6 +3712,35 @@ mod tests {
         assert_eq!(s, BTreeSet::from([2, 3, 4, 7]), "Ctrl+Shift adds the range");
         let (s, _) = click_select(&BTreeSet::from([1, 2]), None, 4, true, false);
         assert_eq!(s, BTreeSet::from([4]), "Shift without an anchor selects the one");
+    }
+
+    /// A search's answer (server/crates/files/src/search.rs), where a result goes, the folder's filter
+    /// and the keys that reach the box.
+    #[test]
+    fn search_reads_hits_filters_and_jumps() {
+        let v = json!({ "root": "library", "path": "", "truncated": true, "results": [
+            { "name": "Mezzanine", "kind": "dir", "path": "Massive Attack/Mezzanine", "parent": "Massive Attack" },
+            { "name": "03 Teardrop.flac", "kind": "file", "path": "Massive Attack/Mezzanine/03 Teardrop.flac",
+              "parent": "Massive Attack/Mezzanine", "size": 9, "audio": { "format": "flac" } },
+            { "name": "to elsewhere", "kind": "link", "target_kind": "dir", "path": "to elsewhere", "parent": "" },
+            { "name": "no path" },
+        ] });
+        let h = Hits::from(&v);
+        assert_eq!((h.hits.len(), h.truncated), (3, true));
+        assert_eq!(h.hits[0].target(), ("Massive Attack/Mezzanine".to_string(), false, None));
+        assert_eq!(h.hits[1].target(), ("Massive Attack/Mezzanine".to_string(), false, Some("03 Teardrop.flac".to_string())));
+        assert!(h.hits[1].entry.is_audio());
+        assert_eq!(h.hits[2].target(), ("to elsewhere".to_string(), true, None));
+        let words = find_words("  PARK blur ");
+        assert!(name_matches("Blur – Parklife", &words));
+        assert!(!name_matches("Blur – Parklife", &find_words("blur nope")));
+        assert_eq!(found_line(3, false, "Library"), "3 found in Library");
+        assert_eq!(found_line(1, false, "Library"), "1 found in Library");
+        assert_eq!(found_line(0, false, "Staging"), "Nothing in Staging is called that");
+        assert_eq!(found_line(200, true, "Library"), "200+ found in Library (the nearest first; type more to narrow it)");
+        let cmd = if cfg!(target_os = "macos") { Modifiers::LOGO } else { Modifiers::CTRL };
+        assert_eq!(key_act(&Key::Character("f".into()), cmd), Some(KeyAct::Find));
+        assert_eq!(key_act(&Key::Character("/".into()), Modifiers::default()), Some(KeyAct::Find));
     }
 
     #[test]

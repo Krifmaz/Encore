@@ -1,4 +1,4 @@
-//! The admin file manager (release 0.33): browse, upload, make folder, rename, move, trash and restore, edit
+//! The admin file manager (release 0.33): browse, search by name ([`search`]), upload, make folder, rename, move, trash and restore, edit
 //! tags and import, over the folders Encore may touch ([`roots`]). The API (`/api/files/*`, admin only) is in
 //! encore-api's `routes::files`; docs/contracts/client-shapes-0.31-0.33.md (§2.4, Part 4) has its JSON.
 //!
@@ -20,6 +20,7 @@ pub mod ops;
 pub mod resolve;
 pub mod roots;
 pub mod rows;
+pub mod search;
 pub mod tags;
 pub mod trash;
 pub mod upload;

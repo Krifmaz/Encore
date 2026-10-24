@@ -8,6 +8,9 @@
 //!   Enter opens, Backspace goes up a folder, Delete moves to trash (asked first), F2 renames, Ctrl+A picks all,
 //!   a letter jumps to the next name starting with it.
 //! - Breadcrumbs, and a box to type a path (the server refuses `..` and paths outside the roots, and says so).
+//! - A search box: as you type it filters the folder that is open, and (after a short pause) searches the whole
+//!   root by name at any depth (`GET /api/files/search`); each result shows its path, and a click opens its
+//!   folder with it picked (a folder opens itself). `/` or Ctrl+F on the list goes to the box, Esc clears it.
 //! - Files and folders dropped from the computer, or Upload files / Upload a folder; a panel shows the progress
 //!   and has Stop (upload.rs).
 //! - New folder, Rename, Move (a folder picker over the roots), Move to trash (dialogs.rs); the Trash with
@@ -41,6 +44,10 @@ use web_sys::{Element, Event};
 
 /// Where the chosen sort is kept on this device.
 const SORT_KEY: &str = "encore.filesSort";
+/// How long typing must pause before the whole root is searched (the open folder is filtered at once).
+const SEARCH_PAUSE_MS: u32 = 250;
+/// The most search results asked for (the server gives the nearest first).
+const SEARCH_LIMIT: usize = 200;
 /// The server's words for a folder reached through a link (§2.4).
 const THROUGH_LINK: &str = "This folder is reached through a link, so Encore doesn't change anything in it.";
 
@@ -111,6 +118,19 @@ const CSS: &str = r#"
 .fm-info { display: flex; gap: 8px; align-items: center; margin: 2px 6px 0; min-width: 0; }
 .fm-info .mono { flex: 0 1 auto; min-width: 0; }
 .fm-info .fm-free, .fm-info .badge { flex: none; white-space: nowrap; }
+.fm-find { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; }
+.fm-find .input { flex: 1; min-width: 0; max-width: 520px; }
+.fm-found { margin-top: 16px; }
+.fm-found-head { display: flex; gap: 8px; align-items: center; margin: 0 4px 8px; font-weight: 650; }
+.fm-found-head .spinner { width: 14px; height: 14px; }
+.fm-hit { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.fm-hit:last-child { border-bottom: 0; }
+.fm-hit:hover, .fm-hit:focus-visible { background: var(--panel-2); outline: none; }
+.fm-hit .fm-ic { display: inline-flex; color: var(--muted); }
+.fm-hit .fm-ic svg { width: 20px; height: 20px; }
+.fm-hit.dir .fm-ic { color: var(--accent); }
+.fm-hit.dir .nm { font-weight: 650; }
+.fm-hit .r { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 .fm-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 10px; min-height: 32px; }
 .fm-tools .count { font-weight: 650; margin-right: 4px; }
 .fm-note { margin: 0 0 10px; }
@@ -214,12 +234,26 @@ struct Fm {
     head: Element,
     list: Element,
     more: Element,
+    /// the search form
+    find: Element,
+    /// the search box in it
+    q: Element,
+    /// where the search's results across the root are shown
+    found: Element,
     roots: RefCell<Vec<Root>>,
     root: RefCell<String>,
     path: RefCell<String>,
     /// the folder open was reached through a link: nothing in it is changed
     via_link: Cell<bool>,
-    /// the folder's entries (§2.4), or the trash's items (§4.8)
+    /// every entry of the folder loaded so far (§2.4), or every trash item (§4.8), before the search filters them
+    all: RefCell<Vec<Value>>,
+    /// what the search box holds (trimmed): the filter on `all`, and the search across the root
+    filter: RefCell<String>,
+    /// the search's results across the root (`GET /api/files/search`), as shown under the list
+    hits: RefCell<Vec<Value>>,
+    /// the search running now: an older answer that arrives late is dropped
+    find_seq: Cell<u32>,
+    /// the rows shown: `all` with the search's filter applied (the selection's indexes are into these)
     rows: RefCell<Vec<Value>>,
     total: Cell<usize>,
     /// the folder answered (false while it loads, and after an error)
@@ -245,6 +279,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
       <section class="fm-main">
         <nav class="fm-crumbs" id="fm-crumbs" aria-label="Folder"></nav>
         <div class="small muted fm-info" id="fm-info"></div>
+        <form class="fm-find" id="fm-find" role="search" autocomplete="off">
+          <input type="search" class="input" id="fm-q" placeholder="Search" aria-label="Search files and folders by name" spellcheck="false">
+        </form>
         <div class="fm-tools" id="fm-tools"></div>
         <div class="small muted fm-note" id="fm-note" hidden></div>
         <div class="card flat fm-wrap" id="fm-wrap">
@@ -253,6 +290,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
           <div class="fm-list" id="fm-list" tabindex="0" role="grid" aria-label="Files" aria-multiselectable="true"></div>
         </div>
         <div class="fm-more" id="fm-more"></div>
+        <section class="fm-found" id="fm-found" aria-live="polite" hidden></section>
         <input type="file" id="fm-pick-files" multiple hidden>
         <input type="file" id="fm-pick-dir" multiple webkitdirectory hidden>
       </section>
@@ -260,6 +298,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let need = |sel: &str| dom::qs_in(&view, sel).ok_or_else(|| format!("{sel} is missing"));
         let (tree, crumbs, info, tools, note) = (need("#fm-roots")?, need("#fm-crumbs")?, need("#fm-info")?, need("#fm-tools")?, need("#fm-note")?);
         let (wrap, hint, head, list, more) = (need("#fm-wrap")?, need("#fm-hint")?, need("#fm-head")?, need("#fm-list")?, need("#fm-more")?);
+        let (find, q, found) = (need("#fm-find")?, need("#fm-q")?, need("#fm-found")?);
         let roots = match api::get("/files/roots").await {
             Ok(d) => { let l = if d.is_array() { d.items() } else { d.a("roots") }; l.iter().filter_map(Root::from).collect::<Vec<_>>() }
             Err(e) => {
@@ -274,8 +313,9 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             (saved.s("sort"), if saved.s("dir") == "desc" { "desc".to_string() } else { "asc".to_string() })
         } else { ("name".to_string(), "asc".to_string()) };
         let fm = Rc::new(Fm {
-            view: view.clone(), tree, crumbs, info, tools, note, wrap, hint, head, list, more,
+            view: view.clone(), tree, crumbs, info, tools, note, wrap, hint, head, list, more, find, q, found,
             roots: RefCell::new(roots), root: RefCell::new(String::new()), path: RefCell::new(String::new()), via_link: Cell::new(false),
+            all: RefCell::new(vec![]), filter: RefCell::new(String::new()), hits: RefCell::new(vec![]), find_seq: Cell::new(0),
             rows: RefCell::new(vec![]), total: Cell::new(0), ready: Cell::new(false), sel: RefCell::new(Sel::new(0)), sort: RefCell::new(sort),
             seq: Cell::new(0), hint_text: RefCell::new(String::new()), used: Cell::new(false),
         });
@@ -321,13 +361,20 @@ impl Fm {
     // ---- moving around ----
 
     /// Opens a folder (or Trash): the address, the crumbs, the tree and the list follow.
-    fn go(self: &Rc<Self>, root: &str, path: &str) {
+    fn go(self: &Rc<Self>, root: &str, path: &str) { self.go_pick(root, path, vec![]); }
+
+    /// [`Fm::go`], with the entries named `pick` picked once the folder is there (a search result's file). The
+    /// search box is cleared: its words were for the folder left, and would hide what the new one holds.
+    fn go_pick(self: &Rc<Self>, root: &str, path: &str, pick: Vec<String>) {
+        self.clear_search();
         *self.root.borrow_mut() = root.to_string();
         *self.path.borrow_mut() = path.to_string();
         self.via_link.set(false);
         self.ready.set(false);
+        self.all.borrow_mut().clear();
         self.rows.borrow_mut().clear();
         *self.sel.borrow_mut() = Sel::new(0);
+        self.paint_find();
         self.save_url();
         self.paint_crumbs();
         self.paint_info();
@@ -337,7 +384,13 @@ impl Fm {
         dom::set_html(&self.more, "");
         self.tree_mark();
         dom::spawn(self.clone().tree_reveal());
-        dom::spawn(self.clone().load(vec![]));
+        let reveal = !pick.is_empty();
+        let me = self.clone();
+        dom::spawn(async move {
+            me.clone().load(pick).await;
+            // a search result's file: shown and ready for the keys
+            if reveal { me.reveal_cursor(); focus_still(&me.list); me.used.set(true); }
+        });
     }
 
     fn up(self: &Rc<Self>) {
@@ -370,11 +423,13 @@ impl Fm {
         if seq != self.seq.get() || !self.view.is_connected() { return; }
         match res {
             Ok(d) => {
-                let rows = if trash { if d.is_array() { d.items() } else { d.a("items") } } else { d.a("entries") };
-                self.total.set(if trash { rows.len() } else { (d.i("total").max(0) as usize).max(rows.len()) });
+                let all = if trash { if d.is_array() { d.items() } else { d.a("items") } } else { d.a("entries") };
+                self.total.set(if trash { all.len() } else { (d.i("total").max(0) as usize).max(all.len()) });
                 self.via_link.set(!trash && d.truthy("via_link"));
+                let rows = logic::filter_rows(&all, &self.filter.borrow());
                 let keys: Vec<String> = rows.iter().map(|e| key_of(e, trash)).collect();
                 *self.sel.borrow_mut() = Sel::keep(&keep, &keys);
+                *self.all.borrow_mut() = all;
                 *self.rows.borrow_mut() = rows;
                 self.ready.set(true);
                 self.paint_info();
@@ -384,6 +439,7 @@ impl Fm {
                 if self.used.get() && (active.is_none() || active.is_some_and(|a| a.tag_name() == "BODY")) { focus_still(&self.list); }
             }
             Err(e) => {
+                self.all.borrow_mut().clear();
                 self.rows.borrow_mut().clear();
                 *self.sel.borrow_mut() = Sel::new(0);
                 self.ready.set(false);
@@ -403,18 +459,21 @@ impl Fm {
     /// "Show more (N)": the next 500.
     async fn load_more(self: Rc<Self>) {
         let (root, path) = self.cur();
-        let offset = self.rows.borrow().len();
+        let offset = self.all.borrow().len();
         let (k, d) = self.sort.borrow().clone();
         let seq = self.seq.get();
         let res = api::get(&format!("/files/list?root={}&path={}&sort={k}&dir={d}&offset={offset}&limit=500", enc(&root), enc(&path))).await;
         if seq != self.seq.get() || !self.view.is_connected() { return; }
         match res {
             Ok(d) => {
-                let have = self.keys();
+                let have: Vec<String> = self.all.borrow().iter().map(|e| e.s("name")).collect();
                 let new: Vec<Value> = d.a("entries").into_iter().filter(|e| !have.contains(&e.s("name"))).collect();
-                self.sel.borrow_mut().on.extend(std::iter::repeat_n(false, new.len()));
-                self.rows.borrow_mut().extend(new);
-                self.total.set((d.i("total").max(0) as usize).max(self.rows.borrow().len()));
+                // only the new entries the search lets through join the rows shown
+                let shown = logic::filter_rows(&new, &self.filter.borrow());
+                self.sel.borrow_mut().on.extend(std::iter::repeat_n(false, shown.len()));
+                self.rows.borrow_mut().extend(shown);
+                self.all.borrow_mut().extend(new);
+                self.total.set((d.i("total").max(0) as usize).max(self.all.borrow().len()));
                 self.paint_rows();
             }
             Err(e) => toast(if e.message.is_empty() { "Couldn't load more" } else { &e.message }, "err"),
@@ -502,7 +561,12 @@ impl Fm {
     fn paint_rows(&self) {
         let trash = self.in_trash();
         let rows = self.rows.borrow().clone();
-        if rows.is_empty() {
+        let filter = self.filter.borrow().clone();
+        if rows.is_empty() && !filter.is_empty() && !self.all.borrow().is_empty() {
+            let where_ = if trash { "the trash" } else { "this folder" };
+            dom::set_html(&self.list, &empty_state(&icon("search"), &format!("Nothing in {where_} matches “{filter}”"),
+                if trash { "" } else { "The search below looks in every folder." }));
+        } else if rows.is_empty() {
             dom::set_html(&self.list, &if trash {
                 empty_state(&icon("trash"), "The trash is empty", "Files you move to trash wait here until you delete them forever.")
             } else {
@@ -511,7 +575,7 @@ impl Fm {
         } else {
             dom::set_html(&self.list, &rows.iter().enumerate().map(|(i, e)| self.row_html(i, e, trash)).collect::<String>());
         }
-        let left = self.total.get().saturating_sub(rows.len());
+        let left = self.total.get().saturating_sub(self.all.borrow().len());
         dom::set_html(&self.more, &if !trash && left > 0 { format!(r#"<button type="button" class="btn" id="fm-more-btn">Show more ({left})</button>"#) } else { String::new() });
         self.paint_sel();
     }
@@ -874,6 +938,120 @@ impl Fm {
         dom::spawn(self.clone().refresh_free());
     }
 
+    // ---- search ----
+
+    /// The search box's placeholder says what it looks through: the open root's every folder, or the trash.
+    fn paint_find(&self) {
+        let r = self.root_name(&self.root.borrow());
+        let text = if self.in_trash() { "Search the trash".to_string() } else { format!("Search {r} by name") };
+        let _ = self.q.set_attribute("placeholder", &text);
+    }
+
+    /// Empties the search box, the filter and the results (nothing is reloaded: the caller opens a folder next).
+    fn clear_search(&self) {
+        self.find_seq.set(self.find_seq.get() + 1);
+        self.filter.borrow_mut().clear();
+        self.hits.borrow_mut().clear();
+        dom::set_value(&self.q, "");
+        dom::set_html(&self.found, "");
+        dom::hide(&self.found, true);
+    }
+
+    /// The rows shown again from `all` with the box's words, the picked rows kept when they still show.
+    fn apply_filter(&self) {
+        let trash = self.in_trash();
+        let keep = self.picked_keys();
+        let rows = logic::filter_rows(&self.all.borrow(), &self.filter.borrow());
+        let keys: Vec<String> = rows.iter().map(|e| key_of(e, trash)).collect();
+        *self.sel.borrow_mut() = Sel::keep(&keep, &keys);
+        *self.rows.borrow_mut() = rows;
+        if self.ready.get() { self.paint_rows(); }
+    }
+
+    /// The box changed: the open folder is filtered at once, and the root is searched once typing pauses.
+    fn search_typed(self: &Rc<Self>) {
+        let typed = dom::value(&self.q).trim().to_string();
+        if typed == *self.filter.borrow() { return; }
+        *self.filter.borrow_mut() = typed.clone();
+        self.apply_filter();
+        let seq = self.find_seq.get() + 1;
+        self.find_seq.set(seq);
+        // the trash is one list: its filter is the whole search
+        if typed.is_empty() || self.in_trash() {
+            self.hits.borrow_mut().clear();
+            dom::set_html(&self.found, "");
+            dom::hide(&self.found, true);
+            return;
+        }
+        let me = self.clone();
+        dom::spawn(async move {
+            dom::sleep(SEARCH_PAUSE_MS).await;
+            if seq == me.find_seq.get() { me.run_search(seq, typed).await; }
+        });
+    }
+
+    /// `GET /api/files/search` over the open root; the answer is shown only while it is still the latest.
+    async fn run_search(self: Rc<Self>, seq: u32, q: String) {
+        let root = self.root.borrow().clone();
+        let place = self.root_name(&root);
+        dom::hide(&self.found, false);
+        dom::set_html(&self.found, &format!(r#"<div class="fm-found-head"><span class="spinner"></span><span>Searching {}…</span></div>"#, esc(&place)));
+        let res = api::get(&format!("/files/search?root={}&q={}&limit={SEARCH_LIMIT}", enc(&root), enc(&q))).await;
+        if seq != self.find_seq.get() || !self.view.is_connected() { return; }
+        match res {
+            Ok(d) => {
+                *self.hits.borrow_mut() = d.a("results");
+                self.paint_found(&place, d.truthy("truncated"));
+            }
+            Err(e) => {
+                self.hits.borrow_mut().clear();
+                let msg = if e.message.is_empty() { "Couldn't search".to_string() } else { e.message };
+                dom::set_html(&self.found, &error_html(&msg));
+            }
+        }
+    }
+
+    /// The search's results: a heading with the count, then one row per match with its folder's path.
+    fn paint_found(&self, place: &str, truncated: bool) {
+        let hits = self.hits.borrow();
+        let head = format!(r#"<div class="fm-found-head">{}<span>{}</span></div>"#, icon("search"), esc(&logic::found_line(hits.len(), truncated, place)));
+        if hits.is_empty() { dom::set_html(&self.found, &head); return; }
+        let rows: String = hits.iter().enumerate().map(|(i, h)| {
+            let dir = logic::hit_is_dir(h);
+            let ic = if logic::is_link(h) { icon("link") } else if dir { svg_folder() } else if h.g("audio").is_object() { icon("music") }
+                     else if h.truthy("image") { svg_image() } else { svg_file() };
+            let at = logic::place(place, &h.s("parent"));
+            let size = if dir { String::new() } else { fmt::size(h.f("size")) };
+            let what = if dir { "Open" } else { "Show in its folder" };
+            format!(r#"<button type="button" class="fm-hit{d}" data-hit="{i}" title="{what}: {full}">
+      <span class="fm-ic">{ic}</span>
+      <span style="min-width:0"><span class="nm ellipsis" style="display:block">{n}</span><span class="small muted ellipsis" style="display:block">{at}</span></span>
+      <span class="r">{size}</span></button>"#,
+                d = if dir { " dir" } else { "" }, n = esc(&h.s("name")), at = esc(&at), full = esc(&logic::place(place, &h.s("path"))))
+        }).collect();
+        dom::set_html(&self.found, &format!(r#"{head}<div class="card flat" role="list">{rows}</div>"#));
+    }
+
+    /// A search result clicked: its folder opens with it picked, or the folder it is opens.
+    fn jump(self: &Rc<Self>, i: usize) {
+        let Some(hit) = self.hits.borrow().get(i).cloned() else { return };
+        let root = self.root.borrow().clone();
+        let (path, pick) = logic::hit_target(&hit);
+        self.go_pick(&root, &path, pick);
+    }
+
+    /// The row the keyboard is on is scrolled into view.
+    fn reveal_cursor(&self) {
+        let Some(c) = self.sel.borrow().cursor else { return };
+        if let Some(row) = dom::qsa_in(&self.list, ".fm-row").into_iter().find(|r| dom::data(r, "i") == c.to_string()) { scroll_near(&row); }
+    }
+
+    /// `/` or Ctrl+F on the list: to the search box, its words picked.
+    fn focus_search(&self) {
+        dom::focus(&self.q);
+        if let Some(h) = self.q.dyn_ref::<web_sys::HtmlInputElement>() { h.select(); }
+    }
+
     // ---- sorting ----
 
     fn set_sort(self: &Rc<Self>, key: &str) {
@@ -960,6 +1138,68 @@ impl Fm {
             let me = self.clone();
             dom::on(&self.crumbs, "keydown", move |e| {
                 if dom::key(e) == "Escape" && dom::closest(e, "#fm-path").is_some() { dom::stop(e); me.paint_crumbs(); focus_still(&me.list); }
+            });
+        }
+        // the search box: filter as you type, search the root after a pause; Esc clears, Enter or ↓ goes on
+        {
+            let me = self.clone();
+            dom::on(&self.q, "input", move |_| me.search_typed());
+        }
+        {
+            let me = self.clone();
+            dom::on(&self.find, "submit", move |e| {
+                dom::prevent(e);
+                // the first row the filter left, else the first result across the root
+                if !me.rows.borrow().is_empty() {
+                    me.sel.borrow_mut().only(0);
+                    me.paint_sel();
+                    me.reveal_cursor();
+                    focus_still(&me.list);
+                } else if !me.hits.borrow().is_empty() {
+                    me.jump(0);
+                }
+            });
+        }
+        {
+            let me = self.clone();
+            dom::on(&self.q, "keydown", move |e| match dom::key(e).as_str() {
+                "Escape" if !me.filter.borrow().is_empty() => {
+                    dom::prevent(e);
+                    dom::stop(e);
+                    dom::set_value(&me.q, "");
+                    me.search_typed();
+                }
+                "Escape" => focus_still(&me.list),
+                "ArrowDown" => {
+                    dom::prevent(e);
+                    match dom::qs_in(&me.found, ".fm-hit") {
+                        Some(first) if me.rows.borrow().is_empty() => dom::focus(&first),
+                        _ => focus_still(&me.list),
+                    }
+                }
+                _ => {}
+            });
+        }
+        {
+            let me = self.clone();
+            dom::on(&self.found, "click", move |e| {
+                let Some(b) = dom::closest(e, "[data-hit]") else { return };
+                if let Ok(i) = dom::data(&b, "hit").parse::<usize>() { me.jump(i); }
+            });
+        }
+        // the results: ↑ and ↓ move between them, ↑ from the first goes back to the box
+        {
+            let me = self.clone();
+            dom::on(&self.found, "keydown", move |e| {
+                let Some(b) = dom::closest(e, "[data-hit]") else { return };
+                let next = match dom::key(e).as_str() {
+                    "ArrowDown" => b.next_element_sibling(),
+                    "ArrowUp" => b.previous_element_sibling().or_else(|| Some(me.q.clone())),
+                    "Escape" => Some(me.q.clone()),
+                    _ => return,
+                };
+                dom::prevent(e);
+                if let Some(n) = next { dom::focus(&n); }
             });
         }
         // the toolbar
@@ -1136,8 +1376,14 @@ impl Fm {
                 let p = self.picked();
                 if p.len() == 1 && !trash { dom::prevent(e); self.rename(p[0]); }
             }
-            "Escape" => { if self.sel.borrow().count() > 0 { self.sel.borrow_mut().clear(); self.paint_sel(); } }
+            "Escape" => {
+                if self.sel.borrow().count() > 0 { self.sel.borrow_mut().clear(); self.paint_sel(); }
+                // with nothing picked, Esc clears the search's filter
+                else if !self.filter.borrow().is_empty() { dom::set_value(&self.q, ""); self.search_typed(); }
+            }
             "a" | "A" if ctrl => { dom::prevent(e); self.sel.borrow_mut().all(); self.paint_sel(); }
+            "f" | "F" if ctrl => { dom::prevent(e); self.focus_search(); }
+            "/" if !ctrl && !alt => { dom::prevent(e); self.focus_search(); }
             _ if key.chars().count() == 1 && !ctrl && !alt && key != " " => {
                 let names: Vec<String> = if trash { self.rows.borrow().iter().map(|r| r.s("name")).collect() } else { self.keys() };
                 let from = self.sel.borrow().cursor;

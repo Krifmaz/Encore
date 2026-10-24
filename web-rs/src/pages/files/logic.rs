@@ -152,6 +152,55 @@ pub fn next_sort(cur: (&str, &str), key: &str) -> (String, String) {
     if cur.0 == key { (key.to_string(), if cur.1 == "asc" { "desc" } else { "asc" }.to_string()) } else { (key.to_string(), first_dir(key).to_string()) }
 }
 
+// ---- search ---------------------------------------------------------------------------------------------------
+
+/// The words of a search, lowercased; empty when nothing was typed.
+pub fn search_words(q: &str) -> Vec<String> {
+    q.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether a name holds every word (lowercased, anywhere in it, in any order): the filter of the folder that is
+/// open. The server's search (`GET /api/files/search`) also drops accents; the filter only lowercases, so it may
+/// show a little less than the search below it, never something the words don't say.
+pub fn name_matches(name: &str, words: &[String]) -> bool {
+    let n = name.to_lowercase();
+    words.iter().all(|w| n.contains(w.as_str()))
+}
+
+/// The rows of `rows` whose name (a trash item's name, or its path's last part) holds every word of `q`; all of
+/// them when `q` is blank.
+pub fn filter_rows(rows: &[Value], q: &str) -> Vec<Value> {
+    let words = search_words(q);
+    if words.is_empty() { return rows.to_vec(); }
+    rows.iter().filter(|e| {
+        let name = if e.s("name").is_empty() { last_part(&e.s("path")).to_string() } else { e.s("name") };
+        name_matches(&name, &words)
+    }).cloned().collect()
+}
+
+/// Whether a search result opens as a folder (a folder, or a link to one) rather than being shown in its folder.
+pub fn hit_is_dir(hit: &Value) -> bool {
+    hit.s("kind") == "dir" || (hit.s("kind") == "link" && hit.s("target_kind") == "dir")
+}
+
+/// Where a search result goes when clicked: (the folder to open, the names to pick in it). A folder opens
+/// itself; a file opens its folder with the file picked.
+pub fn hit_target(hit: &Value) -> (String, Vec<String>) {
+    if hit_is_dir(hit) { (hit.s("path"), vec![]) } else { (hit.s("parent"), vec![hit.s("name")]) }
+}
+
+/// The search results' heading: "3 found in Library", "200+ found in Library" when the server stopped early,
+/// "Nothing in Library is called that".
+pub fn found_line(n: usize, truncated: bool, place: &str) -> String {
+    match (n, truncated) {
+        (0, false) => format!("Nothing in {place} is called that"),
+        (0, true) => format!("Nothing found yet in {place}: the search stopped early, try more words"),
+        (n, true) => format!("{n}+ found in {place} (the nearest first; type more to narrow it)"),
+        (1, false) => format!("1 found in {place}"),
+        (n, false) => format!("{n} found in {place}"),
+    }
+}
+
 // ---- selection ------------------------------------------------------------------------------------------------
 
 /// Which rows are picked, the row a Shift-click extends from (`anchor`) and the row the keyboard is on (`cursor`).
@@ -468,5 +517,26 @@ mod tests {
         assert_eq!(conf_class(0.2), "err");
         assert_eq!(trash_from("Library", "Artist/Album"), "From Library › Artist");
         assert_eq!(trash_from("Staging", "Album"), "From Staging");
+    }
+
+    /// The folder's filter and where a search result goes.
+    #[test]
+    fn search_filters_and_jumps() {
+        let rows = vec![json!({"name": "Blur – Parklife", "kind": "dir"}), json!({"name": "01 Girls & Boys.flac", "kind": "file"}),
+                        json!({"id": "1-1", "path": "Blur/Old Cover.jpg", "name": ""})];
+        let names = |v: Vec<Value>| v.iter().map(|e| if e.s("name").is_empty() { e.s("path") } else { e.s("name") }).collect::<Vec<_>>();
+        assert_eq!(filter_rows(&rows, "  ").len(), 3, "a blank search shows everything");
+        assert_eq!(names(filter_rows(&rows, "PARK blur")), ["Blur – Parklife"], "every word, any order, any case");
+        assert_eq!(names(filter_rows(&rows, "cover")), ["Blur/Old Cover.jpg"], "a trash item by its path's last part");
+        assert!(filter_rows(&rows, "blur nope").is_empty());
+        let file = json!({"name": "03 Teardrop.flac", "kind": "file", "path": "Massive Attack/Mezzanine/03 Teardrop.flac", "parent": "Massive Attack/Mezzanine"});
+        assert_eq!(hit_target(&file), ("Massive Attack/Mezzanine".to_string(), vec!["03 Teardrop.flac".to_string()]));
+        let dir = json!({"name": "Mezzanine", "kind": "dir", "path": "Massive Attack/Mezzanine", "parent": "Massive Attack"});
+        assert_eq!(hit_target(&dir), ("Massive Attack/Mezzanine".to_string(), vec![]));
+        assert!(hit_is_dir(&json!({"kind": "link", "target_kind": "dir"})) && !hit_is_dir(&json!({"kind": "link", "target_kind": "file"})));
+        assert_eq!(found_line(1, false, "Library"), "1 found in Library");
+        assert_eq!(found_line(3, false, "Library"), "3 found in Library");
+        assert_eq!(found_line(200, true, "Library"), "200+ found in Library (the nearest first; type more to narrow it)");
+        assert_eq!(found_line(0, false, "Staging"), "Nothing in Staging is called that");
     }
 }
