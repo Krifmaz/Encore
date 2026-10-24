@@ -34,14 +34,7 @@ pub fn set_link(l: Option<Link>) {
     let now = l.is_some();
     let old = LINK.with(|x| x.replace(l));
     drop(old);
-    if now && !was {
-        if let Some(a) = audio() {
-            st_mut(|s| s.want = false);
-            let t = REC.with(|r| r.borrow_mut().timer.take());
-            drop(t);
-            if !a.paused() { let _ = a.pause(); }
-        }
-    }
+    if now && !was { silence_here(); }
     let old_tick = LINK_TICK.with(|t| t.borrow_mut().take());
     drop(old_tick);
     // between check-ins, move the remote's seek bar along on our own
@@ -65,6 +58,43 @@ pub fn set_link(l: Option<Link>) {
     LYR.with(|l| *l.borrow_mut() = Lyr::default());
     render();
     if st(|s| s.full) { render_full(); load_lyrics(); }
+}
+/// Linking: every sound this device makes stops, so the music goes on only on the linked device.
+///
+/// Pausing the playing element alone left sound behind: a song transition still running on the old song's
+/// element, a pre-buffered or parked element, and the timers that pick a broken-off stream up again or step
+/// the quality down (both of them play again). All of them are stopped here; the queue and the place stay, so
+/// unlinking can pick the song up again.
+pub(super) fn silence_here() {
+    // nothing may start the song again by itself: no "keep playing" wish, no stall or recovery timers
+    st_mut(|s| { s.want = false; s.slow_start = None; });
+    let rec = REC.with(|r| r.borrow_mut().timer.take());
+    drop(rec);
+    let watch = STALL_WATCH.with(|w| w.borrow_mut().take());
+    drop(watch);
+    // a crossfade / overlap in progress: its fading-out element plays on unless the transition ends
+    end_fade();
+    // every element this device plays on: the current one, the spare, the preview one and the parked one
+    let parked = PARKED.with(|p| p.borrow().clone());
+    for el in [audio(), spare(), plain(), parked].into_iter().flatten() {
+        if !el.paused() { let _ = el.pause(); }
+    }
+    // the lock screen / headset controls show this device paused (their play goes to the linked device)
+    media_state();
+}
+/// Whether this device may start sound of its own now: not while it is linked, except a 30-second preview
+/// (they play here even when linked).
+pub(super) fn may_play_here() -> bool {
+    !is_linked() || cur().is_some_and(|t| t.truthy("preview"))
+}
+/// Whether another device's command starts the music on this device: play, a new queue, or a toggle while
+/// paused. A linked device that gets one stops being a remote first (see `run_command`).
+fn starts_here(c: &Value) -> bool {
+    match c.s("action").as_str() {
+        "play" | "play_queue" => true,
+        "toggle" => !shows_playing(),
+        _ => false,
+    }
 }
 /// `[id, playing, online, volume, queue.length, index, shuffle, repeat]` – what a re-render of the bar depends on.
 fn link_key(l: &Link) -> (Value, Value, bool, Value, usize, Value, Value, Value) {
@@ -150,6 +180,9 @@ pub fn command(c: Value) {
     LOCAL.with(|l| l.set(false));
 }
 fn run_command(c: &Value) {
+    // music sent here from another device while this one is a remote: it plays here now, so the link ends
+    // (one device plays) – otherwise it would stay silent, or play here and on the linked device both
+    if is_linked() && starts_here(c) { remote_unlink(); }
     match c.s("action").as_str() {
         "toggle" => toggle(),
         "play" => { if cur().is_some() { user_play(); } }

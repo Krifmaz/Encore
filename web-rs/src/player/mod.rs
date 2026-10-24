@@ -170,7 +170,9 @@ fn cur() -> Option<Rc<Value>> { st(|s| if s.index < 0 { None } else { s.queue.ge
 fn prefs() -> Value { PREFS.with(|p| p.borrow().clone()) }
 
 /// `audio.play().catch(() => {})`.
+/// Nothing starts while this device is linked (see `link::may_play_here`).
 fn play(a: &HtmlMediaElement) {
+    if !may_play_here() { return; }
     if let Ok(p) = a.play() { dom::spawn(async move { let _ = wasm_bindgen_futures::JsFuture::from(p).await; }); }
 }
 
@@ -313,6 +315,9 @@ pub fn mount() {
         log_play(); next(true);
     }));
     on_both(&a, &sp, "play", Rc::new(|_| {
+        // linked: whatever started an element here (the browser's own media keys, a late play() promise), it
+        // stops again at once – the music plays on the linked device only
+        if !may_play_here() { silence_here(); return; }
         HELD.with(|h| h.set(false));
         HELD_AT.with(|h| h.set(0.0));
         PLAYED_SINCE.with(|p| p.set(true));

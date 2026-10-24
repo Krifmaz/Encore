@@ -66,12 +66,26 @@ class ServiceHost(
                 ) || (events.contains(Player.EVENT_VOLUME_CHANGED) && !fading())
             ) remote.beatSoon()
             if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) remote.setPlaying(player.isPlaying)
+            if (events.contains(Player.EVENT_PLAY_WHEN_READY_CHANGED)) stayQuietWhileLinked()
         }
 
         // the app shuffle (CarPlayer.setShuffled) calls this directly, with no onEvents after it
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
             remote.beatSoon()
         }
+    }
+
+    /**
+     * While this phone is a remote for another device it plays nothing itself: a play that reaches the service
+     * anyway (the notification, the lock screen, a headset or car button, Android Auto) is paused again at once
+     * and sent to the linked device as its play. Without this the song went on here as well as there.
+     * Commands from other devices that start the music here end the link first (RemoteDevice.runNow), so they
+     * are not caught here.
+     */
+    private fun stayQuietWhileLinked() {
+        if (!player.playWhenReady || remote.link.value == null) return
+        player.pause()
+        remote.sendToLink(buildJsonObject { put("action", "play") })
     }
 
     fun start() {
