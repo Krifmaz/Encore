@@ -196,7 +196,9 @@ class FilesRulesTest {
         assertEquals(812, page.total)
         assertTrue(page.viaLink)
         assertEquals(listOf("Album", "Elsewhere", "gone.flac", "01 Crazy.flac", "02.flac", "cover.jpg"), page.entries.map { it.name })
-        val (dir, link, gone, song, loose, cover) = page.entries
+        val e = page.entries
+        val (dir, link, gone, song, loose) = e
+        val cover = e[5]
         assertTrue(dir.isDir && !dir.isAudio)
         assertTrue(link.isDir && link.kind == "link" && link.target == "/srv/other")
         assertFalse(gone.isDir)
