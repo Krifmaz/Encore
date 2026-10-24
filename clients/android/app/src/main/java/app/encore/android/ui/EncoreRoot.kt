@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -95,6 +96,14 @@ import app.encore.android.ui.screens.SettingsScreen
 import app.encore.android.ui.screens.UpNextSheet
 import app.encore.android.ui.screens.rememberPlayerMenuActions
 import app.encore.android.ui.theme.palette
+import app.encore.android.ui.tv.RailItem
+import app.encore.android.ui.tv.SidePanel
+import app.encore.android.ui.tv.TvNav
+import app.encore.android.ui.tv.TvPlayer
+import app.encore.android.ui.tv.TvPrefs
+import app.encore.android.ui.tv.TvScaled
+import app.encore.android.ui.tv.TvShell
+import app.encore.android.ui.tv.rememberTvLayout
 
 /**
  * Places the app can go; tabs are the roots, the rest stack on top of the current tab.
@@ -178,24 +187,38 @@ class Nav(
     fun trackMenu(track: Track, onAlbumPage: Boolean = false) = showTrackMenu(track, onAlbumPage)
 }
 
+/**
+ * The app's root: the sign-in flow, or the signed-in app. On a TV (Android TV / Google TV) both are drawn zoomed out
+ * ([TvScaled]) and the signed-in app uses the TV layout (side menu, TV player) instead of the phone one.
+ */
 @Composable
 fun EncoreRoot(graph: AppGraph, player: PlayerConnection) {
     val auth by graph.store.auth.collectAsState()
-    when (val a = auth) {
-        is AuthState.Loading -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
-        is AuthState.SignedOut -> {
-            AuthFlow(graph)
-            ToastHost(bottomPadding = 24.dp)
+    // on a TV, unless Settings → TV says "Phone layout"
+    val tv = rememberTvLayout()
+    TvScaled(tv) {
+        when (val a = auth) {
+            is AuthState.Loading -> Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+            is AuthState.SignedOut -> {
+                AuthFlow(graph)
+                ToastHost(bottomPadding = 24.dp)
+            }
+            is AuthState.SignedIn -> MainScreen(graph, player, a.session, tv)
         }
-        is AuthState.SignedIn -> MainScreen(graph, player, a.session)
     }
 }
 
 /** A song's "⋯" menu, requested by any list; drawn once at the root. */
 private class TrackMenuRequest(val track: Track, val onAlbumPage: Boolean)
 
+/**
+ * The signed-in app: the pages with their navigation, the players, and every sheet and menu drawn once at the root.
+ *
+ * @param tv the TV layout ([TvShell]: side menu, [TvPlayer]) instead of the phone one (bottom tabs, mini player,
+ *   [FullPlayer]).
+ */
 @Composable
-private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Session) {
+private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Session, tv: Boolean) {
     val p = MaterialTheme.palette
     // saveable: the tab survives the activity being made again (a configuration change the manifest doesn't keep
     // the activity through, or the system closing the app in the background)
@@ -256,10 +279,13 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // the song menu's "Download for offline": made here, so the storage permission's answer (Android 8–9) still
     // finds it after the menu closed
     val offlineMenu = rememberOfflineMenu(nav)
+    // the menu actions are made once: they read the layout as it is now, not as it was then
+    val tvNow by rememberUpdatedState(tv)
     val menuActions = rememberPlayerMenuActions(
         nav = nav,
         onClose = { showPlayer = false },
-        onUpNext = { showUpNext = true },
+        // the TV player has Up next as one of its halves: switch to it (opening the player) instead of a sheet
+        onUpNext = { if (tvNow) { TvPrefs.setPanel(SidePanel.QUEUE); showPlayer = true } else { showUpNext = true } },
         onAddToPlaylist = { ids -> addToPlaylistIds = ids },
     )
 
@@ -272,20 +298,79 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         }
     }
 
+    // the page on screen: the top of the stack, or the tab's root
+    val page: @Composable () -> Unit = {
+        when (val top = stack.lastOrNull()) {
+            is Screen.Album -> AlbumScreen(nav, top.id)
+            is Screen.Artist -> ArtistScreen(nav, top.name)
+            is Screen.Playlist -> PlaylistScreen(nav, top.id, top.name)
+            is Screen.Settings -> SettingsScreen(nav, session)
+            is Screen.ForYou -> ForYouScreen(nav)
+            is Screen.Requests -> RequestsScreen(nav)
+            is Screen.Leaderboard -> LeaderboardScreen(nav)
+            is Screen.Account -> AccountScreen(nav, session)
+            is Screen.CatalogArtist -> CatalogArtistScreen(nav, top.mbid)
+            is Screen.CatalogAlbum -> CatalogAlbumScreen(nav, top.rgid)
+            is Screen.DiscoverSearch -> DiscoverScreen(nav, initialQuery = top.query, initialType = top.type, stacked = true)
+            is Screen.Tag -> TagScreen(nav, top.name)
+            is Screen.Picker -> PickerScreen(nav, top.opts)
+            is Screen.PlaylistEdit -> PlaylistEditScreen(nav, top.id)
+            is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url, top.requestMissing, top.albumMode)
+            is Screen.Activity -> ActivityScreen(nav)
+            is Screen.SettingsAt -> SettingsScreen(nav, session, startAt = top.id)
+            is Screen.BugReports -> BugReportsScreen(nav, top.from)
+            is Screen.BugReport -> BugReportScreen(nav, top.id)
+            is Screen.Files -> FilesScreen(nav, top.startRoot)
+            null -> when (tab) {
+                Tab.HOME -> HomeScreen(nav, session)
+                Tab.LIBRARY -> LibraryScreen(nav)
+                Tab.PLAYLISTS -> PlaylistsScreen(nav)
+                Tab.DISCOVER -> DiscoverScreen(nav)
+            }
+        }
+    }
+    // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
+    // linked: "Controlling <device>" instead (the pick-up bar is hidden while this phone is a remote)
+    // in a group listen: "Group · 3" (and "Paused here · Catch up") instead
+    val stateBar: @Composable () -> Unit = {
+        when {
+            group != null -> GroupBar(nav)
+            link == null -> SpotBar(nav, session)
+            else -> LinkedBar(nav)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
-        Scaffold(
+        if (tv) {
+            TvShell(
+                nav = nav,
+                selected = TvNav.selected(showPlayer, stack.lastOrNull(), tab),
+                onSelect = { item ->
+                    when (item) {
+                        RailItem.NOW_PLAYING -> { showPlayer = true }
+                        RailItem.SEARCH -> nav.showTab(Tab.DISCOVER)
+                        RailItem.HOME -> nav.showTab(Tab.HOME)
+                        RailItem.LIBRARY -> nav.showTab(Tab.LIBRARY)
+                        RailItem.PLAYLISTS -> nav.showTab(Tab.PLAYLISTS)
+                        // For you and Settings are pages of the stack on a phone; on the TV they are places of their own
+                        RailItem.FOR_YOU -> { showPlayer = false; stack.clear(); stack.add(Screen.ForYou) }
+                        RailItem.SETTINGS -> { showPlayer = false; stack.clear(); stack.add(Screen.Settings) }
+                    }
+                },
+                topBar = {
+                    Column {
+                        OfflineBanner()
+                        stateBar()
+                    }
+                },
+                page = page,
+            )
+        } else Scaffold(
             containerColor = p.bg,
             topBar = { OfflineBanner() },
             bottomBar = {
                 Column {
-                    // "Continue <song> from 2:31 · was playing on <device>": pick up where another device left off
-                    // linked: "Controlling <device>" instead (the pick-up bar is hidden while this phone is a remote)
-                    // in a group listen: "Group · 3" (and "Paused here · Catch up") instead
-                    when {
-                        group != null -> GroupBar(nav)
-                        link == null -> SpotBar(nav, session)
-                        else -> LinkedBar(nav)
-                    }
+                    stateBar()
                     if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true })
                     Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {
@@ -313,42 +398,17 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                 }
             },
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                when (val top = stack.lastOrNull()) {
-                    is Screen.Album -> AlbumScreen(nav, top.id)
-                    is Screen.Artist -> ArtistScreen(nav, top.name)
-                    is Screen.Playlist -> PlaylistScreen(nav, top.id, top.name)
-                    is Screen.Settings -> SettingsScreen(nav, session)
-                    is Screen.ForYou -> ForYouScreen(nav)
-                    is Screen.Requests -> RequestsScreen(nav)
-                    is Screen.Leaderboard -> LeaderboardScreen(nav)
-                    is Screen.Account -> AccountScreen(nav, session)
-                    is Screen.CatalogArtist -> CatalogArtistScreen(nav, top.mbid)
-                    is Screen.CatalogAlbum -> CatalogAlbumScreen(nav, top.rgid)
-                    is Screen.DiscoverSearch -> DiscoverScreen(nav, initialQuery = top.query, initialType = top.type, stacked = true)
-                    is Screen.Tag -> TagScreen(nav, top.name)
-                    is Screen.Picker -> PickerScreen(nav, top.opts)
-                    is Screen.PlaylistEdit -> PlaylistEditScreen(nav, top.id)
-                    is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url, top.requestMissing, top.albumMode)
-                    is Screen.Activity -> ActivityScreen(nav)
-                    is Screen.SettingsAt -> SettingsScreen(nav, session, startAt = top.id)
-                    is Screen.BugReports -> BugReportsScreen(nav, top.from)
-                    is Screen.BugReport -> BugReportScreen(nav, top.id)
-                    is Screen.Files -> FilesScreen(nav, top.startRoot)
-                    null -> when (tab) {
-                        Tab.HOME -> HomeScreen(nav, session)
-                        Tab.LIBRARY -> LibraryScreen(nav)
-                        Tab.PLAYLISTS -> PlaylistsScreen(nav)
-                        Tab.DISCOVER -> DiscoverScreen(nav)
-                    }
-                }
-            }
+            Box(Modifier.fillMaxSize().padding(padding)) { page() }
         }
         if (showPlayer && nowPlaying != null) {
-            FullPlayer(nav, menuActions, onClose = { showPlayer = false })
+            if (tv) TvPlayer(nav, menuActions, onClose = { showPlayer = false })
+            else FullPlayer(nav, menuActions, onClose = { showPlayer = false })
         }
-        // ⋯ → Lyrics (a song's menu, the player's): the full player opens in lyrics mode
-        LyricsRequests(nav, onOpenPlayer = { showPlayer = true })
+        // ⋯ → Lyrics (a song's menu, the player's): the full player opens in lyrics mode; the TV player on its lyrics
+        LyricsRequests(nav, onOpenPlayer = {
+            if (tv) TvPrefs.setPanel(SidePanel.LYRICS)
+            showPlayer = true
+        })
         if (signalPathOpen && nowPlaying != null) {
             SignalPathSheet(nav, onDismiss = { player.closeSignalPath() })
         }
@@ -373,7 +433,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
         SongFixHost(nav)
         // toasts sit above the mini player and the tabs, in a window of their own above every sheet and dialog
-        ToastHost(bottomPadding = if (nowPlaying != null) 150.dp else 84.dp)
+        // (the TV layout has no bars at the bottom)
+        ToastHost(bottomPadding = if (tv) 24.dp else if (nowPlaying != null) 150.dp else 84.dp)
     }
 }
 

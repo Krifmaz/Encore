@@ -29,6 +29,10 @@ What it does:
   and a banner); a remote's D-pad moves a focus ring over the tabs, rows and tiles (`ui/theme/FocusRing.kt`), and the
   TV becomes an Encore device the phone can send music to. To install, sideload `Encore-android-<version>.apk` from
   the releases (for example with the Downloader app, or `adb install`); it then updates itself like on a phone
+- the TV layout (`ui/tv`, on a TV automatically): the whole app zoomed out, a slim side menu instead of the bottom
+  bars (Search, Home, Library, Playlists, For you, Now playing, Settings; Left opens it), and a TV player with the
+  cover and controls on one side and a panel switching between the lyrics and Up next on the other; Left / Right on
+  its seek bar seek 10 s. Settings → TV (on a TV only): Layout (or the phone layout), Player side, Size
 - Android Auto (browse, search, voice, live lyrics, the quality badge, the artist's page) and the Encore Lyrics car app
 - "Share → Request in Encore", crash reports to the server (Diagnostics → App crashes)
 - songs saved for offline in `Music/Encore`, offline mode (the banner; Home, Library, Playlists, Settings and the

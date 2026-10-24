@@ -14,6 +14,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.lerp
@@ -492,7 +494,7 @@ private fun LandscapeBody(
  * @param center true upright (centred under the cover), false sideways (beside the cover, aligned to its start).
  */
 @Composable
-private fun PlayerMeta(nav: Nav, track: Track, actions: PlayerMenuActions, onClose: () -> Unit, center: Boolean, modifier: Modifier = Modifier) {
+internal fun PlayerMeta(nav: Nav, track: Track, actions: PlayerMenuActions, onClose: () -> Unit, center: Boolean, modifier: Modifier = Modifier) {
     val p = MaterialTheme.palette
     val badge by nav.player.qualityBadge.collectAsState()
     val align = if (center) TextAlign.Center else TextAlign.Start
@@ -568,9 +570,12 @@ private fun PlayerSeek(nav: Nav) {
 /**
  * Shuffle, previous, play / pause, next and repeat (the web's `.np-ctrls`; the same shuffle and repeat as the car and
  * lock screen).
+ *
+ * @param playFocus attached to play / pause, so the TV player can put the remote's focus there when it opens (null:
+ *   nothing asks for the focus, as on a phone).
  */
 @Composable
-private fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier) {
+internal fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier, playFocus: FocusRequester? = null) {
     val p = MaterialTheme.palette
     val isPlaying by nav.player.isPlaying.collectAsState()
     val queue by nav.player.queue.collectAsState()
@@ -597,6 +602,7 @@ private fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier) {
         Box(
             Modifier
                 .size(72.dp)
+                .then(if (playFocus != null) Modifier.focusRequester(playFocus) else Modifier)
                 .clip(CircleShape)
                 .background(p.gradient)
                 .clickable { nav.player.togglePlay() },
@@ -636,7 +642,7 @@ private fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier) {
  * @param center true upright (centred), false sideways (from the start, under the song's lines).
  */
 @Composable
-private fun PlayerActions(
+internal fun PlayerActions(
     nav: Nav,
     track: Track,
     actions: PlayerMenuActions,
@@ -741,64 +747,80 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
     // in a group listen: the group's queue, with who added each song
     val group by GroupListen.state.collectAsState()
     group?.let { GroupUpNextSheet(nav, it, onDismiss); return }
+    val p = MaterialTheme.palette
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
+        UpNextList(nav, onLeave = onDismiss, modifier = Modifier.fillMaxWidth().fillMaxHeight(0.7f))
+    }
+}
+
+/**
+ * The Up next list itself: its head (the title, Clear and "Then shuffle library") over the songs after this one, each
+ * with its cover, title, artists (links) and a remove button; a press on a song plays it. Shared by the phone's
+ * [UpNextSheet] and the TV player's Up next half.
+ *
+ * @param onLeave called before an artist link opens its page (the sheet closes; the TV player closes).
+ * @param showTitle false leaves the "Up next" title out of the head (the TV panel's switch already names it).
+ * @param modifier sizes the list (the head sits above it).
+ */
+@Composable
+fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, showTitle: Boolean = true) {
     val queue by nav.player.queue.collectAsState()
     val index by nav.player.queueIndex.collectAsState()
     val settings by nav.graph.store.settings.collectAsState()
     val p = MaterialTheme.palette
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val upNext = if (index + 1 <= queue.lastIndex) queue.subList(index + 1, queue.size) else emptyList()
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
-        Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Up next", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            SmallButton("Clear", iconRes = R.drawable.ic_delete, enabled = upNext.isNotEmpty()) { nav.player.clearUpNext() }
-            Spacer(Modifier.width(4.dp))
+    Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (showTitle) Text("Up next", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        else Spacer(Modifier.weight(1f))
+        SmallButton("Clear", iconRes = R.drawable.ic_delete, enabled = upNext.isNotEmpty()) { nav.player.clearUpNext() }
+        Spacer(Modifier.width(4.dp))
+        Row(
+            Modifier.clickable { nav.graph.store.setAutoplay(!settings.autoplay) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = settings.autoplay,
+                onCheckedChange = { nav.graph.store.setAutoplay(it) },
+                colors = CheckboxDefaults.colors(checkedColor = p.accent, checkmarkColor = p.onAccent, uncheckedColor = p.muted),
+            )
+            Text("Then shuffle library", style = MaterialTheme.typography.bodySmall, color = p.muted)
+        }
+    }
+    LazyColumn(modifier) {
+        itemsIndexed(upNext) { k, q ->
+            val i = index + 1 + k
             Row(
-                Modifier.clickable { nav.graph.store.setAutoplay(!settings.autoplay) },
+                Modifier.fillMaxWidth().clickable { nav.player.skipTo(i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Checkbox(
-                    checked = settings.autoplay,
-                    onCheckedChange = { nav.graph.store.setAutoplay(it) },
-                    colors = CheckboxDefaults.colors(checkedColor = p.accent, checkmarkColor = p.onAccent, uncheckedColor = p.muted),
+                Cover(
+                    if (q.albumId.isNotEmpty()) nav.graph.api.coverUrl(q.albumId, 96) else null,
+                    nav.graph.imageLoader,
+                    size = 42.dp,
+                    corner = 8.dp,
+                    label = q.album.ifEmpty { q.title },
                 )
-                Text("Then shuffle library", style = MaterialTheme.typography.bodySmall, color = p.muted)
-            }
-        }
-        LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.7f)) {
-            itemsIndexed(upNext) { k, q ->
-                val i = index + 1 + k
-                Row(
-                    Modifier.fillMaxWidth().clickable { nav.player.skipTo(i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Cover(
-                        if (q.albumId.isNotEmpty()) nav.graph.api.coverUrl(q.albumId, 96) else null,
-                        nav.graph.imageLoader,
-                        size = 42.dp,
-                        corner = 8.dp,
-                        label = q.album.ifEmpty { q.title },
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(q.shownTitle(), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(rememberSongLinks(nav, q, withAlbum = false, before = onDismiss), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    IconButton(onClick = { nav.player.removeAt(i) }) {
-                        Icon(painterResource(R.drawable.ic_close), contentDescription = "Remove", tint = p.muted)
-                    }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(q.shownTitle(), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(rememberSongLinks(nav, q, withAlbum = false, before = onLeave), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = { nav.player.removeAt(i) }) {
+                    Icon(painterResource(R.drawable.ic_close), contentDescription = "Remove", tint = p.muted)
                 }
             }
-            if (upNext.isEmpty()) {
-                item {
-                    Text(
-                        if (settings.autoplay) "Nothing queued – a shuffle of your library plays next." else "Nothing queued.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = p.muted,
-                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 16.dp),
-                    )
-                }
-            }
-            item { Spacer(Modifier.height(24.dp)) }
         }
+        if (upNext.isEmpty()) {
+            item {
+                Text(
+                    if (settings.autoplay) "Nothing queued – a shuffle of your library plays next." else "Nothing queued.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = p.muted,
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 16.dp),
+                )
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }

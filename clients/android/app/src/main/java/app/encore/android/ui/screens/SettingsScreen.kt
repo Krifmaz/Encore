@@ -97,6 +97,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import app.encore.android.ui.tv.TvLayoutMode
+import app.encore.android.ui.tv.TvPrefs
+import app.encore.android.ui.tv.rememberIsTvDevice
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -127,6 +130,8 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
     var schemaError by remember { mutableStateOf<String?>(null) }
     var update by remember { mutableStateOf<JsonObject?>(null) }
     val filesHere by FilesAccess.available.collectAsState()
+    // Settings → TV is listed on a TV only
+    val isTv = rememberIsTvDevice()
     // whether this server has plugins (0.32): null while not known (taken as yes); `probed` once it was asked
     var plugins by remember { mutableStateOf<Boolean?>(null) }
     var probed by remember { mutableStateOf(false) }
@@ -226,6 +231,8 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             "androidauto" -> CarButtonsScreen(onBack = back, title = "Android Auto")
             "connections" -> ConnectionsScreen(nav, admin, onBack = back)
             "device" -> ThisDeviceScreen(nav, onBack = back)
+            // this TV's own layout (shown on TVs only)
+            "tv" -> app.encore.android.ui.tv.TvSettingsScreen(onBack = back)
             "users" -> UsersScreen(nav, me?.long("id") ?: 0L, onBack = back, onOpenInvites = { open("invites") })
             "invites" -> InvitesScreen(nav, onBack = back)
             "autodownload" -> AutoDownloadScreen(nav, onBack = back, onOpen = { open(it) })
@@ -270,6 +277,12 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
             NavRow("Android Auto", "Car buttons and the Encore Lyrics screen") { open("androidauto") }
             NavRow("Connections") { open("connections") }
             NavRow("This device") { open("device") }
+            // on a TV: the TV layout, the player's side and the zoom (ui/tv)
+            if (isTv) {
+                val tvMode by TvPrefs.mode.collectAsState()
+                val tvSide by TvPrefs.side.collectAsState()
+                NavRow("TV", if (tvMode == TvLayoutMode.OFF) tvMode.label else "Player on the ${tvSide.label.lowercase()}") { open("tv") }
+            }
             if (admin) {
                 NavLabel("People")
                 NavRow("Users & permissions") { open("users") }
