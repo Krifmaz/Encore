@@ -120,6 +120,37 @@ data class FileListing(val entries: List<FileEntry>, val total: Int, val offset:
     }
 }
 
+/** One result of a search across a root (`GET /api/files/search`, 0.37.1): the entry, its path and its folder's. */
+data class FileHit(
+    /** the entry as a folder listing would show it (name, kind, size, a link's target kind, audio) */
+    val entry: FileEntry,
+    /** its path from the root */
+    val path: String,
+    /** the folder it is in, from the root ("" = the root itself) */
+    val parent: String,
+) {
+    companion object {
+        /** One of the answer's `results`; null without a name or a path. */
+        fun from(o: JsonObject): FileHit? {
+            val entry = FileEntry.from(o) ?: return null
+            val path = o.str("path")
+            if (path.isEmpty()) return null
+            return FileHit(entry, path, if (o.containsKey("parent")) o.str("parent") else FilesRules.parentOf(path))
+        }
+    }
+}
+
+/** A search's answer: the results, the nearest first, and [truncated] when the server stopped early. */
+data class FileHits(val hits: List<FileHit>, val truncated: Boolean) {
+    companion object {
+        /** `{results, truncated}`. */
+        fun from(e: JsonElement?): FileHits {
+            val obj = e as? JsonObject
+            return FileHits(obj?.arr("results").objectsOf().mapNotNull { FileHit.from(it) }, obj?.bool("truncated") == true)
+        }
+    }
+}
+
 /** Something in the trash, with where it came from. */
 data class TrashItem(val id: String, val name: String, val root: String, val path: String, val at: Double, val by: String, val size: Long, val kind: String) {
     companion object {
@@ -220,6 +251,10 @@ class FilesApi(private val api: EncoreApi, private val client: OkHttpClient) {
         val o = call("GET", "/api/files/list?root=${enc(root)}&path=${enc(path)}&sort=${enc(sort)}&dir=${enc(dir)}&offset=$offset&limit=$limit", null)
         return FileListing.from(o, offset)
     }
+
+    /** Every file and folder of [root] whose name holds every word of [q], at any depth, the nearest first. */
+    fun search(root: String, q: String, limit: Int = 200): FileHits =
+        FileHits.from(call("GET", "/api/files/search?root=${enc(root)}&q=${enc(q)}&limit=$limit", null))
 
     fun mkdir(root: String, path: String, name: String) {
         call("POST", "/api/files/mkdir", body { put("root", root); put("path", path); put("name", name) })

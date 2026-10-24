@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -66,6 +67,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,11 +89,13 @@ import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDay
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.formatSize
+import app.encore.android.ui.screens.EncoreField
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -105,6 +109,10 @@ import java.io.IOException
  * folder picker over the roots), Move to trash, the Trash with Restore / Delete forever / Empty trash, Upload (files,
  * or a whole folder, streamed from the phone), Edit tags for audio files, and Import… with "Keep the files where they
  * are". Admins only; opened from Settings → Server → Files or the Home menu.
+ *
+ * A search box over each folder: as you type it filters the folder, and once typing pauses it searches the whole root
+ * by name at any depth (`GET /api/files/search`, 0.37.1); each result shows its folder's path, and a tap opens that
+ * folder with the file picked (a folder opens itself).
  */
 @Composable
 fun FilesScreen(nav: Nav, startRoot: String = "") {
@@ -118,11 +126,14 @@ fun FilesScreen(nav: Nav, startRoot: String = "") {
     // the folder the browsing entered through a link (its path): nothing at or below it is written (client-shapes §2.4;
     // the server's `via_link` says the same for a folder it reached through a link, §4.17)
     var linkAt by remember { mutableStateOf<String?>(null) }
+    // the entry to pick once the folder opened is listed (a search result's file)
+    var pick by remember { mutableStateOf<String?>(null) }
     fun under(p: String): Boolean = linkAt != null && FilesRules.linkAfter(linkAt, p, false) != null
-    /** Opens [p]; [link]: it is a link to a folder (the first one on the way is remembered). */
-    fun go(p: String, link: Boolean = false) {
+    /** Opens [p]; [link]: it is a link to a folder (the first one on the way is remembered); [pickName]: picked there. */
+    fun go(p: String, link: Boolean = false, pickName: String? = null) {
         linkAt = FilesRules.linkAfter(linkAt, p, link)
         path = p
+        pick = pickName
     }
 
     // opened on a root (0.36: "Open Trash" after albums went to the Trash): that root once the roots are in
@@ -168,7 +179,10 @@ fun FilesScreen(nav: Nav, startRoot: String = "") {
             }
             r == null -> RootsList(roots ?: emptyList()) { picked -> root = picked; go("") }
             r.isTrash -> TrashView(nav, api, roots ?: emptyList())
-            else -> FolderView(nav, api, roots ?: emptyList(), r, path, throughLink = under(path), onOpen = { p, link -> go(p, link) })
+            else -> FolderView(
+                nav, api, roots ?: emptyList(), r, path, throughLink = under(path), onOpen = { p, link -> go(p, link) },
+                pick = pick, onPicked = { pick = null }, onFound = { p, link, name -> go(p, link, name) },
+            )
         }
     }
 }
@@ -238,6 +252,11 @@ private fun FolderView(
     throughLink: Boolean,
     /** open a folder; true when the entry opened is a link */
     onOpen: (String, Boolean) -> Unit,
+    /** an entry to pick once this folder is listed (a search result's file), then [onPicked] */
+    pick: String? = null,
+    onPicked: () -> Unit = {},
+    /** a search result tapped: open (folder, it is a link, the name to pick there) */
+    onFound: (String, Boolean, String?) -> Unit = { p, link, _ -> onOpen(p, link) },
 ) {
     val p = MaterialTheme.palette
     // the server's word on it: the folder was reached through a link (§4.17 `via_link`)
@@ -256,6 +275,36 @@ private fun FolderView(
     val selected = remember(root.id, path) { mutableStateMapOf<String, Boolean>() }
     var dialog by remember { mutableStateOf<FolderDialog?>(null) }
     val uploadsDone by FileUploads.done.collectAsState()
+    // one scroll position per folder, so a search result can be scrolled to
+    val listState = remember(root.id, path) { LazyListState() }
+    // the search: its words filter this folder at once and search the whole root after a pause (a new folder starts
+    // with a blank box, its words were for the one left)
+    var query by remember(root.id, path) { mutableStateOf("") }
+    var hits by remember(root.id, path) { mutableStateOf<FileHits?>(null) }
+    var finding by remember(root.id, path) { mutableStateOf(false) }
+    var findError by remember(root.id, path) { mutableStateOf<String?>(null) }
+    val shown = if (query.isBlank()) entries.toList() else entries.filter { FilesRules.matches(it.name, query) }
+
+    LaunchedEffect(root.id, query) {
+        findError = null
+        if (query.isBlank()) {
+            hits = null
+            finding = false
+            return@LaunchedEffect
+        }
+        // a newer word cancels this one before it asks
+        delay(250)
+        finding = true
+        try {
+            hits = withContext(Dispatchers.IO) { api.search(root.id, query.trim()) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            hits = null
+            findError = e.message ?: "Couldn't search"
+        }
+        finding = false
+    }
 
     LaunchedEffect(root.id, path, sort, dir, reload, uploadsDone) {
         loading = true
@@ -267,6 +316,16 @@ private fun FolderView(
             total = page.total
             viaLink = page.viaLink
             selected.keys.retainAll(page.entries.map { it.name }.toSet())
+            // a search result's file: picked and scrolled to
+            pick?.let { name ->
+                val at = page.entries.indexOfFirst { it.name == name }
+                if (at >= 0) {
+                    selected[name] = true
+                    // a request, kept until the list is laid out (it isn't while the folder loads)
+                    listState.requestScrollToItem(at)
+                }
+                onPicked()
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -340,6 +399,18 @@ private fun FolderView(
                 modifier = Modifier.padding(horizontal = Gutter, vertical = 2.dp),
             )
         }
+        EncoreField(
+            value = query,
+            onValueChange = { q ->
+                query = q
+                // the picked entries the filter hides are let go (nothing hidden is moved or trashed)
+                if (q.isNotBlank()) selected.keys.retainAll(entries.filter { FilesRules.matches(it.name, q) }.map { it.name }.toSet())
+            },
+            placeholder = "Search ${root.name} by name",
+            leadingIcon = R.drawable.ic_search,
+            imeAction = ImeAction.Search,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 4.dp),
+        )
         if (picked.isEmpty()) {
             var uploadMenu by remember { mutableStateOf(false) }
             var sortMenu by remember { mutableStateOf(false) }
@@ -384,7 +455,7 @@ private fun FolderView(
                     SmallButton("Move", iconRes = R.drawable.ic_move) { dialog = FolderDialog.Move(picked) }
                     SmallButton("Move to trash", iconRes = R.drawable.ic_delete) { dialog = FolderDialog.Trash(picked) }
                 }
-                SmallButton("Select all") { for (e in entries) selected[e.name] = true }
+                SmallButton("Select all") { for (e in shown) selected[e.name] = true }
                 SmallButton("Cancel") { selected.clear() }
             }
         }
@@ -393,9 +464,19 @@ private fun FolderView(
                 CircularProgressIndicator(color = p.accent, trackColor = p.border)
             }
             error != null -> ErrorBox(error ?: "") { refresh() }
-            entries.isEmpty() -> EmptyState(R.drawable.ic_folder, "This folder is empty", if (canWrite) "Upload files here, or make a new folder." else "")
-            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-                items(entries, key = { it.name }) { e ->
+            entries.isEmpty() && query.isBlank() -> EmptyState(R.drawable.ic_folder, "This folder is empty", if (canWrite) "Upload files here, or make a new folder." else "")
+            else -> LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
+                if (shown.isEmpty() && query.isNotBlank()) {
+                    item {
+                        Text(
+                            "Nothing in this folder matches “${query.trim()}”",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = p.muted,
+                            modifier = Modifier.padding(horizontal = Gutter, vertical = 12.dp),
+                        )
+                    }
+                }
+                items(shown, key = { it.name }) { e ->
                     val isSel = selected[e.name] == true
                     FileRow(
                         e = e,
@@ -442,6 +523,44 @@ private fun FolderView(
                         }
                     }
                 }
+                // the search across the root, under the folder's rows
+                if (query.isNotBlank()) {
+                    // no keys on these rows: a key of theirs could be the same as a file's name
+                    item {
+                        val words = when {
+                            finding -> "Searching ${root.name}…"
+                            findError != null -> findError ?: ""
+                            hits != null -> FilesRules.foundLine(hits?.hits?.size ?: 0, hits?.truncated == true, root.name)
+                            else -> ""
+                        }
+                        if (words.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 16.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(painterResource(R.drawable.ic_search), contentDescription = null, tint = p.muted, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(words, style = MaterialTheme.typography.labelLarge, color = if (findError != null) EncoreColors.Err else p.text)
+                            }
+                        }
+                    }
+                    if (!finding) {
+                        itemsIndexed(hits?.hits ?: emptyList()) { _, h ->
+                            HitRow(h, root.name) {
+                                val (to, link, name) = FilesRules.hitTarget(h)
+                                if (to == path) {
+                                    // in this folder already: the search goes and the file is picked
+                                    query = ""
+                                    selected.clear()
+                                    if (name != null) {
+                                        selected[name] = true
+                                        val at = entries.indexOfFirst { it.name == name }
+                                        if (at >= 0) listState.requestScrollToItem(at)
+                                    }
+                                } else {
+                                    onFound(to, link, name)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -481,6 +600,32 @@ private fun FolderView(
             FileUploads.start(nav.graph, context.contentResolver, root, path, d.items, conflict)
         }
     }
+}
+
+/** One search result: its icon, its name and the path of the folder it is in; a tap opens it. */
+@Composable
+private fun HitRow(h: FileHit, rootName: String, onClick: () -> Unit) {
+    val p = MaterialTheme.palette
+    val e = h.entry
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Gutter, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val icon = when {
+            e.kind == "link" -> R.drawable.ic_link_file
+            e.isDir -> R.drawable.ic_folder
+            e.isAudio -> R.drawable.ic_note
+            else -> R.drawable.ic_file
+        }
+        Icon(painterResource(icon), contentDescription = null, tint = if (e.isDir) p.accent else p.muted, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(e.name, fontWeight = if (e.isDir) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(FilesRules.place(rootName, h.parent), style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (!e.isDir) Text(formatSize(e.size), style = MaterialTheme.typography.bodySmall, color = p.faint)
+    }
+    RowDivider()
 }
 
 private fun playTrack(nav: Nav, id: Long) {

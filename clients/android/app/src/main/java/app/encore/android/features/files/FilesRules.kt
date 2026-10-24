@@ -64,6 +64,39 @@ object FilesRules {
      */
     fun uploadPart(part: String): String = part.replace('/', '_').replace('\\', '_').filterNot { hidden(it) }.trim()
 
+    // ---- search ---------------------------------------------------------------------------------------------------
+
+    /** The words of a search, lowercased (none when nothing was typed). */
+    fun searchWords(q: String): List<String> = q.split(Regex("\\s+")).filter { it.isNotEmpty() }.map { it.lowercase() }
+
+    /**
+     * Whether [name] holds every word of [q] (lowercased, anywhere, in any order): the open folder's filter. A blank
+     * [q] lets everything through. The server's search also drops accents; the filter only lowercases.
+     */
+    fun matches(name: String, q: String): Boolean {
+        val n = name.lowercase()
+        return searchWords(q).all { n.contains(it) }
+    }
+
+    /**
+     * Where a search result goes when tapped: (the folder to open, it is a link, the name to pick there). A folder (or
+     * a link to one) opens itself; a file opens its folder with it picked.
+     */
+    fun hitTarget(hit: FileHit): Triple<String, Boolean, String?> =
+        if (hit.entry.isDir) Triple(hit.path, hit.entry.kind == "link", null) else Triple(hit.parent, false, hit.entry.name)
+
+    /**
+     * The search results' heading: "3 found in Library", "200+ found in Library …" when the server stopped early,
+     * "Nothing in Library is called that".
+     */
+    fun foundLine(n: Int, truncated: Boolean, place: String): String = when {
+        n == 0 && !truncated -> "Nothing in $place is called that"
+        n == 0 -> "Nothing found yet in $place: the search stopped early, try more words"
+        truncated -> "$n+ found in $place (the nearest first; type more to narrow it)"
+        n == 1 -> "1 found in $place"
+        else -> "$n found in $place"
+    }
+
     // ---- sorting --------------------------------------------------------------------------------------------------
 
     /** The sorts the server knows, with their names. */

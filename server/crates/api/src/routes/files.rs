@@ -1,4 +1,4 @@
-//! /api/files: the admin file manager (release 0.33) over the folders Encore may touch – browse, upload, make
+//! /api/files: the admin file manager (release 0.33) over the folders Encore may touch – browse, search by name, upload, make
 //! folder, rename, move, Trash (restore, delete forever, empty), tags and import from a folder. Admin only,
 //! CSRF on every write (the `Admin` extractor). The work is encore-files' (confinement, no writes through
 //! links, the library's rows following, the activity log); the JSON is docs/contracts/client-shapes-0.31-0.33.md
@@ -15,7 +15,7 @@ use encore_files::list::{self, Query as ListQuery};
 use encore_files::roots::{self, LibraryDirs, Root};
 use encore_files::rows::Change;
 use encore_files::upload::{self, Begin, Conflict, Outcome};
-use encore_files::{ops, tags, trash, Target, Who};
+use encore_files::{ops, search, tags, trash, Target, Who};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/files/roots", get(get_roots))
         .route("/api/files/list", get(list_dir))
+        .route("/api/files/search", get(search_names))
         .route("/api/files/upload", post(upload_files).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
         .route("/api/files/mkdir", post(mkdir))
         .route("/api/files/rename", post(rename))
@@ -86,6 +87,34 @@ async fn list_dir(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<L
         let roots = roots_of(&st);
         let t = target(&roots, &q.root, &q.path)?;
         list::list(&st.db, &LibraryDirs::of(&st.cfg), &roots, &t, &query).map(Json)
+    }).await
+}
+
+/// `GET /api/files/search` query.
+#[derive(Deserialize)]
+struct SearchQ {
+    /// the root folder's key
+    root: String,
+    /// the folder searched from ("" = the whole root)
+    #[serde(default)]
+    path: String,
+    /// the words a name must hold
+    #[serde(default)]
+    q: String,
+    /// the most matches to give (default [`search::LIMIT`], at most [`search::MAX_LIMIT`])
+    limit: Option<usize>,
+}
+
+/// GET /api/files/search: the files and folders under a folder whose names hold every word of `q`, at any
+/// depth (encore_files::search). Trash is searched from its own list (`GET /api/files/trash`), not here.
+async fn search_names(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<SearchQ>) -> ApiResult<Json<Value>> {
+    blocking(move || {
+        let roots = roots_of(&st);
+        let t = target(&roots, &q.root, &q.path)?;
+        if t.root.kind == roots::RootKind::Trash {
+            return Err(err(400, "Search the trash from its list"));
+        }
+        search::search(&roots, &t, &q.q, q.limit).map(Json)
     }).await
 }
 
