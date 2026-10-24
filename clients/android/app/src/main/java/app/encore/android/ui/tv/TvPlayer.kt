@@ -34,6 +34,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,7 +101,8 @@ private val UNDER_ART = 300.dp
  * side, in the order Settings → TV → Player side gives ([TvPrefs.side]).
  *
  * The remote's focus starts on play / pause. Left / Right on the seek bar seek 10 s ([TvSeek]); Back closes the player
- * (the root's Back handling).
+ * (the root's Back handling). Screen off (top right) blacks the screen out while the music plays on
+ * ([ScreenOffLayer]).
  *
  * @param nav moves around and plays.
  * @param actions the player's ⋯ menu actions (Go to artist, View album, Share, Signal path…).
@@ -119,8 +121,12 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     // the lyrics load while their half shows them; the player keeps them, so switching back and forth is instant
     val lyrics = rememberLyrics(nav, track.id, active = panel == SidePanel.LYRICS)
     val playFocus = remember { FocusRequester() }
-    // the remote starts on play / pause: the one button most presses are for
-    LaunchedEffect(Unit) {
+    // Screen off: the screen black while the music plays on (TvScreenOff.kt); kept if the activity is made again
+    var screenOff by rememberSaveable { mutableStateOf(false) }
+    // the remote starts on play / pause, the one button most presses are for: when the player opens, and again when
+    // the screen comes back on
+    LaunchedEffect(screenOff) {
+        if (screenOff) return@LaunchedEffect
         try { playFocus.requestFocus() } catch (_: IllegalStateException) { /* not laid out yet: the focus stays where it was */ }
     }
 
@@ -155,6 +161,10 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     modifier = Modifier.weight(1f).padding(start = 8.dp),
                 )
                 GroupPill(Modifier.padding(end = 4.dp))
+                // up here, away from the song's controls, so it isn't pressed by accident
+                IconButton(onClick = { screenOff = true }) {
+                    Icon(painterResource(R.drawable.ic_screen_off), contentDescription = "Screen off", tint = p.text)
+                }
                 DevicesButton(nav, tint = p.text)
             }
             Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
@@ -168,6 +178,8 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 }
             }
         }
+        // over everything, the player included, while the screen is off
+        ScreenOffLayer(screenOff, nav, onWake = { screenOff = false })
     }
 }
 

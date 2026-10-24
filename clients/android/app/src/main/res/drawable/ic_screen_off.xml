@@ -1,0 +1,10 @@
+<!-- A TV with a slash through it: the TV player's "Screen off" (a black screen while the music plays on). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M21,17.18V5c0,-1.1 -0.9,-2 -2,-2H6.82l2,2H19v10.18l2,2zM1.39,2.81L2.6,4.02C2.23,4.38 2,4.88 2,5.43V17c0,1.1 0.9,2 2,2h4v2h8v-2h0.98l3.21,3.21 1.41,-1.41L2.81,1.39 1.39,2.81zM4,6.42L14.58,17H4V6.42z" />
+</vector>

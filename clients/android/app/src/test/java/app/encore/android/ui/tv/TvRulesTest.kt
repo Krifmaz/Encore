@@ -1,5 +1,6 @@
 package app.encore.android.ui.tv
 
+import android.view.KeyEvent
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
 import org.junit.Assert.assertEquals
@@ -85,5 +86,20 @@ class TvRulesTest {
         assertEquals(RailItem.SETTINGS, TvNav.selected(false, Screen.Settings, Tab.LIBRARY))
         assertEquals(RailItem.SETTINGS, TvNav.selected(false, Screen.SettingsAt("soulseek"), Tab.HOME))
         assertNull(TvNav.selected(false, Screen.Album("a"), Tab.HOME))
+    }
+
+    /** With the screen off, playback buttons act on the music, the TV keeps its own buttons, the rest wake it. */
+    @Test
+    fun screenOffButtons() {
+        assertEquals(ScreenOffAction.TOGGLE_PLAY, ScreenOffRules.actionOf(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
+        assertEquals(ScreenOffAction.PLAY, ScreenOffRules.actionOf(KeyEvent.KEYCODE_MEDIA_PLAY))
+        assertEquals(ScreenOffAction.PAUSE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_MEDIA_PAUSE))
+        assertEquals(ScreenOffAction.NEXT, ScreenOffRules.actionOf(KeyEvent.KEYCODE_MEDIA_NEXT))
+        assertEquals(ScreenOffAction.PREVIOUS, ScreenOffRules.actionOf(KeyEvent.KEYCODE_MEDIA_PREVIOUS))
+        assertEquals(ScreenOffAction.SYSTEM, ScreenOffRules.actionOf(KeyEvent.KEYCODE_VOLUME_UP))
+        assertEquals(ScreenOffAction.SYSTEM, ScreenOffRules.actionOf(KeyEvent.KEYCODE_POWER))
+        assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_DPAD_CENTER))
+        assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_BACK))
+        assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_DPAD_LEFT))
     }
 }
