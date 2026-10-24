@@ -42,7 +42,7 @@ on:
         type: boolean
         default: false
       only:
-        description: "Build only part of it: 'android' = just the Android APK; the server, Docker image and desktop apps are carried over from the previous release"
+        description: "Build only part of it: 'android' = the Android APK with the server and Docker image (always built, so servers can update to it); only the desktop apps are carried over from the previous release"
         type: choice
         options: [all, android]
         default: all
@@ -196,7 +196,9 @@ jobs:
 
   server:
     needs: [version, test, ui]
-    if: inputs.only != 'android' && inputs.only != 'test'
+    # every release builds the server, an Android-only one too: servers are offered every v<version> release, and
+    # one without its own server and image made "Update now" fail ("Could not pull ghcr.io/krifmaz/encore:0.36.4")
+    if: inputs.only != 'test'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -255,7 +257,8 @@ jobs:
 
   docker:
     needs: [version, test]
-    if: inputs.only != 'android' && inputs.only != 'test'
+    # an Android-only release too (see `server`): the in-app updater pulls :<version> of every release
+    if: inputs.only != 'test'
     runs-on: ubuntu-latest
     env:
       DOCKER_BUILD_RECORD_UPLOAD: false
@@ -372,8 +375,8 @@ jobs:
     needs: [version, server, docker, apps]
     if: >-
       always() && inputs.channel != 'hotfix' && (
-        (inputs.only == 'android' && needs.apps.result == 'success') ||
-        (inputs.only != 'android' && needs.server.result == 'success' && needs.docker.result == 'success')
+        needs.server.result == 'success' && needs.docker.result == 'success' &&
+        (inputs.only != 'android' || needs.apps.result == 'success')
       )
     runs-on: ubuntu-latest
     steps:
@@ -382,7 +385,6 @@ jobs:
           fetch-depth: 0
       # only our files (the Docker build record artifact can't be downloaded this way)
       - uses: actions/download-artifact@v4
-        if: inputs.only != 'android'
         with:
           pattern: server-*
           path: out
@@ -404,12 +406,12 @@ jobs:
         run: |
           V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
           if [ "$ONLY" = android ]; then
-            # Android only: keep every other file of the newest release, swap in the new APK (SHA256SUMS is
-            # written again when publishing)
+            # Android only: keep the desktop apps of the newest release, with this run's APK and server (SHA256SUMS
+            # is written again when publishing)
             # the newest full release (a hotfix can be "Latest" and has no apps)
             PREV=$(gh release list --limit 200 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
             mkdir -p keep && [ -n "$PREV" ] && gh release download "$PREV" --dir keep 2>/dev/null || true
-            rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS
+            rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS keep/encore-*-linux-*.tar.gz
             # the classic Tauri desktop app (removed in 0.29) and its update manifest are not carried over
             (cd keep && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm latest.json)
             mv keep/* out/ 2>/dev/null || true
@@ -434,7 +436,7 @@ jobs:
           * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
           EOT
           if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
-          * **Android**: \`Encore-android-$V.apk\` (this build) · the server, Docker image and desktop apps are from the previous release
+          * **Android**: \`Encore-android-$V.apk\` (this build) · the desktop apps are from the previous release
           EOT
           elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
           * **Android**: \`Encore-android-$V.apk\`
