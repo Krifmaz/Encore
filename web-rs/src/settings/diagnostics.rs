@@ -756,22 +756,6 @@ fn judge(w: Wait, from: &str, version: Option<&str>, down: bool, answering_for: 
     }
 }
 
-/// `GET /api/health` without the app's connection events (the banner would flash); None when it does not
-/// answer within 3 s or not with ok.
-async fn health() -> Option<Value> {
-    let ctl = web_sys::AbortController::new().ok()?;
-    let signal = ctl.signal();
-    let _abort = dom::Timeout::new(3000, move || ctl.abort());
-    let req = gloo_net::http::Request::get("/api/health")
-        .cache(web_sys::RequestCache::NoStore)
-        .abort_signal(Some(&signal))
-        .build().ok()?;
-    let r = req.send().await.ok()?;
-    if !r.ok() { return None; }
-    let v: Value = serde_json::from_str(&r.text().await.ok()?).ok()?;
-    v.truthy("ok").then_some(v)
-}
-
 /// Poll /api/health every 2 s until the server is back (a restart: it went away and answers again; an update:
 /// it answers with another version), then show "Back" with Reload. After 90 s the card says the server is late
 /// and keeps looking for 10 minutes in all.
@@ -783,7 +767,7 @@ async fn wait_back(up: &Element, w: Wait, from: &str) {
     loop {
         dom::sleep(POLL_MS).await;
         if !up.is_connected() { return; }
-        let h = health().await;
+        let h = crate::update::health().await;
         let now = dom::now_ms();
         let version = h.as_ref().map(|v| v.s("version"));
         match &version {

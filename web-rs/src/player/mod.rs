@@ -223,6 +223,14 @@ fn emit() {
 
 pub fn current() -> Option<Value> { cur().map(|t| (*t).clone()) }
 
+/// Whether this device is playing: the song (or, mid-crossfade, the next one) or a preview sounds, or a stream
+/// that broke off is being picked up again (recovery.rs: paused on purpose, it plays on by itself). A reload
+/// into a new version (update.rs) waits until this is false, since the browser would not let the new page
+/// start the sound again without a tap.
+pub fn playing() -> bool {
+    [audio(), spare(), plain()].into_iter().flatten().any(|a| !a.paused()) || rec_need()
+}
+
 /// `cover(t)` as a JSON value (undefined → Null).
 fn cover_v(t: &Value) -> Value {
     if t.truthy("preview") { t.g("cover").clone() }

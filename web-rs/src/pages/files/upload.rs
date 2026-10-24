@@ -198,6 +198,9 @@ thread_local! {
     static UP: RefCell<Option<Rc<Up>>> = const { RefCell::new(None) };
 }
 
+/// Whether files are going up from this page right now (a reload would cut them off; update.rs waits).
+pub fn uploading() -> bool { UP.with(|u| u.borrow().is_some()) }
+
 /// Queues `items`: a running batch takes them on, otherwise a new one starts.
 pub fn start(items: Vec<Item>) {
     if items.is_empty() { return; }

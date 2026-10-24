@@ -1,6 +1,6 @@
 //! The service worker from the page's side (static/sw.js is the worker itself, hooks/sw.sh fills it in at
-//! build time): registers /sw.js, notices a new version and shows "A new version of Encore is ready" with a
-//! Reload button, asks the server for a new worker when the tab comes back into view (at most every 10
+//! build time): registers /sw.js, notices a new version and hands it to update.rs (which reloads at once, or
+//! when the music stops, or shows "A new version of Encore is ready" with a Reload button), asks the server for a new worker when the tab comes back into view (at most every 10
 //! minutes, and once an hour while it stays in view), and remembers which saved shell the worker serves.
 //!
 //! The order of events, as the browser runs them:
@@ -8,12 +8,14 @@
 //!    fires `updatefound` with the new worker in `registration.installing`.
 //! 2. The new worker saves the new shell and reaches `installed`. It does not take over by itself (sw.js no
 //!    longer calls `skipWaiting()` when it installs), so it waits. Reaching `installed` while this page has a
-//!    controller means "an update": the toast shows. Without a controller it is the very first worker of this
+//!    controller means "an update": update.rs is told ([`Step::Ready`]). Without a controller it is the very first worker of this
 //!    browser, which activates at once: nothing to say.
-//! 3. Reload posts `{type: 'skip-waiting'}` to the waiting worker; it activates, drops the old shell and claims
+//! 3. The reload ([`apply_update`], update.rs calls it) posts `{type: 'skip-waiting'}` to the waiting worker; it activates, drops the old shell and claims
 //!    the page; `controllerchange` fires and the page reloads into the new version. Other tabs see the same
 //!    `controllerchange` but did not ask, so they stay as they are (their own Reload then reloads at once,
 //!    because no worker waits any more).
+//! 4. When update.rs finds that this page already runs the build the server serves (the page was loaded from
+//!    the network after the update), [`activate_quietly`] lets the waiting worker take over without a reload.
 //!
 //! `Flow` holds the decisions as plain Rust, apart from the browser objects, so the host tests drive it with a
 //! fake worker.
@@ -24,9 +26,6 @@ use std::cell::RefCell;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{ServiceWorker, ServiceWorkerContainer, ServiceWorkerRegistration, ServiceWorkerState};
 
-/// The toast's text and its button.
-pub const READY_TEXT: &str = "A new version of Encore is ready";
-pub const RELOAD_LABEL: &str = "Reload";
 /// `visibilitychange` → visible asks for an update at most this often.
 pub const CHECK_EVERY_MS: f64 = 10.0 * 60.0 * 1000.0;
 /// While the tab stays in view, an update check this often (the same throttle applies).
@@ -38,8 +37,8 @@ const RELOAD_FALLBACK_MS: u32 = 4000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Nothing,
-    /// show the persistent "A new version of Encore is ready" toast
-    ShowToast,
+    /// a new worker waits: update.rs decides when to reload into it
+    Ready,
     /// `{type: 'skip-waiting'}` went to the waiting worker; the reload follows on `controllerchange`
     Posted,
     /// `location.reload()` now
@@ -68,8 +67,8 @@ pub fn version_question() -> Value { json!({ "type": "version?" }) }
 /// The page's side of an update.
 #[derive(Debug, Default)]
 pub struct Flow {
-    /// the toast is on screen (it shows once per page load)
-    toast: bool,
+    /// update.rs was told about a waiting worker (once per page load)
+    ready: bool,
     /// Reload was pressed in this page
     asked: bool,
     /// a reload is under way (one only)
@@ -86,14 +85,15 @@ impl Flow {
 
     /// A worker of this registration reached `state` (`installed`, `activated`, …).
     pub fn worker_state(&mut self, state: &str, has_controller: bool) -> Step {
-        if state == "installed" && has_controller && !self.toast {
-            self.toast = true;
-            return Step::ShowToast;
+        if state == "installed" && has_controller && !self.ready {
+            self.ready = true;
+            return Step::Ready;
         }
         Step::Nothing
     }
 
-    /// Reload pressed in the toast; `waiting` is `registration.waiting` at that moment.
+    /// The page reloads into the new version (update.rs: Reload pressed, or the music stopped); `waiting` is
+    /// `registration.waiting` at that moment.
     pub fn reload_pressed<W: Worker>(&mut self, waiting: Option<&W>) -> Step {
         if self.reloading { return Step::Nothing; }
         self.asked = true;
@@ -137,8 +137,10 @@ impl Flow {
         Some(cache)
     }
 
+    /// The shell cache the controlling worker named, once it answered.
     pub fn cache(&self) -> Option<String> { self.cache.clone() }
-    pub fn toast_shown(&self) -> bool { self.toast }
+    /// Whether update.rs was told about a waiting worker.
+    pub fn ready_seen(&self) -> bool { self.ready }
 }
 
 thread_local! {
@@ -177,32 +179,37 @@ fn state_name(s: ServiceWorkerState) -> &'static str {
 
 fn apply(step: Step) {
     match step {
-        Step::ShowToast => show_toast(),
+        Step::Ready => crate::update::worker_ready(),
         Step::Reload => dom::reload(),
         Step::Posted => dom::keep_forever(dom::Timeout::new(RELOAD_FALLBACK_MS, || apply(flow(|f| f.reload_timeout())))),
         Step::Nothing => {}
     }
 }
 
-/// The persistent toast (it stays until the page reloads).
-fn show_toast() {
-    let Some(host) = dom::by_id("toasts") else { return };
-    if dom::by_id("sw-update").is_some() { return; }
-    let el = dom::create("div");
-    el.set_id("sw-update");
-    el.set_class_name("toast");
-    let _ = el.set_attribute("role", "status");
-    let _ = el.set_attribute("style", "display:flex;align-items:center;gap:12px");
-    dom::set_html(&el, &format!(r#"<span class="grow">{}</span><button class="btn sm primary" type="button">{}</button>"#, READY_TEXT, RELOAD_LABEL));
-    if let Some(btn) = dom::qs_in(&el, "button") {
-        let b = btn.clone();
-        dom::on_forever(&btn, "click", move |_| {
-            dom::set_disabled(&b, true);
-            let waiting = REG.with(|r| r.borrow().as_ref().and_then(|r| r.waiting()));
-            apply(flow(|f| f.reload_pressed(waiting.as_ref())));
-        });
-    }
-    let _ = host.append_child(&el);
+/// Whether a new worker has installed and waits to take over (`registration.waiting`).
+pub fn waiting() -> bool { REG.with(|r| r.borrow().as_ref().is_some_and(|r| r.waiting().is_some())) }
+
+/// Reload into the new version: through the waiting worker when there is one (`skip-waiting`, then the reload
+/// on `controllerchange`, with the fallback timer), otherwise `location.reload()` straight away (no worker
+/// here, or none waits: navigations go to the network first, so the reload fetches the new build).
+pub fn apply_update() {
+    let waiting = REG.with(|r| r.borrow().as_ref().and_then(|r| r.waiting()));
+    apply(flow(|f| f.reload_pressed(waiting.as_ref())));
+}
+
+/// Let a waiting worker take over without reloading this page: it already runs the new build. The
+/// `controllerchange` that follows does not reload either, since this page did not ask for one.
+pub fn activate_quietly() {
+    if let Some(w) = REG.with(|r| r.borrow().as_ref().and_then(|r| r.waiting())) { let _ = w.post(&skip_waiting_message()); }
+}
+
+/// `registration.update()` now, past the throttle (update.rs: the server says a new build is out), and wait
+/// for the browser to have fetched the worker script. The new worker installs after that; its `installed`
+/// reaches update.rs through [`Step::Ready`].
+pub async fn check_now() {
+    flow(|f| f.registered(dom::now_ms()));
+    let Some(reg) = REG.with(|r| r.borrow().clone()) else { return };
+    if let Ok(p) = reg.update() { let _ = wasm_bindgen_futures::JsFuture::from(p).await; }
 }
 
 /// Follow a new worker through its states.
@@ -276,17 +283,17 @@ mod tests {
     }
 
     #[test]
-    fn a_new_worker_shows_the_toast_once_and_only_as_an_update() {
+    fn a_new_worker_is_reported_once_and_only_as_an_update() {
         let mut f = Flow::default();
         // the very first worker of this browser: no controller yet, nothing to say
         assert_eq!(f.worker_state("installing", false), Step::Nothing);
         assert_eq!(f.worker_state("installed", false), Step::Nothing);
-        assert!(!f.toast_shown());
+        assert!(!f.ready_seen());
         // a new version next to a controlling one
         assert_eq!(f.worker_state("installing", true), Step::Nothing);
-        assert_eq!(f.worker_state("installed", true), Step::ShowToast);
-        assert!(f.toast_shown());
-        // a second statechange or a second new worker does not stack toasts
+        assert_eq!(f.worker_state("installed", true), Step::Ready);
+        assert!(f.ready_seen());
+        // a second statechange or a second new worker is not reported again
         assert_eq!(f.worker_state("installed", true), Step::Nothing);
         assert_eq!(f.worker_state("activated", true), Step::Nothing);
     }

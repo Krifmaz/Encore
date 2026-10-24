@@ -412,6 +412,8 @@ pub fn init() {
     if dom::window().is_secure_context() {
         crate::sw::register();
     }
+    // reload into a new version of the web app once the server serves one (update.rs)
+    crate::update::start();
     dom::on_window("encore:unauthorized", |_| {
         if user().is_some() {
             set_user(None);

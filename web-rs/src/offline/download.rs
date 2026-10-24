@@ -49,6 +49,9 @@ thread_local! {
     static ACTIVE: RefCell<HashSet<i64>> = RefCell::new(HashSet::new());
 }
 
+/// Whether some download is saving songs on this device right now (a reload would stop it; update.rs waits).
+pub fn downloading() -> bool { ACTIVE.with(|a| !a.borrow().is_empty()) }
+
 /// The library id of a song row (None for previews and catalog rows).
 pub fn track_id(row: &Value) -> Option<i64> {
     if row.truthy("preview") { return None; }

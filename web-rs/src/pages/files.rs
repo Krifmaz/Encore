@@ -24,6 +24,8 @@ pub mod logic;
 mod tags;
 mod upload;
 
+pub use upload::uploading;
+
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;

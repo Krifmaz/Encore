@@ -73,6 +73,27 @@ fn hashed_asset(path: &str) -> bool {
     !name.contains('/') && stem.rsplit_once('-').is_some_and(|(_, h)| h.len() >= 12 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// The build id of the web app in `static_dir`: the content hash in the name of trunk's script,
+/// `encore-web-<hash>.js` (the same hash sw.js makes its cache name from). `/api/health` sends it as `web`, so
+/// an open tab can tell that the server now serves another build than the one it runs (web-rs/src/update.rs)
+/// and reload itself. None when the folder has no such file (a server without the web app, the tests).
+pub fn web_build(static_dir: &std::path::Path) -> Option<String> {
+    let mut found: Vec<String> = std::fs::read_dir(static_dir).ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|name| web_build_of(&name).map(str::to_string))
+        .collect();
+    // one build per folder; should an old script linger next to the new one, the answer is still stable
+    found.sort();
+    found.pop()
+}
+
+/// The hash of a file name `encore-web-<hash>.js` (not the `_bg.wasm`, not a `.js.br` copy); None for any
+/// other name. Trunk drops leading zeros of the hash, so 12 hex digits or more count, as in [`hashed_asset`].
+fn web_build_of(name: &str) -> Option<&str> {
+    let hash = name.strip_prefix("encore-web-")?.strip_suffix(".js")?;
+    (hash.len() >= 12 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
+}
+
 /// `/next/` was the Rust UI's address while the JavaScript UI lived at `/`; an alias for one release (0.26).
 /// `/next` and `/next/` go to `/`; `/next/<path>` goes to `/<path>` with its query string, so an old tab
 /// reloading its hashed script, a bookmarked `/next/share.html` and a desktop app whose saved address ends in
@@ -89,6 +110,8 @@ pub fn app(st: AppState) -> Router {
     let static_dir = st.static_dir.clone();
     let busy = st.busy.clone();
     let perf = st.web.perf.clone();
+    // read once: a new web build only ever arrives with a new server process (an update, a new image)
+    let web = web_build(&static_dir);
     // the web app (web-rs, built by trunk into static/): one folder, index.html for every path that is not a file.
     // The image keeps each text file brotli- and gzip-compressed next to it (`app.css.br`, `app.css.gz`): a
     // browser that takes one gets it, anything else the plain file; caches keep the variants apart (Vary).
@@ -99,7 +122,8 @@ pub fn app(st: AppState) -> Router {
         .route("/next", get(next_alias))
         .route("/next/", get(next_alias))
         .route("/next/{*rest}", get(next_alias))
-        .route("/api/health", get(|| async { Json(json!({ "ok": true, "version": crate::VERSION, "server": "rust" })) }))
+        // `web`: the build of the web app served here (null without one); open tabs reload when it changes
+        .route("/api/health", get(move || async move { Json(json!({ "ok": true, "version": crate::VERSION, "server": "rust", "web": web })) }))
         .merge(routes::auth::router())
         .merge(routes::admin::router())
         .merge(routes::library::router())
@@ -236,6 +260,27 @@ mod tests {
         assert!(!super::hashed_asset("/a/encore-web-f92ab5b84b305a59.js"));
     }
 
+    #[test]
+    fn the_web_build_is_the_scripts_hash() {
+        assert_eq!(super::web_build_of("encore-web-f92ab5b84b305a59.js"), Some("f92ab5b84b305a59"));
+        // a hash that started with a zero (15 digits)
+        assert_eq!(super::web_build_of("encore-web-59d563296e62da3.js"), Some("59d563296e62da3"));
+        for other in ["encore-web-f92ab5b84b305a59_bg.wasm", "encore-web-f92ab5b84b305a59.js.br", "encore-web-f92ab5b84b305a59.js.gz",
+                      "encore-web-short.js", "encore-web-f92ab5b8.js", "index.html", "sw.js", "encore-web-.js"] {
+            assert_eq!(super::web_build_of(other), None, "{other}");
+        }
+        let dir = std::env::temp_dir().join(format!("encore-web-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::web_build(&dir), None, "an empty folder");
+        for name in ["index.html", "encore-web-f92ab5b84b305a59.js", "encore-web-f92ab5b84b305a59.js.br", "encore-web-f92ab5b84b305a59_bg.wasm"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        assert_eq!(super::web_build(&dir).as_deref(), Some("f92ab5b84b305a59"));
+        assert_eq!(super::web_build(&dir.join("missing")), None, "no folder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Rust UI's trunk output served at `/`: index.html for the root and for unknown paths, its own files
     /// (css, sw.js) from the same folder, the hashed files cached for good, `/next/…` redirected to `/…`.
     #[tokio::test]
@@ -287,6 +332,10 @@ mod tests {
         assert_eq!((s, b.as_str()), (StatusCode::OK, "body{}"));
         let (s, _, b) = get(&rust, "/sw.js").await;
         assert_eq!((s, b.as_str()), (StatusCode::OK, "// sw"));
+        // /api/health names the build served here, so open tabs notice a new one
+        let (s, _, b) = get(&rust, "/api/health").await;
+        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!((s, v["web"].as_str()), (StatusCode::OK, Some("f92ab5b84b305a59")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
