@@ -380,6 +380,25 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
                 controls = controls.push(iced::widget::tooltip(widgets::btn_sm("Play here", Btn::Default, Some(Message::PlayHere(d.clone()))), crate::widgets::tip_box("Continue this song on this device"), iced::widget::tooltip::Position::Bottom).gap(4));
             }
         }
+        // the device's own output volume (its media or speaker volume), when it reports one: also while nothing plays
+        if let Some(sys) = s["system_volume"].as_f64() {
+            let sid = id.clone();
+            controls = controls.push(iced::widget::tooltip(
+                row![
+                    widgets::faint("Device").size(12),
+                    slider(0.0..=1.0, sys.clamp(0.0, 1.0), move |v| {
+                        Message::Command(sid.clone(), json!({ "action": "system_volume", "value": (v * 20.0).round() / 20.0 }))
+                    })
+                    .step(0.05)
+                    .width(110)
+                    .style(theme::slider_style),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                crate::widgets::tip_box("The device's own volume (its system volume, not just Encore's)"),
+                iced::widget::tooltip::Position::Bottom,
+            ).gap(4));
+        }
         if playing_here && state.devices.linked.is_none() && !grouped {
             controls = controls.push(widgets::btn_sm(
                 "Send my music there",

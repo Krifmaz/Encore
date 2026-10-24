@@ -800,6 +800,20 @@ The same on web, desktop and phone (phone: `playback/Normalization.kt`, tested i
     spot) keep `gain`, `sample_rate` and `bit_depth` next to the other fields the web's `slim()` keeps, so a song sent to
     another device plays normalized there too.
 
+### 5.1a Device volume from another device (remote)
+
+Next to the player volume (`volume`, Encore's own level on that device), a device can report and take its **system
+output volume**: Android's media volume (the volume keys' one), the computer's speaker volume for the desktop app and
+a Cadenza player (Linux `wpctl` / `pactl` / `amixer`, macOS `osascript`, Windows the default endpoint).
+
+- Check-in state: `"system_volume": 0.45` (0..1, 0 while muted). Left out or `null` when the device cannot change
+  it: the web (a browser cannot), a TV whose volume is fixed (HDMI: the TV or receiver owns it), a machine with no
+  mixer that answers. Android checks in again at once when the volume keys change it.
+- Command: `{"action": "system_volume", "value": 0.7}` (0..1). It unmutes; a value that is not a number changes
+  nothing. The player volume stays as it is.
+- Your devices (web, desktop, Android): each device card that reports `system_volume` shows a **Device** slider
+  next to the player's, also while nothing plays there.
+
 ### 5.2 Lyrics mode (p6 item 4)
 
 No new endpoint (`GET /api/library/tracks/{id}/lyrics` as today). The mode is remembered on the device under

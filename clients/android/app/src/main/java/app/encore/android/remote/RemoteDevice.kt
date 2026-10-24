@@ -489,6 +489,7 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             "play" -> mapOf("playing" to JsonPrimitive(true), "position" to JsonPrimitive(pos))
             "seek" -> mapOf("position" to JsonPrimitive(body.dbl("value")))
             "volume" -> mapOf("volume" to JsonPrimitive(body.dbl("value")))
+            "system_volume" -> mapOf("system_volume" to JsonPrimitive(body.dbl("value")))
             "shuffle" -> mapOf("shuffle" to JsonPrimitive(body.bool("value")))
             "repeat" -> mapOf("repeat" to JsonPrimitive(body.str("value")))
             else -> null

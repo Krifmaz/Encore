@@ -62,6 +62,7 @@ import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -338,6 +339,15 @@ private fun DeviceCard(nav: Nav, dev: DeviceInfo, others: List<DeviceInfo>, link
                     }
                     val vol = if (s.containsKey("volume")) s.dbl("volume").toFloat().coerceIn(0f, 1f) else 0.9f
                     VolumeSlider(vol, p.accent, p.border, Modifier.weight(1f).padding(start = 6.dp)) { v -> send("volume") { put("value", v.toDouble()) } }
+                }
+            }
+            // the device's own media or speaker volume, when it reports one: also while nothing plays there
+            (s["system_volume"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toDoubleOrNull()?.let { sys ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Device volume", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                    VolumeSlider(sys.toFloat().coerceIn(0f, 1f), p.accent, p.border, Modifier.weight(1f).padding(start = 10.dp)) { v ->
+                        send("system_volume") { put("value", v.toDouble()) }
+                    }
                 }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -50,6 +50,7 @@ import app.encore.android.playback.output.EffectsChain
 import app.encore.android.playback.output.OutputRouter
 import app.encore.android.remote.RemoteDevice
 import app.encore.android.remote.ServiceHost
+import app.encore.android.remote.SystemVolume
 import app.encore.android.ui.MainActivity
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
@@ -302,6 +303,8 @@ class EncorePlaybackService : MediaLibraryService() {
             norm = { graph.prefs.norm.value },
             setNorm = { n -> graph.prefs.setNorm(n) },
             normLine = { current.track()?.let { normRow(it).first } ?: "" },
+            // the phone's (or TV's) own media volume, for a device controlling this one
+            systemVolume = SystemVolume(this),
         ).also { it.start() }
         // a group listen: the player follows the group's queue and clock, and this phone's controls go to the group
         GroupListen.init(this)

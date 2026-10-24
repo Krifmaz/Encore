@@ -48,17 +48,17 @@ auto-launch = "0.6"
 # Cadenza: the engine itself with shared-mode output everywhere; the per-OS tables add the
 # exclusive backends. Cargo unifies the features of one dependency across target tables, so
 # the git+rev is the same in every table.
-cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["cpal"] }
-cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37" }
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "2edd0db0a19ab5e92b2d29f9f954d81e5507f539", default-features = false, features = ["cpal"] }
+cadenza-dsp = { git = "https://github.com/Krifmaz/cadenza", rev = "2edd0db0a19ab5e92b2d29f9f954d81e5507f539" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["alsa"] }
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "2edd0db0a19ab5e92b2d29f9f954d81e5507f539", default-features = false, features = ["alsa"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["wasapi"] }
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "2edd0db0a19ab5e92b2d29f9f954d81e5507f539", default-features = false, features = ["wasapi", "os-volume"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "17673b3a0905157edb611940e2c5e2b0eded0c37", default-features = false, features = ["coreaudio"] }
+cadenza = { git = "https://github.com/Krifmaz/cadenza", rev = "2edd0db0a19ab5e92b2d29f9f954d81e5507f539", default-features = false, features = ["coreaudio"] }
 
 [profile.release]
 opt-level = "s"
