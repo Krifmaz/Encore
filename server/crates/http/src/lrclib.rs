@@ -10,7 +10,8 @@ pub const API: &str = "https://lrclib.net/api";
 
 /// A title without "(feat. …)", "[with …]" or "(… remaster)", the way LRCLIB files songs.
 fn clean(s: &str) -> String {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[](feat|ft|with|remaster)[^\)\]]*[\)\]]").unwrap());
+    // a bracket that starts with a featuring word, or that names a remaster anywhere ("[2011 Remaster]")
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[]((feat|ft|with)\b[^\)\]]*|[^\)\]]*remaster[^\)\]]*)[\)\]]").unwrap());
     RE.replace_all(s, "").trim().to_string()
 }
 
@@ -104,5 +105,8 @@ mod tests {
     #[test]
     fn clean_drops_features_and_remasters() {
         assert_eq!(clean("Song (feat. Someone) [2011 Remaster]"), "Song");
+        assert_eq!(clean("Song (Remastered 2009)"), "Song");
+        // a word that only starts like one stays
+        assert_eq!(clean("Song (Without You)"), "Song (Without You)");
     }
 }
