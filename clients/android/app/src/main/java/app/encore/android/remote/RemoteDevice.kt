@@ -54,8 +54,15 @@ interface PlayerHost {
     fun pauseLocal()
 }
 
-/** Another signed-in device, as GET /api/remote/devices and the event stream list it. */
-data class DeviceInfo(val id: String, val name: String, val state: JsonObject) {
+/**
+ * Another signed-in device, as GET /api/remote/devices and the event stream list it.
+ *
+ * @property id the device's id.
+ * @property name the name it checks in under.
+ * @property state what it plays, as its latest check-in says.
+ * @property seenMs when the server got that check-in (server clock, ms; 0 when the server didn't say).
+ */
+data class DeviceInfo(val id: String, val name: String, val state: JsonObject, val seenMs: Long = 0L) {
     val remoteOf: String get() = state.str("remote_of")
     val title: String get() = state.str("title")
     val playing: Boolean get() = state.bool("playing")
@@ -67,8 +74,12 @@ data class Link(
     val name: String,
     val state: JsonObject = JsonObject(emptyMap()),
     val online: Boolean = true,
-    /** when `state` arrived (elapsed ms): the position moves on from there while it plays */
+    /** when `state`'s position was true (this phone's clock, ms): the position moves on from there while it plays */
     val at: Long = System.currentTimeMillis(),
+    /** when the server got the check-in `state` comes from (server clock, ms; 0: not known) – see [LinkClock] */
+    val seenMs: Long = 0L,
+    /** when this phone last sent a command it showed ahead of the device's word (its clock, ms; 0: none) */
+    val commandAt: Long = 0L,
 ) {
     /** Playing there (and still checking in). */
     val playing: Boolean get() = online && state.bool("playing")
@@ -138,6 +149,8 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
     private var missed = 0
     /** Commands that came before the service was there to run them (main thread). */
     private val pending = ArrayList<Pair<Long, JsonObject>>()
+    /** This phone's clock against the server's, from the check-ins' `seen` times (dates the linked position). */
+    private val clock = ClockOffset()
     @Volatile private var hostPlaying = false
 
     /** The id this phone checks in under (made once, kept in the session store). */
@@ -373,20 +386,25 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
     private fun gotDevices(list: JsonElement?) {
         val arr = list as? JsonArray ?: return
         val mine = me
+        val arrived = System.currentTimeMillis()
         val out = ArrayList<DeviceInfo>()
         for (e in arr) {
             val o = e as? JsonObject ?: continue
             val id = o.str("id")
             if (id.isEmpty() || id == mine) continue
-            out.add(DeviceInfo(id, o.str("name"), o["state"] as? JsonObject ?: JsonObject(emptyMap())))
+            // `seen`: server time in seconds (a float); every device's check-in is a sample of the clocks' offset
+            val seen = Math.round(o.dbl("seen") * 1000)
+            clock.add(arrived, seen)
+            out.add(DeviceInfo(id, o.str("name"), o["state"] as? JsonObject ?: JsonObject(emptyMap()), seen))
         }
         _devices.value = out
         val l = _link.value ?: return
         val d = out.firstOrNull { it.id == l.id }
         synchronized(this) {
             missed = if (d != null) 0 else missed + 1
+            // the check-in decides, dated by when the server got it (LinkClock: no restart of the bar per copy)
+            if (d != null) _link.value = LinkClock.next(_link.value ?: l, d.state, d.seenMs, arrived, clock.offsetMs)
             // two missed checks: offline (the bar says so)
-            if (d != null) _link.value = l.copy(state = d.state, online = true, at = System.currentTimeMillis())
             else if (missed > 1 && l.online) _link.value = l.copy(online = false)
         }
     }
@@ -400,7 +418,7 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             prefs.edit().putString(K_LINK, buildJsonObject { put("id", d.id); put("name", name) }.toString()).apply()
         } catch (_: Exception) {}
         missed = 0
-        _link.value = Link(d.id, name, d.state, online = true)
+        _link.value = Link(d.id, name, d.state, online = true, seenMs = d.seenMs)
         main.post {
             try { host?.pauseLocal() } catch (_: Exception) {}
             update()
@@ -466,7 +484,11 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
         if (patched != null) {
             synchronized(this) {
                 val cur = _link.value
-                if (cur != null && cur.id == l.id) _link.value = cur.copy(state = JsonObject(cur.state + patched), at = System.currentTimeMillis())
+                if (cur != null && cur.id == l.id) {
+                    val now = System.currentTimeMillis()
+                    // commandAt: check-ins made before the device ran this don't undo it (LinkClock.COMMAND_GRACE_MS)
+                    _link.value = cur.copy(state = JsonObject(cur.state + patched), at = now, commandAt = now)
+                }
             }
         }
         return true

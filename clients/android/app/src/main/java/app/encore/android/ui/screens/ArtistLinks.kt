@@ -44,13 +44,17 @@ fun songLinks(
     // without the server's split (an older server, a saved queue) the whole text is one name, looked up like
     // the web's `/artist-name/` – it may be "A feat. B", which is no library artist
     val list = track.artists.ifEmpty { if (s.isNotEmpty()) listOf(ArtistCredit(s, inLibrary = false)) else emptyList() }
-    for (a in list) {
-        if (a.name.isEmpty()) continue
-        val i = s.indexOf(a.name, at)
-        if (i < 0) continue
-        append(s.substring(at, i))
-        withLink(LinkAnnotation.Clickable("artist:${a.name}", style) { onArtist(a) }) { append(a.name) }
-        at = i + a.name.length
+    // each credit's place in the text, found as the server matched it (any order, spelling folded): an exact,
+    // left-to-right search left a credit like "Dr Dre" for the text "Dr. Dre" unlinked and greyed out
+    val credited = list.filter { it.name.isNotEmpty() }
+    val spans = CreditSpans.find(s, credited.map { it.name })
+    for ((k, r) in spans) {
+        val a = credited[k]
+        append(s.substring(at, r.first))
+        // the text's own spelling is what shows; the credit (with its MusicBrainz id) is what opens
+        val shown = s.substring(r.first, r.last + 1)
+        withLink(LinkAnnotation.Clickable("artist:${a.name}", style) { onArtist(a) }) { append(shown) }
+        at = r.last + 1
     }
     if (at == 0) {
         if (s.isNotEmpty()) withLink(LinkAnnotation.Clickable("artist:$s", style) { onArtist(ArtistCredit(s, inLibrary = false)) }) { append(s) }
