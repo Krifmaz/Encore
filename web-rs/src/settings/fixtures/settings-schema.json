@@ -862,6 +862,52 @@
           "test": null,
           "test_label": null,
           "title": "Surround (Dolby Atmos)"
+        },
+        {
+          "desc": "What happens to a file when you delete an album, a song or a file. Off: it is deleted for good straight away. On: it waits in the Trash (Settings → System → Files → Trash, on the music disk) and can be restored until the days run out.",
+          "fields": [
+            {
+              "advanced": false,
+              "default": false,
+              "env": "ENCORE_TRASH_KEEP",
+              "env_locked": false,
+              "full": false,
+              "help": "Off: deleting an album, a song or a file deletes it for good. On: it goes to the Trash first, where you can restore it.",
+              "key": "trash_keep",
+              "label": "Keep deleted files in Trash",
+              "max": null,
+              "min": null,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "bool",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": 30,
+              "env": "ENCORE_TRASH_DAYS",
+              "env_locked": false,
+              "full": false,
+              "help": "After this many days a file in the Trash is deleted for good (also what a reported song's old file waits once its replacement arrived).",
+              "key": "trash_days",
+              "label": "Keep them for",
+              "max": 3650,
+              "min": 1,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": "days",
+              "when": null
+            }
+          ],
+          "id": "trash",
+          "part": "",
+          "test": null,
+          "test_label": null,
+          "title": "Deleting files"
         }
       ],
       "id": "library",

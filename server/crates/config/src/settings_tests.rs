@@ -45,7 +45,7 @@ fn table_order_is_a_to_z_then_the_later_keys() {
     let first_late = keys.iter().position(|k| *k == "email_login").unwrap();
     assert!(keys[..first_late].windows(2).all(|w| w[0] < w[1]), "the first run is A to Z");
     assert_eq!(&keys[first_late..first_late + 3], &["email_login", "app_session_days", "lastfm_shared_secret"]);
-    assert_eq!(keys.last(), Some(&"single_to_album"));
+    assert_eq!(keys.last(), Some(&"trash_days"));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn apps_and_sources_is_four_pages_and_old_links_still_open() {
     };
     let cards = |id: &str| SCHEMA.iter().find(|s| s.id == id).unwrap().groups.iter().map(|g| g.id).collect::<Vec<_>>();
     // 0.33: the sources of translated titles on the Library page
-    assert_eq!(cards("library"), ["library", "verify", "translations", "surround"]);
+    assert_eq!(cards("library"), ["library", "verify", "translations", "surround", "trash"]);
     assert_eq!(cards("downloads"), ["pipeline", "releases", "streamrip", "torznab", "slskd", "ytdlp", "youtube"]);
     assert_eq!(cards("integrations"), ["spotify", "media", "roon"]);
     assert_eq!(cards("processing"), ["cadenza"]);

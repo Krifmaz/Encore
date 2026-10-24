@@ -127,6 +127,8 @@ fn sort(entries: &mut [Entry], q: &Query) {
 pub fn list(db: &Db, dirs: &LibraryDirs, roots: &[Root], t: &Target, q: &Query) -> Result<Value, ApiError> {
     let (dir, via_link) = browse_dir(t, roots)?;
     let mut entries = read(&dir)?;
+    // the config folder and the Trash (in the library folder) aren't shown where they lie
+    entries.retain(|e| !t.root.fenced_off(&dir.join(&e.name)));
     sort(&mut entries, q);
     let total = entries.len();
     let page: Vec<Entry> = entries.into_iter().skip(q.offset).take(q.limit).collect();

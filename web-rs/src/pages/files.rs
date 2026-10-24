@@ -59,6 +59,10 @@ pub struct Root {
     pub path: String,
     pub writable: bool,
     pub free: f64,
+    /// Trash's: whether deletes keep files there (Settings → Library → Deleting files; a server before 0.38 always did)
+    pub keep: bool,
+    /// Trash's: the days it keeps them (0: not said)
+    pub days: i64,
 }
 
 impl Root {
@@ -66,7 +70,8 @@ impl Root {
         let id = v.s("id");
         if id.is_empty() { return None; }
         let name = if v.s("name").is_empty() { id.clone() } else { v.s("name") };
-        Some(Root { id, name, path: v.s("path"), writable: !v.has("writable") || v.truthy("writable"), free: v.f("free_bytes") })
+        Some(Root { id, name, path: v.s("path"), writable: !v.has("writable") || v.truthy("writable"), free: v.f("free_bytes"),
+                    keep: !v.has("keep") || v.truthy("keep"), days: v.f("days") as i64 })
     }
     pub fn is_trash(&self) -> bool { self.id == "trash" }
 }
@@ -273,7 +278,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     <div><h1>Files</h1><div class="small muted">Browse, upload, move, rename and import in the library and download folders</div></div>
     <div class="fm">
       <aside class="card flat fm-tree" aria-label="Folders">
-        <div class="small muted fm-tree-head">The folders Encore may change. Deleted files go to Trash first.</div>
+        <div class="small muted fm-tree-head">The folders Encore may change.</div>
         <div id="fm-roots" role="tree"><div class="empty" style="padding:24px"><span class="spinner"></span></div></div>
       </aside>
       <section class="fm-main">
@@ -346,6 +351,8 @@ impl Fm {
     fn root_info(&self) -> Option<Root> { let id = self.root.borrow().clone(); self.roots.borrow().iter().find(|r| r.id == id).cloned() }
     fn root_name(&self, id: &str) -> String { self.roots.borrow().iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_else(|| id.to_string()) }
     fn in_trash(&self) -> bool { *self.root.borrow() == "trash" }
+    /// Does a delete keep files in Trash, and for how many days?
+    fn trash_keep(&self) -> (bool, i64) { self.roots.borrow().iter().find(|r| r.is_trash()).map(|r| (r.keep, r.days)).unwrap_or((true, 0)) }
     /// Whether this folder may be written to: its root is writable, it isn't Trash, it isn't reached through a link.
     fn can_write(&self) -> bool { self.ready.get() && !self.in_trash() && !self.via_link.get() && self.root_info().is_some_and(|r| r.writable) }
     /// Why nothing may be written here, in the server's words.
@@ -568,7 +575,7 @@ impl Fm {
                 if trash { "" } else { "The search below looks in every folder." }));
         } else if rows.is_empty() {
             dom::set_html(&self.list, &if trash {
-                empty_state(&icon("trash"), "The trash is empty", "Files you move to trash wait here until you delete them forever.")
+                empty_state(&icon("trash"), "The trash is empty", &logic::trash_empty_line(self.trash_keep()))
             } else {
                 empty_state(&svg_folder(), "This folder is empty", if self.can_write() { "Upload files here, or make a new folder." } else { "" })
             });
@@ -612,7 +619,7 @@ impl Fm {
                 if w && one.as_ref().is_some_and(logic::is_audio) { b.push(btn("tags", &icon("tag"), "Edit tags", "")); }
                 if w {
                     b.push(btn("move", &svg_move(), "Move", ""));
-                    b.push(btn("trash", &icon("trash"), "Move to trash", "danger"));
+                    b.push(btn("trash", &icon("trash"), logic::delete_label(self.trash_keep().0), "danger"));
                 }
             }
             if n < self.rows.borrow().len() { b.push(btn("all", "", "Select all", "ghost")); }
@@ -756,7 +763,7 @@ impl Fm {
         } else if multi {
             if w {
                 { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::new(&format!("Move {} items", idx.len()), &svg_move(), move || me.move_items(idx.clone()))); }
-                { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::danger("Move to trash", &icon("trash"), move || dom::spawn(me.clone().trash_items(idx.clone())))); }
+                { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::danger(logic::delete_label(me.trash_keep().0), &icon("trash"), move || dom::spawn(me.clone().trash_items(idx.clone())))); }
             }
         } else {
             let Some(e) = self.row(i) else { return };
@@ -774,7 +781,7 @@ impl Fm {
                 if !items.is_empty() { items.push(MenuItem::SEP); }
                 { let me = self.clone(); items.push(MenuItem::new("Rename", &icon("edit"), move || me.rename(i))); }
                 { let me = self.clone(); items.push(MenuItem::new("Move", &svg_move(), move || me.move_items(vec![i]))); }
-                { let me = self.clone(); items.push(MenuItem::danger("Move to trash", &icon("trash"), move || dom::spawn(me.clone().trash_items(vec![i])))); }
+                { let me = self.clone(); items.push(MenuItem::danger(logic::delete_label(me.trash_keep().0), &icon("trash"), move || dom::spawn(me.clone().trash_items(vec![i])))); }
             }
         }
         if items.is_empty() { return; }
@@ -853,14 +860,15 @@ impl Fm {
         if !self.can_write() { toast(self.why_not(), "err"); return; }
         let names: Vec<String> = idx.iter().filter_map(|i| self.row(*i)).map(|e| e.s("name")).collect();
         if names.is_empty() { return; }
-        let title = if names.len() == 1 { format!("Move “{}” to trash?", names[0]) } else { format!("Move {} items to trash?", names.len()) };
-        if !confirm_dialog(&title, "You can restore them from Trash. Songs in the library are taken out of it until they are restored.", "Move to trash", true).await { return; }
+        let (keep, days) = self.trash_keep();
+        if !confirm_dialog(&logic::delete_title(&names, keep), &logic::delete_body(keep, days), logic::delete_label(keep), true).await { return; }
         let (root, path) = self.cur();
         let paths: Vec<String> = names.iter().map(|n| logic::join(&path, n)).collect();
         match api::post("/files/trash", json!({ "root": root, "paths": paths })).await {
             Ok(a) => {
                 let failed = logic::failure_line(&a);
-                if failed.is_empty() { toast(&logic::done_line("trash", a.i("trashed").max(0) as usize), "ok"); } else { toast(&failed, "err"); }
+                let what = if a.truthy("deleted") { "delete" } else { "trash" };
+                if failed.is_empty() { toast(&logic::done_line(what, a.i("trashed").max(0) as usize), "ok"); } else { toast(&failed, "err"); }
             }
             Err(e) => toast_error(&e),
         }
@@ -1465,7 +1473,7 @@ mod tests {
         assert!(t.is_trash() && t.writable);
         assert!(!Root::from(&json!({"id": "slskd", "writable": false})).unwrap().writable);
         assert!(Root::from(&json!({"name": "x"})).is_none());
-        assert_eq!(root_sub_text(&Root { id: "staging".into(), name: "Staging".into(), path: String::new(), writable: false, free: 0.0 }), "Read-only");
+        assert_eq!(root_sub_text(&Root { id: "staging".into(), name: "Staging".into(), path: String::new(), keep: true, days: 0, writable: false, free: 0.0 }), "Read-only");
     }
 
     #[test]

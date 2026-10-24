@@ -1,7 +1,7 @@
 //! Bring your own music: ⋯ → *Replace with my own file* on a song, and Library → *Upload your own files*
 //! (a batch matched to the songs by their tags, ticked when the match is sure, replaced once you confirm).
 //! The server keeps the song's id, so plays, likes, playlists and lyrics stay; the old file waits in the
-//! trash for 7 days. Admins, and accounts with the "own_files" permission (server: routes::own_file).
+//! Trash while Keep deleted files in Trash is on (else deleted). Admins, and accounts with the "own_files" permission (server: routes::own_file).
 use crate::api;
 use crate::app;
 use crate::dom;
@@ -75,7 +75,7 @@ fn files_of(input: &HtmlInputElement) -> Vec<File> {
 /// place. `on_done` runs once it is (the page reloads the song).
 pub fn replace_modal(t: &Value, on_done: Option<Rc<dyn Fn()>>) {
     // the whole dialog takes a dropped file (crate::dropzone hands it to the input's change handler)
-    let body = format!(r#"<div data-dropzone="own-file"><p class="small muted" style="margin-top:0">Your file takes the place of “{title}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces stays in the trash for 7 days.</p>
+    let body = format!(r#"<div data-dropzone="own-file"><p class="small muted" style="margin-top:0">Your file takes the place of “{title}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces is deleted, or kept in the Trash while Keep deleted files in Trash is on.</p>
       <label class="btn" id="own-pick">{up}Choose or drop a file…<input type="file" id="own-file" accept="{ACCEPT}" hidden></label>
       <div class="small mt" id="own-out"></div></div>"#, title = esc(&t.s("title")), up = up_icon());
     let m = modal(ModalOpts::new("Replace with my own file", &body).footer(r#"<button class="btn" data-close>Close</button>"#));
@@ -138,7 +138,7 @@ pub fn pick_select(i: usize, staged: &Value) -> String {
 /// tags; the sure matches are chosen, the rest can be chosen from the likely songs or left out; *Replace N
 /// songs* replaces them.
 pub fn bulk_modal(on_done: Option<Rc<dyn Fn()>>) {
-    let body = format!(r#"<div data-dropzone="own-files"><p class="small muted" style="margin-top:0">Choose your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files stay in the trash for 7 days.</p>
+    let body = format!(r#"<div data-dropzone="own-files"><p class="small muted" style="margin-top:0">Choose your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files are deleted, or kept in the Trash while Keep deleted files in Trash is on.</p>
       <label class="btn" id="own-pick">{up}Choose or drop files…<input type="file" id="own-files" accept="{ACCEPT}" multiple hidden></label>
       <div class="stack mt" id="own-list" style="gap:8px"></div></div>"#, up = up_icon());
     let m = Rc::new(modal(ModalOpts::new("Upload your own files", &body).wide(true)

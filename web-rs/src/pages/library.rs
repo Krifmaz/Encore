@@ -621,6 +621,7 @@ impl Lib {
                 Err(e) => { toast(&e.message, "err"); return; }
             };
             if !trash_dialog(&d).await { return; }
+            let keep = lt::keeps(&d);
             me.moving.set(true);
             let n = ids.len();
             let bar = dom::qs_in(&me.view, "#lib-selbar");
@@ -638,7 +639,11 @@ impl Lib {
             }
             me.moving.set(false);
             if first_reason.is_empty() && moved < n { first_reason = "It is no longer in the library".into(); }
-            ui::toast_action(&lt::moved_text(moved, n, &first_reason), "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+            if keep {
+                ui::toast_action(&lt::moved_text(moved, n, &first_reason), "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+            } else {
+                toast(&lt::deleted_text(moved, n, &first_reason), if moved == n { "ok" } else { "err" });
+            }
             me.leave_select();
             me.load_types();
             me.reload();
@@ -1263,17 +1268,20 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
-/// The Delete… / Move album to Trash dialog from a dry run (POST /api/library/albums/trash `dry_run`): its title is the
+/// The Delete… / Delete album… dialog from a dry run (POST /api/library/albums/trash `dry_run`): its title is the
 /// server's ("Delete 12 albums (3.4 GB)?"), the Trash's words, the other-disk sentence and what stays; Move to Trash /
-/// Cancel. When the Trash's disk hasn't room: the server's words and Close only. → true on Move to Trash
+/// Cancel (Delete / Cancel while the Trash keeps nothing). When the Trash's disk hasn't room: the server's words and
+/// Close only. → true on Move to Trash or Delete
 async fn trash_dialog(d: &Value) -> bool {
     if d.g("room") == &json!(false) {
         modal(ModalOpts::new(&esc(&d.s("text")), &format!(r##"<p class="muted" style="margin:0">{}</p>"##, esck(d, "room_text")))
             .footer(r##"<button class="btn" data-close>Close</button>"##));
         return false;
     }
-    let body = lt::confirm_body(d.truthy("other_disk"), &d.s("skipped_text"));
-    ui::confirm_dialog_html(&d.s("text"), &format!(r##"<p class="muted" style="margin:0;white-space:pre-line">{}</p>"##, esc(&body)), "Move to Trash", true).await
+    let keep = lt::keeps(d);
+    let body = lt::confirm_body(keep, d.f("days") as i64, d.truthy("other_disk"), &d.s("skipped_text"));
+    ui::confirm_dialog_html(&d.s("text"), &format!(r##"<p class="muted" style="margin:0;white-space:pre-line">{}</p>"##, esc(&body)),
+        if keep { "Move to Trash" } else { "Delete" }, true).await
 }
 
 /// The song ⋯ menu's first line (0.36): who added the song, asked when the menu opens (the line shows once it
@@ -1608,7 +1616,11 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
                     match api::del(&format!("/library/albums/{id}")).await {
                         Ok(r) => {
                             let text = if r.truthy("text") { r.s("text") } else { lt::moved_text(1, 1, "") };
-                            ui::toast_action(&text, "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+                            if lt::keeps(&r) {
+                                ui::toast_action(&text, "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+                            } else {
+                                toast(&text, "ok");
+                            }
                             app::navigate("/library");
                         }
                         Err(e) => toast(&e.message, "err"),

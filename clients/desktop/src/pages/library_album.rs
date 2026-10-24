@@ -71,7 +71,7 @@ pub enum Dialog {
     /// Change type… (0.36): the format picked ("" = Automatic).
     ChangeType { picked: &'static str, busy: bool },
     /// Move album to Trash (0.36): the dry run's title and words; `can_go` false when the Trash has no room.
-    Trash { title: String, text: String, can_go: bool },
+    Trash { title: String, text: String, can_go: bool, keep: bool },
     /// Get the rest of the album for an album MusicBrainz doesn't list: another catalogue's track list, or
     /// one to type in (super::rest_of_album).
     Rest(Box<super::rest_of_album::State>),
@@ -998,7 +998,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::TrashDry(Ok(d)) => {
             let (title, text, can_go) = lt::trash_dialog_words(&d);
-            state.dialog = Some(Dialog::Trash { title, text, can_go });
+            state.dialog = Some(Dialog::Trash { title, text, can_go, keep: lt::keeps(&d) });
         }
         Message::TrashDry(Err(e)) => ctx.toast_err(e.message),
         Message::TrashGo => {
@@ -1009,7 +1009,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Trashed(Ok(r)) => {
             let text = if fmt::truthy(&r, "text") { fmt::s(&r, "text") } else { lt::moved_text(1, 1, "") };
-            ctx.toast_action(text, lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+            if lt::keeps(&r) {
+                ctx.toast_action(text, lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+            } else {
+                ctx.toast_ok(text);
+            }
             ctx.navigate(Page::library(""));
         }
         Message::Trashed(Err(e)) => ctx.toast_err(e.message),
@@ -1636,12 +1640,13 @@ fn change_type_dialog<'a>(state: &'a State, picked: &'static str, busy: bool) ->
     modal(lt::CHANGE_TYPE_TITLE, body, Some(footer.into()), false, Message::CloseDialog)
 }
 
-/// Move album to Trash (0.36): the dry run's words; Move to Trash / Cancel, or Close when there is no room.
-fn trash_dialog<'a>(title: &'a str, text: &'a str, can_go: bool) -> El<'a, Message> {
+/// Delete album… (0.36): the dry run's words; Move to Trash (Delete while deletes are for good) / Cancel, or Close
+/// when there is no room.
+fn trash_dialog<'a>(title: &'a str, text: &'a str, can_go: bool, keep: bool) -> El<'a, Message> {
     let footer = if can_go {
         row![
             btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-            btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::TrashGo)),
+            btn(lt::go_label(keep), Btn::Danger, Some(Message::TrashGo)),
         ]
         .spacing(10)
     } else {
@@ -1660,7 +1665,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Some(Dialog::Match(m)) => return Some(match_dialog(m, ctx)),
         Some(Dialog::Artwork(a)) => return Some(art_dialog(a, ctx)),
         Some(Dialog::ChangeType { picked, busy }) => return Some(change_type_dialog(state, picked, *busy)),
-        Some(Dialog::Trash { title, text, can_go }) => return Some(trash_dialog(title, text, *can_go)),
+        Some(Dialog::Trash { title, text, can_go, keep }) => return Some(trash_dialog(title, text, *can_go, *keep)),
         Some(Dialog::Rest(r)) => return Some(super::rest_of_album::view(r, Message::Rest, Message::CloseDialog)),
         None => {}
     }

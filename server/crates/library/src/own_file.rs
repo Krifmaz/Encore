@@ -8,8 +8,10 @@
 //!
 //! 1. the new file is copied next to the old one under a hidden name and tagged from the song
 //!    (`encore_media::tags::retag_like`: the old file's tags and pictures, the library's values on top);
-//! 2. the old file goes to `<config>/trash` as `<unix>-<id>-<name>`, the way a reported song's does, and is
-//!    deleted after 7 days by the same clean-up (encore_requests::report::purge_trash);
+//! 2. the old file goes to the Trash (`crate::folders::trash_dir`) as `<unix>-<id>-<name>`, the way a reported
+//!    song's does, so a failure can put it back; once the new file is in place it is deleted for good, unless
+//!    *Keep deleted files in Trash* is on: then it waits `trash_days` days for the same clean-up
+//!    (encore_requests::report::purge_trash);
 //! 3. the new file takes the old one's name with its own extension, so the lyrics files beside it (same name,
 //!    `.lrc` / `.txt`) still belong to it;
 //! 4. the song's row is pointed at the new file and read in again *under the same id*: plays, likes,
@@ -347,9 +349,9 @@ pub fn replace(st: &impl Ctx, user: &Row, track_id: i64, file: &Path, name: &str
         return Err(refuse(400, format!("Couldn't write the song's tags into “{name}”: {e}")));
     }
 
-    // 2. the old file to the trash, kept 7 days (the report flow's clean-up deletes it after that)
+    // 2. the old file to the trash, so a failure below can put it back
     let at = now();
-    let trash = st.data_dir().join("trash");
+    let trash = crate::folders::trash_dir(st.cfg(), st.data_dir());
     let trashed = if old.is_file() {
         let fname = old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         let to = trash.join(format!("{}-{track_id}-{fname}", at as i64));
@@ -370,6 +372,14 @@ pub fn replace(st: &impl Ctx, user: &Row, track_id: i64, file: &Path, name: &str
         }
         return Err(refuse(500, format!("Couldn't put the new file in place: {e}")));
     }
+    // the old file is kept only while deleted files are (the report flow's clean-up deletes it after the days)
+    let trashed = match trashed {
+        Some(to) if !crate::folders::trash_keep(st.cfg()) => {
+            let _ = std::fs::remove_file(&to);
+            None
+        }
+        t => t,
+    };
     // the staged upload is used up: its file and the note beside it
     let _ = std::fs::remove_file(file);
     if file.parent() == Some(stage_dir(st).as_path()) {

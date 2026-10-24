@@ -41,6 +41,8 @@ tags a lone song with (noted in §11 as a possible follow-up); Remove artist (st
   (often a compilation / remix album / soundtrack listed first).
 - The MusicBrainz answer cache is in memory, 1 h (`http/src/mb.rs`); there is no stored release-group type anywhere.
 - Delete: `DELETE /api/library/albums/{id}` (admin) → `delete_tracks` → `std::fs::remove_file` (permanent).
+  (0.38: the Trash is `<library>/.encore-trash`, and while `trash_keep` is off – the default – a delete is for good:
+  the dry run says `keep` and `days`, the real run's `text` is "Deleted N albums", and the menu item is Delete album….)
   The 0.33 file manager Trash (`files/src/trash.rs`) moves an item into `<config>/trash/<unix>-<n>/` with an
   `.origin.json` note (root, path, by, size, saved rows: id, rel, playlist item ids); `rows::Change` takes the rows out
   (playlist entries/likes kept as missing), restore reads the files in again and `rows::give_back` gives back old ids +

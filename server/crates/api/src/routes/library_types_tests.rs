@@ -35,7 +35,7 @@ async fn env_at(name: &str, lib: Option<PathBuf>) -> Env {
     let lib = std::fs::canonicalize(&lib).unwrap();
     let staging = ts.dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    ts.st.cfg.set_many(&json!({ "library_path": lib.to_string_lossy(), "staging_path": staging.to_string_lossy(), "musicbrainz_url": "http://127.0.0.1:9" }));
+    ts.st.cfg.set_many(&json!({ "trash_keep": true, "library_path": lib.to_string_lossy(), "staging_path": staging.to_string_lossy(), "musicbrainz_url": "http://127.0.0.1:9" }));
     let admin_name = format!("boss-{name}");
     let admin = user(&ts.st, &admin_name, "admin").i("id");
     let member = user(&ts.st, &format!("fan-{name}"), "user").i("id");
@@ -388,7 +388,7 @@ async fn an_album_missing_a_file_goes_and_one_missing_all_stays() {
 
 /// A Trash on another disk needs room for a copy: the dry run says so, a real run is refused with 507.
 #[tokio::test]
-async fn the_trash_needs_room_on_another_disk() {
+async fn a_library_on_another_disk_needs_no_room_for_the_trash() {
     let shm = PathBuf::from("/dev/shm");
     let probe = std::env::temp_dir();
     use std::os::unix::fs::MetadataExt;
@@ -401,13 +401,12 @@ async fn the_trash_needs_room_on_another_disk() {
     let mut e = env_at("room", Some(lib.clone())).await;
     e.song("Big", "Huge", "One", 1, 10 << 40);
     let id = encore_library::album_key("Big", "Huge", "");
+    // the Trash is on the music disk: a library on another disk than the config folder needs no room for it
     let d = e.send("POST", "/api/library/albums/trash", Some(json!({ "ids": [id], "dry_run": true }))).await.json();
-    assert_eq!((d["other_disk"].clone(), d["room"].clone()), (json!(true), json!(false)), "{d}");
-    assert!(d["room_text"].as_str().unwrap().starts_with("There isn't room in the Trash for 10.0 TB ("), "{d}");
-    assert!(d["room_text"].as_str().unwrap().ends_with(" free on its disk). Empty the Trash first, or delete fewer albums."));
+    assert_eq!((d["other_disk"].clone(), d["room"].clone(), d["room_text"].clone()), (json!(false), json!(true), json!("")), "{d}");
     let r = e.send("POST", "/api/library/albums/trash", Some(json!({ "ids": [id], "dry_run": false }))).await;
-    assert_eq!(r.status, 507);
-    assert!(lib.join("Big/Huge/One.flac").exists());
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(!lib.join("Big/Huge/One.flac").exists() && lib.join(".encore-trash").is_dir());
     e.done();
     let _ = std::fs::remove_dir_all(&lib);
 }

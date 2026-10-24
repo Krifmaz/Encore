@@ -271,6 +271,21 @@ class FilesRulesTest {
         )
         assertEquals(ImportResult("Imported 1 song", 0), ImportResult.from(obj("""{"imported": 1}""")))
     }
-}
 
-private operator fun <T> List<T>.component6(): T = this[5]
+    @Test
+    fun deletesSayWhetherTheTrashKeepsThem() {
+        val roots = listOf(FileRoot("library", "Library", "/music", true, 0), FileRoot("trash", "Trash", "/music/.encore-trash", false, 0, keep = false, days = 30))
+        assertEquals(false to 30, FilesRules.trashKeep(roots))
+        assertEquals(true to 0, FilesRules.trashKeep(null))
+        assertEquals("Delete", FilesRules.deleteLabel(false))
+        assertEquals("Delete “a.flac” for good?", FilesRules.deleteTitle(listOf("a.flac"), false))
+        assertEquals("Move 2 items to trash?", FilesRules.deleteTitle(listOf("a", "b"), true))
+        assertTrue(FilesRules.deleteBody(true, 30).startsWith("You can restore them from Trash for 30 days"))
+        assertEquals("Deleted 3 items", FilesRules.deletedLine(3, false))
+        assertEquals("Files you delete wait here for 30 days, then they are deleted for good.", FilesRules.trashEmptyLine(true, 30))
+        val off = FileRoot.from(EncoreJson.parseToJsonElement("""{"id": "trash", "name": "Trash", "path": "/t", "keep": false, "days": 7}""") as JsonObject)!!
+        assertFalse(off.keep)
+        assertEquals(7, off.days)
+        assertTrue(FileRoot.from(EncoreJson.parseToJsonElement("""{"id": "trash"}""") as JsonObject)!!.keep)
+    }
+}

@@ -58,7 +58,7 @@ async fn env(name: &str) -> Env {
     for d in [&lib, &staging, &slsk, &outside] {
         std::fs::create_dir_all(d).unwrap();
     }
-    ts.st.cfg.set_many(&json!({ "library_path": lib.to_string_lossy(), "staging_path": staging.to_string_lossy(), "slskd_download_path": slsk.to_string_lossy(),
+    ts.st.cfg.set_many(&json!({ "trash_keep": true, "library_path": lib.to_string_lossy(), "staging_path": staging.to_string_lossy(), "slskd_download_path": slsk.to_string_lossy(),
         "musicbrainz_url": "http://127.0.0.1:9", "verify_on_import": false, "upgrade_check_audio": false, "embed_cover": false, "save_cover": false }));
     let admin = user(&ts.st, &format!("boss-{name}"), "admin").i("id");
     let app = ts.app();
@@ -146,7 +146,7 @@ async fn roots_list_the_folders_with_trash_last_for_admins_only() {
     assert_eq!(roots[0]["name"], "Library");
     assert_eq!(roots[0]["writable"], true);
     assert!(roots[0]["free_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(roots[3]["path"], e.ts.dir.join("trash").to_string_lossy().as_ref());
+    assert_eq!(roots[3]["path"], encore_files::trash::dir_of(e.st()).to_string_lossy().as_ref());
     // a torrent folder that is there on the disk joins as torrent-1
     let tor = e.ts.dir.join("torrents");
     std::fs::create_dir_all(&tor).unwrap();
@@ -377,7 +377,7 @@ async fn trash_and_restore_give_back_the_files_and_the_rows() {
     assert_eq!(r["trashed"], 1, "{r}");
     assert_eq!(r["failed"], json!([{ "path": "Artist/missing.flac", "reason": "That file or folder isn't there" }]));
     let id = r["items"][0].as_str().unwrap().to_string();
-    let held = e.ts.dir.join("trash").join(&id);
+    let held = encore_files::trash::dir_of(e.st()).join(&id);
     assert!(held.join("Album/01 First.flac").is_file() && !e.lib.join("Artist/Album").exists());
     let origin: Value = serde_json::from_str(&std::fs::read_to_string(held.join(".origin.json")).unwrap()).unwrap();
     assert_eq!((origin["root"].as_str(), origin["path"].as_str(), origin["by"].as_str()), (Some("library"), Some("Artist/Album"), Some("boss-trash")));
@@ -418,7 +418,7 @@ async fn trash_and_restore_give_back_the_files_and_the_rows() {
     assert_eq!(r["restored"], 0);
     assert_eq!(r["failed"][0], json!({ "id": id4, "reason": "Its folder is no longer one Encore may use" }));
     assert_eq!(r["failed"][1]["reason"], "That isn't in the trash");
-    assert!(e.ts.dir.join("trash").join(&id4).is_dir());
+    assert!(encore_files::trash::dir_of(e.st()).join(&id4).is_dir());
     let lines = activity(&e);
     assert!(lines.iter().any(|l| l.contains("moved to trash library:Artist/Album")) && lines.iter().any(|l| l.contains("restored from trash library:Artist/Album")), "{lines:?}");
     e.done();
@@ -434,11 +434,11 @@ async fn only_trash_deletes_for_good_and_empty_trash_spares_parked_reports() {
     let ids: Vec<String> = r["items"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
     assert_eq!(ids.len(), 3);
     // the report flow's parked file in the same folder is no file manager item
-    let parked = e.ts.dir.join("trash").join("1790000000-42-song.flac");
+    let parked = encore_files::trash::dir_of(e.st()).join("1790000000-42-song.flac");
     std::fs::write(&parked, b"p").unwrap();
     let r = send(&e.app, "DELETE", &format!("/api/files/trash/{}", ids[0]), &e.cookie, None, &[]).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT);
-    assert!(!e.ts.dir.join("trash").join(&ids[0]).exists());
+    assert!(!encore_files::trash::dir_of(e.st()).join(&ids[0]).exists());
     for bad in ["1790000000-42-song.flac", "..", "%2e%2e", "1-1", "abc"] {
         let r = send(&e.app, "DELETE", &format!("/api/files/trash/{bad}"), &e.cookie, None, &[]).await;
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{bad}");
@@ -507,7 +507,7 @@ async fn import_in_place_keeps_the_files_where_they_are() {
         assert_eq!((&std::fs::read(f).unwrap(), &std::fs::metadata(f).unwrap().modified().unwrap()), (bytes, mtime));
         assert!(e.row(f).is_some(), "{}", f.display());
     }
-    assert!(std::fs::read_dir(&e.lib).unwrap().next().is_none(), "nothing went into the library folder");
+    assert!(!std::fs::read_dir(&e.lib).unwrap().flatten().any(|x| x.file_name() != ".encore-trash"), "nothing went into the library folder");
     let kept = e.slsk.join("Kept");
     assert_eq!(e.st().cfg.str("library_extra_roots"), kept.to_string_lossy());
     // a folder inside it adds nothing; a folder holding it replaces it
@@ -531,7 +531,7 @@ async fn import_in_place_keeps_the_files_where_they_are() {
     assert!(e.st().db.one("SELECT 1 x FROM activity WHERE message LIKE 'Organized the library: 0 moved, 0 re-tagged'", p![]).unwrap().is_some(), "organize ran");
     assert_eq!(std::fs::read(&kept_file).unwrap(), bytes, "not moved, renamed or retagged");
     assert_eq!(e.path_of(one).unwrap(), kept_file.to_string_lossy());
-    assert!(std::fs::read_dir(&e.lib).unwrap().next().is_none());
+    assert!(!std::fs::read_dir(&e.lib).unwrap().flatten().any(|x| x.file_name() != ".encore-trash"));
     e.done();
 }
 
@@ -735,7 +735,7 @@ async fn imports_never_delete_kept_songs_and_send_what_they_drop_to_trash() {
     // the emptied download folder's leftovers are a Trash item too
     assert!(items.contains(&("staging".into(), "Better".into())) && !e.staging.join("Better").exists(), "{items:?}");
     let held = trash.as_array().unwrap().iter().find(|x| x["path"] == "Better").unwrap()["id"].as_str().unwrap().to_string();
-    assert_eq!(std::fs::read(e.ts.dir.join("trash").join(&held).join("Better/info.nfo")).unwrap(), b"rip log");
+    assert_eq!(std::fs::read(encore_files::trash::dir_of(e.st()).join(&held).join("Better/info.nfo")).unwrap(), b"rip log");
     // the request worker's dedupe after an album import leaves the kept song alone as well
     let again = e.lib.join("Dup Artist/Third/01 Song.flac");
     assert!(flac(&again, "Dup Artist", "Third", "Song", 1));
@@ -856,7 +856,7 @@ async fn trash_notes_are_checked_and_the_config_folder_is_fenced_off() {
     std::fs::create_dir_all(e.staging.join("Box")).unwrap();
     std::fs::write(e.staging.join("Box/a.txt"), b"a").unwrap();
     let id = e.post("/api/files/trash", json!({ "root": "staging", "paths": ["Box"] })).await.json()["items"][0].as_str().unwrap().to_string();
-    let held = e.ts.dir.join("trash").join(&id);
+    let held = encore_files::trash::dir_of(e.st()).join(&id);
     std::fs::write(held.join("Box").join(std::ffi::OsStr::from_bytes(b"bad\xffname")), b"x").unwrap();
     let r = send(&e.app, "DELETE", &format!("/api/files/trash/{id}"), &e.cookie, None, &[]).await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.text());
@@ -881,7 +881,7 @@ async fn trash_notes_are_checked_and_the_config_folder_is_fenced_off() {
     assert_eq!(e.get(&format!("/api/files/list?root={tor}")).await.status, StatusCode::FORBIDDEN);
     let r = e.post("/api/files/rename", json!({ "root": tor, "path": "trash", "name": "gone" })).await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.text());
-    assert!(e.ts.dir.join("trash").is_dir());
+    assert!(encore_files::trash::dir_of(e.st()).is_dir());
     e.done();
 }
 
@@ -964,5 +964,56 @@ async fn trash_keeps_who_added_and_old_notes_still_restore() {
     assert_eq!((row.i("id"), row.i("added_by"), row.s("added_via"), row.f("requested_at"), row.s("source"), row.s("verify_status")),
                (one, e.admin, "request".to_string(), 1000.0, "Soulseek".to_string(), "manual".to_string()));
     assert_eq!(e.row(&e.lib.join("A/B/2.flac")), Some(two), "the old note gives the id back too");
+    e.done();
+}
+
+/// Keep deleted files in Trash off (the default): Move to trash deletes for good, songs' rows with it; the Trash
+/// is `.encore-trash` in the library folder, hidden from its listing; on again, items older than `trash_days`
+/// are purged; the old `<config>/trash` moves over.
+#[tokio::test]
+async fn with_the_trash_off_deletes_are_for_good_and_the_trash_lives_on_the_music_disk() {
+    let e = env("trash-off").await;
+    e.st().cfg.set_many(&json!({ "trash_keep": false }));
+    let roots = e.get("/api/files/roots").await.json();
+    let trash_root = roots.as_array().unwrap().iter().find(|r| r["id"] == "trash").unwrap().clone();
+    assert_eq!((trash_root["keep"].clone(), trash_root["days"].clone()), (json!(false), json!(30)));
+    assert_eq!(trash_root["path"], e.lib.join(".encore-trash").to_string_lossy().as_ref());
+    // the library's listing leaves the Trash out, and it can't be opened through the library
+    let list = e.get("/api/files/list?root=library&path=").await.json();
+    assert!(!list["entries"].as_array().unwrap().iter().any(|x| x["name"] == ".encore-trash"), "{list}");
+    assert_eq!(e.get("/api/files/list?root=library&path=.encore-trash").await.status, StatusCode::FORBIDDEN);
+    std::fs::write(e.staging.join("gone.txt"), b"x").unwrap();
+    let r = e.post("/api/files/trash", json!({ "root": "staging", "paths": ["gone.txt"] })).await.json();
+    assert_eq!((r["trashed"].clone(), r["items"].clone(), r["deleted"].clone()), (json!(1), json!([]), json!(true)), "{r}");
+    assert!(!e.staging.join("gone.txt").exists());
+    assert_eq!(e.get("/api/files/trash").await.json(), json!([]));
+    if let Some(files) = album(&e, &e.lib.join("Off/Album"), "Off", "Album") {
+        let id = e.row(&files[0]).unwrap();
+        let r = e.post("/api/files/trash", json!({ "root": "library", "paths": ["Off/Album"] })).await.json();
+        assert_eq!(r["deleted"], true, "{r}");
+        assert!(!e.lib.join("Off/Album").exists() && e.path_of(id).is_none(), "the songs leave the library with their files");
+    }
+    // on: kept, and purged once older than the days
+    e.st().cfg.set_many(&json!({ "trash_keep": true, "trash_days": 2 }));
+    std::fs::write(e.staging.join("kept.txt"), b"x").unwrap();
+    let r = e.post("/api/files/trash", json!({ "root": "staging", "paths": ["kept.txt"] })).await.json();
+    let id = r["items"][0].as_str().unwrap().to_string();
+    assert_eq!(encore_files::trash::purge(e.st()), 0, "two days aren't up");
+    let note = encore_files::trash::dir_of(e.st()).join(&id).join(encore_files::trash::ORIGIN);
+    let mut o: Value = serde_json::from_str(&std::fs::read_to_string(&note).unwrap()).unwrap();
+    o["at"] = json!(encore_db::now() as i64 - 3 * 86400);
+    std::fs::write(&note, o.to_string()).unwrap();
+    assert_eq!(encore_files::trash::purge(e.st()), 1);
+    assert!(!encore_files::trash::dir_of(e.st()).join(&id).exists());
+    // what the old trash in the config folder holds moves to the music disk's, and its parked rows' notes follow
+    let old = e.ts.dir.join("trash");
+    std::fs::create_dir_all(old.join("1700000000-1")).unwrap();
+    std::fs::write(old.join("1700000000-1/.origin.json"), b"{}").unwrap();
+    std::fs::write(old.join("1700000000-9-song.flac"), b"p").unwrap();
+    e.st().db.execute("INSERT INTO track_parked (id, report_id, row, trash_path, parked_at) VALUES (9, 1, '{}', ?, 1)", p![old.join("1700000000-9-song.flac").to_string_lossy()]).unwrap();
+    assert_eq!(encore_files::trash::migrate(e.st()), 2);
+    let new = encore_files::trash::dir_of(e.st());
+    assert!(!old.exists() && new.join("1700000000-1/.origin.json").is_file() && new.join("1700000000-9-song.flac").is_file());
+    assert_eq!(e.st().db.one("SELECT trash_path FROM track_parked WHERE id=9", p![]).unwrap().unwrap().s("trash_path"), new.join("1700000000-9-song.flac").to_string_lossy());
     e.done();
 }

@@ -1790,7 +1790,7 @@ pub enum LibDialog {
     },
     /// Delete… of the picked albums (0.36): the dry run's title and words; `can_go` false when the Trash's
     /// disk has no room (then only Close).
-    Trash { title: String, text: String, can_go: bool },
+    Trash { title: String, text: String, can_go: bool, keep: bool },
 }
 
 /// A Move to Trash on its way (0.36): the selection in chunks of 100, one call after the other.
@@ -1804,6 +1804,8 @@ pub struct Moving {
     done: usize,
     moved: usize,
     first_reason: String,
+    /// the Trash keeps them (false: deleted for good)
+    keep: bool,
 }
 
 #[derive(Debug, Default)]
@@ -2332,7 +2334,13 @@ fn trash_next(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     }
     let m = state.moving.take().unwrap_or_default();
     let reason = if m.first_reason.is_empty() && m.moved < m.n { "It is no longer in the library".to_string() } else { m.first_reason };
-    ctx.toast_action(lt::moved_text(m.moved, m.n, &reason), lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+    if m.keep {
+        ctx.toast_action(lt::moved_text(m.moved, m.n, &reason), lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+    } else if m.moved == m.n {
+        ctx.toast_ok(lt::deleted_text(m.moved, m.n, &reason));
+    } else {
+        ctx.toast_err(lt::deleted_text(m.moved, m.n, &reason));
+    }
     leave_select(state);
     Task::batch([load_types(state, ctx), load(state, ctx, false)])
 }
@@ -2585,10 +2593,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::DryRun(Ok(d)) => {
             let (title, text, can_go) = lt::trash_dialog_words(&d);
-            state.dialog = Some(LibDialog::Trash { title, text, can_go });
+            state.dialog = Some(LibDialog::Trash { title, text, can_go, keep: lt::keeps(&d) });
         }
         Message::DryRun(Err(e)) => ctx.toast_err(e.message),
         Message::MoveToTrash => {
+            let keep = !matches!(state.dialog, Some(LibDialog::Trash { keep: false, .. }));
             state.dialog = None;
             if state.sel.is_empty() || state.moving.is_some() {
                 return Task::none();
@@ -2597,6 +2606,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.moving = Some(Moving {
                 chunks: lt::chunks(&ids),
                 n: ids.len(),
+                keep,
                 ..Default::default()
             });
             return trash_next(state, ctx);
@@ -3735,11 +3745,11 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             danger,
             on_ok,
         }) => Some(confirm(title, text, ok, *danger, (**on_ok).clone(), Message::CloseDialog)),
-        Some(LibDialog::Trash { title, text, can_go }) => {
+        Some(LibDialog::Trash { title, text, can_go, keep }) => {
             let footer = if *can_go {
                 row![
                     btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-                    btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::MoveToTrash)),
+                    btn(lt::go_label(*keep), Btn::Danger, Some(Message::MoveToTrash)),
                 ]
                 .spacing(10)
             } else {

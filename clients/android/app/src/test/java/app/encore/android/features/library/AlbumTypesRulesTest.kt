@@ -146,10 +146,18 @@ class AlbumTypesRulesTest {
             "Moved 10 of 12 albums to the Trash – 2 couldn't be moved: Its files are outside the folders Encore manages",
             AlbumTypesRules.movedText(10, 12, "Its files are outside the folders Encore manages"),
         )
-        assertEquals(AlbumTypesRules.TRASH_BODY, AlbumTypesRules.confirmBody(false, ""))
+        assertEquals(AlbumTypesRules.TRASH_BODY, AlbumTypesRules.confirmBody(true, 0, false, ""))
+        assertEquals(AlbumTypesRules.DELETE_BODY, AlbumTypesRules.confirmBody(false, 30, false, ""))
+        assertTrue(AlbumTypesRules.confirmBody(true, 30, false, "").contains("restore them for 30 days"))
+        assertEquals("Deleted 1 album", AlbumTypesRules.deletedText(1, 1, ""))
+        assertEquals("Deleted 10 of 12 albums – 2 couldn't be deleted: X", AlbumTypesRules.deletedText(10, 12, "X"))
+        assertEquals("Delete", AlbumTypesRules.goLabel(false))
+        val off = EncoreJson.parseToJsonElement("""{"text": "Delete 1 album (1 MB)?", "keep": false, "days": 30}""") as kotlinx.serialization.json.JsonObject
+        assertEquals(AlbumTypesRules.TrashDialog("Delete 1 album (1 MB)?", AlbumTypesRules.DELETE_BODY, true, false), AlbumTypesRules.trashDialog(off))
+        assertEquals("Deleted 2 albums", AlbumTypesRules.Moved(2, "", keep = false).text(2))
         assertEquals(
             AlbumTypesRules.TRASH_BODY + AlbumTypesRules.OTHER_DISK + "\n1 of them can't be moved to the Trash and stays: X",
-            AlbumTypesRules.confirmBody(true, "1 of them can't be moved to the Trash and stays: X"),
+            AlbumTypesRules.confirmBody(true, 0, true, "1 of them can't be moved to the Trash and stays: X"),
         )
         assertTrue(AlbumTypesRules.OTHER_DISK.startsWith(" "))
         // the sums of the real runs: moved albums, the first reason; a call that moved fewer with no reason

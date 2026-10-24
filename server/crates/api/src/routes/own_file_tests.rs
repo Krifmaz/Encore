@@ -40,7 +40,7 @@ async fn env(name: &str) -> Env {
     let ts = TestServer::new(&format!("own-{name}"));
     let lib = ts.dir.join("music");
     std::fs::create_dir_all(&lib).unwrap();
-    ts.st.cfg.set_many(&json!({ "library_path": lib.to_string_lossy(), "musicbrainz_url": "http://127.0.0.1:9", "quality_check_on_import": false }));
+    ts.st.cfg.set_many(&json!({ "trash_keep": true, "library_path": lib.to_string_lossy(), "musicbrainz_url": "http://127.0.0.1:9", "quality_check_on_import": false }));
     user(&ts.st, &format!("boss-{name}"), "admin");
     let listener_id = user(&ts.st, &format!("fan-{name}"), "user").i("id");
     let app = ts.app();
@@ -142,10 +142,10 @@ async fn a_song_takes_your_own_file_and_keeps_everything_else() {
     assert_eq!(db.one("SELECT COUNT(*) n FROM plays WHERE track_id=?", p![id]).unwrap().unwrap().i("n"), 1);
     assert_eq!(db.one("SELECT COUNT(*) n FROM playlist_items WHERE track_id=?", p![id]).unwrap().unwrap().i("n"), 1);
     assert!(new.with_extension("lrc").is_file());
-    // the old file waits in the trash (deleted after 7 days by the report flow's clean-up)
+    // the old file waits in the trash on the music disk while Keep deleted files in Trash is on
     assert!(!old.exists());
     let trashed = PathBuf::from(v["trash_path"].as_str().unwrap());
-    assert!(trashed.is_file() && trashed.starts_with(e.st().data_dir().join("trash")), "{trashed:?}");
+    assert!(trashed.is_file() && trashed.starts_with(e.lib.join(".encore-trash")), "{trashed:?}");
     assert_eq!(encore_requests::report::purge_trash(e.st()), 0, "kept for now");
     // the Signal path's info says whose file it is
     let r = send(&e.app, "GET", &format!("/api/library/tracks/{id}/info"), &e.listener, None, &[]).await;

@@ -39,7 +39,7 @@ listed_last = [
     "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
     "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
     "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
-    "tools_auto_translator", "translate_background", "single_to_album",
+    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days",
 ]
 
 [sections.general]
@@ -106,6 +106,11 @@ desc = "Where translated and romanized titles come from, strongest first: correc
 section = "library"
 title = "Surround (Dolby Atmos)"
 desc = "Dolby Atmos and other 5.1 and 7.1 versions of songs, in a Surround library of their own: never in the stereo lists, shuffle, playlists or stats. Admins fetch an album's or a song's Atmos version from its page (gamdl with a wrapper-v2 server); a surround file a normal request downloads lands here too. Kodi, Plex or Jellyfin can read the folder as a library of its own."
+
+[groups.trash]
+section = "library"
+title = "Deleting files"
+desc = "What happens to a file when you delete an album, a song or a file. Off: it is deleted for good straight away. On: it waits in the Trash (Settings → System → Files → Trash, on the music disk) and can be restored until the days run out."
 
 [groups.pipeline]
 section = "downloads"
@@ -1099,6 +1104,25 @@ label = "Extra library folders"
 type = "textarea"
 full = true
 help = "One folder per line, inside the container. Their songs are in the library where and as they are: Encore never moves, renames or retags files there. Files → Import with “Keep the files where they are” adds a folder here."
+
+[keys.trash_keep]
+env = "ENCORE_TRASH_KEEP"
+default = false
+group = "trash"
+label = "Keep deleted files in Trash"
+type = "bool"
+help = "Off: deleting an album, a song or a file deletes it for good. On: it goes to the Trash first, where you can restore it."
+
+[keys.trash_days]
+env = "ENCORE_TRASH_DAYS"
+default = 30
+group = "trash"
+label = "Keep them for"
+type = "number"
+unit = "days"
+min = 1
+max = 3650
+help = "After this many days a file in the Trash is deleted for good (also what a reported song's old file waits once its replacement arrived)."
 
 [keys.staging_path]
 env = "ENCORE_STAGING_PATH"

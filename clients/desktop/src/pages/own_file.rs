@@ -1,7 +1,7 @@
 //! Bring your own music: ⋯ → *Replace with my own file* on a song, and Library → *Upload your own files* (a
 //! batch matched to the songs by their tags, the sure matches chosen, replaced once you confirm). Behaviour
 //! reference: web-rs/src/pages/own_file.rs; server: routes::own_file. The song keeps its id, so plays, likes,
-//! playlists and lyrics stay; the old file waits in the server's trash for 7 days. Admins, and accounts with
+//! playlists and lyrics stay; the old file is deleted, or kept in the Trash while that setting is on. Admins, and accounts with
 //! the "own_files" permission.
 //!
 //! The dialogs live with the song menu's ([`super::library::Dialog`]); this file holds their state, their
@@ -146,7 +146,7 @@ async fn upload(api: &Api, path: &str, file: &std::path::Path) -> Result<Value, 
 /// The Replace with my own file dialog.
 pub fn replace_view<'a>(s: &'a ReplaceState) -> El<'a, Act> {
     let mut body = column![small_muted(format!(
-        "Your file takes the place of “{}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces stays in the trash for 7 days.",
+        "Your file takes the place of “{}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces is deleted, or kept in the Trash while Keep deleted files in Trash is on.",
         fmt::s(&s.track, "title")
     ))
     .size(13)]
@@ -310,7 +310,7 @@ pub fn bulk_view<'a>(s: &'a BulkState, ctx: &Ctx<'a>) -> El<'a, Act> {
     let p = ctx.look;
     let choose = btn_icon(Icon::Plus, "Choose files…", Btn::Default, s.takes_files().then_some(Act::OwnBulkPick));
     let mut body = column![
-        small_muted("Choose (or drop) your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files stay in the trash for 7 days.").size(13),
+        small_muted("Choose (or drop) your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files are deleted, or kept in the Trash while Keep deleted files in Trash is on.").size(13),
         drop_zone::view(choose, &s.drop, "Drop audio files here to match them"),
     ]
     .spacing(14);

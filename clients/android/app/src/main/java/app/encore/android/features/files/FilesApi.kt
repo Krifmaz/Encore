@@ -50,14 +50,16 @@ import java.util.concurrent.TimeUnit
 // Everything is read leniently; a server before 0.33 answers 404 on /api/files/roots and the entries hide.
 
 /** A place the file manager may touch (`GET /api/files/roots`). */
-data class FileRoot(val id: String, val name: String, val path: String, val writable: Boolean, val freeBytes: Long) {
+/** [keep] and [days]: Trash's, whether deletes keep files there and how long (a server before 0.38 always kept them). */
+data class FileRoot(val id: String, val name: String, val path: String, val writable: Boolean, val freeBytes: Long, val keep: Boolean = true, val days: Int = 0) {
     val isTrash: Boolean get() = id == "trash"
 
     companion object {
         fun from(o: JsonObject): FileRoot? {
             val id = o.str("id")
             if (id.isEmpty()) return null
-            return FileRoot(id, o.str("name").ifEmpty { id }, o.str("path"), if (o.containsKey("writable")) o.bool("writable") else true, o.long("free_bytes"))
+            return FileRoot(id, o.str("name").ifEmpty { id }, o.str("path"), if (o.containsKey("writable")) o.bool("writable") else true, o.long("free_bytes"),
+                if (o.containsKey("keep")) o.bool("keep") else true, o.long("days").toInt())
         }
     }
 }

@@ -199,7 +199,7 @@ private fun RootsList(roots: List<FileRoot>, onPick: (FileRoot) -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
             Text(
-                "The folders Encore may change. Deleted files go to Trash first.",
+                "The folders Encore may change.",
                 style = MaterialTheme.typography.bodySmall,
                 color = p.muted,
                 modifier = Modifier.padding(horizontal = Gutter, vertical = 8.dp),
@@ -453,7 +453,7 @@ private fun FolderView(
                 if (canWrite) {
                     if (picked.size == 1) SmallButton("Rename", iconRes = R.drawable.ic_edit) { dialog = FolderDialog.Rename(picked[0]) }
                     SmallButton("Move", iconRes = R.drawable.ic_move) { dialog = FolderDialog.Move(picked) }
-                    SmallButton("Move to trash", iconRes = R.drawable.ic_delete) { dialog = FolderDialog.Trash(picked) }
+                    SmallButton(FilesRules.deleteLabel(FilesRules.trashKeep(roots).first), iconRes = R.drawable.ic_delete) { dialog = FolderDialog.Trash(picked) }
                 }
                 SmallButton("Select all") { for (e in shown) selected[e.name] = true }
                 SmallButton("Cancel") { selected.clear() }
@@ -500,7 +500,7 @@ private fun FolderView(
                             // on a link these act on the link itself, never on what it points to
                             if (canWrite) MenuEntry("Rename", R.drawable.ic_edit) { dialog = FolderDialog.Rename(e.name) } else null,
                             if (canWrite) MenuEntry("Move", R.drawable.ic_move) { dialog = FolderDialog.Move(listOf(e.name)) } else null,
-                            if (canWrite) MenuEntry("Move to trash", R.drawable.ic_delete, danger = true) { dialog = FolderDialog.Trash(listOf(e.name)) } else null,
+                            if (canWrite) MenuEntry(FilesRules.deleteLabel(FilesRules.trashKeep(roots).first), R.drawable.ic_delete, danger = true) { dialog = FolderDialog.Trash(listOf(e.name)) } else null,
                         ),
                     )
                 }
@@ -573,21 +573,24 @@ private fun FolderView(
         is FolderDialog.Rename -> NameDialog("Rename", d.name, "Rename", onDismiss = { dialog = null }) { name, fail ->
             named("Renamed", fail) { api.rename(root.id, join(path, d.name), name) }
         }
-        is FolderDialog.Trash -> AlertDialog(
-            onDismissRequest = { dialog = null },
-            containerColor = p.panel,
-            titleContentColor = p.text,
-            textContentColor = p.muted,
-            title = { Text(if (d.names.size == 1) "Move “${d.names[0]}” to trash?" else "Move ${d.names.size} items to trash?") },
-            text = { Text("You can restore them from Trash. Songs in the library are taken out of it until they are restored.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    dialog = null
-                    run(if (d.names.size == 1) "Moved to trash" else "Moved ${d.names.size} items to trash") { api.trash(root.id, d.names.map { join(path, it) }) }
-                }) { Text("Move to trash", color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
-            },
-            dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel", color = p.muted) } },
-        )
+        is FolderDialog.Trash -> {
+            val (keep, days) = FilesRules.trashKeep(roots)
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                containerColor = p.panel,
+                titleContentColor = p.text,
+                textContentColor = p.muted,
+                title = { Text(FilesRules.deleteTitle(d.names, keep)) },
+                text = { Text(FilesRules.deleteBody(keep, days)) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        dialog = null
+                        run(FilesRules.deletedLine(d.names.size, keep)) { api.trash(root.id, d.names.map { join(path, it) }) }
+                    }) { Text(FilesRules.deleteLabel(keep), color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
+                },
+                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel", color = p.muted) } },
+            )
+        }
         is FolderDialog.Move -> FolderPicker(api, roots.filter { !it.isTrash && it.writable }, root, path, title = if (d.names.size == 1) "Move “${d.names[0]}”" else "Move ${d.names.size} items", onDismiss = { dialog = null }) { toRoot, toPath ->
             dialog = null
             if (toRoot.id == root.id && toPath == path) return@FolderPicker
@@ -1207,7 +1210,7 @@ private fun TrashView(nav: Nav, api: FilesApi, roots: List<FileRoot>) {
     when {
         error != null -> ErrorBox(error ?: "") { reload++ }
         list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = p.accent, trackColor = p.border) }
-        list.isEmpty() -> EmptyState(R.drawable.ic_delete, "The trash is empty", "Files you move to trash wait here until you delete them forever.")
+        list.isEmpty() -> FilesRules.trashKeep(roots).let { (keep, days) -> EmptyState(R.drawable.ic_delete, "The trash is empty", FilesRules.trashEmptyLine(keep, days)) }
         else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {

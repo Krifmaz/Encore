@@ -123,7 +123,7 @@ private fun ReplaceSheet(nav: Nav, song: OwnFileUi.Song) {
     ModalBottomSheet(onDismissRequest = { OwnFileUi.close() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = p.panel, contentColor = p.text) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
             Text("Replace with my own file", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
-            Text("Your file takes the place of “${song.title}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces stays in the trash for 7 days.",
+            Text("Your file takes the place of “${song.title}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces is deleted, or kept in the Trash while Keep deleted files in Trash is on.",
                 style = MaterialTheme.typography.bodySmall, color = p.muted)
             if (line.isNotEmpty()) Text(line, style = MaterialTheme.typography.bodySmall, color = if (busy) p.muted else if (ok) EncoreColors.Ok else EncoreColors.Err, modifier = Modifier.padding(top = 10.dp))
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
@@ -186,7 +186,7 @@ private fun BulkSheet(nav: Nav) {
     ModalBottomSheet(onDismissRequest = { OwnFileUi.close() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = p.panel, contentColor = p.text) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
             Text("Upload your own files", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
-            Text("Choose your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files stay in the trash for 7 days.",
+            Text("Choose your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files are deleted, or kept in the Trash while Keep deleted files in Trash is on.",
                 style = MaterialTheme.typography.bodySmall, color = p.muted)
             if (!applied) EncoreButton("Choose files", iconRes = R.drawable.ic_upload, enabled = !applying, modifier = Modifier.padding(top = 12.dp)) { pick.launch(OwnFileRules.MIME_TYPES) }
             for (r in rows) {

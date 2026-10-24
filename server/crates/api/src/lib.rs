@@ -207,6 +207,11 @@ pub fn warm_up(st: &AppState) {
         if n > 0 {
             tracing::info!("who added it: {n} file manager lines read back from the activity log");
         }
+        // 0.38: the Trash moved from the config folder to the music disk; what the old one holds follows
+        let n = encore_files::trash::migrate(&s);
+        if n > 0 {
+            tracing::info!("trash: {n} entries moved from the config folder's trash to the music disk's");
+        }
     });
 }
 

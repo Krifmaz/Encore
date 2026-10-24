@@ -70,7 +70,15 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
         "loudness" => encore_library::loudness::scheduled(st).await?,
         "types" => encore_library::album_types::scheduled(st).await?,
         "update" => encore_system::update::scheduled(st).await?,
-        _ => encore_requests::upkeep::cleanup(st)?,
+        _ => {
+            let mut out = encore_requests::upkeep::cleanup(st)?;
+            // the file manager's Trash keeps items `trash_days` days
+            let gone = encore_files::trash::purge(st);
+            if gone > 0 {
+                out.push_str(&format!(", {gone} item(s) older than {} days deleted from the Trash", encore_library::folders::trash_days(&st.cfg)));
+            }
+            out
+        }
     })
 }
 

@@ -57,9 +57,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> ApiResult<T> + Send + '
     tokio::task::spawn_blocking(f).await.map_err(|e| err(500, format!("The file operation stopped: {e}")))?
 }
 
-/// GET /api/files/roots: the folders the file manager may open.
+/// GET /api/files/roots: the folders the file manager may open. Trash's also says whether deletes keep files
+/// there (`keep`, Settings → Library → Deleting files) and for how many `days`.
 async fn get_roots(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    blocking(move || Ok(Json(Value::Array(roots_of(&st).iter().map(Root::json).collect())))).await
+    blocking(move || {
+        let (keep, days) = (encore_library::folders::trash_keep(&st.cfg), encore_library::folders::trash_days(&st.cfg));
+        Ok(Json(Value::Array(roots_of(&st).iter().map(|r| {
+            let mut v = r.json();
+            if r.kind == roots::RootKind::Trash {
+                v["keep"] = Value::Bool(keep);
+                v["days"] = Value::from(days);
+            }
+            v
+        }).collect())))
+    }).await
 }
 
 /// `GET /api/files/list` query.

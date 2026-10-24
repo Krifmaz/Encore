@@ -1,6 +1,6 @@
 //! The folders the file manager may touch (`GET /api/files/roots`): the library (`library_path`), the staging
 //! folder, Soulseek's download folder, every torrent and Usenet download folder and blackhole folder from the
-//! settings that is there on the disk, and Trash (`<config>/trash`). Each has a stable id: `library`,
+//! settings that is there on the disk, and Trash (`.encore-trash` in the library folder, `<config>/trash` without one). Each has a stable id: `library`,
 //! `staging`, `slskd`, `torrent-<n>`, `usenet-<n>`, `trash` (the n-th distinct torrent or Usenet folder, the
 //! client in use first).
 //!
@@ -38,30 +38,33 @@ pub struct Root {
     pub canon: Option<PathBuf>,
     /// what it is for
     pub kind: RootKind,
-    /// Encore's config folder (database, backups, Trash), resolved, when it lies in this folder: nothing
-    /// under it is listed, read or changed through this root
-    pub fence: Option<PathBuf>,
+    /// Encore's config folder (database, backups) and its Trash, resolved, when they lie in this folder:
+    /// nothing under them is listed, read or changed through this root
+    pub fence: Vec<PathBuf>,
 }
 
 impl Root {
     /// A root for `path`, resolved now.
     pub fn new(id: &str, name: &str, path: PathBuf, kind: RootKind) -> Root {
         let canon = std::fs::canonicalize(&path).ok().filter(|p| p.is_dir());
-        Root { id: id.into(), name: name.into(), path, canon, kind, fence: None }
+        Root { id: id.into(), name: name.into(), path, canon, kind, fence: vec![] }
     }
 
-    /// The root with Encore's config folder fenced off when it lies inside it (not for Trash, which is in it).
-    pub fn fenced(mut self, data_dir: &Path) -> Root {
-        let data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-        if self.kind != RootKind::Trash && self.canon.as_ref().is_some_and(|c| data.starts_with(c)) {
-            self.fence = Some(data);
+    /// The root with Encore's config folder and the Trash fenced off when they lie inside it (not for Trash
+    /// itself, which may be in the config folder).
+    pub fn fenced(mut self, data_dir: &Path, trash: &Path) -> Root {
+        for d in [data_dir, trash] {
+            let d = std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf());
+            if self.kind != RootKind::Trash && self.canon.as_ref().is_some_and(|c| d.starts_with(c)) && !self.fence.contains(&d) {
+                self.fence.push(d);
+            }
         }
         self
     }
 
     /// Is this resolved path Encore's config folder or in it (reached through this root)?
     pub fn fenced_off(&self, real: &Path) -> bool {
-        self.fence.as_ref().is_some_and(|f| real.starts_with(f))
+        self.fence.iter().any(|f| real.starts_with(f))
     }
 
     /// The folder, resolved; 404 while it isn't there.
@@ -79,9 +82,10 @@ impl Root {
     }
 }
 
-/// `<config>/trash`: where Move to trash puts things (each in its own `<unix>-<n>/` folder).
-pub fn trash_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("trash")
+/// Where Move to trash puts things (each in its own `<unix>-<n>/` folder): `.encore-trash` in the library
+/// folder, `<config>/trash` without one ([`encore_library::folders::trash_dir`]).
+pub fn trash_dir(cfg: &Config, data_dir: &Path) -> PathBuf {
+    encore_library::folders::trash_dir(cfg, data_dir)
 }
 
 /// The extra library folders: `library_extra_roots`, one absolute folder per line (blank lines and relative
@@ -251,16 +255,16 @@ pub fn all(cfg: &Config, data_dir: &Path, slskd: &Path) -> Vec<Root> {
             out.push(Root::new(&format!("{prefix}-{}", i + 1), name, p, RootKind::Download));
         }
     }
-    let trash = trash_dir(data_dir);
+    let trash = trash_dir(cfg, data_dir);
     let _ = std::fs::create_dir_all(&trash);
-    out.push(Root::new("trash", "Trash", trash, RootKind::Trash));
-    out.into_iter().map(|r| r.fenced(data_dir)).collect()
+    out.push(Root::new("trash", "Trash", trash.clone(), RootKind::Trash));
+    out.into_iter().map(|r| r.fenced(data_dir, &trash)).collect()
 }
 
 /// The library's root (`library_path`) on its own, for the import's own steps (None when it isn't set).
 pub fn library(cfg: &Config, data_dir: &Path) -> Option<Root> {
     let lib = cfg.str("library_path");
-    (!lib.trim().is_empty()).then(|| Root::new("library", "Library", PathBuf::from(lib.trim()), RootKind::Library).fenced(data_dir))
+    (!lib.trim().is_empty()).then(|| Root::new("library", "Library", PathBuf::from(lib.trim()), RootKind::Library).fenced(data_dir, &trash_dir(cfg, data_dir)))
 }
 
 /// The root with this id.
@@ -290,20 +294,23 @@ mod tests {
         assert_eq!(format_extra(&[PathBuf::from("/a"), PathBuf::from("/b")]), "/a\n/b");
     }
 
-    /// A root that holds Encore's config folder is fenced off from it; Trash (inside it) is not.
+    /// A root that holds Encore's config folder or its Trash is fenced off from them; Trash itself is not.
     #[test]
     fn the_config_folder_is_fenced_off_in_a_root_that_holds_it() {
         let d = encore_core::tmp::dir("files-fence");
         std::fs::create_dir_all(d.join("cfg/trash")).unwrap();
-        std::fs::create_dir_all(d.join("music")).unwrap();
+        std::fs::create_dir_all(d.join("music/.encore-trash")).unwrap();
         let data = d.join("cfg");
-        let wide = Root::new("torrent-1", "Torrents", d.clone(), RootKind::Download).fenced(&data);
+        let trash_dir = d.join("music/.encore-trash");
+        let wide = Root::new("torrent-1", "Torrents", d.clone(), RootKind::Download).fenced(&data, &trash_dir);
         let c = std::fs::canonicalize(&data).unwrap();
-        assert!(wide.fenced_off(&c.join("encore.db")) && !wide.fenced_off(&std::fs::canonicalize(d.join("music")).unwrap()));
-        let lib = Root::new("library", "Library", d.join("music"), RootKind::Library).fenced(&data);
-        assert!(lib.fence.is_none());
-        let trash = Root::new("trash", "Trash", d.join("cfg/trash"), RootKind::Trash).fenced(&data);
-        assert!(trash.fence.is_none());
+        let music = std::fs::canonicalize(d.join("music")).unwrap();
+        assert!(wide.fenced_off(&c.join("encore.db")) && !wide.fenced_off(&music));
+        let lib = Root::new("library", "Library", d.join("music"), RootKind::Library).fenced(&data, &trash_dir);
+        assert_eq!(lib.fence, vec![music.join(".encore-trash")], "the Trash in the library folder is fenced off");
+        assert!(lib.fenced_off(&music.join(".encore-trash/1-1/a.flac")) && !lib.fenced_off(&music.join("A")));
+        let trash = Root::new("trash", "Trash", trash_dir.clone(), RootKind::Trash).fenced(&data, &trash_dir);
+        assert!(trash.fence.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1,12 +1,15 @@
-//! Trash (§4.7–4.11 of the client shapes): Move to trash puts each item in its own folder
-//! `<config>/trash/<unix>-<n>/` with a `.origin.json` beside it – `{root, path, at, by}` and, for songs of the
+//! Trash (§4.7–4.11 of the client shapes): while Settings → Library → Deleting files → *Keep deleted files in
+//! Trash* (`trash_keep`) is off, the default, Move to trash deletes for good ([`trash_one`]); while it is on, it
+//! puts each item in its own folder `<trash>/<unix>-<n>/` with a `.origin.json` beside it – `{root, path, at, by}` and, for songs of the
 //! library, their rows' ids and the playlist entries (likes too) that pointed at them, so a restore gives
 //! all of it back. The songs leave the library as a delete takes them out. Restore puts an item back where
 //! it was (missing folders made again, " (2)" when the name is taken). Delete forever and Empty trash are
-//! the only real deletes the file manager has.
+//! the deletes the file manager has while the setting is on; [`purge`] deletes items older than `trash_days`.
 //!
-//! The report flow parks reported songs in the same `<config>/trash` as plain files (`<unix>-<id>-<name>`);
-//! those are not file manager items: they are never listed, emptied or restored here.
+//! The Trash is `.encore-trash` in the library folder, so a move there is a rename on the music disk and needs
+//! no room of its own (`<config>/trash` without a library folder; [`migrate`] brings the old one's items over).
+//! The report flow and bring your own music park old files in the same folder as plain files
+//! (`<unix>-<id>-<name>`); those are not file manager items: they are never listed, emptied or restored here.
 use crate::dirfd::{size_of, Dir, Kind};
 use crate::names::{self, MISSING};
 use crate::resolve::{io_error, Target};
@@ -31,7 +34,7 @@ pub fn valid_id(id: &str) -> bool {
 
 /// Encore's Trash folder, made when it isn't there, opened.
 fn trash_root(st: &impl Ctx) -> Result<Dir, ApiError> {
-    let dir = roots::trash_dir(st.data_dir());
+    let dir = roots::trash_dir(st.cfg(), st.data_dir());
     encore_core::fsx::mkdir_all(&dir, encore_core::fsx::Step::Files).map_err(io_error)?;
     Dir::open(&dir).map_err(io_error)
 }
@@ -52,7 +55,8 @@ fn new_item(trash: &Dir) -> Result<String, ApiError> {
 
 /// Moves one item to the trash: `dir`/`name` (the item `t` names) into a new item folder, with its origin.
 /// `extras`: files beside it in `dir` that go with it into the same item (a song's .lrc / .txt lyrics) and come
-/// back beside it on a restore. The library's rows of it are taken out through `change`. → the trash id
+/// back beside it on a restore. The library's rows of it are taken out through `change`. → the trash id, or
+/// "" when the Trash keeps nothing (`trash_keep` off): then the item and its extras are deleted for good.
 pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, change: &mut Change, extras: &[String]) -> Result<String, ApiError> {
     let kind = dir.lstat(name).map_err(io_error)?.ok_or_else(|| err(404, MISSING))?.kind;
     let real = dir.path.join(name);
@@ -62,6 +66,9 @@ pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, ch
         return Err(err(409, format!("“{name}” holds an extra library folder ({}): take that out of Settings → Library → Extra library folders first, or move it to Trash by itself", inner.display())));
     }
     let dirs = LibraryDirs::of(st.cfg());
+    if !encore_library::folders::trash_keep(st.cfg()) {
+        return delete_now(st, who, t, dir, name, change, extras, &dirs);
+    }
     let trash = trash_root(st)?;
     // the extras that are there, plain files beside it (never the item itself, never twice)
     let mut extras: Vec<&str> = extras.iter().map(String::as_str).filter(|e| *e != name && *e != ORIGIN && names::check_name(e).is_ok()).collect();
@@ -120,22 +127,56 @@ pub fn trash_one(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, ch
     Ok(id)
 }
 
-/// `POST /api/files/trash {root, paths}` → `{trashed, items, failed}`.
+/// The delete of [`trash_one`] while the Trash keeps nothing: the item and the extras beside it, for good.
+#[allow(clippy::too_many_arguments)]
+fn delete_now(st: &impl Ctx, who: &Who, t: &Target, dir: &Dir, name: &str, change: &mut Change, extras: &[String], dirs: &LibraryDirs) -> Result<String, ApiError> {
+    let real = dir.path.join(name);
+    let gone = dir.remove_all(name);
+    for e in extras.iter().filter(|e| *e != name && names::check_name(e).is_ok()) {
+        if dir.lstat(e).ok().flatten().is_some_and(|x| x.kind == Kind::File) {
+            let _ = dir.unlink(e);
+        }
+    }
+    change.removed(dirs, &real);
+    if let Err(e) = gone {
+        // what couldn't be deleted is read in again
+        if dir.lstat(name).ok().flatten().is_some() {
+            change.arrived(dirs, &real);
+        }
+        return Err(not_all_deleted(e));
+    }
+    crate::audit(st, who, "deleted for good", t, None);
+    Ok(String::new())
+}
+
+/// A delete that left some of it, as the API answer.
+fn not_all_deleted(e: encore_core::fsx::StepError) -> ApiError {
+    let status = if matches!(e.errno, Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS)) { 403 } else { 409 };
+    err(status, format!("Not all of it could be deleted ({})", e.what()))
+}
+
+/// `POST /api/files/trash {root, paths}` → `{trashed, items, failed, deleted}`: `deleted` true when the Trash
+/// keeps nothing and they were deleted for good (`items` is then empty).
 pub fn trash(st: &impl Ctx, who: &Who, items: &[Target]) -> Result<Value, ApiError> {
     let _g = crate::lock();
     let mut change = Change::default();
-    let (mut ids, mut failed) = (vec![], vec![]);
+    let (mut n, mut ids, mut failed) = (0, vec![], vec![]);
     for t in items {
         let res = t.open_existing().and_then(|(dir, name, _)| trash_one(st, who, t, &dir, &name, &mut change, &[]));
         match res {
-            Ok(id) => ids.push(id),
+            Ok(id) => {
+                n += 1;
+                if !id.is_empty() {
+                    ids.push(id);
+                }
+            }
             Err(e) => failed.push(json!({ "path": t.rel(), "reason": e.detail })),
         }
     }
     if let Err(e) = change.apply(st) {
         tracing::warn!("files: the library's rows after a move to trash: {e:#}");
     }
-    Ok(json!({ "trashed": ids.len(), "items": ids, "failed": failed }))
+    Ok(json!({ "trashed": n, "items": ids, "failed": failed, "deleted": !encore_library::folders::trash_keep(st.cfg()) }))
 }
 
 /// The name the item is stored under in its folder, from its note: one plain name (never a path), and its
@@ -323,5 +364,66 @@ pub fn empty(st: &impl Ctx, who: &Who) -> Result<usize, ApiError> {
 
 /// The trash folder (for tests and the roots list).
 pub fn dir_of(st: &impl Ctx) -> PathBuf {
-    roots::trash_dir(st.data_dir())
+    roots::trash_dir(st.cfg(), st.data_dir())
+}
+
+/// When an item went to the trash: its note's `at`, else its id's first number.
+fn item_time(o: &Value, id: &str) -> i64 {
+    o["at"].as_i64().unwrap_or_else(|| id.split('-').next().and_then(|t| t.parse().ok()).unwrap_or(0))
+}
+
+/// Deletes the items that went to the trash more than `trash_days` ago (scheduler: Clean up). → how many went
+pub fn purge(st: &impl Ctx) -> usize {
+    let _g = crate::lock();
+    let Ok(trash) = trash_root(st) else { return 0 };
+    let cutoff = now() as i64 - encore_library::folders::trash_days(st.cfg()) * 86400;
+    let mut n = 0;
+    for id in trash.names().unwrap_or_default() {
+        let Some(o) = origin_of(&trash, &id) else { continue };
+        if item_time(&o, &id) < cutoff {
+            match remove_item(&trash, &id) {
+                Ok(()) => n += 1,
+                Err(e) => tracing::warn!("files: clearing an old trash item: {e}"),
+            }
+        }
+    }
+    if n > 0 {
+        st.db().log("info", &format!("Trash: {n} items older than {} days deleted for good", encore_library::folders::trash_days(st.cfg())));
+    }
+    n
+}
+
+/// 0.38: the Trash moved from `<config>/trash` to the library folder. What the old one holds (file manager
+/// items and parked files alike) moves over, the report flow's and bring your own music's notes of where their
+/// files are with it; the old folder goes once it is empty. Nothing is deleted: what can't move stays where
+/// it is. → how many entries moved
+pub fn migrate(st: &impl Ctx) -> usize {
+    let old = encore_library::folders::old_trash(st.data_dir());
+    let new = dir_of(st);
+    if new == old || !old.is_dir() {
+        return 0;
+    }
+    let _g = crate::lock();
+    let (Ok(from), Ok(to)) = (Dir::open(&old), trash_root(st)) else { return 0 };
+    let mut n = 0;
+    for name in from.names().unwrap_or_default() {
+        let dest = names::free_name(&name, from.lstat(&name).ok().flatten().is_some_and(|x| x.kind == Kind::Dir), |x| to.lstat(x).ok().flatten().is_some());
+        match crate::ops::move_entry(&from, &name, &to, &dest) {
+            Ok(()) => {
+                n += 1;
+                let (a, b) = (old.join(&name).to_string_lossy().into_owned(), new.join(&dest).to_string_lossy().into_owned());
+                for table in ["track_parked", "own_files"] {
+                    let _ = st.db().execute(&format!("UPDATE {table} SET trash_path=? WHERE trash_path=?"), encore_db::p![b, a]);
+                }
+            }
+            Err(e) => tracing::warn!("files: {name} stays in the old trash ({}): {}", old.display(), e.detail),
+        }
+    }
+    if n > 0 {
+        st.db().log("info", &format!("Trash: moved {n} entries from {} to {}", old.display(), new.display()));
+    }
+    if from.names().is_ok_and(|v| v.is_empty()) {
+        let _ = std::fs::remove_dir(&old);
+    }
+    n
 }

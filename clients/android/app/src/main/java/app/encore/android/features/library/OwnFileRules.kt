@@ -13,7 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * Bring your own music (web-rs/src/pages/own_file.rs; server routes::own_file): what the sheets show and send, without
  * Compose so it is unit-tested. ⋯ → *Replace with my own file* puts an uploaded file in a song's place; Library →
  * *Upload your own files* matches a batch of files to their songs by their tags. The song keeps its id, so plays,
- * likes, playlists and lyrics stay; the old file waits in the server's trash for 7 days.
+ * likes, playlists and lyrics stay; the old file is deleted, or kept in the Trash while that setting is on.
  */
 object OwnFileRules {
     /** The permission that lets a member replace songs' files (admins always may). */
