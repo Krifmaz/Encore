@@ -247,6 +247,24 @@ class OfflineStore private constructor(private val app: Context) {
         return try { parseJsonObject(lyricsFile(r.sourceServer, r.id).readText()) } catch (_: Exception) { null }
     }
 
+    /**
+     * A lyrics report changed song [id]'s lyrics: the copy saved with its download takes the server's new [answer]
+     * (the `/lyrics` answer), or goes when the server has none now. Nothing happens for a song not saved with lyrics.
+     */
+    fun replaceLyrics(id: Long, answer: JsonObject) {
+        val r = record(id) ?: return
+        if (!r.lyrics) return
+        val f = lyricsFile(r.sourceServer, r.id)
+        try {
+            if (answer.str("lyrics").isBlank() && answer["instrumental"]?.toString() != "true") {
+                f.delete()
+            } else {
+                f.parentFile?.mkdirs()
+                f.writeText(answer.toString())
+            }
+        } catch (_: Exception) {}
+    }
+
     // ---- writing a download (OfflineWorker) --------------------------------------------------------------------
 
     /**

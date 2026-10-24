@@ -277,16 +277,47 @@ pub fn plain_lyrics(lyrics: &str) -> String {
     out.trim().to_string()
 }
 
-/// The reasons of Report a problem (web report.rs `REASONS`).
-pub const REASONS: [(&str, &str); 7] = [
+/// The reasons of Report a problem (web report.rs `REASONS`; server encore_requests::report::REASONS).
+pub const REASONS: [(&str, &str); 9] = [
     ("wrong_song", "Wrong song"),
     ("wrong_version", "Wrong version (live, remix, edit, missing parts)"),
     ("bad_audio", "Bad audio quality"),
     ("loudness", "Too quiet or too loud"),
     ("fake_lossless", "Fake lossless"),
     ("glitches", "Skips or glitches"),
+    ("wrong_lyrics", "Wrong lyrics"),
+    ("lyrics_sync", "Lyrics out of sync"),
     ("other", "Other"),
 ];
+
+/// A reason about the lyrics, not the audio: the song stays, only its lyrics are replaced (songs only).
+pub fn is_lyrics_reason(reason: &str) -> bool {
+    reason == "wrong_lyrics" || reason == "lyrics_sync"
+}
+
+/// The line above the reasons: what Encore will do for the reason ticked now (web report.rs `explanation`).
+pub fn report_explanation(kind: &str, title: &str, reason: &str) -> String {
+    let what = if kind == "album" { "album" } else { "song" };
+    match reason {
+        "wrong_lyrics" => format!("The song itself stays as it is – nothing is deleted or downloaded again. Encore drops these lyrics for “{title}”, never picks them again for it and looks for other lyrics right away (time-synced first). If there are none, the song shows no lyrics rather than wrong ones."),
+        "lyrics_sync" => format!("The song itself stays as it is – nothing is deleted or downloaded again. Encore drops this timing for “{title}” and looks for another time-synced version right away; if there is none, the same words are shown without timing."),
+        _ => format!(
+            "What is wrong with “{title}”? Encore stops using the source this {what} came from, moves the file{} to the trash for 7 days and gets the {what} again from somewhere else. Plays, likes and playlists stay with the {what}.",
+            if kind == "album" { "s" } else { "" }
+        ),
+    }
+}
+
+/// The toast once the server answered a report (web report.rs `done_toast`).
+pub fn report_toast(res: &Value) -> String {
+    match fmt::s(res, "status").as_str() {
+        "replacing" => "Reported – looking for a better copy".to_string(),
+        "lyrics_found" => "Reported – found other lyrics".to_string(),
+        "lyrics_none" => "Reported – no other lyrics found, so none are shown".to_string(),
+        _ if fmt::truthy(res, "message") => fmt::s(res, "message"),
+        _ => "Reported".to_string(),
+    }
+}
 
 /// The reason a quality-check flag suggests (web `reason_for`).
 pub fn reason_for(codes: &[String]) -> &'static str {
@@ -980,13 +1011,7 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
             sh.dialog = None;
             sh.changed = true;
             ctx.refresh_shell();
-            ctx.toast_ok(if fmt::s(&res, "status") == "replacing" {
-                "Reported – looking for a better copy".to_string()
-            } else if fmt::truthy(&res, "message") {
-                fmt::s(&res, "message")
-            } else {
-                "Reported".to_string()
-            });
+            ctx.toast_ok(report_toast(&res));
         }
         Act::Reported(Err(e)) => {
             if let Some(Dialog::Report { busy, .. }) = &mut sh.dialog {
@@ -1365,9 +1390,9 @@ fn dialog_view<'a>(d: &'a Dialog, ctx: &Ctx<'a>) -> El<'a, Act> {
             busy,
             ..
         } => {
-            let what = if kind == "album" { "album" } else { "song" };
             let mut reasons = column![].spacing(8);
-            for (k, l) in REASONS {
+            // lyrics are reported one song at a time
+            for (k, l) in REASONS.into_iter().filter(|(k, _)| kind != "album" || !is_lyrics_reason(k)) {
                 reasons = reasons.push(
                     radio(l, k, Some(reason.as_str()), |v| Act::ReportReason(v.to_string()))
                         .size(16)
@@ -1376,11 +1401,8 @@ fn dialog_view<'a>(d: &'a Dialog, ctx: &Ctx<'a>) -> El<'a, Act> {
                 );
             }
             let body = column![
-                widgets::muted(format!(
-                    "What is wrong with “{title}”? Encore stops using the source this {what} came from, moves the file{} to the trash for 7 days and gets the {what} again from somewhere else. Plays, likes and playlists stay with the {what}.",
-                    if kind == "album" { "s" } else { "" }
-                ))
-                .size(13),
+                // follows the reason ticked: a lyrics reason keeps the song
+                widgets::muted(report_explanation(kind, title, reason)).size(13),
                 reasons,
                 widgets::field(
                     "Note",

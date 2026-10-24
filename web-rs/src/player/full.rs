@@ -276,7 +276,11 @@ pub(super) fn render_full() {
         if let Some(up) = dom::closest(e, "[data-up]") { let i = num(&dom::data(&up, "up")) as i64; move_to(i, i - 1); return; }
         if let Some(it) = dom::closest(e, "[data-i]") { jump(num(&dom::data(&it, "i")) as i64); }
     });
-    wire(&mut ls, &f, "#np-lyrics", "click", |e| { if let Some(l) = dom::closest(e, "[data-t]") { seek_to(num(&dom::data(&l, "t"))); } });
+    wire(&mut ls, &f, "#np-lyrics", "click", |e| {
+        // "Report lyrics" under the lyrics, else a line: seek there
+        if dom::closest(e, "[data-lyrics-report]").is_some() { report_lyrics(); return; }
+        if let Some(l) = dom::closest(e, "[data-t]") { seek_to(num(&dom::data(&l, "t"))); }
+    });
     set_full_listeners(ls);
     warm_likes(Some(&t));
     update_time();

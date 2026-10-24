@@ -3,6 +3,10 @@
 //! album is requested again with that source left out and other users / services tried first. The
 //! replacement takes over the reported track's id, so plays, likes, playlists and resume spots stay.
 //! The routes (and Settings → Blocked) are the server's; the worker asks here what is blocked.
+//!
+//! Lyrics reasons (Wrong lyrics, Lyrics out of sync; songs only) are routed apart by [`file`]: nothing is
+//! blocked, parked or downloaded again – the lyrics shown now are rejected for that song, their file
+//! deleted and other lyrics looked up at once ([`file_lyrics_report`], encore_library::lyrics).
 use crate::create::{create_request, NewRequest};
 use crate::Ctx;
 use encore_config::perms::is_admin;
@@ -14,15 +18,22 @@ use serde_json::{json, Value};
 use std::path::{Path as FsPath, PathBuf};
 
 /// (key, label) of every reason, in menu order (the same words in both web UIs and the phone app).
-pub const REASONS: [(&str, &str); 7] = [
+pub const REASONS: [(&str, &str); 9] = [
     ("wrong_song", "Wrong song"),
     ("wrong_version", "Wrong version (live, remix, edit, missing parts)"),
     ("bad_audio", "Bad audio quality"),
     ("loudness", "Too quiet or too loud"),
     ("fake_lossless", "Fake lossless"),
     ("glitches", "Skips or glitches"),
+    ("wrong_lyrics", "Wrong lyrics"),
+    ("lyrics_sync", "Lyrics out of sync"),
     ("other", "Other"),
 ];
+
+/// A reason about the lyrics, not the audio: the song's file stays, only its lyrics are replaced.
+pub fn is_lyrics_reason(reason: &str) -> bool {
+    encore_library::lyrics::Complaint::of_reason(reason).is_some()
+}
 
 /// Days a reported file stays in the trash once its replacement arrived.
 const TRASH_DAYS: f64 = 7.0;
@@ -430,14 +441,29 @@ fn allowed(st: &impl Ctx, u: &Row, tracks: &[Row]) -> bool {
     })
 }
 
-/// File the report, block the source, park the files and ask for a replacement. → the report row
-pub fn file_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
+/// File any report: lyrics reasons to [`file_lyrics_report`] (the audio stays), the rest to
+/// [`file_report`] (block, park, replace). → the report row
+pub async fn file(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
+    if is_lyrics_reason(&b.reason) {
+        file_lyrics_report(st, u, b).await
+    } else {
+        file_report(st, u, b)
+    }
+}
+
+/// The checks every report passes: a known reason, a note for "Other", the songs it is about (a lyrics
+/// reason only for one song), the reporter may report them, and not too many reports today. → the
+/// note (trimmed, at most 500 characters) and the songs
+fn check(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<(Option<String>, Vec<Row>)> {
     if !REASONS.iter().any(|(k, _)| *k == b.reason) {
         return Err(err(400, "Pick what is wrong"));
     }
     let note = b.note.as_deref().map(|n| n.trim().chars().take(500).collect::<String>()).filter(|n| !n.is_empty());
     if b.reason == "other" && note.is_none() {
         return Err(err(400, "Say what is wrong"));
+    }
+    if is_lyrics_reason(&b.reason) && b.kind != "track" {
+        return Err(err(400, "Report the lyrics of one song"));
     }
     let tracks: Vec<Row> = match b.kind.as_str() {
         "track" => st.db().query("SELECT * FROM tracks WHERE id=?", p![b.track_id.unwrap_or(0)])?,
@@ -456,6 +482,70 @@ pub fn file_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
             return Err(err(429, "That's a lot of reports today – an admin can look at the rest"));
         }
     }
+    Ok((note, tracks))
+}
+
+/// A lyrics report (Wrong lyrics, Lyrics out of sync) on one song: the audio file is left alone (no block,
+/// no trash, no new download); the lyrics shown now are rejected for that song, the .lrc/.txt next to it
+/// deleted and other lyrics looked up straight away (another LRCLIB version, time-synced first). The
+/// report ends 'lyrics_found' (with the new lyrics as `lyrics`) or 'lyrics_none'. → the report row
+pub async fn file_lyrics_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
+    let (note, tracks) = check(st, u, b)?;
+    let t = &tracks[0];
+    let at = now();
+    let rid = st.db().execute("INSERT INTO reports (user_id, kind, track_id, album_id, reason, note, artist, title, album, source, status, message, created_at, updated_at)
+                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        p![u.i("id"), "track", t.i("id"), t.s("album_id"), b.reason, note, t.s("artist"), t.s("title"), t.s("album"), "LRCLIB", "lyrics_searching",
+           "Looking for other lyrics", at, at])?;
+    let label = REASONS.iter().find(|(k, _)| *k == b.reason).map(|(_, l)| *l).unwrap_or("");
+    st.db().log("info", &format!("{} reported {} – {}: {label}{}", u.s("username"), t.s("artist"), t.s("title"), note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default()));
+    let answer = refetch_lyrics(st, rid, t, &b.reason).await;
+    let mut v = report_json(st, rid)?;
+    v["lyrics"] = answer;
+    Ok(v)
+}
+
+/// Reject the lyrics shown now for report `rid` and look for others; the report says what came of it.
+/// → the new lyrics answer ({lyrics, synced, source}; null lyrics when none was found or the lookup failed)
+async fn refetch_lyrics(st: &impl Ctx, rid: i64, t: &Row, reason: &str) -> Value {
+    let Some(complaint) = encore_library::lyrics::Complaint::of_reason(reason) else { return json!({ "lyrics": null }) };
+    match encore_library::lyrics::reject_current(st, t, complaint, rid).await {
+        Ok(a) => {
+            let found = a["lyrics"].as_str().is_some_and(|l| !l.trim().is_empty()) || a["instrumental"].as_bool().unwrap_or(false);
+            if found {
+                let what = if a["synced"].as_bool().unwrap_or(false) { "time-synced" } else { "plain" };
+                set_report(st, rid, "lyrics_found", &format!("Found other lyrics ({what}) – the song itself was kept"));
+            } else {
+                set_report(st, rid, "lyrics_none", "No other lyrics found – the wrong ones are hidden; the song itself was kept");
+            }
+            a
+        }
+        Err(e) => {
+            set_report(st, rid, "lyrics_none", &format!("The lyrics lookup failed ({}) – the wrong ones are hidden; try again later", e.to_string().chars().take(160).collect::<String>()));
+            json!({ "lyrics": null, "synced": false, "source": null })
+        }
+    }
+}
+
+/// Try a lyrics report again (report row `r`): whatever the song shows now is rejected too, and other
+/// lyrics are looked up once more. → the report
+pub async fn retry_lyrics(st: &impl Ctx, r: &Row) -> ApiResult<Value> {
+    let id = r.i("id");
+    let t = st.db().one("SELECT * FROM tracks WHERE id=?", p![r.i("track_id")])?.ok_or_else(|| err(404, "The song is no longer in the library"))?;
+    set_report(st, id, "lyrics_searching", "Looking for other lyrics");
+    let answer = refetch_lyrics(st, id, &t, &r.s("reason")).await;
+    let mut v = report_json(st, id)?;
+    v["lyrics"] = answer;
+    Ok(v)
+}
+
+/// File the report, block the source, park the files and ask for a replacement (reasons about the
+/// audio; lyrics reasons go through [`file`]). → the report row
+pub fn file_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
+    if is_lyrics_reason(&b.reason) {
+        return Err(err(400, "Lyrics reports keep the song: send them through file()"));
+    }
+    let (note, tracks) = check(st, u, b)?;
     if tracks.iter().any(|t| st.db().one("SELECT 1 FROM track_parked WHERE id=?", p![t.i("id")]).ok().flatten().is_some()) {
         return Err(err(409, "Already reported – a replacement is on its way"));
     }
@@ -543,6 +633,9 @@ pub fn report_json(st: &impl Ctx, id: i64) -> ApiResult<Value> {
 /// Try again (report row `r`): the songs that came back are parked again and requested once more
 /// (blocks stay). → the report
 pub fn retry_report(st: &impl Ctx, u: &Row, r: &Row) -> ApiResult<Value> {
+    if is_lyrics_reason(&r.s("reason")) {
+        return Err(err(400, "Lyrics reports are tried again with retry_lyrics"));
+    }
     let id = r.i("id");
     if r.s("status") == "replacing" || r.s("status") == "filing" {
         return Err(err(409, "A replacement is already on its way"));
@@ -589,6 +682,10 @@ pub async fn dismiss_report(st: &impl Ctx, id: i64) -> ApiResult<()> {
         for t in parked_ids(st, id) {
             restore(st, t);
         }
+    }
+    if is_lyrics_reason(&r.s("reason")) {
+        // the lyrics it rejected may be shown again (they come back on the next lookup)
+        encore_library::lyrics::forget_rejects(st, id);
     }
     set_report(st, id, "dismissed", "Dismissed");
     Ok(())

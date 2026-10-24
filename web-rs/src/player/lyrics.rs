@@ -68,10 +68,18 @@ fn parse_lrc(text: &str) -> Vec<Line> {
     out
 }
 
+/// The "Report lyrics" button under lyrics that are shown (wrong words or timing → the report dialog with
+/// Wrong lyrics ticked; full.rs wires the click).
+const REPORT_BTN: &str = r#"<div class="np-lyrics-report"><button class="btn sm ghost" data-lyrics-report>Report lyrics</button></div>"#;
+
+/// The lyrics pane's content for the song playing now: the synced lines, the plain text or why there
+/// is nothing – with "Report lyrics" under whatever is shown (a song of the library only).
 pub(super) fn lyrics_html() -> String {
     let Some(t) = now_track() else { return String::new() };
     if t.truthy("preview") { return r#"<div class="muted np-empty">Lyrics are available for songs in your library.</div>"#.into(); }
     if !t.g("id").is_number() { return r#"<div class="muted np-empty">No lyrics for this song.</div>"#.into(); }
+    // a Surround song (ids from 1 000 000 000, server surround::BASE_ID) shows its stereo song's lyrics: reported there
+    let report = if t.i("id") >= 1_000_000_000 { "" } else { REPORT_BTN };
     LYR.with(|l| {
         let l = l.borrow();
         if l.loading || l.id != *t.g("id") { return r#"<div class="muted np-empty"><span class="spinner"></span> Looking for lyrics…</div>"#.to_string(); }
@@ -79,11 +87,24 @@ pub(super) fn lyrics_html() -> String {
             return l.lines.iter().enumerate().map(|(i, ln)| {
                 let text = esc(&ln.text);
                 format!(r#"<p data-t="{}" data-li="{i}">{}</p>"#, js_num(ln.t), if text.is_empty() { "♪" } else { &text })
-            }).collect::<String>();
+            }).collect::<String>() + report;
         }
-        if !l.plain.is_empty() { return format!(r#"<div class="np-plain">{}</div>"#, esc(&l.plain)); }
-        format!(r#"<div class="muted np-empty">{}</div>"#, if l.instrumental { "Instrumental" } else { "No lyrics found for this song." })
+        if !l.plain.is_empty() { return format!(r#"<div class="np-plain">{}</div>{report}"#, esc(&l.plain)); }
+        if l.instrumental { return format!(r#"<div class="muted np-empty">Instrumental</div>{report}"#); }
+        r#"<div class="muted np-empty">No lyrics found for this song.</div>"#.to_string()
     })
+}
+
+/// "Report lyrics": the report dialog for the song playing now with Wrong lyrics ticked; once sent, its
+/// lyrics load again (the server has already looked for other ones).
+pub(super) fn report_lyrics() {
+    let Some(t) = now_track() else { return };
+    if !t.g("id").is_number() { return; }
+    crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "wrong_lyrics", Some(Rc::new(|_| {
+        // forget the old answer so load_lyrics asks the server again
+        LYR.with(|l| l.borrow_mut().id = Value::Null);
+        load_lyrics();
+    })));
 }
 
 pub(super) fn load_lyrics() {

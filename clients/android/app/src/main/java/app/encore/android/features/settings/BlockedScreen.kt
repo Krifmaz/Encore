@@ -154,10 +154,10 @@ fun BlockedScreen(nav: Nav, admin: Boolean, onBack: () -> Unit) {
                         color = p.faint,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (st == "no_replacement") SmallButton("Try again", iconRes = R.drawable.ic_refresh, enabled = busy.isEmpty()) {
-                            act("r$id", "Looking for a replacement") { api.retryReport(id) }
+                        if (SettingsRules.canRetry(st)) SmallButton("Try again", iconRes = R.drawable.ic_refresh, enabled = busy.isEmpty()) {
+                            act("r$id", if (st == "lyrics_none") "Looking for other lyrics" else "Looking for a replacement") { api.retryReport(id) }
                         }
-                        if (admin && (st == "replacing" || st == "no_replacement")) SmallButton("Dismiss", enabled = busy.isEmpty()) {
+                        if (admin && SettingsRules.canDismiss(st)) SmallButton("Dismiss", enabled = busy.isEmpty()) {
                             act("d$id", "Dismissed") { api.dismissReport(id) }
                         }
                     }

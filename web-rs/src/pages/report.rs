@@ -10,15 +10,44 @@ use serde_json::{json, Value};
 use std::rc::Rc;
 use web_sys::Element;
 
-pub const REASONS: [(&str, &str); 7] = [
+/// (key, label) of every reason, in menu order (server: encore_requests::report::REASONS).
+pub const REASONS: [(&str, &str); 9] = [
     ("wrong_song", "Wrong song"),
     ("wrong_version", "Wrong version (live, remix, edit, missing parts)"),
     ("bad_audio", "Bad audio quality"),
     ("loudness", "Too quiet or too loud"),
     ("fake_lossless", "Fake lossless"),
     ("glitches", "Skips or glitches"),
+    ("wrong_lyrics", "Wrong lyrics"),
+    ("lyrics_sync", "Lyrics out of sync"),
     ("other", "Other"),
 ];
+
+/// A reason about the lyrics, not the audio: the song stays, only its lyrics are replaced.
+pub fn is_lyrics(reason: &str) -> bool {
+    reason == "wrong_lyrics" || reason == "lyrics_sync"
+}
+
+/// The line under the title of the dialog: what Encore will do for the reason ticked now ("" for none yet).
+pub fn explanation(kind: &str, title: &str, reason: &str) -> String {
+    let what = if kind == "album" { "album" } else { "song" };
+    match reason {
+        "wrong_lyrics" => format!("The song itself stays as it is – nothing is deleted or downloaded again. Encore drops these lyrics for “{title}”, never picks them again for it and looks for other lyrics right away (time-synced first). If there are none, the song shows no lyrics rather than wrong ones."),
+        "lyrics_sync" => format!("The song itself stays as it is – nothing is deleted or downloaded again. Encore drops this timing for “{title}” and looks for another time-synced version right away; if there is none, the same words are shown without timing."),
+        _ => format!("What is wrong with “{title}”? Encore stops using the source this {what} came from, moves the file{} to the trash for 7 days and gets the {what} again from somewhere else. Plays, likes and playlists stay with the {what}.", if kind == "album" { "s" } else { "" }),
+    }
+}
+
+/// The toast once the server answered a report.
+pub fn done_toast(res: &Value) -> String {
+    match res.s("status").as_str() {
+        "replacing" => "Reported – looking for a better copy".to_string(),
+        "lyrics_found" => "Reported – found other lyrics".to_string(),
+        "lyrics_none" => "Reported – no other lyrics found, so none are shown".to_string(),
+        _ if res.truthy("message") => res.s("message"),
+        _ => "Reported".to_string(),
+    }
+}
 
 /// The reason a quality-check flag suggests.
 pub fn reason_for(codes: &[String]) -> &'static str {
@@ -30,17 +59,26 @@ pub fn reason_for(codes: &[String]) -> &'static str {
 }
 
 /// Report a problem with a song (kind "track") or an album (kind "album"). Encore blocks the source the
-/// file came from, moves it to the trash and looks for another copy.
+/// file came from, moves it to the trash and looks for another copy; a lyrics reason (songs only) keeps
+/// the song and only replaces its lyrics. `reason` is ticked to start with ("" for none).
 pub fn report_modal(kind: &str, id: Value, title: &str, reason: &str, on_done: Option<Rc<dyn Fn(Value)>>) {
-    let what = if kind == "album" { "album" } else { "song" };
-    let reasons: String = REASONS.iter().map(|(k, l)| format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="radio" name="rp-reason" value="{k}" {}> {}</label>"#,
+    let reasons: String = REASONS.iter().filter(|(k, _)| kind != "album" || !is_lyrics(k))
+        .map(|(k, l)| format!(r#"<label class="row" style="gap:8px;align-items:center"><input type="radio" name="rp-reason" value="{k}" {}> {}</label>"#,
         if *k == reason { "checked" } else { "" }, esc(l))).collect();
-    let body = format!(r#"<p class="small muted" style="margin-top:0">What is wrong with “{}”? Encore stops using the source this {what} came from, moves the file{} to the trash for 7 days and gets the {what} again from somewhere else. Plays, likes and playlists stay with the {what}.</p>
+    let body = format!(r#"<p class="small muted" style="margin-top:0" id="rp-what">{}</p>
       <div class="stack" style="gap:8px" id="rp-reasons">{reasons}</div>
       <label class="field mt"><span>Note</span><textarea class="input" id="rp-note" rows="2" placeholder="Optional – e.g. the intro is missing"></textarea></label>"#,
-        esc(title), if kind == "album" { "s" } else { "" });
+        esc(&explanation(kind, title, reason)));
     let m = modal(ModalOpts::new("Report a problem", &body).footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="rp-send">Report</button>"#));
     let Some(send) = m.qs("#rp-send") else { return };
+    // the line above the reasons follows the one ticked: a lyrics reason keeps the song
+    if let Some(list) = m.qs("#rp-reasons") {
+        let (m2, kind, title) = (m.clone(), kind.to_string(), title.to_string());
+        dom::on(&list, "change", move |_| {
+            let r = m2.qs("input[name=rp-reason]:checked").map(|e| dom::value(&e)).unwrap_or_default();
+            if let Some(p) = m2.qs("#rp-what") { dom::set_text(&p, &explanation(&kind, &title, &r)); }
+        });
+    }
     let (kind, send2) = (kind.to_string(), send.clone());
     dom::on(&send, "click", move |_| {
         let r = m.qs("input[name=rp-reason]:checked").map(|e| dom::value(&e));
@@ -55,7 +93,7 @@ pub fn report_modal(kind: &str, id: Value, title: &str, reason: &str, on_done: O
             match api::post("/report", body).await {
                 Ok(res) => {
                     m.close();
-                    toast(&if res.s("status") == "replacing" { "Reported – looking for a better copy".to_string() } else if res.truthy("message") { res.s("message") } else { "Reported".to_string() }, "ok");
+                    toast(&done_toast(&res), "ok");
                     if let Some(f) = on_done { f(res); }
                 }
                 Err(e) => { toast(&e.message, "err"); dom::set_disabled(&send, false); }
@@ -64,25 +102,32 @@ pub fn report_modal(kind: &str, id: Value, title: &str, reason: &str, on_done: O
     });
 }
 
+/// A text as one part of a link (encodeURIComponent).
 fn enc(s: &str) -> String { String::from(js_sys::encode_uri_component(s)) }
 
+/// A report's status words and badge class.
 fn status(s: &str) -> (&str, &str) {
     match s {
         "replacing" => ("Looking for a replacement", "warn"),
         "replaced" => ("Replaced", "ok"),
         "no_replacement" => ("No replacement yet", "err"),
+        // lyrics reports (the song stays; only its lyrics are looked up again)
+        "lyrics_searching" => ("Looking for other lyrics", "warn"),
+        "lyrics_found" => ("New lyrics", "ok"),
+        "lyrics_none" => ("No other lyrics yet", "err"),
         "dismissed" => ("Dismissed", ""),
         other => (other, ""),
     }
 }
 
+/// One report on Settings → Blocked: what, why, who and when, its status, Try again and (admins) Dismiss.
 fn report_row(r: &Value, admin: bool) -> String {
     let st = r.s("status");
     let (label, cls) = status(&st);
     let href = if r.s("kind") == "album" && r.truthy("album_id") { format!("#/library/album/{}", enc(&r.s("album_id"))) } else { String::new() };
     let name = format!("{} – {}", esc(&r.s("artist")), esc(&r.s("title")));
-    let retry = if st == "no_replacement" { format!(r#"<button class="btn sm" data-retry="{}">{}Try again</button>"#, r.i("id"), icon("refresh")) } else { String::new() };
-    let dismiss = if admin && (st == "replacing" || st == "no_replacement") { format!(r#"<button class="btn sm ghost" data-dismiss="{}">Dismiss</button>"#, r.i("id")) } else { String::new() };
+    let retry = if st == "no_replacement" || st == "lyrics_none" { format!(r#"<button class="btn sm" data-retry="{}">{}Try again</button>"#, r.i("id"), icon("refresh")) } else { String::new() };
+    let dismiss = if admin && ["replacing", "no_replacement", "lyrics_found", "lyrics_none"].contains(&st.as_str()) { format!(r#"<button class="btn sm ghost" data-dismiss="{}">Dismiss</button>"#, r.i("id")) } else { String::new() };
     format!(r#"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:10px" data-report="{id}">
     <div class="grow" style="min-width:220px"><div style="font-weight:650">{title} <span class="small muted">{kind}</span></div>
       <div class="small">{reason}{note}</div>
@@ -199,7 +244,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let tracks = tracks.clone();
                 dom::spawn(async move {
                     let r: Result<(), api::ApiError> = async {
-                        if let Some(id) = dom::data_opt(&b, "retry") { api::post_empty(&format!("/reports/{id}/retry")).await?; toast("Looking for a replacement", "ok"); }
+                        if let Some(id) = dom::data_opt(&b, "retry") { api::post_empty(&format!("/reports/{id}/retry")).await?; toast("Trying again", "ok"); }
                         else if let Some(id) = dom::data_opt(&b, "dismiss") { api::post_empty(&format!("/reports/{id}/dismiss")).await?; toast("Dismissed", "ok"); }
                         else if let Some(id) = dom::data_opt(&b, "undo") { api::del(&format!("/blocks/{id}")).await?; toast("Unblocked – that source may be used again", "ok"); }
                         else if let Some(i) = dom::data_opt(&b, "check") {

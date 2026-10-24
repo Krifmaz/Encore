@@ -3,6 +3,7 @@
 //! album is requested again with that source left out and other users / services tried first. The
 //! replacement takes over the reported track's id, so plays, likes, playlists and resume spots stay.
 //! Settings → Blocked lists the blocks (with Undo), the reports and the songs the quality checks flagged.
+//! Wrong lyrics / Lyrics out of sync keep the song: only its lyrics are rejected and looked up again.
 use crate::enrich::enrich;
 use crate::auth::{Admin, User};
 use encore_db::RowExt;
@@ -30,9 +31,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/quality/tracks/{id}/check", post(check_track))
 }
 
-/// POST /api/report: file a report on songs or an album.
+/// POST /api/report: file a report on songs or an album (a lyrics reason answers once other lyrics
+/// were looked up, with them as `lyrics`).
 async fn report(State(st): State<AppState>, User(u): User, Json(b): Json<ReportBody>) -> ApiResult<Json<Value>> {
-    Ok(Json(file_report(&st, &u, &b)?))
+    Ok(Json(file(&st, &u, &b).await?))
 }
 
 /// Admins see every report, everyone else their own.
@@ -45,7 +47,7 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
         st.db.query("SELECT id FROM reports WHERE user_id=? ORDER BY id DESC LIMIT 100", p![u.i("id")])?
     };
     let items: Vec<Value> = ids.iter().filter_map(|r| report_json(&st, r.i("id")).ok()).collect();
-    let mut v = json!({ "reports": items, "reasons": REASONS.iter().map(|(k, l)| json!({ "key": k, "label": l })).collect::<Vec<_>>() });
+    let mut v = json!({ "reports": items, "reasons": REASONS.iter().map(|(k, l)| json!({ "key": k, "label": l, "lyrics": is_lyrics_reason(k) })).collect::<Vec<_>>() });
     enrich(&st, Some(&u), &mut v).await;
     Ok(Json(v))
 }
@@ -55,6 +57,12 @@ async fn retry(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -
     let r = st.db.one("SELECT * FROM reports WHERE id=?", p![id])?.ok_or_else(|| err(404, "Report not found"))?;
     if !encore_config::perms::is_admin(&u) && r.i("user_id") != u.i("id") {
         return Err(err(403, "Not your report"));
+    }
+    if is_lyrics_reason(&r.s("reason")) {
+        if r.s("status") == "lyrics_searching" && r.f("updated_at") > encore_db::now() - 60.0 {
+            return Err(err(409, "Already looking for other lyrics"));
+        }
+        return Ok(Json(retry_lyrics(&st, &r).await?));
     }
     Ok(Json(retry_report(&st, &u, &r)?))
 }

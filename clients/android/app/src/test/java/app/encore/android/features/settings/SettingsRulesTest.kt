@@ -182,6 +182,11 @@ class SettingsRulesTest {
         assertEquals("wrong_version", SettingsRules.reasonFor(listOf("wrong_length")))
         assertEquals("bad_audio", SettingsRules.reasonFor(emptyList()))
         assertEquals("No replacement yet" to "err", SettingsRules.reportStatus("no_replacement"))
+        // lyrics reports: their own words, Try again when nothing was found, Dismiss once settled
+        assertEquals("New lyrics" to "ok", SettingsRules.reportStatus("lyrics_found"))
+        assertEquals("No other lyrics yet" to "err", SettingsRules.reportStatus("lyrics_none"))
+        assertTrue(SettingsRules.canRetry("lyrics_none") && SettingsRules.canRetry("no_replacement") && !SettingsRules.canRetry("lyrics_found"))
+        assertTrue(SettingsRules.canDismiss("lyrics_found") && !SettingsRules.canDismiss("dismissed") && !SettingsRules.canDismiss("replaced"))
     }
 
     @Test

@@ -2,7 +2,8 @@ package app.encore.android.ui.components
 
 /**
  * What the player's "⋯" menu can do (web/js/player.js `moreMenu`), in the order the web lists them:
- * Go to artist, View album, Add to playlist, Lyrics, Share link, Signal path – and the "Up next" button.
+ * Go to artist, View album, Add to playlist, Lyrics, Share link, Signal path – and the "Up next" button. The menu's
+ * "Report a problem" needs no player part: it opens [ReportUi] for the song itself.
  *
  * Shared seam (docs: android-m2m3 contract): the DESIGN part defines this interface and draws the menu; the
  * PLAYER part implements it in ui/PlayerConnection.kt. Every call is about the song that is playing now.

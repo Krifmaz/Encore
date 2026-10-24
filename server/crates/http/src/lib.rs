@@ -90,6 +90,8 @@ pub struct Urls {
     pub deepl: String,
     /// Deezer's public API
     pub deezer: String,
+    /// LRCLIB's lyrics API
+    pub lrclib: String,
 }
 
 impl Default for Urls {
@@ -101,6 +103,7 @@ impl Default for Urls {
             ytmusic: ytmusic::API.into(),
             deepl: String::new(),
             deezer: deezer::API.into(),
+            lrclib: lrclib::API.into(),
         }
     }
 }

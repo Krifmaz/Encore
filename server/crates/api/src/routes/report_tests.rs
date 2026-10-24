@@ -174,3 +174,86 @@ fn block_keys() {
     assert_eq!(block_of_slskd(&song, false).unwrap().1, "u|d\\a.flac|5");
     assert_eq!(block_of_slskd(&song, true).unwrap().1, "u|d");
 }
+
+/// A stand-in LRCLIB for "Travis Scott – 90210": its exact match has the wrong words; a search also
+/// offers the right words time-synced (version 2) and plain (version 3). → its address
+async fn lrclib() -> String {
+    use axum::routing::get;
+    let app = axum::Router::new()
+        .route("/get", get(|| async { axum::Json(json!({ "id": 1, "duration": 200.0, "syncedLyrics": "[00:01.00] wrong words\n[00:02.00] here" })) }))
+        .route("/search", get(|| async {
+            axum::Json(json!([
+                { "id": 1, "duration": 200.0, "syncedLyrics": "[00:01.00] wrong words\n[00:02.00] here" },
+                { "id": 2, "duration": 201.0, "syncedLyrics": "[00:05.00] right words" },
+                { "id": 3, "duration": 200.0, "plainLyrics": "Right words" },
+            ]))
+        }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    url
+}
+
+/// Wrong lyrics / Lyrics out of sync never touch the audio: no block, no trash, no new download; the
+/// lyrics file is replaced by another LRCLIB version (time-synced first) and the rejected one stays away.
+#[tokio::test]
+async fn a_lyrics_report_keeps_the_song_and_finds_other_lyrics() {
+    let dir = std::env::temp_dir().join(format!("encore-report-lyrics-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("music")).unwrap();
+    let st = crate::test_support::TestServer::in_dir(&dir).with_urls(encore_http::Urls { lrclib: lrclib().await, ..Default::default() }).st;
+    st.cfg.set_many(&json!({ "library_path": dir.join("music").to_string_lossy(), "quality_check_on_import": false, "lyrics_save_files": true, "lyrics_embed": false }));
+    let listener = user(&st, "listener", "user");
+    let (tid, f) = song(&st, &dir, "Travis Scott/Singles/Travis Scott - 90210.flac", "90210", 0, "single-90210");
+    st.db.execute("INSERT INTO plays (user_id, track_id, seconds, played_at) VALUES (?,?,?,?)", p![listener.i("id"), tid, 200.0, now()]).unwrap();
+    // the wrong lyrics are saved next to the song (the exact match gave them)
+    std::fs::write(f.with_extension("lrc"), "[00:01.00] Wrong words\r\n[00:02.00] here\r\n").unwrap();
+    let audio = std::fs::read(&f).unwrap();
+    let body = ReportBody { kind: "track".into(), track_id: Some(tid), reason: "wrong_lyrics".into(), ..Default::default() };
+
+    // lyrics are reported on one song, and only through file()
+    assert_eq!(file(&st, &listener, &ReportBody { kind: "album".into(), album_id: Some("single-90210".into()), ..body.clone() }).await.unwrap_err().status.as_u16(), 400);
+    assert_eq!(file_report(&st, &listener, &body).unwrap_err().status.as_u16(), 400);
+
+    let rep = file(&st, &listener, &body).await.unwrap();
+    assert_eq!(rep["status"], "lyrics_found", "{rep}");
+    assert_eq!(rep["reason_label"], "Wrong lyrics");
+    // the other words, time-synced, are in the answer and saved in place of the wrong ones
+    assert_eq!(rep["lyrics"]["lyrics"], "[00:05.00] right words");
+    assert_eq!(rep["lyrics"]["synced"], true);
+    assert_eq!(std::fs::read_to_string(f.with_extension("lrc")).unwrap(), "[00:05.00] right words");
+    // the song is untouched: same file, same row, nothing blocked, parked or requested
+    assert_eq!(std::fs::read(&f).unwrap(), audio);
+    assert!(st.db.one("SELECT 1 FROM tracks WHERE id=?", p![tid]).unwrap().is_some());
+    assert!(st.db.one("SELECT 1 FROM source_block", p![]).unwrap().is_none());
+    assert!(st.db.one("SELECT 1 FROM track_parked", p![]).unwrap().is_none());
+    assert!(st.db.one("SELECT 1 FROM requests", p![]).unwrap().is_none());
+    assert!(!trash_dir(&st).exists() || std::fs::read_dir(trash_dir(&st)).unwrap().next().is_none());
+    // a later lookup (the file gone again) still never picks the wrong words
+    std::fs::remove_file(f.with_extension("lrc")).unwrap();
+    let t = st.db.one("SELECT * FROM tracks WHERE id=?", p![tid]).unwrap().unwrap();
+    assert_eq!(encore_library::lyrics::fetch_for_track(&st, &t, false).await.unwrap()["lyrics"], "[00:05.00] right words");
+
+    // the new timing is off too: the same words without timing are shown instead
+    let sync = file(&st, &listener, &ReportBody { reason: "lyrics_sync".into(), ..body.clone() }).await.unwrap();
+    assert_eq!(sync["status"], "lyrics_found");
+    assert_eq!(sync["lyrics"]["lyrics"], "Right words");
+    assert_eq!(sync["lyrics"]["synced"], false);
+    assert!(!f.with_extension("lrc").exists() && f.with_extension("txt").exists());
+
+    // and those are wrong as well: nothing is left, so no lyrics rather than wrong ones
+    let none = file(&st, &listener, &body).await.unwrap();
+    assert_eq!(none["status"], "lyrics_none");
+    assert!(none["lyrics"]["lyrics"].is_null());
+    assert!(!f.with_extension("txt").exists());
+    assert_eq!(std::fs::read(&f).unwrap(), audio);
+
+    // dismissing a lyrics report lets the lyrics it rejected come back
+    let n = |st: &AppState| st.db.one("SELECT COUNT(*) n FROM lyrics_reject WHERE track_id=?", p![tid]).unwrap().unwrap().i("n");
+    assert_eq!(n(&st), 3);
+    dismiss_report(&st, none["id"].as_i64().unwrap()).await.unwrap();
+    assert_eq!(n(&st), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

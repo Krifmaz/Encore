@@ -320,7 +320,12 @@ fn lyrics_mode<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now) -> El<'a, Message
     // room above the first line and below the last, so both can sit in the middle
     let pad = (ctx.size.height * 0.32).max(60.0);
     let lyrics = state.lyrics.view(now.id, pad, Message::SeekTo);
-    let back = widgets::btn("Back to the cover", Btn::Default, Some(Message::SetPane(Pane::Now)));
+    let mut back = row![widgets::btn("Back to the cover", Btn::Default, Some(Message::SetPane(Pane::Now)))].spacing(10);
+    // wrong words or timing: Report a problem with Wrong lyrics ticked (a song of the library, not a Surround one,
+    // whose lyrics are its stereo song's – ids from 1 000 000 000, server surround::BASE_ID)
+    if state.lyrics.shown(now.id) && now.id.is_some_and(|id| id < 1_000_000_000) {
+        back = back.push(widgets::btn("Report lyrics", Btn::Ghost, Some(Message::ReportLyrics)));
+    }
     let body = column![
         container(head).max_width(width),
         container(lyrics).max_width(width).height(Length::Fill),

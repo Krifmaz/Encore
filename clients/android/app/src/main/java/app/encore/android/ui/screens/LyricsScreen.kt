@@ -38,10 +38,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.encore.android.R
 import app.encore.android.features.offline.OfflineStore
 import app.encore.android.core.bool
 import app.encore.android.core.str
 import app.encore.android.ui.Nav
+import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -141,13 +143,24 @@ class LyricsLoad {
     var error by mutableStateOf<String?>(null)
     /** the song these are for (-1: none yet) */
     var forId: Long = -1L
+    /** bumped by [reload]: [rememberLyrics] asks the server again */
+    var version by mutableStateOf(0)
+    /** the next answer replaces the copy saved with a download (a lyrics report changed them) */
+    var refreshSaved: Boolean = false
+
+    /** Ask the server again (after a lyrics report: it has already looked for other lyrics). */
+    fun reload() {
+        forId = -1L
+        refreshSaved = true
+        version += 1
+    }
 }
 
 /** Loads the lyrics of [trackId] once [active] (lyrics mode is on): from the server, or saved with a download. */
 @Composable
 fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
     val load = remember { LyricsLoad() }
-    LaunchedEffect(trackId, active) {
+    LaunchedEffect(trackId, active, load.version) {
         val id = trackId ?: return@LaunchedEffect
         if (!active || load.forId == id) return@LaunchedEffect
         load.forId = id
@@ -157,7 +170,13 @@ fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
         try {
             load.lyrics = withContext(Dispatchers.IO) {
                 // offline: the lyrics saved with a downloaded song
-                val o = try { nav.graph.api.lyrics(id) } catch (e: Exception) { OfflineStore.of(nav.graph.app).savedLyrics(id) ?: throw e }
+                val o = try {
+                    nav.graph.api.lyrics(id).also {
+                        // after a lyrics report the copy saved with a download follows, so offline shows the new ones too
+                        if (load.refreshSaved) OfflineStore.of(nav.graph.app).replaceLyrics(id, it)
+                        load.refreshSaved = false
+                    }
+                } catch (e: Exception) { OfflineStore.of(nav.graph.app).savedLyrics(id) ?: throw e }
                 Lyrics.from(o)
             }
         } catch (e: CancellationException) {
@@ -176,9 +195,12 @@ fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
  * The lyrics pane of the full player (the web's lyrics mode): time-synced lines follow the position, the current one
  * large (28 sp, the others 22 sp) and kept in the middle with a smooth scroll, the lines already sung dimmed; a tap on
  * a line seeks there. Plain lyrics scroll.
+ *
+ * @param onReport the "Report lyrics" button in the bottom corner while lyrics are shown (wrong words or timing); null
+ *   leaves it out (the TV, a Surround song, a file outside the library).
  */
 @Composable
-fun LyricsPane(nav: Nav, load: LyricsLoad, positionMs: Long, modifier: Modifier = Modifier) {
+fun LyricsPane(nav: Nav, load: LyricsLoad, positionMs: Long, modifier: Modifier = Modifier, onReport: (() -> Unit)? = null) {
     val p = MaterialTheme.palette
     val l = load.lyrics
     Box(modifier) {
@@ -201,6 +223,11 @@ fun LyricsPane(nav: Nav, load: LyricsLoad, positionMs: Long, modifier: Modifier 
                 Text(l.plain, color = p.text, fontSize = 22.sp, lineHeight = 30.sp, fontWeight = FontWeight.Medium)
             }
             else -> Empty("No lyrics found for this song.", p.muted)
+        }
+        // something is shown (words, or LRCLIB's "Instrumental"): it can be reported as wrong or out of sync
+        val shown = !load.loading && load.error == null && l != null && (l.instrumental || l.lines.isNotEmpty() || l.plain.isNotBlank())
+        if (onReport != null && shown) {
+            SmallButton("Report lyrics", iconRes = R.drawable.ic_flag, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)) { onReport() }
         }
     }
 }

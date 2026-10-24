@@ -580,9 +580,19 @@ object SettingsRules {
         "replacing" -> "Looking for a replacement" to "warn"
         "replaced" -> "Replaced" to "ok"
         "no_replacement" -> "No replacement yet" to "err"
+        // lyrics reports (the song stays; only its lyrics are looked up again)
+        "lyrics_searching" -> "Looking for other lyrics" to "warn"
+        "lyrics_found" -> "New lyrics" to "ok"
+        "lyrics_none" -> "No other lyrics yet" to "err"
         "dismissed" -> "Dismissed" to ""
         else -> s to ""
     }
+
+    /** A report in this status may be tried again (an audio one with no replacement, a lyrics one with no lyrics). */
+    fun canRetry(status: String): Boolean = status == "no_replacement" || status == "lyrics_none"
+
+    /** Admins may dismiss a report in this status (a lyrics one also once settled: its lyrics may come back). */
+    fun canDismiss(status: String): Boolean = status in setOf("replacing", "no_replacement", "lyrics_found", "lyrics_none")
 
     /** The reason a quality-check flag suggests. */
     fun reasonFor(codes: List<String>): String = when {

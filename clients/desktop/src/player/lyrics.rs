@@ -84,6 +84,11 @@ impl Lyrics {
         self.current = -1;
     }
 
+    /// Lyrics (or LRCLIB's "Instrumental") are on screen for library song `song`: they can be reported.
+    pub fn shown(&self, song: Option<i64>) -> bool {
+        song.is_some() && self.id == song && !self.loading && (!self.lines.is_empty() || !self.plain.is_empty() || self.instrumental)
+    }
+
     /// Nothing loaded (the song changed).
     pub fn clear(&mut self) {
         *self = Lyrics::default();
@@ -372,6 +377,20 @@ mod tests {
         assert_eq!(eased(0.0, 100.0, total, total), 100.0);
         let mid = eased(0.0, 100.0, std::time::Duration::from_millis(200), total);
         assert!(mid > 50.0 && mid < 100.0, "it slows down towards the end: {mid}");
+    }
+
+    #[test]
+    /// "Report lyrics" shows only while the song's lyrics are on screen (not while loading, not for nothing found).
+    fn only_lyrics_on_screen_can_be_reported() {
+        let mut l = Lyrics::default();
+        assert!(!l.shown(Some(7)));
+        l.id = Some(7);
+        l.loading = true;
+        assert!(!l.shown(Some(7)));
+        l.loaded(7, Ok(serde_json::json!({ "lyrics": "plain words", "synced": false })));
+        assert!(l.shown(Some(7)) && !l.shown(Some(8)) && !l.shown(None));
+        l.loaded(7, Ok(serde_json::json!({ "lyrics": null })));
+        assert!(!l.shown(Some(7)));
     }
 
     #[test]

@@ -793,5 +793,8 @@ private val featuresCache = java.util.WeakHashMap<app.encore.android.AppGraph, F
 val app.encore.android.AppGraph.features: FeaturesApi
     get() = synchronized(featuresCache) { featuresCache.getOrPut(this) { FeaturesApi(api, http) } }
 
-/** What the server did with a report: status replacing | replaced | no_replacement, and its message. */
+/**
+ * What the server did with a report: status replacing | replaced | no_replacement (the audio reasons) or
+ * lyrics_found | lyrics_none (the lyrics reasons, which keep the song), and its message.
+ */
 data class ReportResult(val status: String, val message: String)

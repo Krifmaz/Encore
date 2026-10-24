@@ -370,6 +370,8 @@ pub enum Message {
     DownloadSong,
     /// "Report a problem" with the song in front of you.
     ReportSong,
+    /// Lyrics mode's "Report lyrics": Report a problem with Wrong lyrics ticked.
+    ReportLyrics,
     /// The library's song dialogs and downloads.
     SongAct(crate::pages::library::Act),
     ViewAlbum,
@@ -981,8 +983,27 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 }
             }
         }
+        Message::ReportLyrics => {
+            state.menu = None;
+            if let Some(n) = state.now() {
+                if let Some(id) = n.id {
+                    crate::pages::library::open_report(&mut state.shared, "track", json!(id), &n.title, "wrong_lyrics");
+                }
+            }
+        }
         Message::SongAct(a) => {
-            let task = crate::pages::library::shared_update(&mut state.shared, a, ctx).map(Message::SongAct);
+            // a lyrics report went through: the server already looked for other lyrics, so ask it again
+            let lyrics_changed = matches!(&a, crate::pages::library::Act::Reported(Ok(res))
+                if crate::pages::library::is_lyrics_reason(&crate::fmt::s(res, "reason")));
+            let mut task = crate::pages::library::shared_update(&mut state.shared, a, ctx).map(Message::SongAct);
+            if lyrics_changed {
+                state.lyrics.clear();
+                if state.full == Some(Pane::Lyrics) {
+                    if let Some(id) = state.now().and_then(|n| n.id) {
+                        task = Task::batch([task, state.lyrics.load(ctx.api.clone(), id, Message::Lyrics)]);
+                    }
+                }
+            }
             state.shared.take_changed();
             return task;
         }

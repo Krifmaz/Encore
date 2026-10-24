@@ -93,6 +93,7 @@ import app.encore.android.ui.components.LikeButton
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.PlayerMenuActions
+import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.formatDay
@@ -362,7 +363,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             }
                         }
                         ThinSeek(position, duration, onSeek = { ms -> nav.player.seekTo(ms) }, Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp))
-                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth())
+                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth(), onReport = lyricsReport(track, lyrics))
                     }
                 }
                 Box(
@@ -451,7 +452,7 @@ private fun LandscapeBody(
 ) {
     Row(modifier) {
         // left: the lyrics, always on while sideways
-        LyricsPane(nav, lyrics, positionMs, Modifier.weight(1f).fillMaxHeight())
+        LyricsPane(nav, lyrics, positionMs, Modifier.weight(1f).fillMaxHeight(), onReport = lyricsReport(track, lyrics))
         // right: the cover and everything that controls the song
         BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
             val art = PlayerLayout.landscapeArt(maxWidth.value, maxHeight.value).dp
@@ -632,6 +633,13 @@ internal fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier, playFocus: F
 }
 
 /**
+ * The lyrics pane's "Report lyrics" for [track]: the report sheet with Wrong lyrics ticked; once sent, [lyrics] load
+ * again (the server has already looked for other ones). Null for a Surround song or one outside the library.
+ */
+internal fun lyricsReport(track: Track, lyrics: LyricsLoad): (() -> Unit)? =
+    if (track.isSurround || track.id <= 0) null else ({ ReportUi.lyrics(track.id, track.title) { lyrics.reload() } })
+
+/**
  * Like, share, lyrics and "⋯" (the web's `.np-actions`; a Surround song has no like and no playlists).
  *
  * @param onLyrics switches to lyrics mode; null (sideways, where the lyrics are always shown) leaves out the Lyrics
@@ -684,6 +692,8 @@ internal fun PlayerActions(
                 if (onLyrics != null) MenuEntry("Lyrics", R.drawable.ic_lyrics) { onLyrics() } else null,
                 MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },
                 MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
+                // one tap to the report sheet for the song playing now (wrong song, bad audio, wrong lyrics …)
+                if (!track.isSurround && track.id > 0) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(track.id, track.title) } else null,
                 when {
                     group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }

@@ -1,5 +1,10 @@
 //! Lyrics from LRCLIB (free, no key): saved next to each song as .lrc (time-synced) or .txt (plain),
 //! which Jellyfin, Navidrome, Plexamp and most players pick up too.
+//!
+//! A lyrics report (⋯ → Report a problem → Wrong lyrics / Lyrics out of sync) never touches the audio:
+//! [`reject_current`] remembers the lyrics shown now in `lyrics_reject`, deletes the file next to the
+//! song, and every later lookup skips LRCLIB versions with that text ([`Rejects::screen`]), so another
+//! version (time-synced first) is picked – or none, rather than the wrong ones again.
 use encore_db::{Row, RowExt};
 use encore_db::p;
 use crate::Ctx;
@@ -7,6 +12,8 @@ use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{ItemKey, Tag};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// (lyrics, synced?) from an existing .lrc/.txt next to the file.
@@ -19,7 +26,7 @@ pub fn sidecar(path: &Path) -> Option<(String, bool)> {
     None
 }
 
-use encore_http::lrclib::lookup;
+use encore_http::lrclib::lookup_with;
 
 /// Unsynced lyrics inside the file, for players that don't read .lrc files.
 fn embed(path: &Path, plain: &str) -> anyhow::Result<()> {
@@ -40,7 +47,10 @@ pub async fn fetch_for_track(st: &impl Ctx, t: &Row, force: bool) -> anyhow::Res
         return Ok(json!({ "lyrics": text, "synced": synced, "source": "file" }));
     }
     let dur = Some(t.f("duration")).filter(|d| *d > 0.0);
-    let Some(hit) = lookup(st, &t.s("artist"), &t.s("title"), &t.s("album"), dur).await? else {
+    // versions a lyrics report rejected for this song are skipped
+    let rejects = Rejects::of(st, t.i("id"));
+    let picky = !rejects.is_empty();
+    let Some(hit) = lookup_with(st, &t.s("artist"), &t.s("title"), &t.s("album"), dur, |h| rejects.screen(h), picky).await? else {
         return Ok(json!({ "lyrics": null, "synced": false, "source": null }));
     };
     if hit["instrumental"].as_bool().unwrap_or(false) {
@@ -84,4 +94,240 @@ pub async fn fetch_missing(st: &impl Ctx, ids: Option<&[i64]>, limit: usize) -> 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await; // be gentle with the free service
     }
     json!({ "checked": done, "found": found })
+}
+
+// ---- lyrics reports ------------------------------------------------------------------------------
+
+/// What a lyrics report says is wrong with the lyrics a song shows now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Complaint {
+    /// The words belong to another song (or another version): no version with these words again.
+    Wrong,
+    /// The words are right but the timing is off: not this timing again; other time-synced
+    /// versions, or the same words without timing, may be shown.
+    OutOfSync,
+}
+
+impl Complaint {
+    /// The complaint of a report reason ("wrong_lyrics", "lyrics_sync"); None for the reasons about the audio.
+    pub fn of_reason(reason: &str) -> Option<Self> {
+        match reason {
+            "wrong_lyrics" => Some(Complaint::Wrong),
+            "lyrics_sync" => Some(Complaint::OutOfSync),
+            _ => None,
+        }
+    }
+}
+
+/// The words of lyrics, for comparing versions: the `[mm:ss.xx]` (and other `[…]`) tags taken out,
+/// lower case, letters and digits only, one space between words.
+pub fn lyric_words(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let mut depth = 0;
+        for c in line.chars() {
+            match c {
+                '[' => depth += 1,
+                ']' if depth > 0 => depth -= 1,
+                _ if depth > 0 => {}
+                c if c.is_alphanumeric() => out.extend(c.to_lowercase()),
+                _ => out.push(' '),
+            }
+        }
+        out.push(' ');
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Time-synced lyrics as compared: line endings and the spaces around each line evened out, empty lines dropped.
+fn synced_norm(text: &str) -> String {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// SHA-256 (hex) of a text: the key a rejected version is remembered by.
+fn digest(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// The lyrics versions rejected for one song (the `lyrics_reject` rows), by kind.
+#[derive(Default, Debug)]
+pub struct Rejects {
+    /// words no version may have (Wrong lyrics)
+    words: HashSet<String>,
+    /// exact time-synced texts not to use (Lyrics out of sync)
+    synced: HashSet<String>,
+    /// words not to show without timing (Lyrics out of sync on plain lyrics)
+    plain: HashSet<String>,
+    /// LRCLIB's "instrumental" was reported as wrong
+    instrumental: bool,
+}
+
+impl Rejects {
+    /// What reports rejected for track `id`.
+    pub fn of(st: &impl Ctx, id: i64) -> Self {
+        let mut r = Rejects::default();
+        for row in st.db().query("SELECT kind, key FROM lyrics_reject WHERE track_id=?", p![id]).unwrap_or_default() {
+            match row.s("kind").as_str() {
+                "words" => { r.words.insert(row.s("key")); }
+                "synced" => { r.synced.insert(row.s("key")); }
+                "plain" => { r.plain.insert(row.s("key")); }
+                "instrumental" => r.instrumental = true,
+                _ => {}
+            }
+        }
+        r
+    }
+
+    /// Nothing rejected: lookups behave as they always did.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty() && self.synced.is_empty() && self.plain.is_empty() && !self.instrumental
+    }
+
+    /// An LRCLIB version with the rejected parts taken out (its time-synced or plain text set to null),
+    /// or None when nothing of it may be shown.
+    pub fn screen(&self, mut hit: Value) -> Option<Value> {
+        if hit["instrumental"].as_bool().unwrap_or(false) {
+            return (!self.instrumental).then_some(hit);
+        }
+        if let Some(s) = hit["syncedLyrics"].as_str() {
+            if self.words.contains(&digest(&lyric_words(s))) || self.synced.contains(&digest(&synced_norm(s))) {
+                hit["syncedLyrics"] = Value::Null;
+            }
+        }
+        if let Some(s) = hit["plainLyrics"].as_str() {
+            let w = digest(&lyric_words(s));
+            if self.words.contains(&w) || self.plain.contains(&w) {
+                hit["plainLyrics"] = Value::Null;
+            }
+        }
+        (hit["syncedLyrics"].is_string() || hit["plainLyrics"].is_string()).then_some(hit)
+    }
+}
+
+/// The `lyrics_reject` rows (kind, key) for lyrics shown now (`shown`: text and time-synced?, None when
+/// LRCLIB's "instrumental" was shown) and a complaint about them.
+pub fn reject_rows(shown: Option<(&str, bool)>, complaint: Complaint) -> Vec<(&'static str, String)> {
+    match (shown, complaint) {
+        (None, _) => vec![("instrumental", String::new())],
+        (Some((text, _)), Complaint::Wrong) => vec![("words", digest(&lyric_words(text)))],
+        (Some((text, true)), Complaint::OutOfSync) => vec![("synced", digest(&synced_norm(text)))],
+        // plain lyrics have no timing to be off: these words come back only with time-synced lines
+        (Some((text, false)), Complaint::OutOfSync) => vec![("plain", digest(&lyric_words(text)))],
+    }
+}
+
+/// A lyrics report on track `t`: the lyrics shown now (the file next to the song, else what LRCLIB
+/// answers now) are rejected for good, the .lrc/.txt files go (and the words Encore embedded in the
+/// file's tags), and other lyrics are looked up at once. The audio itself is never moved or replaced.
+/// → the new answer ({lyrics, synced, source}, `lyrics` null when no other version was found)
+pub async fn reject_current(st: &impl Ctx, t: &Row, complaint: Complaint, report_id: i64) -> anyhow::Result<Value> {
+    let path = Path::new(&t.s("path")).to_path_buf();
+    let shown: Option<(String, bool)> = match sidecar(&path) {
+        Some(s) => Some(s),
+        // nothing saved (saving lyrics files is off, or LRCLIB said instrumental): what it answers now
+        None => {
+            let now = fetch_for_track(st, t, false).await?;
+            if now["instrumental"].as_bool().unwrap_or(false) {
+                None
+            } else if let Some(l) = now["lyrics"].as_str().filter(|l| !l.trim().is_empty()) {
+                Some((l.to_string(), now["synced"].as_bool().unwrap_or(false)))
+            } else {
+                // no lyrics shown at all: nothing to reject, just look again
+                return fetch_for_track(st, t, true).await;
+            }
+        }
+    };
+    for (kind, key) in reject_rows(shown.as_ref().map(|(l, s)| (l.as_str(), *s)), complaint) {
+        st.db().execute("INSERT OR IGNORE INTO lyrics_reject (track_id, kind, key, report_id, created_at) VALUES (?,?,?,?,?)",
+            p![t.i("id"), kind, key, report_id, encore_db::now()])?;
+    }
+    for ext in ["lrc", "txt"] {
+        let f = path.with_extension(ext);
+        if f.is_file() {
+            if let Err(e) = std::fs::remove_file(&f) {
+                st.db().log("warning", &format!("Could not delete the lyrics file {}: {e}", f.display()));
+            }
+        }
+    }
+    // Encore embeds plain lyrics when asked to; the rejected ones go from the tags too (the audio is untouched)
+    if st.cfg().bool("lyrics_embed") && path.is_file() {
+        if let Err(e) = unembed(&path) {
+            st.db().log("warning", &format!("Could not remove the embedded lyrics from {}: {e}", path.display()));
+        }
+    }
+    fetch_for_track(st, t, true).await
+}
+
+/// Take the lyrics out of a file's tags (nothing happens when it has none).
+fn unembed(path: &Path) -> anyhow::Result<()> {
+    let mut f = lofty::read_from_path(path)?;
+    let Some(tag) = f.primary_tag_mut() else { return Ok(()) };
+    if tag.get_string(ItemKey::Lyrics).is_none() {
+        return Ok(());
+    }
+    tag.remove_key(ItemKey::Lyrics);
+    f.save_to_path(path, WriteOptions::default())?;
+    Ok(())
+}
+
+/// The lyrics a dismissed report rejected may be shown again.
+pub fn forget_rejects(st: &impl Ctx, report_id: i64) {
+    let _ = st.db().execute("DELETE FROM lyrics_reject WHERE report_id=?", p![report_id]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tags, case, punctuation and line breaks don't make lyrics different.
+    #[test]
+    fn words_ignore_timing_case_and_punctuation() {
+        assert_eq!(lyric_words("[00:01.00] Hello, World!\r\n[00:02.50]  it's me"), "hello world it s me");
+        assert_eq!(lyric_words("[ar:Someone]\nHello world\nit's me"), "hello world it s me");
+        assert_eq!(lyric_words(""), "");
+    }
+
+    /// Wrong lyrics: no version with those words, timed or not. Out of sync: that timing goes, the
+    /// same words without timing and other timings stay.
+    #[test]
+    fn rejects_screen_the_versions_a_report_named() {
+        let bad = "[00:01.00] la la\n[00:02.00] la";
+        let hit = json!({ "id": 1, "syncedLyrics": bad, "plainLyrics": "La la\nla" });
+        let other_timing = json!({ "id": 2, "syncedLyrics": "[00:03.00] la la\n[00:04.00] la" });
+        let other_song = json!({ "id": 3, "plainLyrics": "something else" });
+        let set = |rows: Vec<(&'static str, String)>| {
+            let mut r = Rejects::default();
+            for (k, v) in rows {
+                match k { "words" => { r.words.insert(v); } "synced" => { r.synced.insert(v); } "plain" => { r.plain.insert(v); } _ => r.instrumental = true }
+            }
+            r
+        };
+        let wrong = set(reject_rows(Some((bad, true)), Complaint::Wrong));
+        assert!(wrong.screen(hit.clone()).is_none());
+        assert!(wrong.screen(other_timing.clone()).is_none());
+        assert_eq!(wrong.screen(other_song.clone()).unwrap()["id"], 3);
+
+        let sync = set(reject_rows(Some((bad, true)), Complaint::OutOfSync));
+        let kept = sync.screen(hit.clone()).unwrap();
+        assert!(kept["syncedLyrics"].is_null() && kept["plainLyrics"].is_string());
+        assert!(sync.screen(other_timing.clone()).unwrap()["syncedLyrics"].is_string());
+
+        // plain lyrics reported out of sync: only a time-synced version of them may come back
+        let plain = set(reject_rows(Some(("La la\nla", false)), Complaint::OutOfSync));
+        assert!(plain.screen(json!({ "plainLyrics": "la la la" })).is_none());
+        assert!(plain.screen(other_timing).is_some());
+
+        let instr = set(reject_rows(None, Complaint::Wrong));
+        assert!(instr.screen(json!({ "instrumental": true })).is_none());
+        assert!(instr.screen(other_song).is_some());
+        assert!(Rejects::default().is_empty() && !instr.is_empty());
+    }
+
+    /// Only the two lyrics reasons are complaints about lyrics.
+    #[test]
+    fn complaints_of_reasons() {
+        assert_eq!(Complaint::of_reason("wrong_lyrics"), Some(Complaint::Wrong));
+        assert_eq!(Complaint::of_reason("lyrics_sync"), Some(Complaint::OutOfSync));
+        assert_eq!(Complaint::of_reason("wrong_song"), None);
+    }
 }

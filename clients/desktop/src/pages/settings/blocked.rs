@@ -43,6 +43,10 @@ pub fn status_words(s: &str) -> (&str, Badge) {
         "replacing" => ("Looking for a replacement", Badge::Warn),
         "replaced" => ("Replaced", Badge::Ok),
         "no_replacement" => ("No replacement yet", Badge::Err),
+        // lyrics reports (the song stays; only its lyrics are looked up again)
+        "lyrics_searching" => ("Looking for other lyrics", Badge::Warn),
+        "lyrics_found" => ("New lyrics", Badge::Ok),
+        "lyrics_none" => ("No other lyrics yet", Badge::Err),
         "dismissed" => ("Dismissed", Badge::Plain),
         other => (other, Badge::Plain),
     }
@@ -140,7 +144,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Retry(id) => {
             state.busy = Some(format!("retry-{id}"));
             let api = ctx.api.clone();
-            return Task::perform(async move { api.post_empty(&format!("/reports/{id}/retry")).await }, |r| Message::Done(r.map(|_| json!("Looking for a replacement"))));
+            return Task::perform(async move { api.post_empty(&format!("/reports/{id}/retry")).await }, |r| Message::Done(r.map(|_| json!("Trying again"))));
         }
         Message::Dismiss(id) => {
             state.busy = Some(format!("dismiss-{id}"));
@@ -217,13 +221,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Reported(Ok(res)) => {
             state.dialog = None;
-            ctx.toast_ok(if fmt::s(&res, "status") == "replacing" {
-                "Reported – looking for a better copy".to_string()
-            } else if fmt::truthy(&res, "message") {
-                fmt::s(&res, "message")
-            } else {
-                "Reported".to_string()
-            });
+            ctx.toast_ok(crate::pages::library::report_toast(&res));
             return reload(ctx);
         }
         Message::Reported(Err(e)) => {
@@ -273,10 +271,12 @@ fn report_row<'a>(state: &'a State, r: &'a Value, admin: bool) -> El<'a, Message
     .spacing(2)
     .width(Length::Fill);
     let mut actions = row![badge(label, kind)].spacing(6).align_y(Alignment::Center);
-    if st == "no_replacement" {
+    // Try again: an audio report with no replacement, a lyrics report with no lyrics
+    if st == "no_replacement" || st == "lyrics_none" {
         actions = actions.push(btn_icon(Icon::Refresh, "Try again", Btn::Default, state.busy.is_none().then_some(Message::Retry(id))));
     }
-    if admin && (st == "replacing" || st == "no_replacement") {
+    // Dismiss (admins): also a settled lyrics report, so the lyrics it rejected may come back
+    if admin && ["replacing", "no_replacement", "lyrics_found", "lyrics_none"].contains(&st.as_str()) {
         actions = actions.push(btn_sm("Dismiss", Btn::Ghost, state.busy.is_none().then_some(Message::Dismiss(id))));
     }
     let _ = p;
