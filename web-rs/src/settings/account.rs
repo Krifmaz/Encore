@@ -31,7 +31,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let avatar_block = if has("avatar") {
             // `icon.upload || icon.plus`
             let up = { let u = icon("upload"); if u.is_empty() { icon("plus") } else { u } };
-            format!(r##"<div class="row wrap" style="gap:8px"><label class="btn sm">{up}Change picture<input type="file" id="avatar-file" accept="image/*" hidden></label>
+            format!(r##"<div class="row wrap" style="gap:8px" data-dropzone><label class="btn sm">{up}Change picture<input type="file" id="avatar-file" accept="image/*" hidden></label>
           {}</div>"##, if me.truthy("avatar_at") { r#"<button class="btn sm ghost" id="avatar-remove">Remove</button>"# } else { "" })
         } else { String::new() };
         let rename = if has("rename") {

@@ -59,10 +59,10 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
     </div>
     <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
     <div id="updates"></div>
-    <div class="section-head"><h2>Backups</h2>
+    <div class="section-head" data-dropzone="bk-upload"><h2>Backups</h2>
       <div class="row"><label class="btn sm">{up}Upload a backup…<input type="file" id="bk-upload" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" hidden></label><button class="btn sm primary" id="bk-now">Back up now</button></div>
     </div>
-    <div class="card flat">
+    <div class="card flat" data-dropzone="bk-upload">
       <div class="small muted" style="margin-bottom:10px">Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else.</div>
       <div id="backups"><div class="empty"><span class="spinner"></span></div></div>
     </div>

@@ -564,7 +564,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
         &format!(r#"<div class="tabs" id="imp-tabs"><button data-m="url" class="active">From a link</button><button data-m="text">Paste a list</button></div>
       <div class="mt" id="imp-url"><input class="input" id="imp-link" value="{url}" placeholder="YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…">
         <p class="small faint" style="margin:6px 0 0">Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. <span class="mono">https://music.youtube.com/playlist?list=LM</span> or <span class="mono">https://open.spotify.com/collection/tracks</span>). Amazon Music playlists and albums import from their public share links.</p></div>
-      <div class="mt hidden" id="imp-text"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea>
+      <div class="mt hidden" id="imp-text" data-dropzone="imp-file"><textarea class="input" id="imp-lines" rows="8" placeholder="One per line:  Artist - Title"></textarea>
         <div class="row wrap mt"><label class="btn sm">{file}Choose a .txt file<input type="file" id="imp-file" accept=".txt,text/plain" hidden></label>
         <span class="row hidden" id="imp-fold"><button class="btn sm" id="imp-fold-btn">Show all</button><span class="small faint" id="imp-count"></span></span></div></div>
       <div class="row wrap mt">

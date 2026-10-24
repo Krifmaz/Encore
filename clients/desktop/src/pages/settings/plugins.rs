@@ -21,6 +21,7 @@ use crate::fmt;
 use crate::pages::{Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::text_area::text_area;
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn_icon, btn_sm, icon, icon_btn, t, Icon};
 use iced::widget::text_editor;
 use iced::widget::{button, checkbox, column, container, row};
@@ -700,6 +701,8 @@ pub struct State {
     /// the line under Add a plugin: (None while it works, Some(false) a failure)
     add_out: Option<(Option<bool>, String)>,
     dialog: Option<Dialog>,
+    /// plugin zips dragged onto the window for *Upload plugin*
+    drop: DropZone,
     /// the live blocks of the source cards (Tidal sign-in, streamrip config, Soulseek, VPN, YouTube sign-in)
     pub tools: tools::State,
 }
@@ -732,6 +735,8 @@ pub enum Message {
     LogCopy(String),
     PickUpload,
     UploadPicked(Option<PathBuf>),
+    /// a file dragged over or dropped on the window: a dropped plugin zip is uploaded
+    Drop(drop_zone::Event),
     Url(String),
     InstallUrl,
     Install(Add),
@@ -1139,11 +1144,23 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::PickUpload => {
             return Task::perform(
-                async move { rfd::AsyncFileDialog::new().set_title("Upload plugin").add_filter("Plugin zip", &["zip"]).pick_file().await.map(|f| f.path().to_path_buf()) },
+                async move { rfd::AsyncFileDialog::new().set_title("Upload plugin").add_filter("Plugin zip", PLUGIN_FILES.exts).pick_file().await.map(|f| f.path().to_path_buf()) },
                 Message::UploadPicked,
             );
         }
         Message::UploadPicked(None) => {}
+        Message::Drop(ev) => {
+            // like *Upload plugin*: not while a plugin is being added or a dialog asks something
+            if state.adding || state.dialog.is_some() || state.list.is_none() {
+                state.drop.hovering = false;
+                return Task::none();
+            }
+            match state.drop.handle(ev, &PLUGIN_FILES) {
+                Outcome::Take(path) => return Task::done(Message::UploadPicked(Some(path))),
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
+        }
         Message::UploadPicked(Some(path)) => {
             let max = state.list.as_ref().map(|l| fmt::i(l, "upload_max_mb")).filter(|m| *m > 0).unwrap_or(200);
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1945,7 +1962,7 @@ fn add_view<'a>(state: &'a State, list: &'a Value) -> El<'a, Message> {
         help("A plugin is a zip with a plugin.toml and its program, for example one made with Encore's plugin SDK (docs/plugins in Encore's repository). Plugins you add are not made by Encore: install only plugins you trust."),
         row![
             btn_icon(Icon::Plus, "Upload plugin", Btn::Default, (!state.adding).then_some(Message::PickUpload)),
-            help(format!("A .zip of at most {max} MB")),
+            help(format!("A .zip of at most {max} MB (or drop it here)")),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -1964,8 +1981,11 @@ fn add_view<'a>(state: &'a State, list: &'a Value) -> El<'a, Message> {
         Some((Some(ok), m)) => c = c.push(result_line_copy(*ok, m, Message::CopyText)),
         None => {}
     }
-    widgets::card(c).width(Length::Fill).into()
+    drop_zone::view(widgets::card(c).width(Length::Fill), &state.drop, "Drop a plugin .zip to upload it")
 }
+
+/// The plugin zips *Upload plugin* takes, picked or dropped.
+const PLUGIN_FILES: drop_zone::Accept = drop_zone::Accept::one(&["zip"]);
 
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if !state.error.is_empty() {
@@ -2026,6 +2046,8 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     if tools::tidal_waiting(&state.tools) || anything_busy(state) {
         subs.push(iced::time::every(Duration::from_secs(3)).map(|_| Message::Tick));
     }
+    // plugin zips dragged onto the window (Upload plugin)
+    subs.push(drop_zone::events().map(Message::Drop));
     Subscription::batch(subs)
 }
 

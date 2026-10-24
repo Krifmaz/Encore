@@ -14,11 +14,11 @@ use web_sys::Element;
 /// `artworkModal(albumId, a, onDone)`.
 pub fn artwork_modal(album_id: &str, a: &Value, on_done: Rc<dyn Fn()>) {
     let album_id = album_id.to_string();
-    let m = modal(ModalOpts::new("Change artwork", &format!(r#"<form class="row wrap" id="aw-form"><input class="input grow" name="q" value="{}" placeholder="Album title to search for" style="min-width:0">
+    let m = modal(ModalOpts::new("Change artwork", &format!(r#"<div data-dropzone="aw-file"><form class="row wrap" id="aw-form"><input class="input grow" name="q" value="{}" placeholder="Album title to search for" style="min-width:0">
         <button class="btn primary">Search</button>
         <label class="btn">Upload…<input type="file" accept="image/jpeg,image/png" id="aw-file" hidden></label></form>
       <div class="small muted mt">Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg.</div>
-      <div id="aw-out" class="mt"></div>"#, esck(a, "album"))).wide(true));
+      <div id="aw-out" class="mt"></div></div>"#, esck(a, "album"))).wide(true));
     let out = m.qs("#aw-out").expect("#aw-out");
 
     // apply(body, el): embed the chosen picture, then refresh every cover of this album on the page

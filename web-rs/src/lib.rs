@@ -11,6 +11,7 @@ pub mod app;
 pub mod appearance;
 pub mod details;
 pub mod dom;
+pub mod dropzone;
 pub mod group;
 pub mod json;
 pub mod notice;
@@ -39,6 +40,7 @@ pub fn start() {
     details::init();
     appearance::init();
     app::init();
+    dropzone::init();
 }
 
 /// A Rust panic in the page used to leave it half drawn with no word of what happened (0.26.0/0.26.1: empty

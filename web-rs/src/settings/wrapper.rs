@@ -60,7 +60,7 @@ fn managed_html(o: &Value) -> String {
         } else {
             "No app uploaded yet: Apple Music for Android 3.6.0-beta (build 1109), as an .apk or an APKMirror .apkm bundle.".to_string()
         };
-        html.push_str(&format!(r##"<div class="row between wrap" style="gap:8px;align-items:center">
+        html.push_str(&format!(r##"<div class="row between wrap" style="gap:8px;align-items:center" data-dropzone>
       <div style="min-width:0"><b>Apple Music app</b><div class="small muted">{app}</div></div>
       <label class="btn sm" style="cursor:pointer">{up}{label}<input type="file" id="wrapper-app" accept=".apk,.apkm,application/vnd.android.package-archive,application/zip" hidden></label>
     </div>"##, up = icon("plus"), label = if bundle.is_object() { "Replace app" } else { "Upload app" }));

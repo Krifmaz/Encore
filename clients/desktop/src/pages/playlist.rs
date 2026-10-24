@@ -1400,8 +1400,12 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     }
 }
 
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::none()
+/// A .txt list dragged onto the window while *Add tracks from a link* is open.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    match state.dialog {
+        Some(Dialog::Import(_)) => playlists::import_events().map(Message::Import),
+        _ => Subscription::none(),
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use crate::api::{ApiError, VERSION};
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn, btn_icon, btn_sm, icon_btn, modal, small_muted, t, Icon};
 use iced::widget::{column, container, image, row};
 use iced::{Alignment, ContentFit, Length, Task};
@@ -50,6 +51,8 @@ pub struct State {
     dialog: Option<Dialog>,
     busy: bool,
     error: String,
+    /// Pictures dragged onto the window for *Change picture*.
+    drop: DropZone,
 }
 
 /// What a finished request was for.
@@ -82,6 +85,8 @@ pub enum Message {
     EmailSubmit,
     PickAvatar,
     AvatarPicked(Option<PathBuf>),
+    /// A file dragged over or dropped on the window: a dropped picture becomes the new one.
+    Drop(drop_zone::Event),
     RemoveAvatar,
     TwoFaSetup,
     TwoFaCode(String),
@@ -221,13 +226,25 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 async move {
                     rfd::AsyncFileDialog::new()
                         .set_title("Change picture")
-                        .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif"])
+                        .add_filter("Pictures", AVATAR_FILES.exts)
                         .pick_file()
                         .await
                         .map(|f| f.path().to_path_buf())
                 },
                 Message::AvatarPicked,
             );
+        }
+        Message::Drop(ev) => {
+            // only while *Change picture* can be pressed, like the button
+            if state.busy || !ctx.has_feature("avatar") {
+                state.drop.hovering = false;
+                return Task::none();
+            }
+            match state.drop.handle(ev, &AVATAR_FILES) {
+                Outcome::Take(path) => return Task::done(Message::AvatarPicked(Some(path))),
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
         }
         Message::AvatarPicked(None) => {}
         Message::AvatarPicked(Some(path)) => {
@@ -354,6 +371,14 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     Task::none()
 }
 
+/// The pictures *Change picture* takes, picked or dropped.
+const AVATAR_FILES: drop_zone::Accept = drop_zone::Accept::one(&["png", "jpg", "jpeg", "webp", "gif"]);
+
+/// The window's drag and drop, for *Change picture*.
+pub fn subscription(_state: &State) -> iced::Subscription<Message> {
+    drop_zone::events().map(Message::Drop)
+}
+
 /// `/api/users/{id}/avatar?v=<avatar_at>`, the picture the server keeps.
 fn avatar_url(base: &str, me: &Value) -> String {
     format!("{base}/api/users/{}/avatar?v={}", fmt::s(me, "id"), fmt::f(me, "avatar_at").round() as i64)
@@ -417,7 +442,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         if fmt::truthy(me, "avatar_at") {
             r = r.push(btn_sm("Remove", Btn::Ghost, Some(Message::RemoveAvatar)));
         }
-        profile.push(r.into());
+        profile.push(drop_zone::view(r, &state.drop, "Drop a picture to make it yours"));
     }
     let mut requests = row![
         help("Requests this week:"),

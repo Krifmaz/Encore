@@ -9,6 +9,7 @@ use crate::api::{Api, ApiError};
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::text_area::text_area;
 use crate::widgets::{
     self, badge, btn, btn_icon, card_flat, error_box, field, h1, modal, muted, seg, skeleton_rows, small, small_muted,
@@ -100,7 +101,12 @@ pub type Picked = (PathBuf, u64);
 #[derive(Debug, Default)]
 pub struct Picker {
     pub files: Vec<PathBuf>,
+    /// Files dragged onto the window: they join the picked ones.
+    pub drop: DropZone,
 }
+
+/// The files *Add images* takes, picked or dropped (images, .txt and .log files, several at once).
+pub const ATTACH_FILES: drop_zone::Accept = drop_zone::Accept::many(&["png", "jpg", "jpeg", "webp", "gif", "txt", "log"]);
 
 impl Picker {
     /// Add picked files within the limits; the rule that stopped one goes to a toast.
@@ -118,6 +124,19 @@ impl Picker {
             if !self.files.contains(&path) {
                 self.files.push(path);
             }
+        }
+    }
+
+    /// A file dragged over or dropped on the window: a dropped one is added like a picked one
+    /// (same types, same limits); one that isn't taken goes to a toast.
+    pub fn dropped(&mut self, ev: drop_zone::Event, ctx: &mut Ctx) {
+        match self.drop.handle(ev, &ATTACH_FILES) {
+            Outcome::Take(path) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                self.add(vec![(path, size)], ctx);
+            }
+            Outcome::Refused(m) => ctx.toast_err(m),
+            Outcome::Nothing => {}
         }
     }
 
@@ -185,7 +204,7 @@ pub fn is_picture(path: &std::path::Path) -> bool {
 /// The OS file dialog for pictures, .txt and .log files; the picked files with their sizes.
 pub async fn pick_files() -> Vec<Picked> {
     let Some(chosen) = rfd::AsyncFileDialog::new()
-        .add_filter("Images and text files", &["png", "jpg", "jpeg", "webp", "gif", "txt", "log"])
+        .add_filter("Images and text files", ATTACH_FILES.exts)
         .pick_files()
         .await
     else {
@@ -233,6 +252,8 @@ pub enum NewMsg {
     Body(text_editor::Action),
     AddFiles,
     Picked(Vec<Picked>),
+    /// A file dragged over or dropped on the window: it joins the attachments.
+    Drop(drop_zone::Event),
     RemoveFile(usize),
     Send,
     Sent(Result<Value, ApiError>),
@@ -246,6 +267,7 @@ pub fn new_update(d: &mut NewReport, msg: NewMsg, ctx: &mut Ctx) -> (Task<NewMsg
         NewMsg::Body(a) => d.body.perform(a),
         NewMsg::AddFiles => return (Task::perform(pick_files(), NewMsg::Picked), None),
         NewMsg::Picked(files) => d.picker.add(files, ctx),
+        NewMsg::Drop(ev) => d.picker.dropped(ev, ctx),
         NewMsg::RemoveFile(i) => d.picker.remove(i),
         NewMsg::Send => {
             if d.sending {
@@ -325,14 +347,21 @@ pub fn new_dialog<'a, M: Clone + 'a>(
             "Description",
             text_area(&d.body, "What happened, what you expected, how to repeat it", 6, NewMsg::Body)
         ),
-        row![
-            btn_icon(Icon::Plus, "Add images", Btn::Default, Some(NewMsg::AddFiles)),
-            small_muted(format!("Up to {MAX_FILES} files, 8 MB each. Images, .txt and .log files.")),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .wrap(),
-        d.picker.view(NewMsg::RemoveFile),
+        drop_zone::view(
+            column![
+                row![
+                    btn_icon(Icon::Plus, "Add images", Btn::Default, Some(NewMsg::AddFiles)),
+                    small_muted(format!("Up to {MAX_FILES} files, 8 MB each. Images, .txt and .log files (pick or drop them).")),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .wrap(),
+                d.picker.view(NewMsg::RemoveFile),
+            ]
+            .spacing(12),
+            &d.picker.drop,
+            "Drop images, .txt or .log files to attach them",
+        ),
         small_muted(format!(
             "Sent along: {}the app version ({}) and this computer.",
             if d.page.is_empty() { String::new() } else { format!("the page you came from ({}), ", d.page) },
@@ -682,9 +711,15 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     Some(new_dialog(d, ctx, Message::New, Message::CloseDialog))
 }
 
-/// The list refreshes once a minute while it is open (a reply may have come in).
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    iced::time::every(Duration::from_secs(60)).map(|_| Message::Refresh)
+/// The list refreshes once a minute while it is open (a reply may have come in); files dragged onto
+/// the window go to the New report dialog while it is open.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    let refresh = iced::time::every(Duration::from_secs(60)).map(|_| Message::Refresh);
+    if state.dialog.is_some() {
+        Subscription::batch([refresh, drop_zone::events().map(|e| Message::New(NewMsg::Drop(e)))])
+    } else {
+        refresh
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod choice;
 pub mod cover;
 pub mod details;
+pub mod drop_zone;
 pub mod empty;
 pub mod eq_graph;
 pub mod icons;

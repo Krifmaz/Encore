@@ -13,6 +13,7 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{
     self, badge, btn, btn_icon, empty, grid, h1, h3, icon, icon_btn, modal, pop_menu, skeleton_rows,
     small_muted, t, tabs, Icon, MenuItem, Tile, TileKind, TrackRow,
@@ -58,6 +59,8 @@ pub struct ArtState {
     pub candidates: Option<Vec<Value>>,
     pub error: String,
     pub busy: bool,
+    /// A picture dragged onto the window: it is uploaded like *Upload…*.
+    pub drop: DropZone,
 }
 
 #[derive(Debug)]
@@ -167,6 +170,8 @@ pub enum Message {
     ArtResults(Result<Value, ApiError>),
     ArtPick(usize),
     ArtUpload,
+    /// A file dragged over or dropped on the window while *Change artwork* is open.
+    ArtDrop(drop_zone::Event),
     /// The picked file as a data URL ("" = cancelled), or why it was refused.
     ArtFile(Result<String, String>),
     ArtSet(Result<Value, ApiError>),
@@ -315,25 +320,29 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The pictures *Upload…* takes, picked or dropped.
+const PICTURE_FILES: drop_zone::Accept = drop_zone::Accept::one(&["jpg", "jpeg", "png"]);
+
 /// Pick a picture and read it as a data URL ("" when cancelled).
 async fn pick_picture() -> Result<String, String> {
     let Some(f) = rfd::AsyncFileDialog::new()
-        .add_filter("Pictures", &["jpg", "jpeg", "png"])
+        .add_filter("Pictures", PICTURE_FILES.exts)
         .pick_file()
         .await
     else {
         return Ok(String::new());
     };
     let bytes = f.read().await;
+    picture_data_url(&f.file_name(), &bytes)
+}
+
+/// A picked or dropped picture (its file name and bytes) as a data URL; over 15 MB is refused, as on the web.
+fn picture_data_url(name: &str, bytes: &[u8]) -> Result<String, String> {
     if bytes.len() > 15 * 1024 * 1024 {
         return Err("Picture is larger than 15 MB".into());
     }
-    let mime = if f.file_name().to_ascii_lowercase().ends_with(".png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
-    Ok(format!("data:{mime};base64,{}", base64(&bytes)))
+    let mime = if name.to_ascii_lowercase().ends_with(".png") { "image/png" } else { "image/jpeg" };
+    Ok(format!("data:{mime};base64,{}", base64(bytes)))
 }
 
 fn match_search(state: &mut State, ctx: &Ctx) -> Task<Message> {
@@ -863,6 +872,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 candidates: None,
                 error: String::new(),
                 busy: false,
+                drop: DropZone::default(),
             })));
             return art_search(state, ctx);
         }
@@ -895,6 +905,26 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::ArtUpload => return Task::perform(pick_picture(), Message::ArtFile),
+        Message::ArtDrop(ev) => {
+            let Some(Dialog::Artwork(a)) = &mut state.dialog else { return Task::none() };
+            if a.busy {
+                a.drop.hovering = false;
+                return Task::none();
+            }
+            match a.drop.handle(ev, &PICTURE_FILES) {
+                Outcome::Take(path) => {
+                    return Task::perform(
+                        async move {
+                            let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+                            picture_data_url(&path.to_string_lossy(), &bytes)
+                        },
+                        Message::ArtFile,
+                    );
+                }
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
+        }
         Message::ArtFile(Ok(data)) => {
             if !data.is_empty() {
                 return set_art(state, json!({ "data": data }), ctx);
@@ -1576,10 +1606,11 @@ fn art_dialog<'a>(a: &'a ArtState, ctx: &Ctx<'a>) -> El<'a, Message> {
         ]
         .spacing(8)
         .align_y(Alignment::Center),
-        small_muted("Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg."),
+        small_muted("Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg. Or drop a .jpg or .png here."),
         out,
     ]
     .spacing(12);
+    let body = drop_zone::view(body, &a.drop, "Drop a .jpg or .png to use it as the cover");
     modal("Change artwork", body, None, true, Message::CloseDialog)
 }
 
@@ -1636,8 +1667,12 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
     state.menu.map(|at| album_menu(state, ctx, at))
 }
 
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::none()
+/// A picture dragged onto the window while *Change artwork* is open.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    match state.dialog {
+        Some(Dialog::Artwork(_)) => drop_zone::events().map(Message::ArtDrop),
+        _ => Subscription::none(),
+    }
 }
 
 #[cfg(test)]

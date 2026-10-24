@@ -502,13 +502,13 @@ pub fn head_html(list: &Value) -> String {
 /// Upload plugin and Install from URL or GitHub, with the third-party warning.
 pub fn add_html(list: &Value) -> String {
     let max = if list.i("upload_max_mb") > 0 { list.i("upload_max_mb") } else { 200 };
-    format!(r##"<div class="card mt" id="plugins-add">
+    format!(r##"<div class="card mt" id="plugins-add" data-dropzone="plugin-file">
       <h3>Add a plugin</h3>
       <p class="small muted" style="margin:6px 0 12px">A plugin is a zip with a plugin.toml and its program, for example one made with Encore's plugin SDK (docs/plugins in Encore's repository). Plugins you add are not made by Encore: install only plugins you trust.</p>
       <div class="row wrap" style="gap:8px;align-items:center">
         <input type="file" id="plugin-file" accept=".zip,application/zip" hidden>
         <button class="btn" type="button" id="plugin-upload">{plus}Upload plugin</button>
-        <span class="small muted">A .zip of at most {max} MB</span>
+        <span class="small muted">A .zip of at most {max} MB (or drop it here)</span>
       </div>
       <form class="row wrap mt" style="gap:8px" id="plugin-url-form">
         <input class="input" style="flex:1 1 260px;min-width:0" id="plugin-url" placeholder="https://… or owner/repo@ref" autocomplete="off" spellcheck="false" aria-label="Plugin address">

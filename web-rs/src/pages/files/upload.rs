@@ -63,18 +63,8 @@ pub struct Dropped {
     files: Vec<File>,
 }
 
-/// Whether a drag carries files from the computer (not text or a link from the page).
-pub fn has_files(e: &web_sys::Event) -> bool {
-    let types = get(&get(e.as_ref(), "dataTransfer"), "types");
-    if types.is_undefined() || types.is_null() { return false; }
-    Array::from(&types).iter().any(|t| t.as_string().as_deref() == Some("Files"))
-}
-
-/// Sets what the pointer shows over the drop place ("copy", or "none" where nothing may be written).
-pub fn set_drop_effect(e: &web_sys::Event, effect: &str) {
-    let dt = get(e.as_ref(), "dataTransfer");
-    if dt.is_object() { let _ = Reflect::set(&dt, &"dropEffect".into(), &effect.into()); }
-}
+/// Whether a drag carries files, and the pointer over the drop place: shared with every other upload.
+pub use crate::dropzone::{has_files, set_drop_effect};
 
 /// The dropped files and folders (`webkitGetAsEntry`), or the plain file list where a browser has no entries.
 pub fn take_drop(e: &web_sys::Event) -> Dropped {

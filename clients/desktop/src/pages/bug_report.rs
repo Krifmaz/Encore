@@ -6,6 +6,7 @@
 
 use crate::api::ApiError;
 use crate::fmt;
+use crate::widgets::drop_zone;
 use crate::pages::bug_reports::{kind_badge, pick_files, status_badge, status_label, status_table, Picked, Picker};
 use crate::pages::{Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
@@ -63,6 +64,8 @@ pub enum Message {
     Reply(text_editor::Action),
     AddFiles,
     Picked(Vec<Picked>),
+    /// A file dragged over or dropped on the window: it joins the reply's attachments.
+    Drop(drop_zone::Event),
     RemoveFile(usize),
     Send,
     Sent(Result<Value, ApiError>),
@@ -164,6 +167,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Reply(a) => state.reply.perform(a),
         Message::AddFiles => return Task::perform(pick_files(), Message::Picked),
         Message::Picked(files) => state.picker.add(files, ctx),
+        Message::Drop(ev) => state.picker.dropped(ev, ctx),
         Message::RemoveFile(i) => state.picker.remove(i),
         Message::Send => {
             if state.sending {
@@ -331,7 +335,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             } else {
                 column(msgs.iter().map(|m| message_view(m, ctx)).collect::<Vec<_>>()).into()
             };
-            let reply = card(
+            let reply = card(drop_zone::view(
                 column![
                     text_area(&state.reply, "Write a reply", 3, Message::Reply),
                     row![
@@ -347,7 +351,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .align_y(Alignment::Center),
                 ]
                 .spacing(10),
-            )
+                &state.picker.drop,
+                "Drop images, .txt or .log files to attach them to your reply",
+            ))
             .width(Length::Fill);
             column![
                 head,
@@ -379,8 +385,9 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
     ))
 }
 
+/// Files dragged onto the window go to the reply's attachments.
 pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::none()
+    drop_zone::events().map(Message::Drop)
 }
 
 #[cfg(test)]
