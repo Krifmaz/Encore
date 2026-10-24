@@ -483,9 +483,24 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     fun removeArtist(name: String): Int =
         (call("DELETE", "/api/library/artists?name=${EncoreApi.enc(name)}", null) as? JsonObject)?.int("removed") ?: 0
 
-    /** GET /api/discover/album-lookup?artist=&album=: the MusicBrainz release group of a library album ("" when unknown). */
-    fun albumLookup(artist: String, album: String): String =
-        getObject("/api/discover/album-lookup?artist=${EncoreApi.enc(artist)}&album=${EncoreApi.enc(album)}").str("rgid")
+    /**
+     * GET /api/discover/album-lookup?artist=&album=: where "Get the rest of the album" found a library album – `found`
+     * "musicbrainz" (`rgid`), "elsewhere" (Deezer / Apple Music / Discogs: `ext`, `source`, `title`, `artist`, `year`,
+     * `cover`, `tracks`) or "none" (`message`); read it with features/library/RestOfAlbumRules.
+     */
+    fun albumFind(artist: String, album: String): JsonObject =
+        getObject("/api/discover/album-lookup?artist=${EncoreApi.enc(artist)}&album=${EncoreApi.enc(album)}")
+
+    /** The MusicBrainz release group of a library album ("" when MusicBrainz doesn't list it, [albumFind]). */
+    fun albumLookup(artist: String, album: String): String = albumFind(artist, album).str("rgid")
+
+    /**
+     * POST /api/discover/album-rest/request: a song request for each song of an album's track list that isn't in the
+     * library yet – `tracks` (a catalogue's), or `text` typed in, one song per line – with `artist`, `album` and
+     * optionally `year`, `cover`, `artist_lines`. → `{requested, already_requested, in_library, status}`.
+     */
+    fun requestRest(body: JsonObject): JsonObject =
+        call("POST", "/api/discover/album-rest/request", body) as? JsonObject ?: JsonObject(emptyMap())
 
     // ---- Picker --------------------------------------------------------------------------------------------
 

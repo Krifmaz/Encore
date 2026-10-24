@@ -24,6 +24,7 @@ pub mod matcher;
 pub mod meta;
 pub mod nlsearch;
 pub mod organize;
+pub mod rest_of_album;
 pub mod scan;
 pub mod search;
 pub mod sections;

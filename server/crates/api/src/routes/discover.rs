@@ -305,24 +305,83 @@ struct AlbumQ {
     album: String,
 }
 
-/// "Get the rest of the album" from a library album with no MusicBrainz tag: the release group that matches
-/// the artist and title best, so the catalog page can show the missing songs with Request.
+/// The answer when no catalogue has the album: what was asked, and what can be done instead.
+pub(crate) fn not_found_message(album: &str) -> String {
+    format!("No track list for “{album}” on MusicBrainz, Deezer, Apple Music or Discogs. Type its songs in, or search the download sources for the album by name.")
+}
+
+/// GET /api/discover/album-lookup?artist=&album=: "Get the rest of the album" from a library album with no
+/// MusicBrainz tag. It never dead-ends on MusicBrainz; the answer's `found` says where the album was found:
+///
+/// - `"musicbrainz"`: the release group whose title (and artist) is the album's – `rgid`, `title`, `artist` –
+///   so the catalog page shows the missing songs with Request.
+/// - `"elsewhere"`: no such release group, but Deezer, Apple Music or Discogs (the tag sheet's "By…"
+///   catalogues, asked in that order) lists the album – `ext`, `source`, `title`, `artist`, `year`, `cover` and
+///   its `tracks`, each marked with its library copy and any request (as `POST /api/discover/catalog/tracks`
+///   marks them), so the missing ones can be requested (`POST /api/discover/album-rest/request`).
+/// - `"musicbrainz"` again, with MusicBrainz's best-scoring release group, when only a loose match was found
+///   there and nowhere else.
+/// - `"none"`: no catalogue has it – `message` says so, and the apps offer to type the track list in or to
+///   search the download sources for the album by name. `rgid` is null (older apps show their own note).
+///
+/// MusicBrainz being down or slow doesn't stop the other catalogues from being asked.
 async fn album_lookup(State(st): State<AppState>, User(viewer): User, Query(q): Query<AlbumQ>) -> ApiResult<Json<Value>> {
-    let (artist, album) = (q.artist.trim(), q.album.trim());
+    let (artist, album) = (q.artist.trim().to_string(), q.album.trim().to_string());
     if album.is_empty() {
         return Err(err(400, "No album title"));
     }
-    let query = if artist.is_empty() { format!("releasegroup:\"{}\"", encore_http::mb::esc(album)) } else { format!("releasegroup:\"{}\" AND artist:\"{}\"", encore_http::mb::esc(album), encore_http::mb::esc(artist)) };
-    let hits = encore_http::mb::search_albums(&st, &query, 10).await.map_err(mb_err)?;
+    let query = if artist.is_empty() { format!("releasegroup:\"{}\"", encore_http::mb::esc(&album)) } else { format!("releasegroup:\"{}\" AND artist:\"{}\"", encore_http::mb::esc(&album), encore_http::mb::esc(&artist)) };
+    let hits = match encore_http::mb::search_albums(&st, &query, 10).await {
+        Ok(h) => h,
+        Err(e) => {
+            // MusicBrainz unreachable: the other catalogues are still asked
+            st.db.log("warning", &format!("Get the rest of the album: MusicBrainz search for {artist} – {album} failed: {e}"));
+            vec![]
+        }
+    };
     let key = encore_library::catalog::title_key;
-    let (want_t, want_a) = (key(album), key(artist));
-    // an exact title (and artist when given) first, else MusicBrainz's best score
-    let hit = hits.iter().find(|h| key(h["title"].as_str().unwrap_or("")) == want_t && (want_a.is_empty() || key(h["artist"].as_str().unwrap_or("")) == want_a))
-        .or_else(|| hits.first())
-        .ok_or_else(|| err(404, "MusicBrainz doesn't know this album – look it up in the Downloader instead"))?;
-    let mut v = json!({ "rgid": hit["id"], "title": hit["title"], "artist": hit["artist"] });
-    enrich(&st, Some(&viewer), &mut v).await;
-    Ok(Json(v))
+    let (want_t, want_a) = (key(&album), key(&artist));
+    // an exact title (and artist when given) first
+    let exact = hits.iter().find(|h| key(h["title"].as_str().unwrap_or("")) == want_t && (want_a.is_empty() || key(h["artist"].as_str().unwrap_or("")) == want_a));
+    let mb_answer = |hit: &Value| json!({ "found": "musicbrainz", "rgid": hit["id"], "title": hit["title"], "artist": hit["artist"] });
+    if let Some(hit) = exact {
+        let mut v = mb_answer(hit);
+        enrich(&st, Some(&viewer), &mut v).await;
+        return Ok(Json(v));
+    }
+    // not on MusicBrainz under that name: the other catalogues, then their track list
+    if let Some(mut found) = encore_library::rest_of_album::find_album_elsewhere(&st, &artist, &album).await {
+        let mut tracks = match encore_library::catalog::tracklist(&st, &found["ext"]).await {
+            Ok(t) => t,
+            Err(e) => {
+                st.db.log("warning", &format!("Get the rest of the album: the {} track list of {artist} – {album} failed: {e}", s_of(&found["source"])));
+                vec![]
+            }
+        };
+        let fallback = Some(s_of(&found["artist"])).filter(|a| !a.is_empty()).unwrap_or(artist.clone());
+        let tracks = st.blocking(move |st| {
+            crate::routes::catalog::annotate_tracks(st, &mut tracks, &fallback);
+            Ok(tracks)
+        }).await?;
+        found["found"] = json!("elsewhere");
+        found["rgid"] = Value::Null;
+        found["owned_tracks"] = json!(tracks.iter().filter(|t| t["in_library"] == true).count());
+        found["tracks"] = json!(tracks);
+        enrich(&st, Some(&viewer), &mut found).await;
+        return Ok(Json(found));
+    }
+    // a loose MusicBrainz match is better than nothing
+    if let Some(hit) = hits.first() {
+        let mut v = mb_answer(hit);
+        enrich(&st, Some(&viewer), &mut v).await;
+        return Ok(Json(v));
+    }
+    Ok(Json(json!({ "found": "none", "rgid": null, "title": album, "artist": artist, "message": not_found_message(&album) })))
+}
+
+/// A JSON value as text ("" for anything but a string).
+fn s_of(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
 }
 
 /// The MusicBrainz id the library knows for an artist name: the library artist (any spelling or alias),

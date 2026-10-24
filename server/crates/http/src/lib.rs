@@ -92,6 +92,8 @@ pub struct Urls {
     pub deezer: String,
     /// LRCLIB's lyrics API
     pub lrclib: String,
+    /// Apple's iTunes Search API (a stand-in's address in tests)
+    pub apple: String,
 }
 
 impl Default for Urls {
@@ -104,6 +106,7 @@ impl Default for Urls {
             deepl: String::new(),
             deezer: deezer::API.into(),
             lrclib: lrclib::API.into(),
+            apple: apple::API.into(),
         }
     }
 }

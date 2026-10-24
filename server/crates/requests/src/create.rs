@@ -45,6 +45,10 @@ pub struct NewRequest {
     /// group ids and Discover "ext-…" ids – instead of what the release types pick (owned and requested ones
     /// are still left out)
     pub release_ids: Option<Vec<String>>,
+    /// "Get the rest of the album" for an album no catalogue lists: the album by its artist and title alone
+    /// (no MusicBrainz id, no catalogue entry). The download sources search for it by name, and the songs of it
+    /// already in the library don't count as "Already in library" – it is asked for to fill in the rest.
+    pub fill_in: bool,
 }
 
 
@@ -253,9 +257,10 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
                 return Err(err(400, "A valid http(s) URL is required"));
             }
         }
-        // an album with no MusicBrainz id is fine when another catalogue knows it, or when a manual
-        // pick (extra) says exactly what to download – a Soulseek folder, say
-        "album" if nz(&b.mbid).is_none() && (ext_ok || has_extra) => {
+        // an album with no MusicBrainz id is fine when another catalogue knows it, when a manual pick
+        // (extra) says exactly what to download – a Soulseek folder, say – or when it is asked for by name
+        // to fill in the rest of a library album no catalogue lists (fill_in)
+        "album" if nz(&b.mbid).is_none() && (ext_ok || has_extra || b.fill_in) => {
             if artist.is_none() || title.is_none() {
                 return Err(err(400, "Artist and album title are required"));
             }
@@ -307,6 +312,10 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     }
     if let Some(m) = b.album_mode.as_deref().filter(|m| *m == "song" || *m == "album") {
         detail["album_mode"] = json!(m);
+    }
+    // (only an album by name: one with a MusicBrainz id or a catalogue entry is checked against its songs)
+    if b.kind == "album" && b.fill_in && nz(&b.mbid).is_none() {
+        detail["fill_in"] = json!(true);
     }
     if b.kind == "artist" {
         use encore_config::release_types::ReleaseFilter;

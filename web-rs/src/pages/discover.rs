@@ -1503,7 +1503,10 @@ fn artist_song_row(t: &Value, at: &str, sub: &str) -> String {
 }
 
 /// `extSheet(m, tracks, artist)`: the track list of a release only Deezer / Apple Music (…) know: owned songs play, missing ones can be requested.
-fn ext_sheet(m: &Value, tracks: Vec<Value>, artist: &str) {
+/// The sheet of a release outside MusicBrainz (`m`: its title, cover, year, request): its track list with
+/// Play on the owned songs and Request on the missing ones. → the sheet's element, for callers that add to it
+/// ("Get the rest of the album", super::rest_of_album).
+pub(crate) fn ext_sheet(m: &Value, tracks: Vec<Value>, artist: &str) -> Element {
     let owned: Vec<Value> = tracks.iter().filter(|t| t.truthy("library")).cloned().collect();
     let queue: Rc<Vec<Value>> = Rc::new(owned.iter().map(|t| t.g("library").clone()).collect());
     let req_cell = |t: &Value| -> String {
@@ -1543,6 +1546,7 @@ fn ext_sheet(m: &Value, tracks: Vec<Value>, artist: &str) {
       <div class="table-wrap"><table class="table"><tbody>{rows}</tbody></table></div>"#)
     } else { r#"<p class="muted">No track list available.</p>"#.to_string() };
     let md = ui::modal(ModalOpts::new(&esck(m, "title"), &body));
+    let el = md.el.clone();
     bind_request_buttons(&md.el);
     let tracks = Rc::new(tracks);
     let play = move |i: usize, shuffle: bool| {
@@ -1560,6 +1564,7 @@ fn ext_sheet(m: &Value, tracks: Vec<Value>, artist: &str) {
         if dom::closest(e, "[data-ext-play-all]").is_some() { play(0, false); return; }
         if dom::closest(e, "[data-ext-shuffle]").is_some() { play(0, true); }
     });
+    el
 }
 
 /// Library artist → full artist page (resolved through MusicBrainz), falling back to the library filter.

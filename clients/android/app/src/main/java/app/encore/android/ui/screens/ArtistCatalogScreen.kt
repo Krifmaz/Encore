@@ -56,6 +56,7 @@ import app.encore.android.data.api.Album
 import app.encore.android.data.api.ArtistSongs
 import app.encore.android.data.api.OneOffs
 import app.encore.android.features.library.AlbumTypesRules
+import app.encore.android.features.library.RestOfAlbumRules
 import app.encore.android.features.library.oneOffsShelf
 import app.encore.android.data.api.Track
 import app.encore.android.data.repo.AlbumPage
@@ -995,7 +996,7 @@ private fun ExtReleaseTile(nav: Nav, artistName: String, m: ExtRelease, statuses
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuses: RequestStatuses, artistMbid: String = "", onDismiss: () -> Unit) {
+internal fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuses: RequestStatuses, artistMbid: String = "", onDismiss: () -> Unit) {
     val p = MaterialTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1039,6 +1040,17 @@ private fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuses
                                 EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { nav.player.play(queue, 0, shuffle = true) }
                             }
                             NoteText("${owned.size} of ${tracks.size} songs in your library", Modifier.padding(bottom = 6.dp))
+                        }
+                        // every song that isn't here or asked for yet, in one go (POST /api/discover/album-rest/request)
+                        val missing = tracks.filter { t ->
+                            !t.inLibrary && statuses.statusOf(listOf(songNameKey(t.artist.ifEmpty { artistName }, t.title)), t.requestStatus).isEmpty()
+                        }
+                        if (missing.isNotEmpty() && releaseStatus.isEmpty()) {
+                            Row(Modifier.padding(horizontal = 22.dp, vertical = 6.dp)) {
+                                EncoreButton(RestOfAlbumRules.requestAllLabel(missing.size), iconRes = R.drawable.ic_add, primary = true) {
+                                    scope.launch { requestMissingSongs(nav, m, artistName, missing, statuses) }
+                                }
+                            }
                         }
                         LazyColumn(Modifier.fillMaxWidth().height(if (tracks.size > 8) 420.dp else (tracks.size * 52 + 8).dp)) {
                             items(tracks.size) { i ->

@@ -6,6 +6,7 @@ mod downloads;
 mod github;
 mod loudness;
 mod musicbrainz;
+mod rest_of_album;
 mod plugins;
 mod rejected;
 mod soulseek;

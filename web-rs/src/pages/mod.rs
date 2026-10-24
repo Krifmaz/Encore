@@ -23,6 +23,8 @@ pub mod picker;
 pub mod playlists;
 pub mod report;
 pub mod requests;
+/// "Get the rest of the album" for albums MusicBrainz lists and for those it doesn't.
+pub mod rest_of_album;
 pub mod soulseek;
 pub mod storage;
 pub mod translate;

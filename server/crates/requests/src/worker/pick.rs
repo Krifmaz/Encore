@@ -54,7 +54,9 @@ pub(super) async fn start(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     let lossless_only = r.d["lossless_only"].as_bool().unwrap_or(false);
     // already there? (lossless upgrade requests replace what's there)
     let replacing = r.d["replace"].is_object(); // a reported copy is being replaced: what's there doesn't count
-    if kind == "album" && !lossless_only && !replacing && (encore_library::has_release_group(st.db(), &r.s("mbid")) || encore_library::has_album(st.db(), &r.s("artist"), &r.album_title())) {
+    // "Get the rest of the album" by name: part of the album is there, and the rest is what is wanted
+    let filling_in = r.d["fill_in"].as_bool() == Some(true);
+    if kind == "album" && !lossless_only && !replacing && !filling_in && (encore_library::has_release_group(st.db(), &r.s("mbid")) || encore_library::has_album(st.db(), &r.s("artist"), &r.album_title())) {
         complete(st, r, "Already in library", &[], Value::Null).await;
         return Ok(());
     }

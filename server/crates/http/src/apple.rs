@@ -15,9 +15,14 @@ const GAP: Duration = Duration::from_secs(3);
 /// How long to wait after Apple says "too many requests" before the one retry.
 const BACKOFF: Duration = Duration::from_secs(60);
 
+/// The API's address: [`API`], or the stand-in a test points `Urls::apple` at.
+fn base(st: &impl Ctx) -> &str {
+    st.urls().apple.trim_end_matches('/')
+}
+
 /// Search the catalog for `term` as `entity` (song, album, musicArtist).
 pub fn search(st: &impl Ctx, term: &str, entity: &str, limit: u32) -> RequestBuilder {
-    st.http().get(format!("{API}/search")).query(&[("term", term.to_string()), ("entity", entity.to_string()), ("limit", limit.to_string())])
+    st.http().get(format!("{}/search", base(st))).query(&[("term", term.to_string()), ("entity", entity.to_string()), ("limit", limit.to_string())])
 }
 
 /// Look up an artist or album by id with what belongs to it as `entity` (album, song); Apple's own limit
@@ -27,7 +32,7 @@ pub fn lookup(st: &impl Ctx, id: &str, entity: &str, limit: Option<u32>) -> Requ
     if let Some(n) = limit {
         q.push(("limit", n.to_string()));
     }
-    st.http().get(format!("{API}/lookup")).query(&q)
+    st.http().get(format!("{}/lookup", base(st))).query(&q)
 }
 
 /// Send `req` paced with every other paced caller (20 s at most) and read it as JSON. A throttled answer

@@ -69,6 +69,9 @@ pub enum Dialog {
     ChangeType { picked: &'static str, busy: bool },
     /// Move album to Trash (0.36): the dry run's title and words; `can_go` false when the Trash has no room.
     Trash { title: String, text: String, can_go: bool },
+    /// Get the rest of the album for an album MusicBrainz doesn't list: another catalogue's track list, or
+    /// one to type in (super::rest_of_album).
+    Rest(Box<super::rest_of_album::State>),
 }
 
 #[derive(Debug, Default)]
@@ -135,6 +138,8 @@ pub enum Message {
     AlbumLyricsDone(Result<Value, ApiError>),
     GetRest,
     RestLookup(Result<Value, ApiError>),
+    /// The Get the rest of the album dialog's own messages.
+    Rest(super::rest_of_album::Message),
     ReleaseInfo,
     ReportAlbum,
     EditOpen,
@@ -595,8 +600,19 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             if fmt::truthy(&r, "rgid") {
                 ctx.navigate(Page::Album(fmt::s(&r, "rgid")));
             } else {
-                ctx.toast("MusicBrainz doesn't know this album – look it up in the Downloader instead");
+                // not on MusicBrainz: another catalogue's track list, or one to type in (never a dead end)
+                let a = state.album.clone().unwrap_or(Value::Null);
+                let artist = if fmt::truthy(&a, "albumartist") { fmt::s(&a, "albumartist") } else { fmt::s(&a, "artist") };
+                state.dialog = Some(Dialog::Rest(Box::new(super::rest_of_album::State::new(artist, fmt::s(&a, "album"), r))));
             }
+        }
+        Message::Rest(m) => {
+            let Some(Dialog::Rest(rest)) = state.dialog.as_mut() else { return Task::none() };
+            let (task, after) = super::rest_of_album::update(rest, m, ctx, Message::Rest);
+            if matches!(after, super::rest_of_album::After::Close) {
+                state.dialog = None;
+            }
+            return task;
         }
         Message::RestLookup(Err(e)) => ctx.toast(e.message),
         Message::ReleaseInfo => {
@@ -1614,6 +1630,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Some(Dialog::Artwork(a)) => return Some(art_dialog(a, ctx)),
         Some(Dialog::ChangeType { picked, busy }) => return Some(change_type_dialog(state, picked, *busy)),
         Some(Dialog::Trash { title, text, can_go }) => return Some(trash_dialog(title, text, *can_go)),
+        Some(Dialog::Rest(r)) => return Some(super::rest_of_album::view(r, Message::Rest, Message::CloseDialog)),
         None => {}
     }
     state.menu.map(|at| album_menu(state, ctx, at))

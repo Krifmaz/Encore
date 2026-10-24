@@ -1560,20 +1560,10 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     }
     items.push(MenuItem::link("Download album (zip)", &icon("download"), &format!("/api/library/albums/{id}/download"), false));
     { let id = id.to_string(); items.push(MenuItem::new("Lyrics for all songs", &icon("music"), move || lyrics::fetch_album_lyrics(&id))); }
-    // the catalog page of this album shows every song, with Request on the ones that aren't here yet
+    // the album's songs that aren't here yet, with Request: its MusicBrainz page, else another catalogue's track list, else a typed one (rest_of_album)
     {
         let (rgid, artist, album) = (a.s("mb_releasegroupid"), if a.truthy("albumartist") { a.s("albumartist") } else { a.s("artist") }, a.s("album"));
-        items.push(MenuItem::new("Get the rest of the album", &icon("download"), move || {
-            if !rgid.is_empty() { app::navigate(&format!("/album/{rgid}")); return; }
-            let (artist, album) = (artist.clone(), album.clone());
-            dom::spawn(async move {
-                match api::get(&format!("/discover/album-lookup?artist={}&album={}", enc(&artist), enc(&album))).await {
-                    Ok(r) if r.truthy("rgid") => app::navigate(&format!("/album/{}", r.s("rgid"))),
-                    Ok(_) => toast("MusicBrainz doesn't know this album – look it up in the Downloader instead", "warn"),
-                    Err(e) => toast(&e.message, "warn"),
-                }
-            });
-        }));
+        items.push(MenuItem::new("Get the rest of the album", &icon("download"), move || crate::pages::rest_of_album::get_rest(&rgid, &artist, &album)));
     }
     if a.truthy("mb_releasegroupid") { items.push(MenuItem::link("Release info", &icon("disc"), &format!("#/album/{}", a.s("mb_releasegroupid")), false)); }
     { let (id, title) = (id.to_string(), a.s("album")); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("album", json!(id), &title, "", Some(Rc::new(|_| app::navigate("/library")))))); }

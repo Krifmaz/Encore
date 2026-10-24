@@ -78,6 +78,8 @@ import app.encore.android.ui.theme.palette
 import app.encore.android.data.repo.Me
 import app.encore.android.features.library.AlbumArtworkSheet
 import app.encore.android.features.library.AlbumSelect
+import app.encore.android.features.library.RestOfAlbumRules
+import app.encore.android.data.repo.ExtRelease
 import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.library.ChangeTypeDialog
 import app.encore.android.features.library.TrashConfirm
@@ -199,14 +201,26 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     var changeType by remember { mutableStateOf(false) }
     // the admin's sheets: "match" (Tag / match metadata), "edit" (Edit details), "artwork" (Change artwork…)
     var albumSheet by remember { mutableStateOf("") }
-    // "Get the rest of the album": the album on Discover, where the songs that aren't here yet can be requested
+    // "Get the rest of the album" for an album MusicBrainz doesn't list: another catalogue's track list (with its
+    // artist), or the songs typed in (RestOfAlbum.kt)
+    var restFound by remember { mutableStateOf<Pair<String, ExtRelease>?>(null) }
+    var restTyped by remember { mutableStateOf<RestAsk?>(null) }
+    val restStatuses = rememberRequestStatuses()
+    // "Get the rest of the album": the album on Discover, where the songs that aren't here yet can be requested –
+    // else another catalogue's track list, else a list to type in (never a dead end on MusicBrainz)
     fun restOfAlbum(rgid: String, artist: String, title: String) {
         if (rgid.isNotEmpty()) { nav.open(Screen.CatalogAlbum(rgid)); return }
         scope.launch {
             try {
-                val found = withContext(Dispatchers.IO) { nav.features.albumLookup(artist, title) }
-                if (found.isNotEmpty()) nav.open(Screen.CatalogAlbum(found))
-                else Toasts.show("MusicBrainz doesn't know this album – look it up in the Downloader instead", "warn")
+                val found = withContext(Dispatchers.IO) { nav.features.albumFind(artist, title) }
+                when (RestOfAlbumRules.found(found)) {
+                    RestOfAlbumRules.Found.MUSICBRAINZ -> nav.open(Screen.CatalogAlbum(found.str("rgid")))
+                    RestOfAlbumRules.Found.ELSEWHERE -> {
+                        Toasts.show(RestOfAlbumRules.sourceNote(found.str("source")), "info")
+                        restFound = found.str("artist").ifEmpty { artist } to restRelease(found)
+                    }
+                    RestOfAlbumRules.Found.NONE -> restTyped = RestAsk(artist, title, found.str("message"))
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -423,6 +437,9 @@ fun AlbumScreen(nav: Nav, albumId: String) {
         "edit" -> AlbumEditSheet(nav, albumId, onDismiss = { albumSheet = "" })
         "artwork" -> AlbumArtworkSheet(nav, albumId, shown?.title.orEmpty(), onDismiss = { albumSheet = "" })
     }
+    // ⋯ → Get the rest of the album, not on MusicBrainz: the catalogue's track list, or the songs to type in
+    restFound?.let { (artist, m) -> ExtTracksSheet(nav, artist, m, restStatuses, onDismiss = { restFound = null }) }
+    restTyped?.let { ask -> RestTypedDialog(nav, ask, me?.isAdmin == true, onDismiss = { restTyped = null }) }
     // ⋯ → Move album to Trash (admins): the dry run's words, then the album goes; Open Trash in the toast
     trashDialog?.let { d ->
         TrashConfirm(d, onDismiss = { trashDialog = null }) {

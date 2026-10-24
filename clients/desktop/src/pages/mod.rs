@@ -32,6 +32,7 @@ pub mod offline;
 pub mod playlist;
 pub mod playlists;
 pub mod requests;
+pub mod rest_of_album;
 pub mod search;
 pub mod settings;
 pub mod soulseek;

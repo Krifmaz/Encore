@@ -51,7 +51,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// A request row with its detail parsed; 404 when there is none.
-fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
+pub(crate) fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
     let mut r = st.db.one("SELECT * FROM requests WHERE id=?", p![id])?.ok_or_else(|| err(404, "Request not found"))?;
     let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
     r.insert("detail".into(), d);
