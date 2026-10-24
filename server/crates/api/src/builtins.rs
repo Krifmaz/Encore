@@ -177,7 +177,10 @@ impl Builtin {
                 let accounts: Vec<&str> = [("Deezer", streamrip::deezer_arl_set(st)), ("Tidal", streamrip::tidal_signed_in(st)), ("Qobuz", streamrip::qobuz_login(st).is_some())]
                     .iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
                 let who = if accounts.is_empty() { "no account signed in".to_string() } else { format!("signed in: {}", accounts.join(", ")) };
-                ready(format!("{line} · {who}"), Some(signed))
+                // a lookup that failed within the hour ("Deezer lookup failed: Quota limit exceeded") shows here
+                // too, so the card doesn't look fine while every request ends "not found"
+                let problem = streamrip::last_lookup_problem(st).map(|p| format!(" · {p}")).unwrap_or_default();
+                ready(format!("{line} · {who}{problem}"), Some(signed))
             }
             Kind::Slskd => {
                 let s = st.requests.slskd.status();

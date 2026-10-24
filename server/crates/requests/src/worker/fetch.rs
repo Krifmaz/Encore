@@ -886,6 +886,8 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
             urls.push(format!("https://www.deezer.com/album/{dz}"));
         }
     }
+    // what the services' lookup came to: why nothing was found (a failed lookup is not "not found")
+    let mut found: Option<streamrip::Resolved> = None;
     if urls.is_empty() {
         if r.s("kind") == "album" {
             let rel = release_info(st, r).await;
@@ -897,16 +899,19 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
                     }
                 }
             }
-            urls = streamrip::resolve_album(st, &r.s("artist"), &r.album_title(), n_tracks(&rel), first_isrc.as_deref()).await;
+            found = Some(streamrip::resolve_album(st, &r.s("artist"), &r.album_title(), n_tracks(&rel), first_isrc.as_deref()).await);
         } else {
             let isrc = isrc_for(st, r).await;
-            urls = streamrip::resolve_track(st, &r.s("artist"), &r.s("title"), isrc.as_deref(), r.length()).await;
+            found = Some(streamrip::resolve_track(st, &r.s("artist"), &r.s("title"), isrc.as_deref(), r.length()).await);
         }
+        urls = found.as_ref().map(|f| f.urls.clone()).unwrap_or_default();
     }
     urls.retain(|u| !crate::report::url_blocked(st, u)); // reported items are never picked again
     drop(lookup);
     if urls.is_empty() {
-        return Ok(Out::Next("not found on Deezer/Tidal".into()));
+        // "not found on Deezer/Tidal" only when the services answered; else what failed ("Deezer lookup failed: …")
+        let why = found.map(|f| f.none_message()).unwrap_or_else(|| "not found on Deezer/Tidal".into());
+        return Ok(Out::Next(why));
     }
     let mut last = String::new();
     for url in urls {
