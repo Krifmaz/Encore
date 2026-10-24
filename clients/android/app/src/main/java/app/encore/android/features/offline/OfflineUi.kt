@@ -10,6 +10,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import app.encore.android.ui.components.SectionHead
+import app.encore.android.ui.components.Tile
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -73,7 +85,15 @@ const val PREFER_LOCAL_HELP = "Saves data when a song is already downloaded here
 
 // ---- the offline banner ----------------------------------------------------------------------------------------
 
-/** "Offline – the server can't be reached. Downloaded songs play." with Retry, above the app while offline. */
+/**
+ * "Offline · Downloaded songs play · tap for details" with Retry, above the app while offline.
+ *
+ * It is the Scaffold's top bar, which in an edge-to-edge window (MainActivity's `enableEdgeToEdge`) owns the status
+ * bar inset: the warn tint runs under the status bar, and the text and Retry sit below it (they used to draw under
+ * the clock and icons, where the system also takes every touch). Two short lines instead of one long wrapped
+ * sentence, a 48 dp Retry, and the whole banner opens [OfflineSheet] with the full message, why the server can't be
+ * reached, and Retry.
+ */
 @Composable
 fun OfflineBanner() {
     val active by OfflineMode.active.collectAsState()
@@ -81,17 +101,131 @@ fun OfflineBanner() {
     val trying by OfflineMode.trying.collectAsState()
     val context = LocalContext.current
     val p = MaterialTheme.palette
+    // the sheet with the full message, opened by a tap anywhere on the banner but Retry
+    var details by remember { mutableStateOf(false) }
     Row(
-        Modifier.fillMaxWidth().background(EncoreColors.Warn.copy(alpha = 0.16f)).padding(horizontal = Gutter, vertical = 8.dp),
+        Modifier
+            .fillMaxWidth()
+            .background(EncoreColors.Warn.copy(alpha = 0.16f))
+            // after the background: the tint fills the status bar, the content stays below it
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .clickable(onClickLabel = "Offline details") { details = true }
+            .heightIn(min = 48.dp)
+            .padding(start = Gutter, end = 8.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(painterResource(R.drawable.ic_cloud_off), contentDescription = null, tint = p.text, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(OfflineMode.BANNER, style = MaterialTheme.typography.bodySmall, color = p.text, modifier = Modifier.weight(1f))
+        Icon(painterResource(R.drawable.ic_cloud_off), contentDescription = null, tint = p.text, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(OfflineMode.BANNER_TITLE, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = p.text, maxLines = 1)
+            Text(OfflineMode.BANNER_LINE, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         Spacer(Modifier.width(8.dp))
-        SmallButton(if (trying) "Trying…" else "Retry", enabled = !trying) { OfflineMode.retry(context) }
+        RetryButton(trying) { OfflineMode.retry(context) }
+    }
+    if (details) OfflineSheet(onDismiss = { details = false })
+}
+
+/**
+ * The banner's and the sheet's Retry: a 48 dp touch target around the small button (Material's minimum), reading
+ * "Trying…" and not tappable while a check is on its way.
+ */
+@Composable
+private fun RetryButton(trying: Boolean, onRetry: () -> Unit) {
+    Box(Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp), contentAlignment = Alignment.Center) {
+        SmallButton(if (trying) "Trying…" else "Retry", iconRes = R.drawable.ic_refresh, enabled = !trying, onClick = onRetry)
     }
 }
+
+/**
+ * The sheet the offline banner opens: the full offline message, why the last check failed ([OfflineMode.reason]),
+ * how many songs are saved here and how many plays and likes wait, Retry, and Close. Closes by itself once the server
+ * answers again.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun OfflineSheet(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val active by OfflineMode.active.collectAsState()
+    val trying by OfflineMode.trying.collectAsState()
+    val reason by OfflineMode.reason.collectAsState()
+    val store = remember(context) { OfflineStore.of(context) }
+    val all by store.all.collectAsState()
+    // the plays and likes still waiting, read off the main thread when the sheet opens or the downloads change
+    var waiting by remember { mutableStateOf("") }
+    LaunchedEffect(all) {
+        val (plays, likes) = withContext(Dispatchers.IO) { OfflineMode.pending() }
+        waiting = Outbox.countsText(plays, likes)
+    }
+    // back online: nothing left to say
+    LaunchedEffect(active) { if (!active) onDismiss() }
+    val p = MaterialTheme.palette
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
+        Column(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, bottom = 24.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(painterResource(R.drawable.ic_cloud_off), contentDescription = null, tint = EncoreColors.Warn, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("You're offline", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            }
+            Text(OfflineMode.BANNER, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 12.dp))
+            Text("Why: $reason", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(top = 8.dp))
+            Text(
+                listOf(
+                    "${OfflineIndex.songs(store.songs(all).size)} saved on this phone",
+                    if (waiting.isNotEmpty()) "$waiting will be sent when the server is back" else "",
+                ).filter { it.isNotEmpty() }.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = p.muted,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Text("The app asks the server again every 30 seconds.", style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 4.dp))
+            Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                EncoreButton(if (trying) "Trying…" else "Retry", iconRes = R.drawable.ic_refresh, primary = true, enabled = !trying) {
+                    OfflineMode.retry(context)
+                }
+                EncoreButton("Close", onClick = onDismiss)
+            }
+        }
+    }
+}
+
+// ---- Home's "Saved on this phone" row --------------------------------------------------------------------------
+
+/**
+ * Home's row of the albums saved on this phone, newest download first, shown while offline (the server's sections
+ * are then only what it last answered, or nothing): a tap plays the album from its files, "Downloaded" opens the
+ * Library tab's Downloaded list. Nothing when no song is saved here.
+ *
+ * @param onOpenAll opens the full Downloaded list (the Library tab, which opens on Downloaded while offline).
+ */
+@Composable
+fun SavedOnPhoneRow(nav: Nav, onOpenAll: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember(context) { OfflineStore.of(context) }
+    val all by store.all.collectAsState()
+    // the newest downloads first, at most a screen's worth of cards (the full list is a tap away)
+    val albums = remember(all) { OfflineIndex.group(store.songs(all)).sortedByDescending { it.latest }.take(MAX_SAVED_ON_HOME) }
+    if (albums.isEmpty()) return
+    SectionHead("Saved on this phone", subtitle = "Plays without the server", action = "Downloaded", onAction = onOpenAll)
+    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        items(albums, key = { it.key }) { a ->
+            val tracks = remember(a) { a.songs.map { OfflineStore.trackOf(it) } }
+            val cover = remember(a.albumId, a.songs.size) { coverOf(nav, store, a.albumId, 400) }
+            Tile(
+                title = a.album.ifEmpty { "Unknown album" },
+                subtitle = listOf(a.artist, OfflineIndex.songs(a.songs.size)).filter { it.isNotEmpty() }.joinToString(" · "),
+                modifier = Modifier.width(150.dp),
+                onClick = { nav.player.play(tracks) },
+            ) { m ->
+                Cover(cover, nav.graph.imageLoader, m, corner = 12.dp, label = a.album.ifEmpty { "?" })
+            }
+        }
+    }
+}
+
+/** How many saved albums Home's row shows at most. */
+private const val MAX_SAVED_ON_HOME = 20
 
 // ---- "Download for offline" in the menus -------------------------------------------------------------------
 

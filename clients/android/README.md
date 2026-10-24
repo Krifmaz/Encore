@@ -126,7 +126,9 @@ foreground service, no WorkManager), then the album cover (600 px) and the lyric
   device" (Settings → This device → Downloads, on by default, as the web's switch) turned off streams downloaded
   songs while the server can be reached; offline mode or no network always plays the copy.
 - Offline mode (`OfflineMode`): the signed-in server doesn't answer `/api/health` (or a proxy says 502–504) and songs
-  of it are saved here. The banner with Retry, the Library tab shows Downloaded, the other tabs are greyed; the
+  of it are saved here. The banner with Retry (below the status bar; a tap opens a sheet with the full message, why
+  the check failed – `OfflineReason`: no network, DNS, refused, timeout, HTTPS, or a proxy's 502–504 – and Retry),
+  Home's "Saved on this phone" row, a page still loading starts over from the kept answers, the Library tab shows Downloaded, the other tabs are greyed; the
   server is asked again every 30 s, on network changes and on Retry. Plays and likes made meanwhile wait in the
   outbox (`files/offline/outbox.json`, owned by `<server>|<username>`) and go when it answers: the plays in the list
   form of `POST /api/library/plays`, the likes one by one ("Back online – 3 plays sent"). The hearts use the liked

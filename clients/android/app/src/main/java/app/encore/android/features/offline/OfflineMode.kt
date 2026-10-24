@@ -37,7 +37,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * server took (a short gap while online, as the web's `sync_outbox`).
  */
 object OfflineMode {
+    /** The full message, shown in the offline sheet (OfflineUi.kt `OfflineSheet`) the banner opens. */
     const val BANNER = "Offline – showing what this phone saved. Downloaded songs play."
+    /** The banner's first line: short enough for one line on the narrowest phone. */
+    const val BANNER_TITLE = "Offline"
+    /** The banner's second line (one line, ellipsized): what still works, and that the banner opens the details. */
+    const val BANNER_LINE = "Downloaded songs play · tap for details"
+    /** The toast after a Retry the server still didn't answer. */
     const val STILL_OFFLINE = "The server still can't be reached"
 
     /** How often offline mode asks the server again. */
@@ -54,6 +60,10 @@ object OfflineMode {
     private val _trying = MutableStateFlow(false)
     /** A check is on its way (the banner's Retry says "Trying…"). */
     val trying: StateFlow<Boolean> = _trying.asStateFlow()
+
+    private val _reason = MutableStateFlow(OfflineReason.UNKNOWN)
+    /** Why the last check failed ([OfflineReason]), for the offline sheet; kept while offline mode is on. */
+    val reason: StateFlow<String> = _reason.asStateFlow()
 
     @Volatile private var app: Context? = null
     private val checking = Mutex()
@@ -134,7 +144,9 @@ object OfflineMode {
             return@withLock false
         }
         _trying.value = true
-        val up = try { withContext(Dispatchers.IO) { reachable(graph, server) } } finally { _trying.value = false }
+        val failure = try { withContext(Dispatchers.IO) { probe(graph, server) } } finally { _trying.value = false }
+        val up = failure == null
+        if (failure != null) _reason.value = failure
         if (up) {
             val was = _active.value
             // (a retry loop running this check ends by itself: offline mode is off now)
@@ -167,17 +179,23 @@ object OfflineMode {
         }
     }
 
-    /** `/api/health` answers (a proxy saying the server is down, 502–504, counts as no answer). */
-    private fun reachable(graph: AppGraph, server: String): Boolean {
+    /**
+     * Asks `/api/health` once. Null when it answered (any status but 502–504: a proxy saying the server behind it is
+     * down counts as no answer); otherwise why not, in words ([OfflineReason]).
+     */
+    private fun probe(graph: AppGraph, server: String): String? {
         val client = graph.http.newBuilder()
             .connectTimeout(WAIT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(WAIT_SECONDS, TimeUnit.SECONDS)
             .cache(null)
             .build()
         return try {
-            client.newCall(Request.Builder().url("$server/api/health").build()).execute().use { it.code !in 502..504 }
-        } catch (_: Exception) {
-            false
+            client.newCall(Request.Builder().url("$server/api/health").build()).execute().use {
+                if (it.code in 502..504) OfflineReason.of(phoneOnline = true, code = it.code, error = null, seconds = WAIT_SECONDS) else null
+            }
+        } catch (e: Exception) {
+            // still asked without a network (a VPN or a LAN can answer anyway); without one, that is the reason
+            OfflineReason.of(phoneOnline = online, code = null, error = e, seconds = WAIT_SECONDS)
         }
     }
 
