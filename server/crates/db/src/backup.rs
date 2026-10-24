@@ -509,7 +509,7 @@ pub fn to_prune(all: &[Info], r: Retention) -> Vec<String> {
     let buckets = |b: &Info| {
         let day = (b.time / DAY).floor() as i64;
         let (y, m, _) = civil_from_days(day);
-        (day, day.div_euclid(7), y * 12 + m as i64)
+        (day, day.div_euclid(7), y * 12 + m)
     };
     // the days, weeks and months that have a kept copy, and how many each tier took
     let (mut days, mut weeks, mut months) = (HashSet::new(), HashSet::new(), HashSet::new());
@@ -599,7 +599,7 @@ mod tests {
         all.push(info(Kind::Uploaded, now - 50.0 * DAY));
         all.sort_by(|a, b| b.time.partial_cmp(&a.time).unwrap());
         let week = |b: &Info| ((b.time / DAY).floor() as i64).div_euclid(7);
-        let month = |b: &Info| { let (y, m, _) = civil_from_days((b.time / DAY).floor() as i64); y * 12 + m as i64 };
+        let month = |b: &Info| { let (y, m, _) = civil_from_days((b.time / DAY).floor() as i64); y * 12 + m };
         let kept_with = |r| { let gone: std::collections::HashSet<String> = to_prune(&all, r).into_iter().collect(); all.iter().filter(|b| !gone.contains(&b.name)).cloned().collect::<Vec<Info>>() };
         // the default: 3 copies (the newest, one of an earlier week, one of an earlier month) + 1 pre-upgrade
         let kept = kept_with(Retention::default());
