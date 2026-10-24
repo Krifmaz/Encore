@@ -1,0 +1,61 @@
+# The Apple Music wrapper: wrapper-v2 (github.com/glomatico/wrapper-v2), the signed-in service gamdl decrypts ALAC
+# and Dolby Atmos through. Encore's own code (encore_requests::wrapper) builds its image from the source and the
+# owner's Apple Music for Android app and runs it as a container beside Encore's through the Docker socket, or
+# looks after one the owner runs. Nothing to download at install: the app is uploaded on the card.
+# docs/contracts/plugin-manifest.md describes every key; docs/plugins/WRAPPER.md how it works.
+
+[plugin]
+id = "wrapper"
+name = "Apple Music wrapper"
+version = "0.37.0"
+description = "Runs wrapper-v2, the signed-in Apple Music service gamdl needs for ALAC lossless and Dolby Atmos. Encore builds it from your own copy of the Apple Music Android app and runs it next to itself (needs the Docker socket), or uses one you run. Sign in with your Apple ID and the code Apple sends; gamdl's Wrapper URL fills itself in. Needs an Apple Music subscription."
+kind = "tool"
+protocol = 1
+homepage = "https://github.com/glomatico/wrapper-v2"
+license = "Unlicense"
+commands = ["status", "test"]
+builtin = true
+
+# No field in the settings table (their card is this one), so their words are here.
+[[settings]]
+key = "wrapper_mode"
+label = "Wrapper"
+type = "select"
+options = [["managed", "Encore runs it (Docker socket)"], ["external", "A wrapper I run"]]
+default = "managed"
+help = "Encore runs it: Encore builds wrapper-v2 and runs it as a container next to its own (mount /var/run/docker.sock into Encore). A wrapper I run: enter its address."
+
+[[settings]]
+key = "wrapper_url"
+label = "Wrapper address"
+type = "url"
+default = ""
+when = "wrapper_mode=external"
+help = "Your wrapper-v2's control address, for example http://wrapper-v2:80. Its decrypt port (10020) must be reachable on the same host."
+
+[[settings]]
+key = "wrapper_fill_gamdl"
+label = "Point gamdl at this wrapper"
+type = "bool"
+default = true
+help = "Fills in gamdl's Wrapper URL whenever the wrapper starts or signs in."
+
+[[settings]]
+key = "wrapper_image"
+label = "Image to run instead"
+type = "text"
+default = ""
+when = "wrapper_mode=managed"
+advanced = true
+help = "A wrapper-v2 image you built or trust (registry/name:tag): Encore pulls and runs it instead of building one, and no app upload is needed."
+
+# internal: where the managed wrapper answered when it last started
+[[settings]]
+key = "wrapper_address"
+
+[[settings]]
+key = "wrapper_decrypt_address"
+
+[permissions]
+network = true
+filesystem = "folder"

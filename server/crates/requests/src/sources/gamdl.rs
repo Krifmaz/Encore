@@ -383,10 +383,10 @@ fn args(st: &impl Ctx, folder: &Path, ffmpeg: &str, surround: bool) -> Result<Ve
     let (prio, _, _, _, wrapped) = codec_for(st, surround);
     let w = wrapper(st);
     if surround && w.is_none() {
-        return Err(Failure::unsupported("Dolby Atmos needs a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card"));
+        return Err(Failure::unsupported("Dolby Atmos needs a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card (the Apple Music wrapper plugin runs one)"));
     }
     if wrapped && w.is_none() {
-        return Err(Failure::unsupported("ALAC and Dolby Atmos need a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card, or choose AAC"));
+        return Err(Failure::unsupported("ALAC and Dolby Atmos need a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card (the Apple Music wrapper plugin runs one), or choose AAC"));
     }
     let tmp = pytool::data(st, ID).join("tmp");
     let _ = std::fs::create_dir_all(&tmp);
@@ -553,7 +553,7 @@ pub async fn test(st: &impl Ctx) -> Result<String, Failure> {
             let ver = me["version"].as_str().unwrap_or("?");
             parts.push(if ver == WRAPPER_API { format!("wrapper {ver} signed in") } else { format!("wrapper {ver} signed in (gamdl {v} expects {WRAPPER_API})") });
         }
-        None if wrapped => return Err(Failure::unsupported("ALAC and Dolby Atmos need a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card, or choose AAC")),
+        None if wrapped => return Err(Failure::unsupported("ALAC and Dolby Atmos need a wrapper-v2 server: set \"Wrapper URL\" on the gamdl card (the Apple Music wrapper plugin runs one), or choose AAC")),
         None => {}
     }
     if !media_user_token(st).is_empty() {

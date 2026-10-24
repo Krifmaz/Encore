@@ -22,6 +22,7 @@ pub mod surround;
 pub mod system;
 pub mod update;
 pub mod tagging;
+pub mod wrapper;
 pub mod ytauth;
 pub mod discover;
 pub mod foryou;
@@ -29,3 +30,5 @@ pub mod catalog;
 pub mod changelog;
 #[cfg(test)]
 mod plugins_tests;
+#[cfg(test)]
+mod wrapper_tests;

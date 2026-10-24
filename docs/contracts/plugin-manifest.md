@@ -374,7 +374,8 @@ The plan (docs/backlog/2026-10-plan.md, 0.32) listed `[runtime]`, `[[binary]]`, 
 ## The catalog
 
 `server/crates/plugins/catalog/<id>.toml`, embedded in the server. All are Encore's own code
-(`builtin = true`); seven install a program (zotify and gamdl since 0.34).
+(`builtin = true`); seven install a program (zotify and gamdl since 0.34), and the Apple Music wrapper (0.37)
+builds one into a container of its own.
 
 | id | kind | Program it installs | From | Sum | Adopts |
 |---|---|---|---|---|---|
@@ -383,6 +384,7 @@ The plan (docs/backlog/2026-10-plan.md, 0.32) listed `[runtime]`, `[[binary]]`, 
 | `slskd` | source | slskd | GitHub `slskd/slskd` releases | GitHub's asset digest | `tools/slskd`, `slskd` |
 | `zotify` | source (Spotify) | zotify fork, venv (librespot through `[python] overrides`); Install pins v0.21.0 | GitHub `Googolplexed0/zotify` tags | none of Encore's (https; the version command) | |
 | `gamdl` | source (Apple Music) | gamdl, venv; Install pins 3.9.1 | PyPI `gamdl` | none of Encore's (https; the version command) | |
+| `wrapper` | tool | none at install: Set up builds wrapper-v2's image from its source (pinned commit) and the owner's Apple Music app, and runs it through the Docker socket (docs/plugins/WRAPPER.md) | GitHub `glomatico/wrapper-v2` (codeload tarball) | the Apple libraries and Android files against wrapper-v2's `LIBS_VERSION.json` | |
 | `torznab` | source | none | | | |
 | `qbittorrent`, `transmission`, `deluge`, `rtorrent`, `torrent-blackhole` | client (torrent) | none | | | |
 | `sabnzbd`, `nzbget`, `usenet-blackhole` | client (usenet) | none | | | |
@@ -402,6 +404,8 @@ cadenza belongs to exactly one plugin; the catalog test checks it):
   are in the manifest, as the Translator's);
 - `gamdl`: `gamdl_media_user_token`, `gamdl_codec`, `gamdl_wrapper_url`, `gamdl_wrapper_decrypt`, `gamdl_storefront`,
   `gamdl_lyrics`, `gamdl_language` (the same way);
+- `wrapper`: `wrapper_mode`, `wrapper_url`, `wrapper_fill_gamdl`, `wrapper_image` (the same way), `wrapper_address`,
+  `wrapper_decrypt_address` (internal: where the managed wrapper answered when it last started);
 - `slskd`: `slskd_enabled`, `soulseek_username`, `soulseek_password`, `soulseek_port`, `soulseek_share`,
   `soulseek_upload_slots`, `slskd_download_path`, `slskd_preferred_format`, `slskd_min_bitrate`,
   `slskd_search_timeout`, `slskd_stall_minutes`, `slskd_max_candidates`, `vpn_enabled`,
@@ -426,7 +430,8 @@ catalog: it installs through Upload plugin.
 Keys a catalog plugin adds that `settings.toml` does not have. Each one is listed here as `- `key`` with what
 it does, and its manifest entry has a label and a type; the catalog test checks both ways.
 
-None: every catalog setting is in `settings.toml` (zotify's and gamdl's since 0.34, without a card).
+None: every catalog setting is in `settings.toml` (zotify's and gamdl's since 0.34, the Apple Music wrapper's since
+0.37, without a card).
 
 ## Example: yt-dlp (catalog)
 

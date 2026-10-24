@@ -52,8 +52,9 @@ services:
       - ${APPDATA:-/opt/appdata}/encore:/config
       - ${MUSIC_DIR:-/srv/media/music}:/music
       - ${DOWNLOADS_DIR:-/srv/downloads}:/downloads
-      # Optional, only for "Update now" (Settings → Diagnostics). Warning: the socket gives the container control
-      # of Docker on this host; mount it only if you want Update now.
+      # Optional, for "Update now" (Settings → Diagnostics) and for the Apple Music wrapper Encore builds and runs
+      # beside itself (Settings → Plugins → Apple Music wrapper, for gamdl's ALAC and Dolby Atmos). Warning: the
+      # socket gives the container control of Docker on this host; mount it only if you want those.
       # - /var/run/docker.sock:/var/run/docker.sock
     networks: [music]
 

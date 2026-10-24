@@ -22,6 +22,7 @@ pub mod plugins;
 pub mod schema_form;
 pub mod tasks;
 pub mod users;
+pub mod wrapper;
 
 #[cfg(test)]
 mod form_tests;

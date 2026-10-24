@@ -181,6 +181,8 @@ Encore writes the engine's settings (`/config/slskd/slskd.yml`) from its own eve
     ports: ["8080:8080"]
   ```
 
+**Apple Music in ALAC and Dolby Atmos (optional)**: the *gamdl* plugin downloads Apple Music as AAC with your media-user-token; lossless ALAC and Dolby Atmos need a *wrapper*, a service signed in to your Apple Music account that decrypts for gamdl. Install *Apple Music wrapper* under *Settings → Plugins*: with the Docker socket mounted into Encore (`- /var/run/docker.sock:/var/run/docker.sock`), upload your own copy of the Apple Music Android app (3.6.0-beta, build 1109), press **Set up**, sign in with your Apple ID and the code Apple sends, and gamdl's Wrapper URL fills itself in. A wrapper-v2 you run yourself works too. Needs an Apple Music subscription; details in [docs/plugins/WRAPPER.md](docs/plugins/WRAPPER.md).
+
 **Torrents & Usenet (optional)**: add your indexers to Prowlarr, then install *Torrents & Usenet (Prowlarr)* under *Settings → Plugins*, enter the Prowlarr URL and API key on its card, and pick your torrent client (qBittorrent, Transmission, Deluge, rTorrent/ruTorrent, or a blackhole watch folder for anything else) and/or Usenet client (SABnzbd, NZBGet, or a blackhole folder). Each client is a plugin of its own with its own card; the Torrents & Usenet card offers to install the one you pick. Encore searches Prowlarr, sends the best album release to the right client, and imports it when it finishes. This replaces Lidarr.
 
 **Optional keys** (Settings):

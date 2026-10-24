@@ -1,7 +1,10 @@
 //! A small Docker Engine API client over the unix socket (`/var/run/docker.sock`), for "Update now"
-//! (update.rs) and the self-update helper (selfupdate.rs). HTTP/1.1 through hyper on a `UnixStream`, one
-//! connection per request. Paths are unversioned: the daemon answers in its own current API version.
-use http_body_util::{BodyExt, Full};
+//! (update.rs), the self-update helper (selfupdate.rs) and the Apple Music wrapper Encore runs beside itself
+//! (encore_requests::wrapper: an image build fed from a file, its streamed answer, a container's logs).
+//! HTTP/1.1 through hyper on a `UnixStream`, one connection per request. Paths are unversioned: the daemon
+//! answers in its own current API version.
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::Frame;
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
@@ -83,6 +86,90 @@ impl Docker {
         }
     }
 
+    /// `GET /images/<name>/json`: whether Docker has the image `name` (`repo:tag`).
+    pub async fn image_exists(&self, name: &str) -> anyhow::Result<bool> {
+        let (code, v) = self.get(&format!("/images/{}/json", urlencoding::encode(name))).await?;
+        match code {
+            200 => Ok(true),
+            404 => Ok(false),
+            _ => anyhow::bail!("Docker answered {code}: {}", message(&v)),
+        }
+    }
+
+    /// A request whose body is the file at `body` (sent as `content_type`, read in chunks, never whole in
+    /// memory), with the answer handed to `on_line` one line at a time as it arrives: an image build's progress
+    /// (`POST /build`, one JSON object per line). Gives back the status; the time limit counts the whole call.
+    pub async fn stream_file(&self, method: &str, path: &str, body: &Path, content_type: &str, timeout: Duration, mut on_line: impl FnMut(&str) + Send) -> anyhow::Result<u16> {
+        use futures_util::TryStreamExt;
+        let call = async {
+            let file = tokio::fs::File::open(body).await?;
+            let len = file.metadata().await?.len();
+            // the file as a stream of body frames
+            let frames = tokio_util::io::ReaderStream::with_capacity(file, 1 << 16).map_ok(Frame::data);
+            let stream = tokio::net::UnixStream::connect(&self.sock).await?;
+            let (mut tx, conn) = hyper::client::conn::http1::handshake::<_, StreamBody<_>>(TokioIo::new(stream)).await?;
+            let driver = tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            let req = hyper::Request::builder().method(method).uri(path).header(hyper::header::HOST, "docker")
+                .header(hyper::header::CONTENT_TYPE, content_type).header(hyper::header::CONTENT_LENGTH, len)
+                .body(StreamBody::new(frames))?;
+            let resp = tx.send_request(req).await?;
+            let status = resp.status().as_u16();
+            let mut body = resp.into_body();
+            // bytes of a line not finished yet: a chunk may end anywhere
+            let mut pending: Vec<u8> = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let Ok(data) = frame?.into_data() else { continue };
+                pending.extend_from_slice(&data);
+                while let Some(i) = pending.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=i).collect();
+                    on_line(String::from_utf8_lossy(&line).trim_end());
+                }
+            }
+            if !pending.is_empty() {
+                on_line(String::from_utf8_lossy(&pending).trim_end());
+            }
+            driver.abort();
+            anyhow::Ok(status)
+        };
+        match tokio::time::timeout(timeout, call).await {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("no answer within {} minutes", timeout.as_secs() / 60),
+        }
+    }
+
+    /// The last `lines` lines a container wrote (stdout and stderr together), as text.
+    pub async fn logs(&self, id: &str, lines: usize) -> anyhow::Result<String> {
+        let path = format!("/containers/{}/logs?stdout=1&stderr=1&tail={lines}", urlencoding::encode(id));
+        let (code, bytes) = self.request("GET", &path, None, TIMEOUT).await?;
+        if code >= 400 {
+            let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            anyhow::bail!("Docker answered {code}: {}", message(&v));
+        }
+        Ok(demux_logs(&bytes))
+    }
+
+    /// The container this process runs in, as Docker inspects it: the id Docker mounted /etc/hostname from
+    /// (mountinfo), else the hostname (the id's first 12 characters unless the owner set one). None outside a
+    /// container, or in one this Docker does not run.
+    pub async fn this_container(&self) -> Option<Value> {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        let hostname = crate::update::hostname();
+        let mut candidates: Vec<String> = crate::update::container_id_from_mountinfo(&mountinfo).into_iter().collect();
+        if !hostname.is_empty() && !candidates.contains(&hostname) {
+            candidates.push(hostname.clone());
+        }
+        for c in candidates {
+            if let Ok(Some(v)) = self.inspect(&c).await {
+                if v["Id"].as_str().unwrap_or("").starts_with(&c) || v["Config"]["Hostname"].as_str() == Some(hostname.as_str()) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
     /// `POST /images/create`: pulls `repo:tag` and waits for the progress stream to end. The error is
     /// Docker's own words (an HTTP error, or the `error` line inside a 200 stream).
     pub async fn pull(&self, repo: &str, tag: &str, timeout: Duration) -> Result<(), String> {
@@ -95,6 +182,39 @@ impl Docker {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+/// A container's log as Docker sends it without a terminal: frames of an 8-byte header (stream 1 or 2, three
+/// zero bytes, the length as a big-endian u32) and that many bytes. A log of a container with a terminal has
+/// no frames and is taken as it is, as is anything that does not read as frames.
+pub fn demux_logs(bytes: &[u8]) -> String {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while rest.len() >= 8 && matches!(rest[0], 0..=2) && rest[1..4] == [0, 0, 0] {
+        let n = u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+        if rest.len() < 8 + n {
+            break;
+        }
+        out.extend_from_slice(&rest[8..8 + n]);
+        rest = &rest[8 + n..];
+    }
+    // no frames at all (a terminal), or a tail that is not one: kept as written
+    out.extend_from_slice(rest);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What went wrong in an image build's answer (`POST /build`): the `error` (or `errorDetail.message`) of one
+/// of its lines. None for a progress line.
+pub fn build_error(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    v["errorDetail"]["message"].as_str().or_else(|| v["error"].as_str()).map(|e| e.trim().to_string()).filter(|e| !e.is_empty())
+}
+
+/// The words of an image build's progress line (`{"stream": "Step 3/20 : RUN …\n"}`), trimmed; None when
+/// the line has none (an `aux` line with the image id, an empty line).
+pub fn build_text(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    v["stream"].as_str().or_else(|| v["status"].as_str()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 /// Docker's `{"message": "..."}` (or the status line when there is none).
@@ -119,4 +239,31 @@ pub fn pull_error(status: u16, body: &[u8]) -> Option<String> {
         }
     }
     last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_lose_their_frame_headers() {
+        let mut framed = vec![1u8, 0, 0, 0, 0, 0, 0, 3];
+        framed.extend_from_slice(b"ab\n");
+        framed.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 4]);
+        framed.extend_from_slice(b"err\n");
+        assert_eq!(demux_logs(&framed), "ab\nerr\n");
+        // a container with a terminal: no frames
+        assert_eq!(demux_logs(b"plain text\n"), "plain text\n");
+        // a frame cut short is kept as it came
+        assert_eq!(demux_logs(&[1, 0, 0, 0, 0, 0, 0, 9, b'x']), String::from_utf8_lossy(&[1, 0, 0, 0, 0, 0, 0, 9, b'x']));
+    }
+
+    #[test]
+    fn build_lines_read_as_progress_or_error() {
+        assert_eq!(build_text(r#"{"stream":"Step 3/20 : RUN make\n"}"#).as_deref(), Some("Step 3/20 : RUN make"));
+        assert_eq!(build_text(r#"{"aux":{"ID":"sha256:x"}}"#), None);
+        assert_eq!(build_error(r#"{"errorDetail":{"message":"no space left"},"error":"no space"}"#).as_deref(), Some("no space left"));
+        assert_eq!(build_error(r#"{"stream":"ok"}"#), None);
+        assert_eq!(build_error("not json"), None);
+    }
 }

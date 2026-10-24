@@ -16,6 +16,7 @@ encore-plugins = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 flate2 = { workspace = true }
+futures-util = { workspace = true }
 hex = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
@@ -24,5 +25,6 @@ libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }

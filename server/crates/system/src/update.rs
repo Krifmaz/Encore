@@ -241,7 +241,7 @@ pub fn container_id_from_mountinfo(text: &str) -> Option<String> {
 }
 
 /// This machine's host name (the container id inside Docker).
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"].iter().filter_map(|p| std::fs::read_to_string(p).ok())
         .map(|h| h.trim().to_string()).find(|h| !h.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default()

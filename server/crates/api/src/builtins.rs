@@ -8,6 +8,7 @@
 //! | streamrip | encore_requests::sources::streamrip (Qobuz, Tidal with its sign-in, Deezer) |
 //! | zotify | encore_requests::sources::zotify (Spotify: its two-step sign-in, search, downloads) |
 //! | gamdl | encore_requests::sources::gamdl (Apple Music: search, downloads, the wrapper) |
+//! | wrapper | encore_requests::wrapper (wrapper-v2: its container through the Docker socket, its Apple sign-in) |
 //! | slskd | encore_requests::slskd_managed (the managed slskd) with the session supervisor (slskd_session) |
 //! | torznab | encore_requests::sources::torznab (Prowlarr) |
 //! | qbittorrent … usenet-blackhole | encore_requests::sources::dl (the download clients) |
@@ -30,6 +31,7 @@ use encore_plugins::plugin::BoxFuture;
 use encore_plugins::{Call, Code, Downloaded, Failure, FileEntry, Manifest, Plugin, Status};
 use encore_requests::sources::dl::Client;
 use encore_requests::sources::{gamdl, streamrip, ytdlp, zotify};
+use encore_requests::wrapper;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -45,6 +47,8 @@ enum Kind {
     Zotify,
     /// gamdl (Apple Music)
     Gamdl,
+    /// the Apple Music wrapper gamdl decrypts through
+    Wrapper,
     /// slskd (Soulseek)
     Slskd,
     /// the torrent and usenet indexers (Prowlarr)
@@ -67,6 +71,7 @@ impl Kind {
             "streamrip" => Kind::Streamrip,
             "zotify" => Kind::Zotify,
             "gamdl" => Kind::Gamdl,
+            "wrapper" => Kind::Wrapper,
             "slskd" => Kind::Slskd,
             "torznab" => Kind::Torznab,
             "cadenza" => Kind::Cadenza,
@@ -139,6 +144,7 @@ impl Builtin {
         match self.kind {
             Kind::Zotify => zotify::status(st).await,
             Kind::Gamdl => gamdl::status(st).await,
+            Kind::Wrapper => wrapper::status(st).await,
             Kind::Ytdlp | Kind::Streamrip => {
                 let id = self.m.id();
                 let st2 = st.clone();
@@ -237,6 +243,7 @@ impl Builtin {
         match self.kind {
             Kind::Zotify => zotify::test(st).await,
             Kind::Gamdl => gamdl::test(st).await,
+            Kind::Wrapper => wrapper::test(st).await,
             Kind::Client(c) => c.status(st).await.map_err(fail),
             Kind::Translator => {
                 let m = self.m.clone();
@@ -369,6 +376,13 @@ impl Builtin {
                     encore_requests::slskd_managed::stop(st).await;
                 }
                 st.requests.slskd.poke();
+            }
+            // removed: its container goes; switched off: it stops (Start brings it back)
+            Kind::Wrapper if removing => wrapper::removing(st).await,
+            Kind::Wrapper if !on && wrapper::mode(st) == wrapper::Mode::Managed => {
+                if let Err(e) = wrapper::stop(st).await {
+                    tracing::debug!("wrapper: {e}");
+                }
             }
             Kind::Translator => {
                 if removing || !on {

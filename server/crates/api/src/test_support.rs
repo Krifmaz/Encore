@@ -73,6 +73,15 @@ impl TestServer {
         self
     }
 
+    /// The same with its Docker socket at `sock` (a stand-in, or a path with nothing there), so a test never
+    /// reaches the Docker of the machine it runs on.
+    pub fn with_docker_socket(mut self, sock: impl Into<PathBuf>) -> TestServer {
+        self.st.system.docker_socket = sock.into();
+        // the adapters run on the state as it is now
+        self._plugins = crate::builtins::register(&self.st);
+        self
+    }
+
     /// The API and the web app, as the binary serves them.
     pub fn app(&self) -> Router {
         crate::app(self.st.clone())

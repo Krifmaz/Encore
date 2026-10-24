@@ -1807,6 +1807,36 @@ env = "GAMDL_LANGUAGE"
 default = "en-US"
 help = "gamdl: the language of titles and tags (en-US, de-DE …)."
 
+# ---- Settings → Plugins → Apple Music wrapper (0.37): its words are in the plugin's manifest (catalog/wrapper.toml)
+
+[keys.wrapper_mode]
+env = "WRAPPER_MODE"
+default = "managed"
+help = "Apple Music wrapper: managed (Encore builds and runs wrapper-v2 through the Docker socket) or external (one you run)."
+
+[keys.wrapper_url]
+env = "WRAPPER_URL"
+default = ""
+help = "Apple Music wrapper: the address of a wrapper-v2 you run yourself (external mode)."
+
+[keys.wrapper_image]
+env = "WRAPPER_IMAGE"
+default = ""
+help = "Apple Music wrapper: a wrapper-v2 image to pull and run instead of building one (managed mode)."
+
+[keys.wrapper_fill_gamdl]
+env = "WRAPPER_FILL_GAMDL"
+default = true
+help = "Apple Music wrapper: point gamdl's Wrapper URL at this wrapper when it starts or signs in."
+
+[keys.wrapper_address]
+default = ""
+help = "Apple Music wrapper: where Encore reached the managed wrapper when it last started (internal)."
+
+[keys.wrapper_decrypt_address]
+default = ""
+help = "Apple Music wrapper: the managed wrapper's decrypt socket, host:port (internal)."
+
 # ---- Settings → Server processing (Cadenza): the engine's own settings, drawn from its description
 
 [keys.cadenza_engine_settings]

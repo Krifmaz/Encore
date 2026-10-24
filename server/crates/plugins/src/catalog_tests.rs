@@ -48,7 +48,7 @@ fn every_catalog_manifest_reads() {
     assert_eq!(
         ids,
         [
-            "ytdlp", "streamrip", "slskd", "zotify", "gamdl", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget",
+            "ytdlp", "streamrip", "slskd", "zotify", "gamdl", "wrapper", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget",
             "usenet-blackhole", "cadenza", "translator", "jellyfin", "plex", "navidrome"
         ]
     );

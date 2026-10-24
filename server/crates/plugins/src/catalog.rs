@@ -5,13 +5,14 @@ use crate::manifest::{parse_for, Manifest, Origin};
 use std::sync::OnceLock;
 
 /// Every catalog manifest as (id, text), in the order the Plugins page lists them: the sources, the download
-/// clients, the tools and playback, the connections. The text is what the plugins table keeps.
-pub const FILES: [(&str, &str); 19] = [
+/// clients, the tools and playback, the connections (the Apple Music wrapper sits beside gamdl, which it serves). The text is what the plugins table keeps.
+pub const FILES: [(&str, &str); 20] = [
     ("ytdlp", include_str!("../catalog/ytdlp.toml")),
     ("streamrip", include_str!("../catalog/streamrip.toml")),
     ("slskd", include_str!("../catalog/slskd.toml")),
     ("zotify", include_str!("../catalog/zotify.toml")),
     ("gamdl", include_str!("../catalog/gamdl.toml")),
+    ("wrapper", include_str!("../catalog/wrapper.toml")),
     ("torznab", include_str!("../catalog/torznab.toml")),
     ("qbittorrent", include_str!("../catalog/qbittorrent.toml")),
     ("transmission", include_str!("../catalog/transmission.toml")),

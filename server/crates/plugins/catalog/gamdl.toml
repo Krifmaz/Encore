@@ -64,7 +64,7 @@ key = "gamdl_wrapper_url"
 label = "Wrapper URL"
 type = "url"
 default = ""
-help = "A wrapper-v2 server signed in to Apple Music, for example http://wrapper:30020. Needed for ALAC and for Dolby Atmos versions in the Surround library; with it the media-user-token is optional."
+help = "A wrapper-v2 server signed in to Apple Music, for example http://wrapper-v2:80. Needed for ALAC and for Dolby Atmos versions in the Surround library; with it the media-user-token is optional. The Apple Music wrapper plugin runs one and fills this in."
 
 [[settings]]
 key = "gamdl_wrapper_decrypt"

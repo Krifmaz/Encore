@@ -968,6 +968,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "socket2",
  "subtle",
  "tokio",
@@ -1015,6 +1016,7 @@ dependencies = [
  "encore-playback",
  "encore-plugins",
  "flate2",
+ "futures-util",
  "hex",
  "http-body-util",
  "hyper",
@@ -1023,6 +1025,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "urlencoding",
 ]

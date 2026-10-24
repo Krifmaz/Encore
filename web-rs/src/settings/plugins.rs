@@ -413,11 +413,12 @@ pub fn form_body_html(answer: &Value, values: &Value, reveal: bool, schema: &Sch
 }
 
 /// The blocks a plugin card draws under its fields: Tidal sign-in and the streamrip config (streamrip), the
-/// Soulseek status (slskd).
+/// Soulseek status (slskd), the Apple Music wrapper's setup and sign-in (wrapper).
 pub fn extras_html(id: &str) -> String {
     match id {
         "streamrip" => apps::tidal_block() + &apps::streamrip_config_block(),
         "slskd" => format!("\n      {}", apps::soulseek_status_block()),
+        "wrapper" => super::wrapper::block(),
         _ => String::new(),
     }
 }
@@ -768,6 +769,7 @@ impl Page {
                 "streamrip" => { apps::bind_tidal(&self.hub.view, &card); apps::bind_streamrip_config(&card); }
                 "slskd" => { apps::bind_vpn(&self.hub, g.clone(), &card); apps::bind_soulseek(&self.hub, &card); }
                 "ytdlp" => crate::pages::youtube::bind_youtube(&card),
+                "wrapper" => super::wrapper::bind(&self.hub.view, &card),
                 _ => {}
             }
         }
