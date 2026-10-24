@@ -41,6 +41,9 @@ Written for Encore 0.37. The code is `server/crates/requests/src/wrapper/` (the 
 5. With **Point gamdl at this wrapper** on (the default), gamdl's **Wrapper URL** and **Wrapper decrypt address**
    are filled in when the wrapper starts and when it signs in. Otherwise press **Use with gamdl**. Then choose
    **ALAC lossless** under gamdl's Format, or use Get Dolby Atmos version (Settings → Library → Surround).
+   While gamdl points at the wrapper, gamdl's card shows both values read-only, marked "Filled in by the Apple
+   Music wrapper plugin", and its Save leaves them alone. A Wrapper URL typed in by hand with no decrypt address
+   counts as this wrapper too (gamdl then takes the URL's host, port 10020).
 
 The Apple session is kept in the Docker volume `encore-wrapper-data`, so the wrapper stays signed in across
 restarts, image rebuilds and Encore updates. Sign out on the card ends it.

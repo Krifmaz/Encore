@@ -878,3 +878,6 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
    drop place shows a dashed outline, and the one under the pointer is filled in. */
 .drop-ready { outline: 2px dashed rgba(var(--accent-rgb), .55); outline-offset: 3px; border-radius: 10px; transition: outline-color .12s, background-color .12s; }
 .drop-over { outline: 2px solid var(--accent); background-color: rgba(var(--accent-rgb), .12); }
+
+/* a card's advanced fields, folded under "Show advanced" (schema_form.rs) */
+details.adv-fields > summary { cursor: pointer; width: max-content; }

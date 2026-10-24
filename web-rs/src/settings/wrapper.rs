@@ -8,7 +8,7 @@
 use crate::api;
 use crate::dom;
 use crate::json::{json, J};
-use crate::ui::{esc, fmt, icon, toast};
+use crate::ui::{esc, fmt, icon, icon_attr, toast};
 use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -56,12 +56,14 @@ fn managed_html(o: &Value) -> String {
     // the app (only when Encore builds the image)
     if builds {
         let app = if bundle.is_object() {
-            format!("{} {} · {} · {}", icon("check"), esc(&bundle.s("name")), esc(&bundle.s("kind")), fmt::size(bundle.f("size")))
+            // the icon sized inline: a bare svg in this div has no size of its own and fills the card
+            format!("{} {} · {} · {}", icon_attr("check", r#"width="14" height="14" style="vertical-align:-2px""#),
+                esc(&bundle.s("name")), esc(&bundle.s("kind")), fmt::size(bundle.f("size")))
         } else {
             "No app uploaded yet: Apple Music for Android 3.6.0-beta (build 1109), as an .apk or an APKMirror .apkm bundle.".to_string()
         };
         html.push_str(&format!(r##"<div class="row between wrap" style="gap:8px;align-items:center" data-dropzone>
-      <div style="min-width:0"><b>Apple Music app</b><div class="small muted">{app}</div></div>
+      <div style="min-width:0"><b>Apple Music app</b><div class="small muted" style="overflow-wrap:anywhere">{app}</div></div>
       <label class="btn sm" style="cursor:pointer">{up}{label}<input type="file" id="wrapper-app" accept=".apk,.apkm,application/vnd.android.package-archive,application/zip" hidden></label>
     </div>"##, up = icon("plus"), label = if bundle.is_object() { "Replace app" } else { "Upload app" }));
     }
@@ -148,6 +150,28 @@ fn gamdl_html(o: &Value) -> String {
     format!(r##"<div class="row wrap mt" style="gap:8px;align-items:center">{line}</div>"##)
 }
 
+/// Shows on the gamdl card, as it stands on the page, the Wrapper URL and decrypt address this wrapper just
+/// filled in (`g`: the overview's `gamdl`): their inputs take the values, read-only, with the plugin's note
+/// under them, as a reload of the page would draw them. Nothing changes while gamdl points elsewhere.
+fn sync_gamdl_fields(g: &Value) {
+    if !g.truthy("points_here") { return; }
+    for (key, v) in [("gamdl_wrapper_url", g.s("url")), ("gamdl_wrapper_decrypt", g.s("decrypt"))] {
+        for input in dom::qsa(&format!(r#"input[data-k="{key}"]"#)) {
+            if input.has_attribute("disabled") { continue; } // the environment's value stays
+            dom::set_value(&input, &v);
+            let _ = input.set_attribute("readonly", "");
+            let Some(field) = dom::closest_of(&input, ".field") else { continue };
+            if dom::qs_in(&field, "small.src.plugin").is_some() { continue; }
+            // the plugin's note takes the place of "Default · env var …"
+            for old in dom::qsa_in(&field, "small.src") { dom::remove(&old); }
+            let note = dom::create("small");
+            let _ = note.set_attribute("class", "src plugin");
+            dom::set_html(&note, "🔗 Filled in by the <b>Apple Music wrapper</b> plugin – it changes this itself");
+            let _ = field.append_child(&note);
+        }
+    }
+}
+
 /// The block's body for the answer of GET /api/system/wrapper.
 pub fn panel_html(o: &Value) -> String {
     let mut html = String::new();
@@ -179,6 +203,7 @@ pub fn bind(view: &Element, card: &Element) {
                     Ok(o) => {
                         busy.set(o.g("job").truthy("running"));
                         dom::set_html(&body, &panel_html(&o));
+                        sync_gamdl_fields(o.g("gamdl"));
                     }
                     Err(e) => dom::set_text(&body, &e.message),
                 }
