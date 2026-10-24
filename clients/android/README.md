@@ -30,7 +30,8 @@ What it does:
   TV becomes an Encore device the phone can send music to. To install, sideload `Encore-android-<version>.apk` from
   the releases (for example with the Downloader app, or `adb install`); it then updates itself like on a phone
 - the TV layout (`ui/tv`, on a TV automatically): the whole app zoomed out, a slim side menu instead of the bottom
-  bars (Search, Home, Library, Playlists, For you, Now playing, Settings; Left opens it), and a TV player with the
+  bars (Search, Home, Library, Playlists, For you, Now playing, Settings; Left at the page's edge or Menu opens it,
+  Back or Right closes it; Up / Down always move to the next control, so text fields don't trap the focus), and a TV player with the
   cover and controls on one side and a panel switching between the lyrics and Up next on the other; Left / Right on
   its seek bar seek 10 s; Screen off (top right) blacks the screen out while the music plays on, the playback
   buttons still work and any other button brings it back. Settings → TV (on a TV only): Layout (or the phone layout), Player side, Size

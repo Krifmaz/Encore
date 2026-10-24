@@ -345,6 +345,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             TvShell(
                 nav = nav,
                 selected = TvNav.selected(showPlayer, stack.lastOrNull(), tab),
+                // another page (or the player closing over it): the focus goes onto the page
+                pageKey = listOf(stack.size, stack.lastOrNull(), tab, showPlayer),
                 onSelect = { item ->
                     when (item) {
                         RailItem.NOW_PLAYING -> { showPlayer = true }

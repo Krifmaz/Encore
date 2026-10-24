@@ -1,12 +1,15 @@
 /**
  * The rules of the TV layout (Android TV / Google TV, e.g. an NVIDIA Shield), as plain values with no Android in them
  * so they are tested without a device (TvRulesTest): which layout the app uses, which side the TV player sits on, what
- * its other half shows, how far the screen is zoomed out, what the side menu lists and how far a remote press seeks.
+ * its other half shows, how far the screen is zoomed out, what the side menu lists, which remote buttons move around
+ * it and how far a remote press seeks.
  *
  * The stored forms (the `key`s) are what [TvPrefs] writes to this device's SharedPreferences; anything unknown read
  * back falls to the default, so an older or newer app never breaks on a value it doesn't know.
  */
 package app.encore.android.ui.tv
+
+import android.view.KeyEvent
 
 /**
  * Whether the app uses the TV layout (the side menu, the TV player, the zoomed-out screen) or the phone one.
@@ -127,8 +130,44 @@ enum class RailItem(val label: String) {
     SETTINGS("Settings"),
 }
 
+/** A remote button the TV side menu cares about ([TvRules.railKey]). */
+enum class RailKey {
+    /** D-pad Left: on the page's left edge it opens the menu. */
+    LEFT,
+
+    /** D-pad Right: in the open menu it goes back to the page. */
+    RIGHT,
+
+    /** The remote's Menu button: opens the menu from anywhere on the page. */
+    MENU,
+}
+
 /** Plain decisions of the TV layout. */
 object TvRules {
+    /**
+     * Which side menu button a key is, if any.
+     *
+     * @param keyCode the button's Android key code (`KeyEvent.KEYCODE_…`).
+     */
+    fun railKey(keyCode: Int): RailKey? = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_LEFT -> RailKey.LEFT
+        KeyEvent.KEYCODE_DPAD_RIGHT -> RailKey.RIGHT
+        KeyEvent.KEYCODE_MENU -> RailKey.MENU
+        else -> null
+    }
+
+    /**
+     * Whether a key moves the focus up or down on a TV page: true for Down, false for Up, null for any other key.
+     * The TV frame moves the focus itself for these before a control sees them, so a text field can't keep them.
+     *
+     * @param keyCode the button's Android key code (`KeyEvent.KEYCODE_…`).
+     */
+    fun verticalMove(keyCode: Int): Boolean? = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_DOWN -> true
+        KeyEvent.KEYCODE_DPAD_UP -> false
+        else -> null
+    }
+
     /** How far one Left / Right press on the TV seek bar moves the song, in ms. */
     const val SEEK_STEP_MS = 10_000L
 
