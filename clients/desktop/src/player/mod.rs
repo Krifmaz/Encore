@@ -1569,6 +1569,8 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     };
     Subscription::batch([
         glide,
+        // files dropped on Replace with my own file (opened from the player's ⋯)
+        crate::pages::library::shared_subscription(&state.shared).map(Message::SongAct),
         group::subscription(&state.group),
         engine::subscription().map(|e| Message::Engine(Box::new(e))),
         iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),

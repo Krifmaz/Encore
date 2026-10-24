@@ -23,6 +23,7 @@ pub const PERMS: &[(&str, &str)] = &[
     ("storage", "See server storage"),
     ("server_dsp", "Use server-side Cadenza processing for their streams (costs server CPU)"),
     ("translate", "Correct translated titles (the fix shows for everyone reading that language)"),
+    ("own_files", "Replace songs with their own files (⋯ → Replace with my own file; the new file plays for everyone)"),
 ];
 
 /// Every permission of `u`: the saved ones over the defaults.
@@ -35,6 +36,8 @@ pub fn perms_of(cfg: &Config, u: &Row) -> Map<String, Value> {
     out.insert("storage".into(), json!(true));
     out.insert("server_dsp".into(), json!(false));
     out.insert("translate".into(), json!(true));
+    // a replaced file plays for everyone: only admins, unless an admin gives it to an account
+    out.insert("own_files".into(), json!(false));
     for (k, v) in saved {
         if PERMS.iter().any(|(p, _)| *p == k) {
             out.insert(k, json!(v.as_bool().unwrap_or(false)));

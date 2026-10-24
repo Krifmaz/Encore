@@ -694,6 +694,8 @@ internal fun PlayerActions(
                 MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
                 // one tap to the report sheet for the song playing now (wrong song, bad audio, wrong lyrics …)
                 if (!track.isSurround && track.id > 0) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(track.id, track.title) } else null,
+                // bring your own music (admins and the "own_files" permission)
+                app.encore.android.features.library.OwnFileUi.entry(app.encore.android.features.library.SongFixUi.me.value, track.id, track.title, track.isSurround),
                 when {
                     group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }

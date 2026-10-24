@@ -485,6 +485,16 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
     if lib.is_some() {
         items.push(MenuItem::new("Report a problem", Message::ReportSong).icon(Icon::Shield));
     }
+    // bring your own music (admins and the "own_files" permission); a Surround song can't take one
+    if let (Some(id), Some(n)) = (lib, now.as_ref()) {
+        if id < SURROUND_IDS && crate::pages::own_file::allowed_for(&ctx.session.user) {
+            let song = serde_json::json!({ "id": id, "title": n.title });
+            items.push(
+                MenuItem::new("Replace with my own file", Message::SongAct(crate::pages::library::Act::ReplaceOwn(Box::new(song))))
+                    .icon(Icon::Disc),
+            );
+        }
+    }
     if ctx.has_feature("remote") {
         items.push(
             MenuItem::new(

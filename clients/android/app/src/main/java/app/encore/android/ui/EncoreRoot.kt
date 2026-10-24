@@ -430,6 +430,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         }
         // ⋯ → Report a problem (songs and albums)
         ReportHost(nav)
+        // bring your own music: Replace with my own file, Upload your own files
+        app.encore.android.features.library.OwnFileHost(nav)
         // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
         SongFixHost(nav)
         // toasts sit above the mini player and the tabs, in a window of their own above every sheet and dialog
@@ -486,6 +488,8 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
                 // its surround version: play it, or (admins) fetch the Dolby Atmos version
                 *SurroundUi.entries(nav, t, me, fixScope).toTypedArray(),
                 if (!surround) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) } else null,
+                // bring your own music (admins and the "own_files" permission)
+                app.encore.android.features.library.OwnFileUi.entry(me, t.id, t.title, surround),
                 // admins, and members with "fix" on a song their request brought in (library.rs `track_menu`)
                 *(if (!surround) SongFixUi.entries(nav, t, me, fixScope, req.onAlbumPage) else emptyList()).toTypedArray(),
             ),

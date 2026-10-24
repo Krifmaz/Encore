@@ -975,6 +975,8 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
         return Ok(Json(info));
     }
     info["quality"] = encore_media::quality::for_track(&st, id); // "Fake lossless? cutoff 16 kHz" in the signal path
+    // "Your own file, uploaded by alex" in the signal path (⋯ → Replace with my own file)
+    info["own_file"] = encore_library::own_file::latest(&st, id).unwrap_or(Value::Null);
     if let Some(gain) = encore_library::loudness::info_gain(&st.db, id) {
         info["gain"] = gain;
     }

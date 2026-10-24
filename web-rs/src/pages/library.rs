@@ -178,6 +178,8 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
         items.push(MenuItem::new("Get Dolby Atmos version", &icon("download"), move || get_atmos(format!("/library/tracks/{id}/surround"), done.clone())));
     }
     { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Report a problem", &icon("shield"), move || { let done = done.clone(); crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "", Some(Rc::new(move |_| done()))) })); }
+    // bring your own music: this song's file replaced with one you upload (admins and the "own_files" permission)
+    if crate::pages::own_file::allowed() { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Replace with my own file", &icon("disc"), move || crate::pages::own_file::replace_modal(&t, Some(done.clone())))); }
     if ui::translate_mode() != "off" { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t.s("title"), "title", Some(done.clone())))); }
     if admin { let t = t.clone(); items.push(MenuItem::new("Edit song details…", &icon("edit"), move || fix_song_modal(&t))); }
     if can_fix {
@@ -959,13 +961,17 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         <button class="btn sm" id="art-all">{}Find missing artwork</button>
       </div>"##, icon("refresh"), icon("tag"), icon("disc"), icon("shield"), icon("disc"))
         } else { String::new() };
+        // bring your own music: a batch of your own files matched to the songs they are
+        let own_html = if crate::pages::own_file::allowed_for(&ctx.user) {
+            format!(r##"<button class="btn sm" id="own-files-btn" title="Replace songs with your own copies: each file is matched to its song by its tags">{}Upload your own files</button>"##, icon("disc"))
+        } else { String::new() };
         let artist_html = if !st.artist.is_empty() {
             format!(r##"<span class="badge accent">{} <a href="#/library" style="margin-left:4px">✕</a></span><button class="btn sm" id="artist-share" title="Share link">{}Share</button>"##, esc(&st.artist), icon("external"))
         } else { String::new() };
         dom::set_html(&view, &format!(r##"
     <div class="row wrap between" style="margin-bottom:18px">
       <div class="row" style="gap:12px;align-items:center"><div><h1>Library</h1><div class="muted small" id="lib-sub"></div></div>
-        <button class="btn primary sm" id="shuffle-lib" title="Play everything in random order – no song twice this session">{shuffle}Shuffle</button></div>
+        <button class="btn primary sm" id="shuffle-lib" title="Play everything in random order – no song twice this session">{shuffle}Shuffle</button>{own_html}</div>
       {admin_html}
     </div>
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
@@ -990,6 +996,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             shuffle = icon("shuffle"), search = icon("search"), q = esc(&st.q),
             select_btn = if admin && !crate::offline::mode::active() { format!(r##"<button class="btn sm hidden" id="lib-select" title="Pick albums to delete">{}Select</button>"##, icon("check")) } else { String::new() }));
         dom::on_sel(&view, "#shuffle-lib", "click", |_| dom::spawn(async { if player::shuffle_library().await == 0 { toast("Your library is empty", "err"); } }));
+        dom::on_sel(&view, "#own-files-btn", "click", |_| crate::pages::own_file::bulk_modal(None));
         { let name = st.artist.clone(); dom::on_sel(&view, "#artist-share", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
         let body = need(&view, "#lib-body")?;
         let more = need(&view, "#more")?;

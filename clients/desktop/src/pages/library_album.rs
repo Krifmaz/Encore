@@ -1671,7 +1671,8 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 pub fn subscription(state: &State) -> Subscription<Message> {
     match state.dialog {
         Some(Dialog::Artwork(_)) => drop_zone::events().map(Message::ArtDrop),
-        _ => Subscription::none(),
+        // files dropped on Replace with my own file
+        _ => super::library::shared_subscription(&state.shared).map(Message::Shared),
     }
 }
 

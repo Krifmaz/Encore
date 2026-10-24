@@ -27,6 +27,8 @@ pub fn cleanup(st: &impl Ctx) -> anyhow::Result<String> {
         }
     }
     let trashed = crate::report::purge_trash(st);
+    // uploads for "Replace with my own file" that were staged and never used (a day old)
+    encore_library::own_file::purge_staged(st);
     Ok(format!("{removed} leftover download folder(s) removed{}{}", if n > 0 { format!(", {n} old request(s) cleared") } else { String::new() },
         if trashed > 0 { format!(", {trashed} reported file(s) deleted from the trash") } else { String::new() }))
 }

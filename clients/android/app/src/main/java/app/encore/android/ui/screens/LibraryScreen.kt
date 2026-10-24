@@ -283,6 +283,12 @@ fun LibraryScreen(nav: Nav) {
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (AlbumSelect.selecting) AlbumSelectTopBar(nav, scrollBehavior) else EncoreTopBar("Library", scrollBehavior = scrollBehavior, actions = {
+                // bring your own music: a batch of your own files matched to the songs they are
+                if (app.encore.android.features.library.OwnFileRules.allowed(me) && !offline) {
+                    IconButton(onClick = { app.encore.android.features.library.OwnFileUi.openBulk() }) {
+                        Icon(painterResource(R.drawable.ic_upload), contentDescription = "Upload your own files", tint = MaterialTheme.palette.text)
+                    }
+                }
                 SmallButton("Shuffle", iconRes = R.drawable.ic_shuffle, primary = true, modifier = Modifier.padding(end = Gutter)) {
                     scope.launch { shuffleLibrary(nav) }
                 }

@@ -29,6 +29,7 @@ pub mod library_artist;
 pub mod library_types;
 pub mod login;
 pub mod offline;
+pub mod own_file;
 pub mod playlist;
 pub mod playlists;
 pub mod requests;
