@@ -269,7 +269,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         set_html(&view, r#"<h1>For you</h1><div id="fy-lib">
     <div class="section-head"><div><h2>Mixes from your library</h2><div class="small muted">Made on this server from what you play, like, skip and dislike</div></div></div>
     <div id="fy-mixes"><div class="skeleton" style="height:180px"></div></div>
-    <div class="section-head"><div><h2>Your genres</h2><div class="small muted">A mix of each genre in your library</div></div></div><div id="fy-genres" class="chips"></div></div>
+    <div class="section-head"><div><h2>Your genres</h2><div class="small muted">A mix of each genre in your library</div></div><button class="btn sm" id="fy-gs" type="button">Genre shuffle…</button></div><div id="fy-genres" class="chips"></div></div>
     <div class="section-head"><h2>From ListenBrainz and Last.fm</h2></div><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.</p>
     <div id="fy-body"><div class="skeleton" style="height:300px"></div></div>
     <div class="section-head"><h2>Browse by genre</h2></div><div id="fy-tags" class="chips"></div>"#);
@@ -289,6 +289,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         // the library's mixes: play one with a click (on its tile or a genre chip)
         dom::spawn(load_mixes(view.clone()));
         if let Some(lib) = dom::qs_in(&view, "#fy-lib") { dom::on(&lib, "click", |e| {
+            if dom::closest(e, "#fy-gs").is_some() { player::genre_shuffle_modal(); return; }
             let Some(m) = dom::closest(e, "[data-mix]") else { return };
             let id = dom::data(&m, "mix");
             dom::spawn(async move { player::play_mix(&id).await; });

@@ -41,6 +41,8 @@ class AppGraph(app: Application) {
     val http: OkHttpClient = buildHttpClient(app, store)
     val api: EncoreApi = EncoreApi(http, store)
     val likes: LikesRepository = LikesRepository(api, scope)
+    /** The disliked songs (the player's thumbs-down), which the server's shuffles and mixes leave out. */
+    val dislikes: app.encore.android.data.library.DislikesRepository = app.encore.android.data.library.DislikesRepository(api, likes, scope)
 
     /** Playback preferences (quality, effects, server processing), synced with the account. */
     val prefs: PrefsRepository = PrefsRepository(app, api, scope, store)

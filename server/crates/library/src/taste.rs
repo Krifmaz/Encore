@@ -566,6 +566,8 @@ pub enum Scope {
     All,
     /// one genre's songs
     Genre(u16),
+    /// the songs of any of these genres (a genre shuffle of several)
+    Genres(Vec<u16>),
     /// only these songs (a playlist or an album being shuffled), by index
     Songs(Vec<usize>),
     /// songs the listener never played and hasn't liked: new finds
@@ -582,6 +584,13 @@ impl Profile {
         let list: Box<dyn Iterator<Item = usize> + '_> = match scope {
             Scope::All => Box::new(0..cat.len()),
             Scope::Genre(g) => Box::new(cat.genre_songs.get(*g as usize).into_iter().flatten().copied()),
+            Scope::Genres(gs) => {
+                // a song with two of the genres comes once
+                let mut v: Vec<usize> = gs.iter().filter_map(|g| cat.genre_songs.get(*g as usize)).flatten().copied().collect();
+                v.sort_unstable();
+                v.dedup();
+                Box::new(v.into_iter())
+            }
             Scope::Songs(v) => Box::new(v.iter().copied().filter(|i| *i < cat.len())),
             Scope::Fresh => Box::new((0..cat.len()).filter(|i| !self.play_count.contains_key(i) && !self.liked.contains(i))),
             Scope::Rediscover => Box::new((0..cat.len()).filter(move |i| {
@@ -665,10 +674,11 @@ pub struct Mix {
     pub songs: Vec<i64>,
 }
 
-/// A genre written for a title: "indie rock" → "Indie rock", "r&b" → "R&B".
+/// A genre written for a title: "indie rock" → "Indie rock", "pop" → "Pop", and the initialisms "r&b" → "R&B",
+/// "edm" → "EDM".
 pub fn genre_title(g: &str) -> String {
-    if g.len() <= 3 {
-        return g.to_uppercase();
+    if g.contains('&') || ["edm", "idm", "ebm", "dnb", "uk", "lofi"].contains(&g) {
+        return if g == "lofi" { "Lo-fi".into() } else { g.to_uppercase() };
     }
     let mut c = g.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
@@ -749,10 +759,10 @@ impl Profile {
             _ => {
                 if let Some(g) = id.strip_prefix("genre:") {
                     Scope::Genre(cat.genre_index(g)?)
-                } else if let Some(a) = id.strip_prefix("artist:") {
-                    return Some(self.artist_mix(cat, co, cat.artist_index(a)?, n, exclude, rng));
                 } else {
-                    return None;
+                    // an artist's radio, or an id that names nothing
+                    let a = cat.artist_index(id.strip_prefix("artist:")?)?;
+                    return Some(self.artist_mix(cat, co, a, n, exclude, rng));
                 }
             }
         };
@@ -794,6 +804,14 @@ mod tests {
         assert_eq!(split_genres("(17)"), Vec::<String>::new());
         assert_eq!(decade_of("1997-05-21"), Some(1990));
         assert_eq!(decade_of("unknown"), None);
+    }
+
+    #[test]
+    fn genre_titles() {
+        assert_eq!(genre_title("pop"), "Pop");
+        assert_eq!(genre_title("indie rock"), "Indie rock");
+        assert_eq!(genre_title("r&b"), "R&B");
+        assert_eq!(genre_title("edm"), "EDM");
     }
 
     #[test]
@@ -942,6 +960,10 @@ mod tests {
         let fresh = mixes.iter().find(|m| m.id == "fresh").unwrap();
         assert!(fresh.songs.iter().all(|i| !(100..120).contains(i) && *i != 300 && *i != 301));
         // a genre mix only holds that genre
+        // a shuffle of two genres holds both and nothing else
+        let both = p.shuffle(&c, &Scope::Genres(vec![c.genre_index("jazz").unwrap(), c.genre_index("hip hop").unwrap()]), 40, &HashSet::new(), &mut Rng::new(4));
+        assert_eq!(both.len(), 40);
+        assert!(both.iter().all(|i| (300..320).contains(i) || (400..420).contains(i)), "{both:?}");
         let rock = p.mix(&c, &CoListen::default(), "genre:Rock", 30, &HashSet::new(), &mut Rng::new(1)).unwrap();
         assert!(rock.iter().all(|i| (100..120).contains(i) || (200..220).contains(i)));
         assert!(p.mix(&c, &CoListen::default(), "genre:polka", 10, &HashSet::new(), &mut Rng::new(1)).is_none());

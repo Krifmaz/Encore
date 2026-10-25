@@ -38,16 +38,19 @@ pub(super) fn mark_played(t: &Value) {
 /// Random library songs not yet heard (or queued) this session; when everything has played, start a fresh round.
 /// With smart shuffle on (Settings → Playback) the server weights the draw by taste (player/taste.rs).
 async fn fresh_shuffle(limit: usize) -> Result<Vec<Value>, ApiError> {
-    let url = if smart_on() { "/taste/shuffle" } else { "/library/shuffle" };
+    // a genre shuffle playing: more of the same genres
+    let genres = genre_scope();
+    let url = if smart_on() || genres.is_some() { "/taste/shuffle" } else { "/library/shuffle" };
+    let body = |exclude: &[i64]| { let mut b = json!({ "limit": limit, "exclude": exclude }); if let Some(g) = &genres { b["genres"] = json!(g); } b };
     let queued: Vec<i64> = st(|s| s.queue.iter().filter(|t| t.g("id").is_number()).map(|t| t.i("id")).collect());
     let mut exclude: Vec<i64> = PLAYED.with(|p| p.borrow().clone());
     for id in queued { if !exclude.contains(&id) { exclude.push(id); } }
-    let mut more = api::post(url, json!({ "limit": limit, "exclude": exclude })).await?.items();
+    let mut more = api::post(url, body(&exclude)).await?.items();
     if more.is_empty() {
         PLAYED.with(|p| p.borrow_mut().clear());
         if let Some(s) = session_storage() { let _ = s.remove_item("encore.played"); }
         let cur_id: Vec<i64> = cur().filter(|t| t.g("id").is_number()).map(|t| vec![t.i("id")]).unwrap_or_default();
-        more = api::post(url, json!({ "limit": limit, "exclude": cur_id })).await?.items();
+        more = api::post(url, body(&cur_id)).await?.items();
     }
     Ok(more)
 }
@@ -68,6 +71,8 @@ pub async fn shuffle_library() -> usize {
 /// context: 'album' | 'single' | 'list' – decides what happens when the queue ends.
 fn sendable(tracks: &[Value]) -> Vec<Value> { tracks.iter().filter(|t| json::truthy(t) && t.g("id").is_number()).map(slim).collect() }
 pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
+    // another list: a genre shuffle that was playing is over (play_genres sets it again for its own list)
+    clear_genre_scope();
     // in a group listen the list becomes the group's queue (player/group.rs)
     if g_play_queue(&tracks, start, context, 0.0) { return; }
     if is_linked() && !is_local() && context != "preview" {

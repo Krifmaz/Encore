@@ -321,6 +321,7 @@ class EncorePlaybackService : MediaLibraryService() {
         car.player.aroundUser = { block -> group?.fromUser(block) ?: block() }
         // in a group the rung is fixed for a song and the original file preferred (SyncRules.kt, GroupQuality)
         adaptive.inGroup = { group?.active == true }
+        scrobbler.inGroup = { group?.active == true }
         adaptive.reloadAt = { serverMade -> group?.takeIf { it.active }?.reloadAt(serverMade) }
         resolver.grouped = { GroupListen.inGroup }
         GroupListen.restore()

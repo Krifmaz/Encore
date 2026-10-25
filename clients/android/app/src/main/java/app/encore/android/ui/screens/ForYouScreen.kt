@@ -179,6 +179,49 @@ private fun GenreChips(nav: Nav, tags: Tags) {
 }
 
 /**
+ * The mixes the server makes from the library and this account's taste (`/api/taste/mixes`: Your mix, Fresh finds,
+ * Rediscover, a mix per favourite genre, a radio per favourite artist) as a row of tiles, then a chip per genre of
+ * the library that plays that genre's mix. A tap plays the mix made fresh. On the For you page and Discover.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun LibraryMixes(nav: Nav) {
+    val features = nav.features
+    val mixes = rememberLoad("taste-mixes") { features.tasteMixes() }
+    val genres = rememberLoad("taste-genres") { try { features.tasteGenres() } catch (_: Exception) { emptyList() } }
+    Column {
+        SectionHead("Mixes from your library", subtitle = "Made on your server from what you play, like, skip and dislike")
+        when (val s = mixes.state.value) {
+            is Loadable.Loading -> Row(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Spinner() }
+            is Loadable.Failed -> NoteText("Couldn't load your mixes: ${s.message}", Modifier.padding(vertical = 12.dp))
+            is Loadable.Ready -> {
+                val d = s.value
+                if (d.mixes.isEmpty()) {
+                    NoteText("Mixes appear once the library has songs. They get better the more you play, like and dislike.", Modifier.padding(vertical = 12.dp))
+                } else {
+                    if (d.cold) NoteText("Play, like and dislike songs and these mixes learn what you like.", Modifier.padding(bottom = 10.dp))
+                    LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(d.mixes.size, key = { i -> "mix-${d.mixes[i].id}" }) { i ->
+                            val m = d.mixes[i]
+                            Tile(title = m.title, subtitle = m.subtitle, modifier = Modifier.width(150.dp), onClick = { nav.player.playMix(m.id) }) { mod ->
+                                Cover(m.covers.firstOrNull()?.let { nav.graph.api.coverUrl(it, 300) }, nav.graph.imageLoader, mod.fillMaxSize(), corner = 12.dp, label = m.title)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val list = (genres.state.value as? Loadable.Ready)?.value.orEmpty().take(16)
+        if (list.isNotEmpty()) {
+            SectionHead("Your genres", subtitle = "A mix of each genre in your library")
+            FlowRow(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (g in list) Badge(g.title, kind = if (g.affinity > 0) "accent" else "", onClick = { nav.player.playMix("genre:${g.genre}") })
+            }
+        }
+    }
+}
+
+/**
  * Discover before anything is typed: the For you picks as short horizontal rows (like Home's Recently added), each
  * with "See all" for the full For you page, then the genres. Owned songs play, the rest open a search for them.
  */
@@ -191,6 +234,7 @@ fun ForYouRows(nav: Nav) {
     val tags = (tagsLoader.state.value as? Loadable.Ready)?.value
     val seeAll = { nav.open(Screen.ForYou) }
     LazyColumn(Modifier.fillMaxSize()) {
+        item(key = "library-mixes") { LibraryMixes(nav) }
         when (val s = loader.state.value) {
             is Loadable.Loading -> item { Row(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Spinner() } }
             is Loadable.Failed -> item { NoteText("Couldn't load your picks: ${s.message}", Modifier.padding(vertical = 12.dp)) }
@@ -317,6 +361,8 @@ fun ForYouScreen(nav: Nav) {
                 addAll(d.playlists)
             }
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+                item(key = "library-mixes") { LibraryMixes(nav) }
+                item { SectionHead("From ListenBrainz and Last.fm") }
                 item {
                     NoteText(
                         "Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.",

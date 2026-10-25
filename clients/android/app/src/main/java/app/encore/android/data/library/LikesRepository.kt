@@ -42,6 +42,11 @@ class LikesRepository(private val api: EncoreApi, private val scope: CoroutineSc
 
     fun isLiked(id: Long): Boolean = id in _liked.value
 
+    /** The server took the song out of Liked Songs on its own (a dislike, DislikesRepository): the hearts follow. */
+    fun forget(id: Long) {
+        _liked.value = _liked.value - id
+    }
+
     fun toggle(id: Long) {
         val was = id in _liked.value
         _liked.value = if (was) _liked.value - id else _liked.value + id

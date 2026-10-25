@@ -323,6 +323,58 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return post("/api/library/shuffle", body).objects().mapNotNull { Track.from(it) }
     }
 
+    // ---- recommendations made on the server (/api/taste) ----------------------------------------------------
+
+    /**
+     * POST /api/taste/shuffle: a smart shuffle of the library – random songs weighted by what this account plays,
+     * likes, skips and dislikes (favourites more often, just-played songs wait, disliked songs never), without
+     * `exclude`. Settings → Playback → Smart shuffle picks it over [shuffle].
+     */
+    fun smartShuffle(limit: Int, exclude: List<Long>): List<Track> {
+        val body = json.encodeToJsonElement(ShuffleBody.serializer(), ShuffleBody(limit, exclude.takeLast(5000)))
+        return post("/api/taste/shuffle", body).objects().mapNotNull { Track.from(it) }
+    }
+
+    /**
+     * POST /api/taste/shuffle with `ids`: these songs in a taste-weighted shuffled order (a playlist's or an album's
+     * Shuffle with smart shuffle on); disliked ones are left out.
+     */
+    fun smartOrder(ids: List<Long>): List<Long> {
+        val body = JsonObject(mapOf("ids" to JsonArray(ids.take(5000).map { JsonPrimitive(it) })))
+        val arr = post("/api/taste/shuffle", body) as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toLong() }
+    }
+
+    /** GET /api/taste/like-this/{id}: songs of the library like this one ("Start radio"). */
+    fun likeThis(trackId: Long, limit: Int = 50): List<Track> =
+        get("/api/taste/like-this/$trackId?limit=$limit").objects().mapNotNull { Track.from(it) }
+
+    /** POST /api/taste/mix: one of the For you mixes made fresh (`you`, `fresh`, `rediscover`, `genre:…`, `artist:…`). */
+    fun mix(id: String, limit: Int = 100): List<Track> {
+        val body = JsonObject(mapOf("id" to JsonPrimitive(id), "limit" to JsonPrimitive(limit)))
+        return post("/api/taste/mix", body).objects().mapNotNull { Track.from(it) }
+    }
+
+    /** POST /api/taste/skip: Next before the song's play counted (a mild "not now" for the recommendations). */
+    fun skip(trackId: Long, seconds: Double) {
+        post("/api/taste/skip", json.encodeToJsonElement(PlayBody.serializer(), PlayBody(trackId, seconds)))
+    }
+
+    /** GET /api/taste/dislikes: the ids of the disliked songs. */
+    fun dislikes(): Set<Long> {
+        val o = get("/api/taste/dislikes") as? JsonObject ?: return emptySet()
+        return o.arr("tracks").objectsOf().map { it.long("id") }.filter { it > 0 }.toSet()
+    }
+
+    /** PUT /api/taste/dislikes/tracks/{id}: never queue the song in a shuffle or a mix again (it leaves Liked Songs too). */
+    fun dislike(trackId: Long) { call("PUT", url("/api/taste/dislikes/tracks/$trackId"), JsonObject(emptyMap())) }
+
+    /** DELETE /api/taste/dislikes/tracks/{id}: take a dislike back. */
+    fun undislike(trackId: Long) { call("DELETE", url("/api/taste/dislikes/tracks/$trackId"), null) }
+
+    /** PUT /api/taste/dislikes/artists/{name}: "Don't play this artist" in shuffles and mixes. */
+    fun dislikeArtist(name: String) { call("PUT", url("/api/taste/dislikes/artists/" + enc(name)), JsonObject(emptyMap())) }
+
     // ---- the Surround library (0.35, docs/contracts/surround.md) -----------------------------------------
 
     /**

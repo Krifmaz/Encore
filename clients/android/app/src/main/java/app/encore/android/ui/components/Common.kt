@@ -686,6 +686,26 @@ fun LikeButton(liked: Boolean, onClick: () -> Unit, tint: Color = Color.Unspecif
     }
 }
 
+/**
+ * The dislike button (thumbs down): filled while the song is disliked. A dislike keeps the song out of every shuffle
+ * and mix (data/library/DislikesRepository).
+ */
+@Composable
+fun DislikeButton(disliked: Boolean, onClick: () -> Unit, tint: Color = Color.Unspecified) {
+    val haptics = LocalHapticFeedback.current
+    val p = MaterialTheme.palette
+    IconButton(onClick = {
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        onClick()
+    }) {
+        Icon(
+            painterResource(if (disliked) R.drawable.ic_thumb_down_filled else R.drawable.ic_thumb_down),
+            contentDescription = if (disliked) "Disliked – tap to take it back" else "Dislike",
+            tint = if (tint != Color.Unspecified) tint else if (disliked) p.text else p.muted,
+        )
+    }
+}
+
 /** A thin line between list rows (the web's `.list-item` border). */
 @Composable
 fun RowDivider(modifier: Modifier = Modifier, startIndent: Dp = Gutter) {

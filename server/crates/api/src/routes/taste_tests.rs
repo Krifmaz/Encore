@@ -101,6 +101,13 @@ async fn dislikes_never_come_back() {
     let mut ids: Vec<i64> = v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect();
     ids.sort();
     assert_eq!(ids, vec![12, 13]);
+    // a genre shuffle of several genres
+    let (s, v) = e.call("POST", "/api/taste/shuffle", Some(json!({ "genres": ["Jazz", "polka"], "limit": 100 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let ids = Env::ids(&v);
+    assert_eq!(ids.len(), 18);
+    assert!(ids.iter().all(|i| *i > 40));
+    assert_eq!(e.call("POST", "/api/taste/shuffle", Some(json!({ "genres": ["polka"] }))).await.0, StatusCode::NOT_FOUND);
     // taken back: they come up again
     e.call("DELETE", "/api/taste/dislikes/artists/Artist%202", None).await;
     e.call("DELETE", "/api/taste/dislikes/tracks/11", None).await;
