@@ -365,6 +365,9 @@ fn paint_playback(st: &Rc<Look>) {
       <div class="stack" style="gap:6px"><h3>When the queue ends</h3>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-autoplay" {autoplay}> Keep going with a shuffle of the whole library</label>
         <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-resume" {resume}> Resume where I left off when the app opens</label></div>
+      <div class="stack" style="gap:6px"><h3>Shuffle</h3>
+        <label class="row" style="gap:8px;align-items:center"><input type="checkbox" id="pb-smart" {smart}> Smart shuffle</label>
+        <span class="small muted">Shuffles and the music after the queue lean to what you play and like: favourites come up more often, songs you just heard wait, songs you skip a lot come up less, and songs or artists you disliked never play. Off, a shuffle is plain random.</span></div>
       <div class="stack" style="gap:6px"><h3>Sound (on this device)</h3>
         {sound}</div>
       <div class="stack" style="gap:6px"><h3>Song transitions</h3>
@@ -381,6 +384,7 @@ fn paint_playback(st: &Rc<Look>) {
         preload = if p.truthy("preload") { "checked" } else { "" },
         autoplay = if p.truthy("autoplay") { "checked" } else { "" },
         resume = if p.truthy("resume") { "checked" } else { "" },
+        smart = if p.truthy("smart_shuffle") { "checked" } else { "" },
         sound = sound_html(&p),
         transitions = transitions_html(&p, eng.is_some()),
         dsp_block = dsp_html(&p, &st.dsp),
@@ -399,6 +403,10 @@ fn paint_playback(st: &Rc<Look>) {
     if let Some(c) = dom::qs_in(&st.el, "#pb-autoplay") {
         let (st2, c2) = (st.clone(), c.clone());
         dom::on(&c, "change", move |_| set_playback(&st2, json!({ "autoplay": dom::checked(&c2) })));
+    }
+    if let Some(c) = dom::qs_in(&st.el, "#pb-smart") {
+        let (st2, c2) = (st.clone(), c.clone());
+        dom::on(&c, "change", move |_| set_playback(&st2, json!({ "smart_shuffle": dom::checked(&c2) })));
     }
     if let Some(c) = dom::qs_in(&st.el, "#pb-resume") {
         let (st2, c2) = (st.clone(), c.clone());

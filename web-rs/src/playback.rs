@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 /// crossfade: the transition's length in seconds (1–12; 0 only with transition 'off') · crossfade_album_gapless: no
 ///            transition within an album (every mode)
 pub fn defaults() -> Value {
-    json!({ "quality": "auto", "preload": true, "autoplay": true, "resume": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device",
+    json!({ "quality": "auto", "preload": true, "autoplay": true, "smart_shuffle": true, "resume": true, "dsp": false, "dsp_filter": "", "dsp_dither": "tpdf", "dsp_rate": "device",
         "fx_on": false, "eq_preset": "flat", "eq_bands": [], "eq_preamp": 0, "crossfeed": "off", "balance": 0, "mono": false,
         "transition": "off", "crossfade": 0, "crossfade_album_gapless": true })
 }
@@ -194,6 +194,8 @@ pub fn clean(p: &Value) -> Value {
     if !QUALITIES.contains(&quality.as_str()) { c["quality"] = json!("auto"); }
     c["preload"] = json!(c.g("preload") != &json!(false));
     c["autoplay"] = json!(c.g("autoplay") != &json!(false));
+    // smart shuffle (player/taste.rs): on unless switched off
+    c["smart_shuffle"] = json!(c.g("smart_shuffle") != &json!(false));
     c["resume"] = json!(c.g("resume") != &json!(false));
     c["dsp"] = json!(c.g("dsp") == &json!(true));
     if !c.g("dsp_filter").is_string() { c["dsp_filter"] = json!(""); }
