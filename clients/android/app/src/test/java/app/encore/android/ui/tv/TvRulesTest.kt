@@ -102,4 +102,26 @@ class TvRulesTest {
         assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_BACK))
         assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_DPAD_LEFT))
     }
+
+    /** The idle settings read back as written; unknown or missing ones fall to Never and to a fully black screen. */
+    @Test
+    fun idleSettingsRoundTrip() {
+        for (v in TvIdleOff.entries) assertEquals(v, TvIdleOff.of(v.key))
+        for (v in TvIdleStyle.entries) assertEquals(v, TvIdleStyle.of(v.key))
+        assertEquals(TvIdleOff.NEVER, TvIdleOff.of(null))
+        assertEquals(TvIdleStyle.OFF, TvIdleStyle.of("nonsense"))
+        assertEquals(1f, TvIdleStyle.OFF.alpha)
+    }
+
+    /** The idle wait counts down from the last press, and only runs while the music plays and the screen is lit. */
+    @Test
+    fun idleDelayOnlyWhilePlayingAndLit() {
+        assertNull(ScreenOffRules.idleDelay(TvIdleOff.NEVER, screenOff = false, playing = true, sinceInputMs = 0))
+        assertNull(ScreenOffRules.idleDelay(TvIdleOff.MIN_2, screenOff = true, playing = true, sinceInputMs = 0))
+        assertNull(ScreenOffRules.idleDelay(TvIdleOff.MIN_2, screenOff = false, playing = false, sinceInputMs = 0))
+        assertEquals(120_000L, ScreenOffRules.idleDelay(TvIdleOff.MIN_2, screenOff = false, playing = true, sinceInputMs = 0))
+        assertEquals(20_000L, ScreenOffRules.idleDelay(TvIdleOff.MIN_1, screenOff = false, playing = true, sinceInputMs = 40_000))
+        // long past the wait: at once, never a negative delay
+        assertEquals(0L, ScreenOffRules.idleDelay(TvIdleOff.MIN_1, screenOff = false, playing = true, sinceInputMs = 90_000))
+    }
 }

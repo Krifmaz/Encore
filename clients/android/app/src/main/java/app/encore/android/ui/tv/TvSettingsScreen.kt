@@ -21,7 +21,8 @@ import app.encore.android.features.settings.SettingsPage
 
 /**
  * The TV page: Layout (the TV layout or the phone one), Player side (which side the TV player's controls take; the
- * lyrics / Up next panel takes the other) and Size (how far the screen is zoomed out). Each choice applies at once.
+ * lyrics / Up next panel takes the other), Size (how far the screen is zoomed out) and When idle (how long the player
+ * waits untouched before turning the screen off or dimming it by itself; never by default). Each choice applies at once.
  *
  * @param onBack back to the Settings list.
  */
@@ -30,6 +31,8 @@ fun TvSettingsScreen(onBack: () -> Unit) {
     val mode by TvPrefs.mode.collectAsState()
     val side by TvPrefs.side.collectAsState()
     val zoom by TvPrefs.zoom.collectAsState()
+    val idleOff by TvPrefs.idleOff.collectAsState()
+    val idleStyle by TvPrefs.idleStyle.collectAsState()
     SettingsPage("TV", onBack, subtitle = "How Encore looks on this TV. Kept on this TV only.") {
         SetCard {
             Label("Layout")
@@ -49,6 +52,16 @@ fun TvSettingsScreen(onBack: () -> Unit) {
             Label("Size")
             SegRow(TvZoom.entries.map { it.key to it.label }, zoom.key, enabled = tvOn) { TvPrefs.setZoom(TvZoom.of(it)) }
             Muted("Smaller fits more on the screen at once; Larger is easier to read from far away.")
+        }
+        Spacer(Modifier.height(12.dp))
+        SetCard {
+            Label("When idle")
+            SegRow(TvIdleStyle.entries.map { it.key to it.label }, idleStyle.key, enabled = tvOn && idleOff != TvIdleOff.NEVER) {
+                TvPrefs.setIdleStyle(TvIdleStyle.of(it))
+            }
+            Spacer(Modifier.height(8.dp))
+            SegRow(TvIdleOff.entries.map { it.key to it.label }, idleOff.key, enabled = tvOn) { TvPrefs.setIdleOff(TvIdleOff.of(it)) }
+            Muted("While the music plays and the remote goes untouched this long, the screen turns off (black) or dims; the music keeps playing. Any button brings it back.")
         }
     }
 }
