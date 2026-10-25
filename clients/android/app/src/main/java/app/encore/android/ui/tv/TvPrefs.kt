@@ -20,7 +20,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * The TV settings as flows the UI follows: [mode] (TV layout or phone layout), [side] (which side the TV player's
- * controls take), [panel] (what the player's other half shows, remembered as it is switched) and [zoom].
+ * controls take), [panel] (what the player's other half shows, remembered as it is switched), [zoom], [idleOff] and
+ * [idleStyle].
  *
  * Read once from SharedPreferences on first use ([init]); each setter updates its flow at once and writes in the
  * background (`apply`).
@@ -41,6 +42,12 @@ object TvPrefs {
     /** Key of [zoom]. */
     private const val KEY_ZOOM = "encore.tv.zoom"
 
+    /** Key of [idleOff]. */
+    private const val KEY_IDLE_OFF = "encore.tv.idleOff"
+
+    /** Key of [idleStyle]. */
+    private const val KEY_IDLE_STYLE = "encore.tv.idleStyle"
+
     /** Backing flow of [mode]. */
     private val modeFlow = MutableStateFlow(TvLayoutMode.AUTO)
 
@@ -52,6 +59,12 @@ object TvPrefs {
 
     /** Backing flow of [zoom]. */
     private val zoomFlow = MutableStateFlow(TvZoom.MEDIUM)
+
+    /** Backing flow of [idleOff]. */
+    private val idleOffFlow = MutableStateFlow(TvIdleOff.NEVER)
+
+    /** Backing flow of [idleStyle]. */
+    private val idleStyleFlow = MutableStateFlow(TvIdleStyle.OFF)
 
     /** Whether the stored values were read into the flows yet. */
     @Volatile private var loaded = false
@@ -71,6 +84,12 @@ object TvPrefs {
     /** How far the TV layout zooms out (Settings → TV → Size). */
     val zoom: StateFlow<TvZoom> = zoomFlow.asStateFlow()
 
+    /** How long the player waits untouched before Screen off turns on by itself (Settings → TV → When idle). */
+    val idleOff: StateFlow<TvIdleOff> = idleOffFlow.asStateFlow()
+
+    /** Whether the idle screen goes fully black or only dims (Settings → TV → When idle). */
+    val idleStyle: StateFlow<TvIdleStyle> = idleStyleFlow.asStateFlow()
+
     /**
      * Reads the stored values into the flows, once; later calls do nothing. Every composable entry point calls it, so
      * nothing else has to remember to.
@@ -86,6 +105,8 @@ object TvPrefs {
             sideFlow.value = PlayerSide.of(sp.getString(KEY_SIDE, null))
             panelFlow.value = SidePanel.of(sp.getString(KEY_PANEL, null))
             zoomFlow.value = TvZoom.of(sp.getString(KEY_ZOOM, null))
+            idleOffFlow.value = TvIdleOff.of(sp.getString(KEY_IDLE_OFF, null))
+            idleStyleFlow.value = TvIdleStyle.of(sp.getString(KEY_IDLE_STYLE, null))
         } catch (_: Exception) {
             // unreadable preferences: the defaults stand
         }
@@ -107,6 +128,12 @@ object TvPrefs {
 
     /** Sets [zoom] and stores it. */
     fun setZoom(v: TvZoom) { zoomFlow.value = v; write(KEY_ZOOM, v.key) }
+
+    /** Sets [idleOff] and stores it. */
+    fun setIdleOff(v: TvIdleOff) { idleOffFlow.value = v; write(KEY_IDLE_OFF, v.key) }
+
+    /** Sets [idleStyle] and stores it. */
+    fun setIdleStyle(v: TvIdleStyle) { idleStyleFlow.value = v; write(KEY_IDLE_STYLE, v.key) }
 
     /** Writes one value in the background; a failure only loses the value for the next start. */
     private fun write(key: String, value: String) {

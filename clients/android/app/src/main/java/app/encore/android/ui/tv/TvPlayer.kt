@@ -5,6 +5,7 @@
  */
 package app.encore.android.ui.tv
 
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -32,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -49,6 +51,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -84,6 +87,7 @@ import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /** The most the TV player's cover grows to: past this the song's lines and buttons would be pushed off the screen. */
@@ -102,7 +106,8 @@ private val UNDER_ART = 300.dp
  *
  * The remote's focus starts on play / pause. Left / Right on the seek bar seek 10 s ([TvSeek]); Back closes the player
  * (the root's Back handling). Screen off (top right) blacks the screen out while the music plays on
- * ([ScreenOffLayer]).
+ * ([ScreenOffLayer]), and turns on by itself after the remote sits untouched for Settings → TV → When idle
+ * ([TvIdleOff], never by default), fully black or dimmed ([TvIdleStyle]).
  *
  * @param nav moves around and plays.
  * @param actions the player's ⋯ menu actions (Go to artist, View album, Share, Signal path…).
@@ -129,11 +134,28 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
         if (screenOff) return@LaunchedEffect
         try { playFocus.requestFocus() } catch (_: IllegalStateException) { /* not laid out yet: the focus stays where it was */ }
     }
+    // When idle: the time of the last remote press, and the wait before the screen goes black by itself
+    val idleOff by TvPrefs.idleOff.collectAsState()
+    val idleStyle by TvPrefs.idleStyle.collectAsState()
+    val playing by nav.player.isPlaying.collectAsState()
+    // whether the screen went off by itself (dims if so set) rather than from its button (always black)
+    var byIdle by rememberSaveable { mutableStateOf(false) }
+    var lastInput by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
+    // restarted by every press, by the screen coming back on, by play / pause and by the setting changing
+    LaunchedEffect(idleOff, screenOff, playing, lastInput) {
+        val wait = ScreenOffRules.idleDelay(idleOff, screenOff, playing, SystemClock.uptimeMillis() - lastInput)
+            ?: return@LaunchedEffect
+        delay(wait)
+        byIdle = true
+        screenOff = true
+    }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(p.bg)
+            // every remote press restarts the idle wait; the press itself goes on to wherever it was headed
+            .onPreviewKeyEvent { lastInput = SystemClock.uptimeMillis(); false }
             // swallow presses so they don't reach the screen underneath
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}),
     ) {
@@ -162,7 +184,7 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                 )
                 GroupPill(Modifier.padding(end = 4.dp))
                 // up here, away from the song's controls, so it isn't pressed by accident
-                IconButton(onClick = { screenOff = true }) {
+                IconButton(onClick = { byIdle = false; screenOff = true }) {
                     Icon(painterResource(R.drawable.ic_screen_off), contentDescription = "Screen off", tint = p.text)
                 }
                 DevicesButton(nav, tint = p.text)
@@ -179,7 +201,12 @@ fun TvPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
             }
         }
         // over everything, the player included, while the screen is off
-        ScreenOffLayer(screenOff, nav, onWake = { screenOff = false })
+        ScreenOffLayer(
+            screenOff,
+            nav,
+            onWake = { screenOff = false; lastInput = SystemClock.uptimeMillis() },
+            alpha = if (byIdle) idleStyle.alpha else 1f,
+        )
     }
 }
 

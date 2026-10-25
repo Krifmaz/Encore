@@ -3,6 +3,10 @@
  * this blacks the whole screen out while the music plays on. On an OLED TV black pixels are off; on others the
  * picture is at least dark. Any button on the remote brings the player back, except the playback buttons, which
  * keep controlling the music without lighting the screen up.
+ *
+ * Screen off is turned on by its button in the player's top bar, or by itself after the remote has sat untouched for
+ * the time Settings → TV → When idle gives ([TvIdleOff], never by default), fully black or only dimmed
+ * ([TvIdleStyle], black by default).
  */
 package app.encore.android.ui.tv
 
@@ -37,6 +41,60 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.ui.Nav
 import kotlinx.coroutines.delay
+
+/**
+ * How long the TV player waits, with no remote button pressed while the music plays, before the screen goes black (or
+ * dim, [TvIdleStyle]) by itself (Settings → TV → When idle). Never unless that setting is changed: by default only the player's Screen off button
+ * blacks the screen out.
+ *
+ * @property key the stored form.
+ * @property label what Settings → TV shows for it.
+ * @property ms the wait in milliseconds; null for [NEVER] (only the player's Screen off button does it).
+ */
+enum class TvIdleOff(val key: String, val label: String, val ms: Long?) {
+    /** Never by itself: the default. */
+    NEVER("never", "Never", null),
+
+    /** After a minute. */
+    MIN_1("1m", "1 min", 60_000L),
+
+    /** After two minutes. */
+    MIN_2("2m", "2 min", 120_000L),
+
+    /** After five minutes. */
+    MIN_5("5m", "5 min", 300_000L),
+
+    /** After ten minutes. */
+    MIN_10("10m", "10 min", 600_000L),
+    ;
+
+    companion object {
+        /** The wait stored as [key]; anything unknown or missing is [NEVER]. */
+        fun of(key: String?): TvIdleOff = entries.firstOrNull { it.key == key } ?: NEVER
+    }
+}
+
+/**
+ * What the screen does when the TV player has sat idle ([TvIdleOff]): go fully black (the default) or only dim, so the
+ * cover and the song still show faintly. The Screen off button in the player always goes fully black.
+ *
+ * @property key the stored form.
+ * @property label what Settings → TV shows for it.
+ * @property alpha how dark the layer over the player is: 1 is all black.
+ */
+enum class TvIdleStyle(val key: String, val label: String, val alpha: Float) {
+    /** All black: on an OLED TV the pixels are off. The default. */
+    OFF("off", "Screen off", 1f),
+
+    /** Darkened, the player still faintly showing. */
+    DIM("dim", "Dim", 0.80f),
+    ;
+
+    companion object {
+        /** The style stored as [key]; anything unknown or missing is [OFF]. */
+        fun of(key: String?): TvIdleStyle = entries.firstOrNull { it.key == key } ?: OFF
+    }
+}
 
 /** What one remote button does while the screen is off ([ScreenOffRules.actionOf]). */
 enum class ScreenOffAction {
@@ -83,20 +141,36 @@ object ScreenOffRules {
         -> ScreenOffAction.SYSTEM
         else -> ScreenOffAction.WAKE
     }
+
+    /**
+     * How long from now until Screen off should turn on by itself, or null when it shouldn't (the setting is off, the
+     * screen is already off, or nothing is playing: a paused player is left lit, as it is likely being looked at).
+     *
+     * @param idle the setting (Settings → TV → When idle).
+     * @param screenOff whether the screen is already off.
+     * @param playing whether the music is playing.
+     * @param sinceInputMs how long ago the remote was last pressed, in ms.
+     */
+    fun idleDelay(idle: TvIdleOff, screenOff: Boolean, playing: Boolean, sinceInputMs: Long): Long? {
+        val wait = idle.ms ?: return null
+        if (screenOff || !playing) return null
+        return (wait - sinceInputMs).coerceAtLeast(0L)
+    }
 }
 
 /**
- * The black screen of Screen off, over everything while [on]. It takes the remote's focus and keeps every button
+ * The black (or dimmed, [alpha] under 1) screen of Screen off, over everything while [on]. It takes the remote's focus and keeps every button
  * from reaching the player underneath: playback buttons act on the music ([ScreenOffRules.actionOf]), volume and power
  * go to the TV, and any other button calls [onWake] when it is let go (so the same press doesn't also reach the
  * button that gets the focus back). For the first few seconds a dim line says how to get back; then it is all black.
  *
  * @param on whether the screen is off.
+ * @param alpha how dark the layer is: 1 (the default) is all black, less lets the player show faintly ([TvIdleStyle]).
  * @param nav plays, pauses and skips for the playback buttons.
  * @param onWake turns the screen back on.
  */
 @Composable
-fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit) {
+fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit, alpha: Float = 1f) {
     if (!on) return
     val focus = remember { FocusRequester() }
     var hint by remember { mutableStateOf(true) }
@@ -108,7 +182,7 @@ fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color.Black.copy(alpha = alpha))
             .focusRequester(focus)
             .onPreviewKeyEvent { e ->
                 when (ScreenOffRules.actionOf(e.key.nativeKeyCode)) {
@@ -137,7 +211,7 @@ fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit) {
     ) {
         AnimatedVisibility(hint, enter = fadeIn(tween(0)), exit = fadeOut(tween(1200))) {
             Text(
-                "Screen off · press any button to turn it back on",
+                if (alpha < 1f) "Dimmed · press any button to light it back up" else "Screen off · press any button to turn it back on",
                 color = Color(0xFF555555),
                 fontSize = 14.sp,
                 modifier = Modifier.padding(bottom = 32.dp),
