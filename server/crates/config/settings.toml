@@ -1083,6 +1083,22 @@ label = "Fetch the Dolby Atmos version after each request"
 type = "bool"
 help = "When a song or album request is done and Apple Music has it in Dolby Atmos, its Atmos version is fetched into Surround too. Needs the gamdl plugin with a wrapper-v2 server."
 
+[keys.surround_sweep_batch]
+env = "ENCORE_SURROUND_SWEEP_BATCH"
+default = 25
+group = "surround"
+label = "Albums per Dolby Atmos task run"
+type = "number"
+help = "How many stereo albums each run of the Find Dolby Atmos versions task (Settings → Tasks) asks Apple Music about. Find Dolby Atmos versions on the Surround tab goes through the whole library at once."
+
+[keys.surround_sweep_recheck_days]
+env = "ENCORE_SURROUND_SWEEP_RECHECK_DAYS"
+default = 30
+group = "surround"
+label = "Ask again about albums without Atmos after (days)"
+type = "number"
+help = "An album Apple Music had no Dolby Atmos version of is asked about again by the sweep after this many days (Atmos versions of older albums keep coming out)."
+
 [keys.surround_hide_from_stereo]
 env = "ENCORE_SURROUND_HIDE_FROM_STEREO"
 default = true
@@ -1650,6 +1666,14 @@ help = "Sort albums by type task on/off (the Type filter of Library → Albums, 
 [keys.task_types_minutes]
 default = 360
 help = "How often the Sort albums by type task runs, in minutes (it reads the type tags of songs scanned before 0.36 once, and asks MusicBrainz about at most 300 albums a run)."
+
+[keys.task_atmos_enabled]
+default = false
+help = "Find Dolby Atmos versions task on/off: each run asks Apple Music about a batch of stereo albums (surround_sweep_batch) and fetches the Atmos version of each one it has into Surround."
+
+[keys.task_atmos_minutes]
+default = 720
+help = "How often the Find Dolby Atmos versions task runs, in minutes."
 
 [keys.task_cleanup_enabled]
 default = true

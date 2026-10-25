@@ -8,7 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 15] = [
+pub const TASKS: [(&str, &str, &str); 16] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
@@ -20,6 +20,7 @@ pub const TASKS: [(&str, &str, &str); 15] = [
     ("quality", "Quality scan", "Check library songs for fake lossless (a lossy file saved as FLAC), upsampled hi-res, very quiet or clipped audio, a batch per run at low priority. Suspect songs show under Settings → Blocked with a Replace button; nothing is removed."),
     ("loudness", "Measure loudness", "Measure how loud each song is, for volume normalization in the apps. Songs with ReplayGain tags use them; the others are measured at low priority while nobody is using the app, and each run goes on where the last one stopped."),
     ("types", "Sort albums by type", "Work out which albums are live, compilations, remixes, soundtracks, singles or one-offs: reads the type the files' tags give and, for albums without one, asks MusicBrainz at low priority. Imports record the type themselves."),
+    ("atmos", "Find Dolby Atmos versions", "Ask Apple Music (gamdl with a wrapper-v2 server) about a batch of stereo albums each run and fetch the Dolby Atmos version of each one it has into the Surround library. Albums with a surround copy are skipped; one without Atmos is asked again after a while. The Surround tab's Find Dolby Atmos versions goes through the whole library at once."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
     ("tools", "Update plugins", "Check the installed plugins (yt-dlp, streamrip, Soulseek, Cadenza, the Translator and the ones you added) for new versions and install them for the plugins switched to update automatically under Settings → Plugins – no new Encore image needed. A plugin that is switched on but whose program is missing is installed again."),
     ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
@@ -67,6 +68,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "quality" => ("task_quality_enabled", "task_quality_minutes", 1),
         "loudness" => ("task_loudness_enabled", "task_loudness_minutes", 1),
         "types" => ("task_types_enabled", "task_types_minutes", 1),
+        "atmos" => ("task_atmos_enabled", "task_atmos_minutes", 1),
         "update" => ("check_updates", "task_update_minutes", 1),
         _ => ("task_cleanup_enabled", "task_cleanup_minutes", 1),
     }

@@ -788,9 +788,12 @@ impl Lib {
         if append {
             if let Some(g) = dom::qs_in(&self.body, ".grid") { let _ = g.insert_adjacent_html("beforeend", &html); }
         } else {
-            dom::set_html(&self.body, &if !items.is_empty() { format!(r##"<div class="grid">{html}</div>"##) }
+            // admins get the library sweep's bar above the albums
+            let bar = if self.admin { SWEEP_BAR } else { "" };
+            dom::set_html(&self.body, &format!("{bar}{}", if !items.is_empty() { format!(r##"<div class="grid">{html}</div>"##) }
                 else if !q.is_empty() { empty_state(&icon("disc"), &format!("No surround albums match “{q}”"), "") }
-                else { empty_state(&icon("disc"), "No surround albums yet", "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Get Dolby Atmos version on an album.") });
+                else { empty_state(&icon("disc"), "No surround albums yet", "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Find Dolby Atmos versions (or Get Dolby Atmos version on an album).") }));
+            if self.admin { sweep_bar(&self.body); }
         }
         self.st.borrow_mut().offset = offset + items.len();
         dom::toggle_class(&self.more, "hidden", items.len() < PAGE);
@@ -1508,6 +1511,62 @@ fn album_versions(a: &Value, surround: bool) -> String {
     let req = sur.o("request");
     if req.truthy("id") { out.push_str(&format!(r##"<a class="badge" href="#/requests" title="Request #{}">Dolby Atmos version: {}</a>"##, req.s("id"), esc(&req.s("status")))); }
     out
+}
+
+/// The Surround tab's bar for the library sweep (admins): what it is doing or last did, and its button.
+const SWEEP_BAR: &str = r##"<div class="row between mb" id="atmos-sweep" style="gap:12px;flex-wrap:wrap"><span class="muted" id="atmos-sweep-text">Dolby Atmos versions of your albums…</span><button class="btn sm" id="atmos-sweep-btn" disabled>Find Dolby Atmos versions</button></div>"##;
+
+/// The sweep bar's line for the sweep's state (`GET /api/surround/sweep`) → (text, button label, button on).
+fn sweep_line(v: &Value) -> (String, &'static str, bool) {
+    if !v.truthy("can_fetch") {
+        return ("Finding Dolby Atmos versions needs the gamdl plugin with a wrapper-v2 server (Settings → Plugins → gamdl).".into(), "Find Dolby Atmos versions", false);
+    }
+    if v.truthy("running") {
+        let at = if v.truthy("current") { format!(" · now: {}", v.s("current")) } else { String::new() };
+        return (format!("Asking Apple Music: {} of {} albums checked, {} in Dolby Atmos, {} requested{at}", v.s("checked"), v.s("total"), v.s("found"), v.s("requested")), "Stop", true);
+    }
+    let last = if v.truthy("result") { format!("Last sweep: {}.", v.s("result")) } else { "Look for the official Dolby Atmos version of every album in your library on Apple Music.".into() };
+    (last, "Find Dolby Atmos versions", true)
+}
+
+/// Wires the sweep bar: shows the sweep's state, starts or stops it, and follows a running one every 3 s
+/// while the bar is on the page.
+fn sweep_bar(body: &Element) {
+    let (Some(text), Some(btn)) = (dom::qs_in(body, "#atmos-sweep-text"), dom::qs_in(body, "#atmos-sweep-btn")) else { return };
+    let running = Rc::new(std::cell::Cell::new(false));
+    // one look at the sweep: the bar's text and button; true while it runs
+    let show = { let (text, btn, running) = (text.clone(), btn.clone(), running.clone()); Rc::new(move |v: &Value| {
+        let (line, label, on) = sweep_line(v);
+        dom::set_text(&text, &line);
+        dom::set_text(&btn, label);
+        if on { let _ = btn.remove_attribute("disabled"); } else { let _ = btn.set_attribute("disabled", ""); }
+        running.set(v.truthy("running"));
+    }) };
+    // follow it until it is over or the bar is gone
+    let follow = { let (show, text) = (show.clone(), text.clone()); Rc::new(move || {
+        let (show, text) = (show.clone(), text.clone());
+        dom::spawn(async move {
+            loop {
+                let Ok(v) = api::get("/surround/sweep").await else { return };
+                if !text.is_connected() { return; }
+                show(&v);
+                if !v.truthy("running") { return; }
+                gloo_timers::future::TimeoutFuture::new(3000).await;
+            }
+        });
+    }) };
+    follow();
+    let f = follow.clone();
+    dom::on(&btn, "click", move |_| {
+        let (f, running) = (f.clone(), running.get());
+        dom::spawn(async move {
+            let res = if running { api::del("/surround/sweep").await } else { api::post_empty("/surround/sweep").await };
+            match res {
+                Ok(_) => { toast(if running { "Stopping after this album" } else { "Looking for Dolby Atmos versions of your albums…" }, "ok"); f(); }
+                Err(e) => toast(&e.message, "err"),
+            }
+        });
+    });
 }
 
 /// "Get Dolby Atmos version" on a stereo album, for admins when gamdl can fetch Atmos and none is here or coming.

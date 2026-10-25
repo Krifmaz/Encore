@@ -7,6 +7,8 @@
 //! - `POST /api/library/albums/{id}/surround` → `{request_id}` (admins): 404 when Apple Music has no Atmos version,
 //!   409 when one is already being fetched or gamdl can't fetch Atmos
 //! - `GET|POST /api/library/tracks/{id}/surround`: the same for a song
+//! - `GET /api/surround/sweep` → the library sweep's progress (admins); `POST` starts one over the whole library
+//!   (202, 409 when one runs or gamdl can't fetch Atmos); `DELETE` stops it after the album it is on
 use crate::auth::{Admin, User};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -21,6 +23,7 @@ use serde_json::{json, Value};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/surround/albums", get(albums))
+        .route("/api/surround/sweep", get(sweep_state).post(sweep_start).delete(sweep_stop))
         .route("/api/library/albums/{id}/surround", get(album_state).post(album_fetch))
         .route("/api/library/tracks/{id}/surround", get(track_state).post(track_fetch))
 }
@@ -81,4 +84,41 @@ async fn track_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path
     }
     let rid = encore_requests::surround::request_track(&st, encore_db::RowExt::i(&u, "id"), id).await?;
     Ok(Json(json!({ "request_id": rid })))
+}
+
+/// GET /api/surround/sweep: what the library sweep is doing or last did (admins): the job's
+/// `{running, total, checked, found, requested, current, result, …}` plus `can_fetch`.
+async fn sweep_state(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let mut v = st.jobs.get(encore_requests::surround::SWEEP_JOB);
+    v["can_fetch"] = json!(encore_requests::sources::gamdl::atmos_ready(&st));
+    Ok(Json(v))
+}
+
+/// POST /api/surround/sweep: look for the Dolby Atmos version of every stereo album and fetch the ones Apple
+/// Music has (admins), in the background. 202 once started.
+async fn sweep_start(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+    if !encore_requests::sources::gamdl::atmos_ready(&st) {
+        return Err(err(409, "Dolby Atmos versions need the gamdl plugin with a wrapper-v2 server (Settings → Plugins → gamdl)"));
+    }
+    if st.jobs.running(encore_requests::surround::SWEEP_JOB) {
+        return Err(err(409, "A Dolby Atmos sweep is running already"));
+    }
+    let uid = encore_db::RowExt::i(&u, "id");
+    let bg = st.clone();
+    tokio::spawn(async move {
+        if let Err(e) = encore_requests::surround::sweep(&bg, Some(uid), usize::MAX).await {
+            tracing::info!("surround sweep: {e}");
+        }
+    });
+    Ok((axum::http::StatusCode::ACCEPTED, Json(json!({ "started": true }))))
+}
+
+/// DELETE /api/surround/sweep: stop the running sweep after the album it is on (admins).
+async fn sweep_stop(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let job = encore_requests::surround::SWEEP_JOB;
+    let running = st.jobs.running(job);
+    if running {
+        st.jobs.set(job, json!({ "cancel": true }));
+    }
+    Ok(Json(json!({ "stopping": running })))
 }

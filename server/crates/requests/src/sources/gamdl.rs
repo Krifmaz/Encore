@@ -281,6 +281,7 @@ fn song_result(st: &impl Ctx, req: &Value, s: &Value, sf: &str, by_isrc: bool) -
     let subtitle = [artist, album].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
     Some(json!({
         "key": format!("am:song:{id}"), "title": title, "artist": artist, "album": album, "subtitle": subtitle,
+        "year": a["releaseDate"].as_str().unwrap_or("").chars().take(4).collect::<String>(),
         "format": if fmt == "aac" { "m4a" } else { fmt }, "bitrate": rate, "bit_depth": depth, "sample_rate": 0, "quality": label(fmt, rate, depth), "lossless": lossless, "tracks": 1,
         "size": dur.filter(|_| rate > 0).map(|d| (rate as f64 * 1000.0 / 8.0 * d) as i64), "duration": dur, "isrc": isrc, "cover": cover(a), "info": info,
         "score": (score.clamp(0.0, 100.0) * 10.0).round() / 10.0, "url": url,
@@ -322,6 +323,10 @@ fn album_result(st: &impl Ctx, req: &Value, al: &Value, sf: &str) -> Option<Valu
     let url = a["url"].as_str().map(String::from).unwrap_or_else(|| format!("{HOME}/{sf}/album/{id}"));
     Some(json!({
         "key": format!("am:album:{id}"), "title": bare, "artist": artist, "album": bare, "subtitle": artist,
+        // what the Atmos match checks (crate::surround::pick): the release year, and whether Apple calls it a
+        // single, an EP (" - EP" in its name) or a compilation
+        "year": a["releaseDate"].as_str().unwrap_or("").chars().take(4).collect::<String>(),
+        "album_kind": if a["isSingle"] == true || title.ends_with(" - Single") { "single" } else if title.ends_with(" - EP") { "ep" } else if a["isCompilation"] == true { "compilation" } else { "album" },
         "format": if fmt == "aac" { "m4a" } else { fmt }, "bitrate": rate, "bit_depth": depth, "sample_rate": 0, "quality": label(fmt, rate, depth), "lossless": lossless, "tracks": n,
         "size": null, "duration": null, "isrc": null, "cover": cover(a), "info": info, "score": (score.clamp(0.0, 100.0) * 10.0).round() / 10.0, "url": url,
         "payload": { "url": url, "kind": "album", "tracks": n.unwrap_or(0), "title": bare, "artist": artist, "album": bare },
@@ -506,13 +511,14 @@ pub fn atmos_ready(st: &impl Ctx) -> bool {
     st.plugins().enabled(ID) && wrapper(st).is_some() && pytool::program(st, ID).is_some()
 }
 
-/// The Dolby Atmos version of a song or album (the SDK's request fields): the best matching Atmos result, if
-/// Apple has one.
-pub async fn atmos_for(st: &impl Ctx, ask: &Value) -> Result<Option<Value>, Failure> {
+/// The Dolby Atmos results for a song or album (the SDK's request fields), best scored first. Which one, if any,
+/// really is the same release is for the caller to decide (crate::surround::pick): the search's own score
+/// takes loose matches.
+pub async fn atmos_results(st: &impl Ctx, ask: &Value) -> Result<Vec<Value>, Failure> {
     let mut req = ask.clone();
     req["surround"] = json!(true);
-    let results = search(st, &req).await?;
-    Ok(results.into_iter().next())
+    req["limit"] = json!(SEARCH_LIMIT);
+    search(st, &req).await
 }
 
 /// Whether gamdl can download as a subscriber: a media-user-token is set, or a wrapper server is.
