@@ -9,6 +9,7 @@ import app.encore.android.data.repo.DownloadsHealth
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
+import app.encore.android.data.repo.RequestCounts
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.repo.RequestUser
 import app.encore.android.data.repo.RetryFailedResult
@@ -842,5 +843,20 @@ class RequestRulesTest {
         val link = row("""{"id": 9, "kind": "url", "url": "https://example.com/a", "artist": "x", "status": "completed"}""")
         assertNull(RequestRules.titleTarget(link))
         assertEquals("", RequestRules.artistTarget(link))
+    }
+
+    /** The filter chips carry their counts once they are in, and the badges only the groups that have requests. */
+    @Test
+    fun theCounts() {
+        assertEquals("Failed", RequestRules.filterLabel("failed", "Failed", null))
+        val c = RequestCounts(all = 20, remaining = 12, pending = 0, active = 12, completed = 6, failed = 2)
+        assertEquals("Failed 2", RequestRules.filterLabel("failed", "Failed", c))
+        assertEquals("Active 12", RequestRules.filterLabel("active", "Active", c))
+        assertEquals("All 20", RequestRules.filterLabel("all", "All", c))
+        assertEquals(listOf("12 remaining" to "info", "2 failed" to "err"), RequestRules.countBadges(c))
+        assertTrue(RequestRules.countBadges(RequestCounts(all = 4, completed = 4)).isEmpty())
+        val decoded = (EncoreJson.parseToJsonElement("""{"all":3,"remaining":1,"pending":1,"active":2,"completed":0,"failed":1}""") as JsonObject)
+            .decodeModel(RequestCounts.serializer())!!
+        assertEquals(RequestCounts(3, 1, 1, 2, 0, 1), decoded)
     }
 }

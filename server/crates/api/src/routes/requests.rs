@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/from-link", post(from_link))
         .route("/api/requests/link", post(link))
         .route("/api/requests/users", get(users))
+        .route("/api/requests/counts", get(counts))
         .route("/api/requests/clear", post(clear))
         .route("/api/requests/clear-waiting", post(clear_waiting))
         .route("/api/requests/retry-failed", post(retry_failed))
@@ -112,6 +113,67 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
     }).await
+}
+
+/// `GET /api/requests/counts` query: whose requests to count, the same as the list's.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct CountsQ {
+    /// an admin's own requests only
+    mine: bool,
+    /// an admin's look at one person's requests (a user id; empty: everyone's)
+    user: Option<String>,
+}
+
+/// The Requests page's counts, one per status group: what the tabs and the summary line show.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Counts {
+    /// every request (the All tab)
+    pub all: i64,
+    /// still to download: queued, searching, downloading, monitoring, importing or waiting ([`ACTIVE`])
+    pub remaining: i64,
+    /// awaiting an admin's approval
+    pub pending: i64,
+    /// the Active tab: `remaining` and `pending` together (the list's `status=active`)
+    pub active: i64,
+    /// finished and in the library (the Available tab)
+    pub completed: i64,
+    /// failed (the Failed tab)
+    pub failed: i64,
+}
+
+impl Counts {
+    /// The counts from `(status, n)` pairs; statuses no group takes (denied, cancelled) only count in `all`.
+    pub fn from_statuses(rows: impl IntoIterator<Item = (String, i64)>) -> Counts {
+        let mut c = Counts::default();
+        for (status, n) in rows {
+            c.all += n;
+            match status.as_str() {
+                "pending" => c.pending += n,
+                "completed" => c.completed += n,
+                "failed" => c.failed += n,
+                s if ACTIVE.contains(&s) => c.remaining += n,
+                _ => {}
+            }
+        }
+        // the Active tab lists the requests awaiting approval with the ones still to download
+        c.active = c.remaining + c.pending;
+        c
+    }
+}
+
+/// GET /api/requests/counts: how many of the caller's requests (an admin: everyone's, their own with `mine`,
+/// one person's with `user`) are in each status group, child requests included. → [`Counts`]
+async fn counts(State(st): State<AppState>, User(u): User, Query(q): Query<CountsQ>) -> ApiResult<Json<Counts>> {
+    let mut sql = "SELECT status, COUNT(*) AS n FROM requests WHERE 1=1".to_string();
+    let mut params = vec![];
+    if let Some(owner) = whose(&u, q.mine, user_id(q.user.as_deref())) {
+        sql += " AND user_id=?";
+        params.push(json!(owner));
+    }
+    sql += " GROUP BY status";
+    let rows = st.db.read_now(|c| c.query(&sql, params))?;
+    Ok(Json(Counts::from_statuses(rows.into_iter().map(|r| (r.s("status"), r.i("n"))))))
 }
 
 /// `GET /api/requests/users` (admins): the people who have requests, for the Requests page's User list. →

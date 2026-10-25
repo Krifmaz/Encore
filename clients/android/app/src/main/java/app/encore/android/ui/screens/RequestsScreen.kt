@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.repo.LinkProbe
 import app.encore.android.data.repo.Me
+import app.encore.android.data.repo.RequestCounts
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.repo.RequestUser
 import app.encore.android.features.requests.RequestItem
@@ -51,6 +52,7 @@ import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
+import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.ChoiceRow
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.EmptyState
@@ -114,6 +116,8 @@ fun RequestsScreen(nav: Nav) {
     var userMenu by remember { mutableStateOf(false) }
     val user = picked?.first ?: 0L
     var rows by remember { mutableStateOf<List<RequestRow>?>(null) }
+    // GET /api/requests/counts for the filter chips and the badges over them (null until it answers)
+    var counts by remember { mutableStateOf<RequestCounts?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf(0) }
     var link by remember { mutableStateOf("") }
@@ -139,6 +143,13 @@ fun RequestsScreen(nav: Nav) {
         try {
             val m = me ?: withContext(Dispatchers.IO) { features.me() }.also { me = it; actions.me = it; if (!it.isAdmin && !mine) mine = true }
             rows = withContext(Dispatchers.IO) { features.requests(FILTERS[filter].first, mine && m.isAdmin, user = if (m.isAdmin) user else 0L) }
+            // the filters' counts follow the list (an older server has none: the plain labels stay)
+            try {
+                counts = withContext(Dispatchers.IO) { features.requestCounts(mine && m.isAdmin, if (m.isAdmin) user else 0L) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
             // the User list's counts follow the list (an older server has none: the list stays as it was)
             if (m.isAdmin) {
                 try {
@@ -459,7 +470,16 @@ fun RequestsScreen(nav: Nav) {
                     }
                 }
             }
-            item { ChoiceRow(FILTERS.map { it.second }, filter, onSelect = { filter = it }) }
+            // "12 remaining", "3 awaiting approval", "2 failed"
+            val badges = counts?.let { RequestRules.countBadges(it) }.orEmpty()
+            if (badges.isNotEmpty()) {
+                item {
+                    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        badges.forEach { (text, kind) -> Badge(text, kind) }
+                    }
+                }
+            }
+            item { ChoiceRow(FILTERS.map { (k, l) -> RequestRules.filterLabel(k, l, counts) }, filter, onSelect = { filter = it }) }
             when {
                 err != null -> item { Box(Modifier.fillMaxWidth().height(200.dp)) { ErrorBox(err) { error = null; reload() } } }
                 list == null -> item { Box(Modifier.fillMaxWidth().height(200.dp)) { LoadingBox() } }

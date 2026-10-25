@@ -121,3 +121,43 @@ async fn an_admin_looks_at_one_persons_requests_and_a_member_only_at_their_own()
     assert_eq!(v[1], json!({ "id": caz, "username": "Caz", "count": 4 }));
     ts.remove();
 }
+
+/// The status groups: queued…waiting are still to download, pending awaits approval, Active is both, and
+/// denied or cancelled requests only count in All.
+#[test]
+fn counts_group_the_statuses() {
+    let c = Counts::from_statuses([
+        ("queued", 2), ("downloading", 1), ("waiting", 3), ("pending", 4), ("failed", 5), ("completed", 6), ("cancelled", 7), ("denied", 1),
+    ].map(|(s, n)| (s.to_string(), n)));
+    assert_eq!(c, Counts { all: 29, remaining: 6, pending: 4, active: 10, completed: 6, failed: 5 });
+    assert_eq!(Counts::from_statuses([]), Counts::default());
+}
+
+/// `GET /api/requests/counts` counts whose requests the list would show: an admin everyone's, one person's
+/// with `user`, their own with `mine`; a member only ever their own.
+#[tokio::test]
+async fn counts_follow_whose_requests() {
+    let ts = TestServer::new("requests-counts");
+    let st = ts.st.clone();
+    let app = ts.app();
+    let (sam, sam_c) = account(&st, "sam", "user");
+    let (caz, _) = account(&st, "Caz", "user");
+    let (boss, boss_c) = account(&st, "boss", "admin");
+    for (owner, statuses) in [(sam, vec!["failed", "queued", "pending"]), (caz, vec!["failed", "failed", "downloading", "waiting", "completed"]), (boss, vec!["completed"])] {
+        for s in statuses {
+            insert(&st, owner, &format!("{s} of {owner}"), s);
+        }
+    }
+    let (code, v, _) = call(&app, "GET", "/api/requests/counts", &boss_c, None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "all": 9, "remaining": 3, "pending": 1, "active": 4, "completed": 2, "failed": 3 }));
+    let one = format!("/api/requests/counts?user={caz}");
+    let (_, v, _) = call(&app, "GET", &one, &boss_c, None).await;
+    assert_eq!(v, json!({ "all": 5, "remaining": 2, "pending": 0, "active": 2, "completed": 1, "failed": 2 }));
+    let (_, v, _) = call(&app, "GET", "/api/requests/counts?mine=true", &boss_c, None).await;
+    assert_eq!(v["all"], 1);
+    // a member: their own, whatever `user` says
+    let (_, v, _) = call(&app, "GET", &one, &sam_c, None).await;
+    assert_eq!(v, json!({ "all": 3, "remaining": 1, "pending": 1, "active": 2, "completed": 0, "failed": 1 }));
+    assert_eq!(call(&app, "GET", "/api/requests/counts", "", None).await.0, StatusCode::UNAUTHORIZED);
+}

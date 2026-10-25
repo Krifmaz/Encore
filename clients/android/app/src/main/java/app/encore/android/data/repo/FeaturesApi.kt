@@ -276,6 +276,16 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
         return call("GET", qs.toString(), null).objects().rows(RequestRow.serializer())
     }
 
+    /**
+     * GET /api/requests/counts?mine=&user=: how many of the requests the list would show are in each status group
+     * (members only ever get their own).
+     */
+    fun requestCounts(mine: Boolean, user: Long = 0L): RequestCounts {
+        val qs = StringBuilder("/api/requests/counts")
+        if (mine) qs.append("?mine=true") else if (user > 0L) qs.append("?user=").append(user)
+        return getObject(qs.toString()).page(RequestCounts.serializer())
+    }
+
     /** GET /api/requests/users (admins): the people who have requests, by name, with their counts. */
     fun requestUsers(): List<RequestUser> = call("GET", "/api/requests/users", null).objects().rows(RequestUser.serializer())
 

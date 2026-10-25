@@ -9,6 +9,9 @@
 //! (the server's `status=active`). Admins also get Download all now beside Retry failed, on a
 //! server with Download now: every waiting request is woken and requests move up in their lines
 //! (with a person picked, only theirs) – never more at once than each source allows.
+//! The tabs carry how many requests each holds ("Failed 3"), and badges under the title say how
+//! many downloads are still to go, await approval or failed (`GET /api/requests/counts`, whose
+//! requests the list shows), fetched again with the list.
 
 use crate::api::ApiError;
 use crate::fmt;
@@ -42,6 +45,11 @@ pub struct State {
     users: Vec<Value>,
     /// The person picked in it (kept while they have no requests left).
     picked: Option<UserChoice>,
+    /// `GET /api/requests/counts` for whose requests the list shows; None until it answers.
+    counts: Option<Value>,
+    /// The tab labels with their counts ("Failed 3"), one per [`TABS`] entry; the plain labels
+    /// until the counts are in.
+    tab_labels: Vec<String>,
 }
 
 /// An entry of the User list: everyone's requests (`id` None) or one person's.
@@ -97,6 +105,8 @@ pub enum Message {
     User(UserChoice),
     /// `GET /api/requests/users`.
     Users(Result<Value, ApiError>),
+    /// `GET /api/requests/counts`.
+    Counts(Result<Value, ApiError>),
     /// `/api/auth/me` for the quota line.
     Me(Result<Value, ApiError>),
     Tick,
@@ -120,6 +130,35 @@ impl State {
     }
 }
 
+/// A tab's label with its count beside it ("Failed 3"), as the web draws it; just the label
+/// while there are no counts.
+pub fn tab_label(label: &str, count: Option<i64>) -> String {
+    match count {
+        Some(n) => format!("{label} {n}"),
+        None => label.to_string(),
+    }
+}
+
+/// The badges under the title, as the web's `counts_badges`: the downloads still to go, the
+/// requests awaiting approval and the failed ones, each with its kind; a group with none is left
+/// out.
+pub fn counts_badges(c: &Value) -> Vec<(String, theme::Badge)> {
+    [("remaining", theme::Badge::Info, "remaining"), ("pending", theme::Badge::Warn, "awaiting approval"), ("failed", theme::Badge::Err, "failed")]
+        .into_iter()
+        .filter(|(k, _, _)| fmt::i(c, k) > 0)
+        .map(|(k, kind, text)| (format!("{} {text}", fmt::i(c, k)), kind))
+        .collect()
+}
+
+/// The counts' query: whose requests, the same as the list's ("mine=true", "user=7" or nothing).
+pub fn counts_query(mine: bool, user: Option<i64>) -> String {
+    if mine {
+        "mine=true".into()
+    } else {
+        user.map(|u| format!("user={u}")).unwrap_or_default()
+    }
+}
+
 /// The query of the current tab and whose requests, as the web builds it.
 pub fn query(filter: &str, mine: bool, user: Option<i64>) -> String {
     let mut q = String::from("limit=300");
@@ -137,12 +176,15 @@ pub fn query(filter: &str, mine: bool, user: Option<i64>) -> String {
 fn reload(state: &mut State, ctx: &Ctx) -> Task<Message> {
     state.list.query = query(&state.filter, state.list.mine, state.list.user);
     let list = state.list.load(ctx).map(Message::List);
+    // the tabs' and badges' counts follow the list
+    let (api, q) = (ctx.api.clone(), counts_query(state.list.mine, state.list.user));
+    let counts = Task::perform(async move { api.get(&format!("/requests/counts?{q}")).await }, Message::Counts);
     if !state.admin {
-        return list;
+        return Task::batch([list, counts]);
     }
     // the User list's counts follow the list
     let api = ctx.api.clone();
-    Task::batch([list, Task::perform(async move { api.get("/requests/users").await }, Message::Users)])
+    Task::batch([list, counts, Task::perform(async move { api.get("/requests/users").await }, Message::Users)])
 }
 
 /// Called when the app navigates here.
@@ -158,6 +200,8 @@ pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.list.keep = None;
     state.list.take = 0;
     state.quota.clear();
+    state.counts = None;
+    state.tab_labels = TABS.iter().map(|(_, l)| tab_label(l, None)).collect();
     let api = ctx.api.clone();
     Task::batch([
         reload(state, ctx),
@@ -182,6 +226,13 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             Task::none()
         }
         Message::Users(Err(_)) => Task::none(),
+        Message::Counts(Ok(c)) => {
+            state.tab_labels = TABS.iter().map(|(k, l)| tab_label(l, Some(fmt::i(&c, k)))).collect();
+            state.counts = Some(c);
+            Task::none()
+        }
+        // a failed fetch keeps the counts drawn last (the list works without them)
+        Message::Counts(Err(_)) => Task::none(),
         Message::Me(Ok(me)) => {
             let admin = matches!(me["role"].as_str(), Some("admin" | "owner"));
             if fmt::truthy(&me, "request_limit") && !admin {
@@ -205,6 +256,13 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let p = ctx.look;
     let mut title = column![h1("Requests")].spacing(4);
+    // "12 remaining", "3 awaiting approval", "2 failed"
+    if let Some(c) = &state.counts {
+        let badges = counts_badges(c);
+        if !badges.is_empty() {
+            title = title.push(iced::widget::Row::with_children(badges.into_iter().map(|(l, kind)| widgets::badge(l, kind))).spacing(6));
+        }
+    }
     if !state.quota.is_empty() {
         title = title.push(small_muted(state.quota.as_str()));
     }
@@ -265,7 +323,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     if let Some(b) = request_list::storage_banner(ctx, &state.list) {
         page = page.push(b.map(Message::List));
     }
-    page.push(tabs(&TABS, &state.filter, Message::Filter))
+    // the tabs with their counts once they are in (the plain labels before the page opened)
+    let items: Vec<(&str, &str)> = TABS
+        .iter()
+        .enumerate()
+        .map(|(i, (k, l))| (*k, state.tab_labels.get(i).map(String::as_str).unwrap_or(l)))
+        .collect();
+    page.push(tabs(&items, &state.filter, Message::Filter))
         .push(card_flat(list).width(Length::Fill))
         .into()
 }
@@ -305,5 +369,20 @@ mod tests {
         assert_eq!(user_label("Caz", 612), "Caz (612)");
         assert_eq!(name_of("Caz (612)"), "Caz");
         assert_eq!(name_of("Dr. (Who) (3)"), "Dr. (Who)");
+    }
+
+    /// The tabs carry their counts once they are in, the badges only the groups that have
+    /// requests, and the counts are whose requests the list shows.
+    #[test]
+    fn the_counts() {
+        assert_eq!(tab_label("Failed", None), "Failed");
+        assert_eq!(tab_label("Failed", Some(3)), "Failed 3");
+        let c = serde_json::json!({ "all": 20, "remaining": 12, "pending": 0, "active": 12, "completed": 6, "failed": 2 });
+        let labels: Vec<String> = counts_badges(&c).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, ["12 remaining", "2 failed"]);
+        assert!(counts_badges(&serde_json::json!({ "all": 4, "completed": 4 })).is_empty());
+        assert_eq!(counts_query(true, Some(7)), "mine=true");
+        assert_eq!(counts_query(false, Some(7)), "user=7");
+        assert_eq!(counts_query(false, None), "");
     }
 }

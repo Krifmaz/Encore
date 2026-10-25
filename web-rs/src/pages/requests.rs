@@ -1,4 +1,8 @@
 //! Port of web/js/pages/requests.js – see docs/archive/ui-rewrite/CONTRACT.md
+//!
+//! The tabs carry how many requests each holds, and a line of badges under the title says how many downloads
+//! are still to go, await approval or failed (`GET /api/requests/counts`, whose requests the list shows),
+//! refreshed with the list every 4 s.
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
@@ -21,15 +25,14 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let picked: Rc<RefCell<Option<(i64, String)>>> = Rc::new(RefCell::new(None));
         let tabs: String = {
             let f = filter.borrow();
-            [("all", "All"), ("active", "Active"), ("pending", "Awaiting approval"), ("completed", "Available"), ("failed", "Failed")]
-                .iter()
-                .map(|(k, l)| format!(r#"<button data-s="{k}" class="{}">{l}</button>"#, if *k == f.as_str() { "active" } else { "" }))
+            TABS.iter()
+                .map(|(k, l)| format!(r#"<button data-s="{k}" class="{}">{}</button>"#, if *k == f.as_str() { "active" } else { "" }, tab_label(l, None)))
                 .collect()
         };
         let controls = header_controls(admin, common::may_fix());
         dom::set_html(&view, &format!(r#"
     <div class="row wrap between" style="margin-bottom:18px">
-      <div><h1>Requests</h1><div class="small muted" id="quota"></div></div>
+      <div><h1>Requests</h1><div class="row wrap" id="r-counts" style="gap:6px;margin-top:4px"></div><div class="small muted" id="quota"></div></div>
       <div class="row wrap" style="gap:8px">
         {controls}
       </div>
@@ -49,6 +52,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 let (view, list, f, w, picked) = (view.clone(), list.clone(), filter.borrow().clone(), whose.get(), picked.clone());
                 dom::spawn(async move {
                     if let Err(e) = load(&list, &f, w, admin).await { dom::console_error(&e); }
+                    paint_counts(&view, w).await;
                     if admin { paint_users(&view, &picked).await; }
                 });
             })
@@ -104,6 +108,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
         let f = filter.borrow().clone();
         load(&list, &f, whose.get(), admin).await?;
+        paint_counts(&view, whose.get()).await;
         if admin { paint_users(&view, &picked).await; }
         {
             let (list, reload) = (list.clone(), reload.clone());
@@ -111,6 +116,45 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+/// The status tabs: `(key, label)`; the key is the list's `status` and the field of `GET /api/requests/counts`
+/// that counts the tab.
+const TABS: [(&str, &str); 5] = [("all", "All"), ("active", "Active"), ("pending", "Awaiting approval"), ("completed", "Available"), ("failed", "Failed")];
+
+/// A tab's label with its count beside it ("Failed 3"); just the label until the counts are in.
+fn tab_label(label: &str, count: Option<i64>) -> String {
+    match count {
+        Some(n) => format!(r#"{label} <span class="tab-count">{n}</span>"#),
+        None => label.to_string(),
+    }
+}
+
+/// The badges under the title from `GET /api/requests/counts`: the downloads still to go, the requests awaiting
+/// approval and the failed ones; a group with none is left out, and nothing at all when nothing is left to do.
+pub fn counts_badges(c: &Value) -> String {
+    [("remaining", "info", "remaining"), ("pending", "warn", "awaiting approval"), ("failed", "err", "failed")]
+        .iter()
+        .filter(|(k, _, _)| c.i(k) > 0)
+        .map(|(k, class, text)| format!(r#"<span class="badge {class}" data-count="{k}">{} {text}</span>"#, c.i(k)))
+        .collect()
+}
+
+/// The counts fetched for whose requests the list shows, drawn into the tabs and the badges under the title.
+/// A failed fetch leaves what was drawn last (the list still works without them).
+async fn paint_counts(view: &Element, whose: Whose) {
+    let q = whose.query();
+    let Ok(c) = api::get(&format!("/requests/counts?{}", q.trim_start_matches('&'))).await else { return };
+    if let Some(slot) = dom::qs_in(view, "#r-counts") {
+        let html = counts_badges(&c);
+        if slot.inner_html() != html { dom::set_html(&slot, &html); }
+    }
+    for b in dom::qsa_in(view, "#r-tabs button") {
+        let key = dom::data(&b, "s");
+        let Some((_, label)) = TABS.iter().find(|(k, _)| *k == key) else { continue };
+        let html = tab_label(label, Some(c.i(&key)));
+        if b.inner_html() != html { dom::set_html(&b, &html); }
+    }
 }
 
 /// The buttons over the list: admins get the User list, Retry failed, Download all now, Clear finished and Clear waiting;
@@ -195,7 +239,7 @@ async fn load(list: &Element, filter: &str, whose: Whose, admin: bool) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{header_controls, name_of, user_label, user_options};
+    use super::{counts_badges, header_controls, name_of, tab_label, user_label, user_options};
     use serde_json::json;
 
     /// Admins pick whose requests show in a User list ("All users", then each person with their count) in place of
@@ -244,5 +288,19 @@ mod tests {
         assert_eq!(crate::pages::common::waiting_done(612), "Cancelled 612 waiting requests");
         assert_eq!(crate::pages::common::waiting_done(1), "Cancelled 1 waiting request");
         assert_eq!(crate::pages::common::waiting_done(0), "Nothing is waiting");
+    }
+
+    /// The tabs show their counts once they are in, and the badges only the groups that have requests.
+    #[test]
+    fn the_counts() {
+        assert_eq!(tab_label("Failed", None), "Failed");
+        assert_eq!(tab_label("Failed", Some(3)), r#"Failed <span class="tab-count">3</span>"#);
+        let c = json!({ "all": 20, "remaining": 12, "pending": 0, "active": 12, "completed": 6, "failed": 2 });
+        let b = counts_badges(&c);
+        assert!(b.contains(r#"<span class="badge info" data-count="remaining">12 remaining</span>"#), "{b}");
+        assert!(b.contains(r#"<span class="badge err" data-count="failed">2 failed</span>"#), "{b}");
+        assert!(!b.contains("awaiting approval"), "none awaiting: {b}");
+        assert_eq!(counts_badges(&json!({ "all": 4, "completed": 4 })), "");
+        assert!(counts_badges(&json!({ "pending": 1 })).contains("1 awaiting approval"));
     }
 }
