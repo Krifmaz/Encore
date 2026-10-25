@@ -1,7 +1,8 @@
 //! The recommendations in the player (the server's /api/taste): the dislike button (a song never queued by a
 //! shuffle or a mix again, and gone from Up next), "Don't play this artist", skips (Next before a play counted,
 //! a mild "not now"), smart shuffle (Settings → Playback, on by default: shuffles and "keep going" weighted by
-//! taste instead of plain random) and "Start radio" (songs like this one from the library).
+//! taste instead of plain random), "Start radio" (songs like this one from the library) and "Genre shuffle…" (a
+//! shuffle of one or more of the library's genres, which the music after the queue keeps to).
 
 use super::*;
 
@@ -180,4 +181,71 @@ pub async fn play_mix(id: &str) -> bool {
         }
         Err(e) => { toast(&e.message, "err"); false }
     }
+}
+
+thread_local! {
+    /// the genres of the genre shuffle playing (Genre shuffle…): the music after the queue keeps to them; any other
+    /// list played clears it
+    static GENRES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// The genres the music after the queue keeps to (a genre shuffle is playing), if any.
+pub(super) fn genre_scope() -> Option<Vec<String>> {
+    GENRES.with(|g| g.borrow().clone())
+}
+
+/// Another list starts playing: the genre shuffle is over.
+pub(super) fn clear_genre_scope() {
+    GENRES.with(|g| *g.borrow_mut() = None);
+}
+
+/// Plays a genre shuffle: library songs of any of `genres`, weighted by taste with smart shuffle on (the server
+/// always leaves disliked songs out); the music after the queue keeps to the same genres.
+pub async fn play_genres(genres: Vec<String>) -> bool {
+    if genres.is_empty() { return false; }
+    match api::post("/taste/shuffle", json!({ "genres": genres, "limit": 100 })).await {
+        Ok(v) => {
+            let list = v.items();
+            if list.is_empty() { toast("No songs of those genres right now", ""); return false; }
+            play_queue(list, 0, "library");
+            GENRES.with(|g| *g.borrow_mut() = Some(genres));
+            true
+        }
+        Err(e) => { toast(&e.message, "err"); false }
+    }
+}
+
+/// "Genre shuffle…": tick one or more of the library's genres (the ones you like most first) and shuffle them.
+pub fn genre_shuffle_modal() {
+    let m = crate::ui::modal(ModalOpts::new("Genre shuffle", r#"<div class="muted"><span class="spinner"></span> Loading your genres…</div>"#)
+        .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" data-gs-play disabled>Shuffle</button>"#));
+    dom::spawn(async move {
+        let Some(body) = m.qs(".modal-body") else { return };
+        let list = match api::get("/taste/genres").await {
+            Ok(v) => v.items(),
+            Err(e) => { set_html(&body, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))); return; }
+        };
+        if list.is_empty() {
+            set_html(&body, r#"<p class="muted" style="margin:0">No genres yet: the songs' genre tags make them, and an artist's untagged songs take the artist's usual genres.</p>"#);
+            return;
+        }
+        set_html(&body, &format!(r#"<p class="small muted" style="margin:0 0 8px">Tick one or more. The shuffle keeps to them, and so does the music after it.</p><div class="stack" style="gap:0">{}</div>"#,
+            list.iter().map(|g| format!(r#"<label class="row" style="gap:10px;padding:6px 0;align-items:center;cursor:pointer"><input type="checkbox" data-genre="{}"><span class="grow">{}</span><span class="small muted">{} songs</span></label>"#,
+                esc(&g.s("genre")), esc(&g.s("title")), g.i("songs"))).collect::<String>()));
+        let ticked = { let m = m.clone(); move || -> Vec<String> { m.qsa("[data-genre]").iter().filter(|b| dom::checked(b)).map(|b| dom::data(b, "genre")).collect() } };
+        {
+            let (m2, ticked) = (m.clone(), ticked.clone());
+            dom::on_each(&m.el, "[data-genre]", "change", move |_, _| {
+                if let Some(b) = m2.qs("[data-gs-play]") { dom::set_disabled(&b, ticked().is_empty()); }
+            });
+        }
+        if let Some(b) = m.qs("[data-gs-play]") {
+            let m2 = m.clone();
+            dom::on(&b, "click", move |_| {
+                let genres = ticked();
+                let m3 = m2.clone();
+                dom::spawn(async move { if play_genres(genres).await { m3.close(); } });
+            });
+        }
+    });
 }

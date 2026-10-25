@@ -363,6 +363,7 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
             scope.launch {
                 try { withContext(Dispatchers.IO) { features.logoutAll() } } catch (_: Exception) {}
                 graph.likes.clear()
+                graph.dislikes.clear()
                 graph.prefs.clear()
                 graph.store.signOut()
             }
@@ -375,6 +376,7 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
             scope.launch {
                 try { withContext(Dispatchers.IO) { graph.api.logout() } } catch (_: Exception) {}
                 graph.likes.clear()
+                graph.dislikes.clear()
                 graph.prefs.clear()
                 graph.store.signOut()
             }

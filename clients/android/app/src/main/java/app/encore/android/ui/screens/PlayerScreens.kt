@@ -89,6 +89,7 @@ import app.encore.android.features.offline.OfflineMenu
 import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Badge
 import app.encore.android.ui.components.Cover
+import app.encore.android.ui.components.DislikeButton
 import app.encore.android.ui.components.LikeButton
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
@@ -663,6 +664,7 @@ internal fun PlayerActions(
 ) {
     val p = MaterialTheme.palette
     val liked by nav.graph.likes.liked.collectAsState()
+    val disliked by nav.graph.dislikes.disliked.collectAsState()
     val link by nav.player.remote.link.collectAsState()
     // a group listen: the ⋯ menu's "Start a group listen" / "Group listen"
     val group by GroupListen.state.collectAsState()
@@ -673,6 +675,9 @@ internal fun PlayerActions(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (!track.isSurround) LikeButton(track.id in liked, { nav.graph.likes.toggle(track.id) })
+        // a disliked song playing here: on to the next one
+        val dislike = { nav.graph.dislikes.toggle(track.id) { if (link == null && nav.player.nowPlaying.value?.id == track.id) nav.player.next() } }
+        if (!track.isSurround && track.id > 0) DislikeButton(track.id in disliked, dislike)
         IconButton(onClick = { actions.shareLink() }) {
             Icon(painterResource(R.drawable.ic_share), contentDescription = "Share link", tint = p.text)
         }
@@ -688,6 +693,9 @@ internal fun PlayerActions(
                 if (added.isNotEmpty()) MenuEntry(added, info = true, onClick = {}) else null,
                 if (track.artist.isNotEmpty() || track.albumArtist.isNotEmpty()) MenuEntry("Go to artist", R.drawable.ic_person) { actions.goToArtist() } else null,
                 if (track.albumId.isNotEmpty()) MenuEntry("View album", R.drawable.ic_album) { actions.viewAlbum() } else null,
+                if (!track.isSurround && track.id > 0) MenuEntry(if (track.id in disliked) "Take back the dislike" else "Dislike", R.drawable.ic_thumb_down) { dislike() } else null,
+                if (!track.isSurround && track.id > 0 && track.artist.isNotEmpty()) MenuEntry("Don't play ${track.artist}", R.drawable.ic_close) { nav.graph.dislikes.dislikeArtist(track.artist) } else null,
+                if (!track.isSurround && track.id > 0) MenuEntry("Start radio", R.drawable.ic_spark) { nav.player.startRadio(track) } else null,
                 if (!track.isSurround) MenuEntry("Add to playlist", R.drawable.ic_playlist_add) { actions.addToPlaylist() } else null,
                 if (onLyrics != null) MenuEntry("Lyrics", R.drawable.ic_lyrics) { onLyrics() } else null,
                 MenuEntry("Share link", R.drawable.ic_share) { actions.shareLink() },

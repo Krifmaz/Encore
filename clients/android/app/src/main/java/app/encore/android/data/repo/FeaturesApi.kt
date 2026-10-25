@@ -7,6 +7,9 @@ import app.encore.android.core.obj
 import app.encore.android.core.objects
 import app.encore.android.core.objectsOf
 import app.encore.android.core.str
+import app.encore.android.core.strings
+import app.encore.android.core.bool
+import app.encore.android.core.dbl
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.AuthInfo
 import app.encore.android.data.api.EncoreApi
@@ -238,6 +241,19 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     fun forYou(): ForYou = getObject("/api/discover/for-you").page(ForYou.serializer())
 
     fun tags(): Tags = getObject("/api/discover/tags").page(Tags.serializer())
+
+    /** GET /api/taste/mixes: the mixes the server makes from the library and this account's taste. */
+    fun tasteMixes(limit: Int = 30): TasteMixes {
+        val o = getObject("/api/taste/mixes?limit=$limit")
+        val mixes = o.arr("mixes").objectsOf().map { m ->
+            TasteMix(m.str("id"), m.str("title"), m.str("subtitle"), m.arr("covers").strings(), m.arr("tracks").objectsOf().mapNotNull { Track.from(it) })
+        }
+        return TasteMixes(o.bool("cold"), mixes)
+    }
+
+    /** GET /api/taste/genres: the library's genres, the ones this account likes first. */
+    fun tasteGenres(): List<TasteGenre> =
+        (call("GET", "/api/taste/genres", null) as? JsonArray).objectsOf().map { TasteGenre(it.str("genre"), it.str("title"), it.int("songs"), it.dbl("affinity")) }
 
     fun tag(name: String, page: Int): TagPage = getObject("/api/discover/tag/${EncoreApi.enc(name)}?page=$page").page(TagPage.serializer())
 

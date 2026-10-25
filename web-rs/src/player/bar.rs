@@ -88,6 +88,7 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib { let t2 = t.clone(); items.push(MenuItem::new(if is_disliked(&t) { "Take back the dislike" } else { "Dislike" }, &icon("thumbsdown"), move || dom::spawn(toggle_dislike(t2.clone())))); }
     if lib && t.truthy("artist") { let name = t.s("artist"); items.push(MenuItem::new(&format!("Don't play {name}"), &icon("x"), move || dom::spawn(dislike_artist(name.clone())))); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Start radio", &icon("spark"), move || dom::spawn(start_radio(t2.clone())))); }
+    if !linked { items.push(MenuItem::new("Genre shuffle…", &icon("shuffle"), genre_shuffle_modal)); }
     if lib { let id = t.i("id"); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || crate::pages::playlists::add_to_playlist_modal(vec![id]))); }
     if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || open_full("lyrics"))); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }

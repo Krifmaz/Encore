@@ -429,6 +429,10 @@ fun PlaybackSettingsScreen(nav: Nav, onBack: () -> Unit) {
             CheckRow("Keep going with a shuffle of the whole library", prefs.autoplay) { on -> set { it.copy(autoplay = on) } }
             CheckRow("Resume where I left off when the app opens", prefs.resume) { on -> set { it.copy(resume = on) } }
 
+            H3("Shuffle")
+            CheckRow("Smart shuffle", prefs.smartShuffle) { on -> set { it.copy(smartShuffle = on) } }
+            Help("Shuffles and the music after the queue lean to what you play and like: favourites come up more often, songs you just heard wait, songs you skip a lot come up less, and songs or artists you disliked never play. Off, a shuffle is plain random.")
+
             H3("In the car")
             val carLyrics by remember { CarPrefs.liveLyrics(context) }.collectAsState()
             CheckRow("Live lyrics in the car", carLyrics) { on -> CarPrefs.setLiveLyrics(context, on) }

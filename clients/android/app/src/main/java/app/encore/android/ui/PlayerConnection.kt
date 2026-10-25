@@ -376,8 +376,27 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     fun play(tracks: List<Track>, startIndex: Int = 0, shuffle: Boolean = false) {
         if (tracks.isEmpty()) return
         if (shuffle && GroupListen.shuffleList(tracks)) return
+        // Smart shuffle (Settings → Playback): the server puts the list in a taste-weighted order first
+        if (shuffle && smartShuffleHere() && tracks.size >= 3) {
+            scope.launch {
+                val order = try { withContext(Dispatchers.IO) { api.smartOrder(tracks.map { it.id }) } } catch (_: Exception) { emptyList() }
+                val byId = tracks.associateBy { it.id }
+                val list = order.mapNotNull { byId[it] }
+                // the server can't answer (or left nothing): a plain shuffle
+                startList(list.ifEmpty { tracks.shuffled() }, 0)
+            }
+            return
+        }
         val list = if (shuffle) tracks.shuffled() else tracks
-        val start = if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1)
+        startList(list, if (shuffle) 0 else startIndex.coerceIn(0, list.size - 1))
+    }
+
+    /** Smart shuffle applies to a list played here: switched on, and not in a group or linked to another device. */
+    private fun smartShuffleHere(): Boolean =
+        prefs?.playback?.value?.smartShuffle != false && !GroupListen.inGroup && linked() == null
+
+    /** Play `list` (already in play order) from `start`: in the group listen, on the linked device, or here. */
+    private fun startList(list: List<Track>, start: Int) {
         if (GroupListen.playList(list, start)) return
         if (linked() != null) { sendQueue(list, start, 0.0); return }
         val items = list.map { MediaItems.track(api, it) }
@@ -385,6 +404,27 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
             c.setMediaItems(items, start, 0L)
             c.prepare()
             c.play()
+        }
+    }
+
+    /**
+     * "Start radio": this song, then songs like it from the library (its artist and the ones heard with it, the same
+     * genres and era, leaning to your taste; the server's /api/taste/like-this).
+     */
+    fun startRadio(track: Track) {
+        scope.launch {
+            val more = try { withContext(Dispatchers.IO) { api.likeThis(track.id, 50) } } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't start the radio", "err"); return@launch }
+            if (more.isEmpty()) { Toasts.show("Nothing like it in the library yet", "info"); return@launch }
+            play(listOf(track) + more)
+        }
+    }
+
+    /** Plays one of the For you mixes made fresh (`/api/taste/mix`, `id` as the server named it). */
+    fun playMix(id: String) {
+        scope.launch {
+            val list = try { withContext(Dispatchers.IO) { api.mix(id, 100) } } catch (e: Exception) { Toasts.show(e.message ?: "Couldn't load the mix", "err"); return@launch }
+            if (list.isEmpty()) { Toasts.show("This mix is empty right now", "info"); return@launch }
+            play(list)
         }
     }
 

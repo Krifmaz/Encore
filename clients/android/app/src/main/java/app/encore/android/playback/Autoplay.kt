@@ -11,8 +11,9 @@ import java.util.concurrent.ExecutorService
 
 /**
  * Settings → Playback → "Keep going with a shuffle of the whole library": when the queue runs out, 50 more songs
- * from `POST /api/library/shuffle`, never one played in this listening session (a fresh round once everything has
- * played). Offline, the shuffle is of the songs saved on this phone. Main thread only.
+ * from `POST /api/library/shuffle` (with Smart shuffle on, `POST /api/taste/shuffle`: weighted by taste, never a
+ * disliked song), never one played in this listening session (a fresh round once everything has played). Offline,
+ * the shuffle is of the songs saved on this phone. Main thread only.
  */
 class Autoplay(
     private val player: ExoPlayer,
@@ -42,16 +43,19 @@ class Autoplay(
         val exclude = ArrayList<Long>(played)
         for (i in 0 until count) MediaItems.trackId(player.getMediaItemAt(i).mediaId)?.let { exclude.add(it) }
         val cur = current.id
+        val smart = prefs().smartShuffle
+        // the server's shuffle: weighted by taste with Smart shuffle on, plain random otherwise
+        val draw: (List<Long>) -> List<app.encore.android.data.api.Track> = { ex -> if (smart) api.smartShuffle(50, ex) else api.shuffle(50, ex) }
         io.execute {
             // the server can't be reached: the songs saved here (those not played yet)
             var more = if (OfflineMode.active.value) savedShuffle(exclude.toHashSet())
-                else try { api.shuffle(50, exclude.distinct()) } catch (_: Exception) { emptyList() }
+                else try { draw(exclude.distinct()) } catch (_: Exception) { emptyList() }
             var freshRound = false
             if (more.isEmpty() && exclude.isNotEmpty()) {
                 // everything has played: start a fresh round
                 freshRound = true
                 more = if (OfflineMode.active.value) savedShuffle(listOfNotNull(cur).toHashSet())
-                    else try { api.shuffle(50, listOfNotNull(cur)) } catch (_: Exception) { emptyList() }
+                    else try { draw(listOfNotNull(cur)) } catch (_: Exception) { emptyList() }
             }
             main.post {
                 if (freshRound) played.clear()

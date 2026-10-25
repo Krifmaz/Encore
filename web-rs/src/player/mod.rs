@@ -44,7 +44,7 @@ pub use load::{seek_to, set_volume, toggle};
 pub(crate) use load::{can_play, convert_query};
 pub use local::{offline_setting, prefer_local, set_prefer_local};
 pub use norm::norm_setting;
-pub use taste::play_mix;
+pub use taste::{genre_shuffle_modal, play_mix};
 pub use queue::{enqueue, group_shuffle, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
 

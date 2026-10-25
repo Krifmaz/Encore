@@ -12,7 +12,9 @@ import java.util.concurrent.ExecutorService
  * (`POST /api/library/now-playing`), a play (`POST /api/library/plays`) at half the song or 4 minutes, whichever
  * comes first, songs under 30 s at their end; a song that runs to its end (gapless, or faded out by a song
  * transition) counts with its full length. The server passes them on (ListenBrainz, Last.fm). A play the server
- * can't take (offline) waits in the outbox (features/offline) and goes when it answers again. Main thread only.
+ * can't take (offline) waits in the outbox (features/offline) and goes when it answers again. A move to a later song
+ * before the play counted (and after the first two seconds) is a skip (`POST /api/taste/skip`), which the
+ * recommendations take as a mild "not now". Main thread only.
  */
 class Scrobbler(
     private val player: ExoPlayer,
@@ -24,6 +26,13 @@ class Scrobbler(
     private var logged = false
     private var lastId: Long? = null
     private var lastDurationSec = 0.0
+    /** how far into the last song the player was at the last [check] (seconds) */
+    private var lastPositionSec = 0.0
+    /** the queue index of the last song at the last [check] */
+    private var lastIndex = -1
+
+    /** set by the service: in a group listen now (the group moves songs on, so there are no skips to tell) */
+    var inGroup: () -> Boolean = { false }
 
     /** "Now playing" for the song, once per song. */
     fun announce(id: Long) {
@@ -43,9 +52,18 @@ class Scrobbler(
             val prev = lastId
             if (!logged && prev != null && lastDurationSec > 0) logPlay(prev, lastDurationSec)
         }
+        // Next (a seek to a later song) before the play counted: a skip
+        val prev = lastId
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK && !logged && prev != null && lastPositionSec >= 2.0 &&
+            player.currentMediaItemIndex > lastIndex && !inGroup() && !OfflineMode.active.value) {
+            val secs = lastPositionSec
+            io.execute { try { api.skip(prev, secs) } catch (_: Exception) {} }
+        }
         logged = false
         lastId = null
         lastDurationSec = 0.0
+        lastPositionSec = 0.0
+        lastIndex = -1
     }
 
     /** The queue ended: the last song ran to its end. */
@@ -73,6 +91,8 @@ class Scrobbler(
         val d = current.durationSec()
         lastId = id
         lastDurationSec = d
+        lastPositionSec = p
+        lastIndex = player.currentMediaItemIndex
         if (logged) return
         // half the song or 4 minutes, whichever comes first; songs under 30 s at their end
         val hit = if (d > 0) (if (d < 30) p >= d - 1 else p >= minOf(d / 2, 240.0)) else p >= 30

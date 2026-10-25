@@ -162,6 +162,7 @@ private fun SignInScreen(graph: AppGraph, server: String, info: AuthInfo, onBack
                 when (result) {
                     is LoginResult.Success -> {
                         graph.likes.clear()
+                        graph.dislikes.clear()
                         graph.store.signIn(result.session)
                     }
                     is LoginResult.NeedsCode -> {

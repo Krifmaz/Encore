@@ -181,6 +181,8 @@ struct ShuffleBody {
     exclude: Vec<i64>,
     /// only this genre's songs
     genre: Option<String>,
+    /// only the songs of these genres (a genre shuffle of several; genres the library doesn't have are skipped)
+    genres: Option<Vec<String>>,
     /// only these songs (a playlist or album being shuffled): they come back in a taste-weighted order, without
     /// the disliked ones
     ids: Option<Vec<i64>>,
@@ -188,12 +190,19 @@ struct ShuffleBody {
 
 /// POST /api/taste/shuffle: a smart shuffle – random songs weighted by the listener's taste (favourites come up
 /// more often, just-played songs wait, artists are spread out), never a disliked song or artist. Over the whole
-/// library, one genre (`genre`) or a given list (`ids`). Answers the songs, with their loudness.
+/// library, one genre (`genre`), several (`genres`: a genre shuffle) or a given list (`ids`). Answers the songs,
+/// with their loudness.
 async fn shuffle(State(st): State<AppState>, User(u): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (cat, _, profile) = model(st, u.i("id"))?;
         let scope = if let Some(ids) = &b.ids {
             Scope::Songs(ids.iter().filter_map(|i| cat.index(*i)).collect())
+        } else if let Some(gs) = b.genres.as_ref().filter(|v| !v.is_empty()) {
+            let found: Vec<u16> = gs.iter().filter_map(|g| cat.genre_index(g)).collect();
+            if found.is_empty() {
+                return Err(err(404, "No songs of those genres"));
+            }
+            Scope::Genres(found)
         } else if let Some(g) = b.genre.as_deref().filter(|g| !g.trim().is_empty()) {
             Scope::Genre(cat.genre_index(g).ok_or_else(|| err(404, "No songs of that genre"))?)
         } else {

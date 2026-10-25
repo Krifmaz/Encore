@@ -1323,3 +1323,32 @@ data class Leaderboard(
     /** (username, songs played this week), most first. */
     val thisWeek: List<Pair<String, Long>> get() = weekRows.map { it.username to it.plays }
 }
+
+/**
+ * One For you mix made on the server from the library (`/api/taste/mixes`).
+ *
+ * @property id what to ask for it again (`you`, `fresh`, `rediscover`, `genre:<name>`, `artist:<name>`)
+ * @property title its name ("Your mix", "Indie rock mix" …)
+ * @property subtitle one line under the name
+ * @property covers album ids of its first songs, for the tile's cover
+ * @property tracks its songs, in play order
+ */
+data class TasteMix(val id: String, val title: String, val subtitle: String, val covers: List<String>, val tracks: List<Track>)
+
+/**
+ * GET /api/taste/mixes.
+ *
+ * @property cold the account hasn't played, liked or disliked anything yet (the mixes are plain shuffles)
+ * @property mixes the mixes, Your mix first
+ */
+data class TasteMixes(val cold: Boolean, val mixes: List<TasteMix>)
+
+/**
+ * One genre of the library (`/api/taste/genres`).
+ *
+ * @property genre its name as the server keys it ("hip hop"), for `genre:<name>` mixes
+ * @property title its name to show ("Hip hop")
+ * @property songs how many songs of the library it has
+ * @property affinity how much this account likes it, -1..1
+ */
+data class TasteGenre(val genre: String, val title: String, val songs: Int, val affinity: Double)

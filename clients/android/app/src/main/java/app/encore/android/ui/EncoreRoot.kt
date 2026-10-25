@@ -263,7 +263,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // whether the server has the Surround library (0.35): the Library's Surround tab, the song menu's surround entries
     LaunchedEffect(session) { SurroundUi.probe(graph) }
     val fixScope = rememberCoroutineScope()
-    LaunchedEffect(session) { graph.likes.refresh(force = true) }
+    LaunchedEffect(session) { graph.likes.refresh(force = true); graph.dislikes.refresh(force = true) }
     // the first page of each Library tab's covers, so the tabs open with their covers in place
     LaunchedEffect(session) { graph.coverPreloader.firstPages() }
     // the next song's cover, fetched ahead so it shows at once when the song changes
