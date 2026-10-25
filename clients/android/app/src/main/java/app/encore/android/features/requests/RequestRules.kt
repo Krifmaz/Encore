@@ -9,6 +9,7 @@ import app.encore.android.data.repo.LinkResult
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.RejectedDownload
 import app.encore.android.data.repo.RequestCandidate
+import app.encore.android.data.repo.RequestCounts
 import app.encore.android.data.repo.RequestError
 import app.encore.android.data.repo.RequestOutput
 import app.encore.android.data.repo.RequestRow
@@ -80,6 +81,30 @@ data class RequestDetails(
  * `clear_menu`, `retry_failed`; requests.rs; download.rs). Pure, so the unit tests check the words and the gates.
  */
 object RequestRules {
+    /** A filter chip's label with its count beside it ("Failed 3"); just the label while there are no counts. */
+    fun filterLabel(key: String, label: String, counts: RequestCounts?): String {
+        if (counts == null) return label
+        val n = when (key) {
+            "all" -> counts.all
+            "active" -> counts.active
+            "pending" -> counts.pending
+            "completed" -> counts.completed
+            "failed" -> counts.failed
+            else -> return label
+        }
+        return "$label $n"
+    }
+
+    /**
+     * The badges over the filters, as the web's `counts_badges`: (text, kind) for the downloads still to go, the
+     * requests awaiting approval and the failed ones; a group with none is left out.
+     */
+    fun countBadges(c: RequestCounts): List<Pair<String, String>> = listOf(
+        Triple(c.remaining, "info", "remaining"),
+        Triple(c.pending, "warn", "awaiting approval"),
+        Triple(c.failed, "err", "failed"),
+    ).filter { it.first > 0 }.map { (n, kind, text) -> "$n $text" to kind }
+
     /** The request's title as a link ([RequestTarget]); null for an artist (its name is the link), a link or a playlist. */
     fun titleTarget(r: RequestRow): RequestTarget? {
         if (r.kind != "album" && r.kind != "track") return null

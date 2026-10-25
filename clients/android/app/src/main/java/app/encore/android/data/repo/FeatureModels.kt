@@ -574,6 +574,26 @@ data class SimilarTracks(val source: LString = "", @Serializable(with = Items::c
 @Serializable
 data class RequestUser(val id: LLong = 0L, val username: LString = "", val count: LInt = 0)
 
+/**
+ * GET /api/requests/counts: how many requests are in each status group, for whose requests the list shows; the
+ * filter chips and the badges over them show these.
+ */
+@Serializable
+data class RequestCounts(
+    /** Every request (the All filter). */
+    val all: LInt = 0,
+    /** Still to download: queued, searching, downloading, monitoring, importing or waiting. */
+    val remaining: LInt = 0,
+    /** Awaiting an admin's approval. */
+    val pending: LInt = 0,
+    /** The Active filter: [remaining] and [pending] together. */
+    val active: LInt = 0,
+    /** Finished and in the library (the Available filter). */
+    val completed: LInt = 0,
+    /** Failed (the Failed filter). */
+    val failed: LInt = 0,
+)
+
 /** One row of GET /api/requests. */
 @Serializable
 data class RequestRow(
