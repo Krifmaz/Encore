@@ -108,6 +108,8 @@ pub struct Web {
     /// sign-ins with Spotify, Tidal, Last.fm and MusicBrainz in progress: their single-use states and
     /// confirmation pages, each for 10 minutes (crate::signin)
     pub(crate) sign_ins: Arc<crate::signin::SignIns>,
+    /// the recommendations' catalog of the library and the server's co-listening (crate::routes::taste)
+    pub(crate) taste: crate::routes::taste::TasteLock,
 }
 
 /// How long the Storage page's folder sizes and disk usage are reused before they are worked out again (in
@@ -132,6 +134,7 @@ impl Default for Web {
             perf: Default::default(),
             new_releases: Default::default(),
             sign_ins: Default::default(),
+            taste: Default::default(),
         }
     }
 }

@@ -4,7 +4,8 @@
 //! importing ([`tagger`], [`meta`]), lyrics, duplicates, organizing folders, the side index of the library
 //! lists ([`sections`]), each song's loudness for volume normalization ([`loudness`]), and giving
 //! fingerprints and ISRCs back to AcoustID and MusicBrainz ([`contribute`]), and the Surround library of Dolby Atmos and
-//! multichannel versions, kept apart from the stereo one ([`surround`]).
+//! multichannel versions, kept apart from the stereo one ([`surround`]), and the recommendations made from the
+//! listeners' plays, likes, skips and dislikes ([`taste`]).
 //!
 //! Functions that need the server's database, settings, HTTP client or caches take a [`Ctx`], which the
 //! server's state implements.
@@ -30,6 +31,7 @@ pub mod search;
 pub mod sections;
 pub mod split;
 pub mod surround;
+pub mod taste;
 pub mod tagger;
 pub mod translate;
 pub mod twins;
