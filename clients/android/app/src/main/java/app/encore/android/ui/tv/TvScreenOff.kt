@@ -8,16 +8,14 @@
  * the time Settings → TV → When idle gives ([TvIdleOff], never by default), fully black or only dimmed
  * ([TvIdleStyle], black by default).
  *
- * While the screen is fully off this also goes as far as an app can towards a really dark panel:
+ * While the screen is fully off:
  * - the mouse / air-mouse pointer is hidden over the black layer (a pointer drawn by a separate "mouse toggle" app is
- *   that app's own overlay and can't be hidden from here);
+ *   that app's own overlay and can't be hidden from here), and a mouse click wakes the screen;
  * - the window's brightness is set to off ([WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF]), which turns the
- *   backlight down or off on TVs and boxes that honour it (many TVs ignore it and only the black picture remains);
- * - the window never holds the screen on ([WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON] is cleared), so the TV's own
- *   "turn off display when inactive" setting can switch the panel off. Playback runs in its foreground service with a
- *   CPU-only wake lock, so the music keeps playing either way.
- * Actually switching the panel off on command takes system rights (HDMI-CEC standby, the power manager) that a store
- * app doesn't get, so that is left to the TV's own power button and settings.
+ *   backlight down on the few TVs that honour it (a box such as a Shield ignores it; the picture is simply black);
+ * - the window holds the screen on ([WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON]) so the box never goes to sleep.
+ *   That matters on a box behind a receiver or surround processor: its sleep sends HDMI-CEC standby down the chain and
+ *   would switch the audio off with the picture. Nothing here ever sends CEC or puts the display to sleep.
  */
 package app.encore.android.ui.tv
 
@@ -198,18 +196,20 @@ fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit, alpha: Float = 1f)
     val noPointer = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
-    // fully off: the window's backlight down too, put back as it was when the screen comes back on
+    // fully off: the backlight down and the box kept awake, both put back when the screen comes back on
     if (alpha >= 1f) {
         DisposableEffect(context) {
             val window = context.findActivity()?.window
             val before = window?.attributes?.screenBrightness
             window?.let { w ->
-                w.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                // kept awake while black: the box's sleep would standby the whole HDMI chain, audio included
+                w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 w.attributes = w.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF }
             }
             onDispose {
-                if (window != null && before != null) {
-                    window.attributes = window.attributes.apply { screenBrightness = before }
+                if (window != null) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    if (before != null) window.attributes = window.attributes.apply { screenBrightness = before }
                 }
             }
         }
