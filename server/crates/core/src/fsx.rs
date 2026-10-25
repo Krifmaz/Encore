@@ -102,8 +102,9 @@ pub struct StepError {
     /// failing side, not the destination
     pub source_failed: bool,
     /// set by [`narrow`]: the failing file's folder passed a fresh probe, so the error is this one file's
-    /// (a read-only disk of a pooled library, a name that disk refuses), not the storage's
-    pub only_file: Option<OnlyFile>,
+    /// (a read-only disk of a pooled library, a name that disk refuses), not the storage's (boxed: the error
+    /// stays small, as clippy's `result_large_err` wants)
+    pub only_file: Option<Box<OnlyFile>>,
 }
 
 /// What [`narrow`] found out about a file whose write failed although its folder can be written.
@@ -226,7 +227,7 @@ pub fn narrow(mut e: StepError) -> StepError {
     }
     let Some(dir) = file.parent().filter(|d| d.is_dir()).map(Path::to_path_buf) else { return e };
     if probe(&dir, e.step).is_ok() {
-        e.only_file = Some(OnlyFile { branch: mergerfs_fullpath(&file), dir });
+        e.only_file = Some(Box::new(OnlyFile { branch: mergerfs_fullpath(&file), dir }));
     }
     e
 }
