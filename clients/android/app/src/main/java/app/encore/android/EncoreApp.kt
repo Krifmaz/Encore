@@ -6,6 +6,7 @@ import app.encore.android.data.api.ApiCache
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.buildHttpClient
 import app.encore.android.data.library.LikesRepository
+import app.encore.android.data.library.DislikesRepository
 import app.encore.android.data.prefs.PrefsRepository
 import app.encore.android.data.session.SessionStore
 import coil3.ImageLoader
@@ -42,7 +43,7 @@ class AppGraph(app: Application) {
     val api: EncoreApi = EncoreApi(http, store)
     val likes: LikesRepository = LikesRepository(api, scope)
     /** The disliked songs (the player's thumbs-down), which the server's shuffles and mixes leave out. */
-    val dislikes: app.encore.android.data.library.DislikesRepository = app.encore.android.data.library.DislikesRepository(api, likes, scope)
+    val dislikes: DislikesRepository = DislikesRepository(api, likes, scope)
 
     /** Playback preferences (quality, effects, server processing), synced with the account. */
     val prefs: PrefsRepository = PrefsRepository(app, api, scope, store)
