@@ -14,6 +14,9 @@ thread_local! {
     static LINK_TICK: RefCell<Option<Interval>> = const { RefCell::new(None) };
 }
 
+/// How often, ms, the linked device's position moves on here between its check-ins.
+const LINK_TICK_MS: u32 = 250;
+
 // ---- linked: this device is locked as a remote for another one ----
 // Everything you play or press here goes to that device; nothing plays locally until you unlink.
 pub(super) fn is_linked() -> bool { LINK.with(|l| l.borrow().is_some()) }
@@ -37,14 +40,15 @@ pub fn set_link(l: Option<Link>) {
     if now && !was { silence_here(); }
     let old_tick = LINK_TICK.with(|t| t.borrow_mut().take());
     drop(old_tick);
-    // between check-ins, move the remote's seek bar along on our own
+    // between check-ins, move the remote's seek bar (and its time-synced lyrics) along on our own, four times a
+    // second so a line lights up within a quarter second of being sung on the other device
     if now {
-        let tick = Interval::new(1000, || {
+        let tick = Interval::new(LINK_TICK_MS, || {
             let playing = LINK.with(|l| l.borrow().as_ref().is_some_and(|l| l.state.truthy("playing")));
             if playing {
                 LINK.with(|l| {
                     if let Some(l) = l.borrow_mut().as_mut() {
-                        let p = l.state.f("position") + 1.0;
+                        let p = l.state.f("position") + LINK_TICK_MS as f64 / 1000.0;
                         if let Some(o) = l.state.as_object_mut() { o.insert("position".into(), json!(p)); }
                     }
                 });

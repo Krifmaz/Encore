@@ -278,8 +278,11 @@ pub(super) fn render_full() {
         if let Some(it) = dom::closest(e, "[data-i]") { jump(num(&dom::data(&it, "i")) as i64); }
     });
     wire(&mut ls, &f, "#np-lyrics", "click", |e| {
-        // "Report lyrics" under the lyrics, else a line: seek there
-        if dom::closest(e, "[data-lyrics-report]").is_some() { report_lyrics(); return; }
+        // "Report lyrics" / the timing controls under the lyrics, else a line: seek there
+        if dom::closest(e, "[data-lyrics-report]").is_some() { report_lyrics("wrong_lyrics"); return; }
+        if dom::closest(e, "[data-lyrics-other]").is_some() { report_lyrics("lyrics_sync"); return; }
+        if let Some(b) = dom::closest(e, "[data-lyrics-nudge]") { nudge_lyrics(num(&dom::data(&b, "lyricsNudge")) as i64); return; }
+        if dom::closest(e, "[data-lyrics-reset]").is_some() { nudge_lyrics_to(0); return; }
         if let Some(l) = dom::closest(e, "[data-t]") { seek_to(num(&dom::data(&l, "t"))); }
     });
     set_full_listeners(ls);

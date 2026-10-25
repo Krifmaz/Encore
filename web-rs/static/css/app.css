@@ -578,6 +578,8 @@ body.np-open { overflow: hidden; }
 /* "Report lyrics" under the lyrics (wrong words or timing): quiet, centred, out of the lines' way */
 .np-lyrics .np-lyrics-report { display: flex; justify-content: center; padding: 18px 0 8px; opacity: .75; }
 .np-lyrics .np-lyrics-report:hover { opacity: 1; }
+/* time-synced lyrics: Earlier · nudge · Later · Other timing · Report lyrics, wrapping on a narrow screen */
+.np-lyrics .np-lyrics-timing { flex-wrap: wrap; gap: 6px; }
 .np-queue h3 { margin: 6px 0 10px; }
 .np-q-acts { gap: 6px; justify-content: flex-end; }
 .np-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; cursor: pointer; }

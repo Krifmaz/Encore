@@ -15,6 +15,55 @@ fn clean(s: &str) -> String {
     RE.replace_all(s, "").trim().to_string()
 }
 
+/// Words in a title's brackets or after " - " that name a different recording of a song: a remix, a live take,
+/// an acoustic version… Their lyrics (and above all their timing) differ from the original's.
+const VERSION_WORDS: &[&str] = &[
+    "remix", "rmx", "mix", "live", "acoustic", "unplugged", "instrumental", "karaoke", "demo", "edit", "extended",
+    "version", "rework", "reprise", "vip", "bootleg", "flip", "slowed", "sped", "nightcore", "reverb", "cover",
+];
+
+/// The version words ([`VERSION_WORDS`]) a title carries, in its brackets or after " - " (the plain title
+/// itself never counts: "Mix Tape" is a song, "Song (Club Mix)" a version), sorted and without repeats.
+fn version_of(title: &str) -> Vec<&'static str> {
+    let lower = title.to_lowercase();
+    let mut parts: Vec<&str> = Vec::new();
+    // what is inside (…) or […]
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in lower.char_indices() {
+        match c {
+            '(' | '[' => {
+                if depth == 0 {
+                    start = i + 1;
+                }
+                depth += 1;
+            }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push(&lower[start..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    // "Song - Club Mix": everything after the first " - "
+    if let Some((_, rest)) = lower.split_once(" - ") {
+        parts.push(rest);
+    }
+    let mut out: Vec<&'static str> = VERSION_WORDS.iter().copied()
+        .filter(|w| parts.iter().any(|p| p.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w)))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// Is a search hit the same recording as the song asked for: the same version words ([`version_of`]) in both
+/// titles? A remix never gets the original's lyrics, nor the original a remix's. A hit without a title passes.
+fn same_version(asked: &[&str], hit: &Value) -> bool {
+    hit["trackName"].as_str().is_none_or(|name| version_of(name) == asked)
+}
+
 /// LRCLIB's free-text search (words of the lyrics, a title): a list of songs.
 pub fn search(st: &impl Ctx, q: &str) -> RequestBuilder {
     st.http().get(format!("{}/search", st.urls().lrclib)).query(&[("q", q)])
@@ -55,6 +104,9 @@ pub async fn lookup_with(st: &impl Ctx, artist: &str, title: &str, album: &str, 
     }
     let r = st.http().get(format!("{}/search", st.urls().lrclib)).query(&[("artist_name", artist.to_string()), ("track_name", clean(title))]).send().await?;
     let hits: Vec<Value> = if r.status().is_success() { r.json::<Value>().await?.as_array().cloned().unwrap_or_default() } else { vec![] };
+    // the search is fuzzy: "Song (Remix)" finds the original too, and its lines run at the original's pace
+    let asked = version_of(title);
+    let hits = hits.into_iter().filter(|h| same_version(&asked, h)).collect();
     Ok(best(hits, exact, duration, keep))
 }
 
@@ -99,6 +151,26 @@ mod tests {
         // the exact match left with plain lyrics only still loses to a synced search hit
         assert_eq!(best(hits, Some(json!({ "id": 9, "plainLyrics": "x" })), Some(200.0), Some).unwrap()["id"], 2);
         assert!(best(vec![], None, None, Some).is_none());
+    }
+
+    /// Remixes, live takes and other versions are told apart by the words in their brackets or after " - ".
+    #[test]
+    fn versions_are_told_apart() {
+        assert_eq!(version_of("hand crushed by a mallet (remix)"), vec!["remix"]);
+        assert_eq!(version_of("hand crushed by a mallet - Remix"), vec!["remix"]);
+        assert_eq!(version_of("hand crushed by a mallet (feat. Fall Out Boy) [Remix]"), vec!["remix"]);
+        assert_eq!(version_of("Song (Live at Wembley)"), vec!["live"]);
+        assert_eq!(version_of("Song (Club Mix) [Live]"), vec!["live", "mix"]);
+        assert!(version_of("hand crushed by a mallet").is_empty());
+        // words of the title itself are no version
+        assert!(version_of("Mix Tape").is_empty());
+        assert!(version_of("Live Forever").is_empty());
+
+        let remix = version_of("hand crushed by a mallet (remix)");
+        assert!(same_version(&remix, &json!({ "trackName": "hand crushed by a mallet (Remix) [feat. Fall Out Boy]" })));
+        assert!(!same_version(&remix, &json!({ "trackName": "hand crushed by a mallet" })));
+        assert!(!same_version(&version_of("hand crushed by a mallet"), &json!({ "trackName": "hand crushed by a mallet (remix)" })));
+        assert!(same_version(&remix, &json!({ "id": 1 })));
     }
 
     /// The cleaned title LRCLIB is asked for.

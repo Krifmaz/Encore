@@ -372,6 +372,16 @@ pub enum Message {
     ReportSong,
     /// Lyrics mode's "Report lyrics": Report a problem with Wrong lyrics ticked.
     ReportLyrics,
+    /// Lyrics mode's "Other timing": Report a problem with Lyrics out of sync ticked (another timing is looked for).
+    ReportLyricsSync,
+    /// Lyrics mode's Earlier (−1) / Later (+1): the time-synced lines move a quarter second.
+    NudgeLyrics(i64),
+    /// Lyrics mode's "In sync": the lines as stamped again.
+    NudgeLyricsReset,
+    /// The clicks stopped: save the nudge of song `.0` if click `.1` is still the newest.
+    SaveLyricsShift(i64, u64),
+    /// The server answered the save of song `.0`'s nudge.
+    LyricsShiftSaved(i64, Result<Value, ApiError>),
     /// The library's song dialogs and downloads.
     SongAct(crate::pages::library::Act),
     ViewAlbum,
@@ -983,13 +993,46 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 }
             }
         }
-        Message::ReportLyrics => {
+        Message::ReportLyrics | Message::ReportLyricsSync => {
             state.menu = None;
+            let reason = if matches!(msg, Message::ReportLyricsSync) { "lyrics_sync" } else { "wrong_lyrics" };
             if let Some(n) = state.now() {
                 if let Some(id) = n.id {
-                    crate::pages::library::open_report(&mut state.shared, "track", json!(id), &n.title, "wrong_lyrics");
+                    crate::pages::library::open_report(&mut state.shared, "track", json!(id), &n.title, reason);
                 }
             }
+        }
+        Message::NudgeLyrics(_) | Message::NudgeLyricsReset => {
+            let Some(id) = state.lyrics.id.filter(|_| !state.lyrics.lines.is_empty()) else { return Task::none() };
+            let gen = match msg {
+                Message::NudgeLyrics(dir) => state.lyrics.nudge(dir),
+                _ => state.lyrics.nudge_to(0),
+            };
+            let pos = state.now().map(|n| n.position).unwrap_or(0.0);
+            state.lyrics.sync(pos);
+            // saved once the clicks stop (a newer click's save replaces this one)
+            let wait = Task::perform(tokio::time::sleep(lyrics::NUDGE_SAVE_AFTER), move |_| Message::SaveLyricsShift(id, gen));
+            return Task::batch([wait, lyrics_scroll_soon()]);
+        }
+        Message::SaveLyricsShift(id, gen) => {
+            if !state.lyrics.save_due(id, gen) {
+                return Task::none();
+            }
+            let api = ctx.api.clone();
+            let ms = state.lyrics.shift_ms;
+            return Task::perform(
+                async move { api.put(&format!("/library/tracks/{id}/lyrics/shift"), json!({ "shift_ms": ms })).await },
+                move |r| Message::LyricsShiftSaved(id, r),
+            );
+        }
+        Message::LyricsShiftSaved(id, r) => {
+            if let Err(e) = &r {
+                ctx.toast_err(format!("Couldn't save the timing: {e}"));
+            }
+            state.lyrics.saved(id, &r);
+            let pos = state.now().map(|n| n.position).unwrap_or(0.0);
+            state.lyrics.sync(pos);
+            return lyrics_scroll_soon();
         }
         Message::SongAct(a) => {
             // a lyrics report went through: the server already looked for other lyrics, so ask it again
