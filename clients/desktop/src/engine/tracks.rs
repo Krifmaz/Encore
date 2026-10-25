@@ -86,14 +86,16 @@ pub fn stream_url(base: &str, id: i64) -> String {
     format!("{base}/api/library/tracks/{id}/stream")
 }
 
-/// The stream to play: the original, or what the playback settings ask for (`?q=…`, `?dsp=1…`).
+/// The stream to play: the original, or what the playback settings ask for (`?q=…`, `?dsp=1…`), on the
+/// address in use (the local network address while it answers, [`crate::route::net`]).
 fn play_url(base: &str, id: i64) -> String {
     let q = query();
-    if q.is_empty() {
+    let url = if q.is_empty() {
         stream_url(base, id)
     } else {
         format!("{}?{q}", stream_url(base, id))
-    }
+    };
+    crate::route::net(&url)
 }
 
 /// A track id from a JSON row (number or numeric string).

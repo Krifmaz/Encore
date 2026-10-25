@@ -248,7 +248,11 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         GroupListen.openInvite(text)
     }
 
-    LaunchedEffect(session) { OfflineMode.start(graph.app) }
+    LaunchedEffect(session) {
+        // the server's local network address while on the home network, its public one otherwise
+        app.encore.android.data.api.ServerRoute.start(graph.app)
+        OfflineMode.start(graph.app)
+    }
     // who is signed in (role and permissions), for the song menu's correcting entries and the Library's admin tab
     val me by SongFixUi.me.collectAsState()
     LaunchedEffect(session) {

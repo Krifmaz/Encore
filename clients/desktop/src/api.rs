@@ -199,11 +199,21 @@ impl Api {
         } else {
             crate::config::normalize(base)
         };
+        // another server: its addresses are found again ([`Api::choose_route`])
+        crate::route::reset(&b);
         *self.base.write().unwrap_or_else(|e| e.into_inner()) = b;
     }
 
-    /// `<base>/api<path>`; a full `http(s)://` URL is used as is.
+    /// `<base>/api<path>` as it is fetched now: on the address in use ([`crate::route::net`]), which is
+    /// the local network address while it answers. A full `http(s)://` URL is used as is (also routed when
+    /// it is on the server).
     pub fn url(&self, path: &str) -> String {
+        crate::route::net(&self.home_url(path))
+    }
+
+    /// `<base>/api<path>` on the address the app was signed in to: the form every kept page, cover and link
+    /// is known by. A full `http(s)://` URL is used as is.
+    fn home_url(&self, path: &str) -> String {
         if path.starts_with("http://") || path.starts_with("https://") {
             return path.to_string();
         }
@@ -213,6 +223,28 @@ impl Api {
         } else {
             format!("{base}/api{path}")
         }
+    }
+
+    /// Asks the server for its addresses (`GET /api/auth/addresses`) and picks the one to use: the Local
+    /// network address while it answers as this server, else the public one (see [`crate::route`]). The
+    /// session cookie is copied to the chosen address, since the jar keeps cookies per host. Called at sign-in
+    /// and every minute; cheap when nothing changed (one call and one probe of at most 2.5 s).
+    pub async fn choose_route(&self) -> crate::route::Route {
+        let home = self.base();
+        // an old server without the endpoint answers 404: nothing to switch to
+        let answer = match self.get("/auth/addresses").await {
+            Ok(v) => Some(v),
+            Err(e) if e.status == 404 => Some(Value::Null),
+            Err(_) => None,
+        };
+        let cookie = self.session_cookie();
+        let r = crate::route::choose(&self.client, &home, answer).await;
+        if let (Some(c), Ok(u)) = (cookie, Url::parse(r.target())) {
+            if r.target() != home {
+                self.jar.add_cookie_str(&format!("{COOKIE}={c}; Path=/; HttpOnly"), &u);
+            }
+        }
+        r
     }
 
     fn base_url(&self) -> Option<Url> {
@@ -270,15 +302,18 @@ impl Api {
     }
 
     /// Asks `/api/health` once (8 s at most, never from the kept copies); when the server answers,
-    /// offline mode ends. True when it answered.
+    /// offline mode ends. True when it answered. The address is chosen again first, so a computer that
+    /// left home (or came back) finds the server at its other address.
     pub async fn check_back(&self) -> bool {
         let base = self.base();
         if base.is_empty() {
             return false;
         }
+        self.choose_route().await;
         let up = match self
             .client
-            .get(format!("{base}/api/health"))
+            // on the address in use: the public one when the local address the app was signed in to is away
+            .get(crate::route::net(&format!("{base}/api/health")))
             .timeout(Duration::from_secs(8))
             .send()
             .await
@@ -310,19 +345,20 @@ impl Api {
         if base.is_empty() {
             return Err(ApiError::new(0, "No server chosen"));
         }
-        let url = self.url(path);
+        // kept under the home address's URL, whichever address answers it
+        let url = self.home_url(path);
         let owner = if method == Method::GET && crate::api_cache::cacheable(&url, &base) {
             crate::api_cache::owner(&base, self.session_cookie().as_deref())
         } else {
             String::new()
         };
         if owner.is_empty() {
-            return self.send(method, &url, body).await.map(|(v, _)| v);
+            return self.send_routed(method, &url, body).await.map(|(v, _)| v);
         }
         if self.is_offline() {
             return kept(&owner, &url).ok_or_else(|| ApiError::new(0, NOT_KEPT));
         }
-        match self.send(method, &url, body).await {
+        match self.send_routed(method, &url, body).await {
             Ok((v, text)) => {
                 crate::api_cache::put(&owner, &url, &text);
                 Ok(v)
@@ -335,6 +371,18 @@ impl Api {
                 None => Err(e),
             },
             Err(e) => Err(e),
+        }
+    }
+
+    /// [`Api::send`] to `url` (a home-address URL) on the address in use. When that is the local network
+    /// address and it can't be reached (the computer left home), the call goes once more to the home address
+    /// and that one stays in use until [`Api::choose_route`] finds the local one again.
+    async fn send_routed(&self, method: Method, url: &str, body: Option<Value>) -> Result<(Value, String), ApiError> {
+        let routed = crate::route::net(url);
+        let first = self.send(method.clone(), &routed, body.clone()).await;
+        match first {
+            Err(e) if e.unreachable() && routed != url && crate::route::fall_back() => self.send(method, url, body).await,
+            other => other,
         }
     }
 
@@ -539,8 +587,13 @@ impl Api {
     }
 
     /// `/api/auth/me` + `/api/auth/info` together.
+    /// When the address the app was signed in to doesn't answer, the server's other address (kept from the
+    /// last run, [`crate::route`]) is tried before giving up: signed in at home, opened away from it.
     pub async fn session(&self) -> Result<Session, ApiError> {
-        let user = self.me().await?;
+        let user = match self.me().await {
+            Err(e) if e.unreachable() && self.choose_route().await.via != crate::route::Via::Home => self.me().await?,
+            other => other?,
+        };
         let info = self.info().await.unwrap_or(Value::Null);
         Ok(Session { user, info })
     }

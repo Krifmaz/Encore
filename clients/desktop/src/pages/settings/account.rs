@@ -505,6 +505,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .spacing(4)
             .align_y(Alignment::Center),
             help("On a phone you can also use your browser's Add to Home screen."),
+            // which of the server's addresses this computer uses (the local one while it answers)
+            help(format!("Connected through: {}", crate::route::current().label())),
             container(btn("Change server…", Btn::Default, Some(Message::Ask(Dialog::ChangeServer)))),
         ]
         .spacing(10)

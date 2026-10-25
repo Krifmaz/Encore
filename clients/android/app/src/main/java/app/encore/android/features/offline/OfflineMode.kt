@@ -144,6 +144,8 @@ object OfflineMode {
             return@withLock false
         }
         _trying.value = true
+        // a phone that left home (or came back) finds the server at its other address first
+        if (_active.value) app.encore.android.data.api.ServerRoute.choose(a)
         val failure = try { withContext(Dispatchers.IO) { probe(graph, server) } } finally { _trying.value = false }
         val up = failure == null
         if (failure != null) _reason.value = failure

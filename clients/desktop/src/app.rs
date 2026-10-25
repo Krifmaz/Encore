@@ -59,6 +59,8 @@ pub enum Message {
     CheckServer,
     /// The answer to [`Message::CheckServer`]: true when the server is back.
     ServerBack(bool),
+    /// The address in use was chosen again ([`Api::choose_route`]): the local network address while it answers.
+    Route(crate::route::Route),
     Nav(Page),
     Back,
     SignOut,
@@ -143,6 +145,8 @@ pub struct App {
     pub tour: Option<crate::tour::State>,
     pub whats_new: crate::whats_new::State,
     ticks: u64,
+    /// The server address in use when it was last chosen, so a switch is told once ([`Message::Route`]).
+    route_via: crate::route::Via,
     // one state per page
     pub login: pages::login::State,
     pub home: pages::home::State,
@@ -231,6 +235,7 @@ impl App {
             tour: flags.tour.map(|(dir, login)| crate::tour::State::new(dir, login)),
             whats_new: Default::default(),
             ticks: 0,
+            route_via: crate::route::Via::Home,
             login,
             home: Default::default(),
             search: Default::default(),
@@ -527,6 +532,12 @@ impl App {
         ])
     }
 
+    /// Picks the server address to use ([`Api::choose_route`]).
+    fn choose_route(&self) -> Task<Message> {
+        let api = self.api.clone();
+        Task::perform(async move { api.choose_route().await }, Message::Route)
+    }
+
     /// Asks the server whether it is back ([`Api::check_back`], which ends offline mode).
     fn check_server(&self) -> Task<Message> {
         let api = self.api.clone();
@@ -678,11 +689,23 @@ impl App {
                     if self.api.is_offline() && self.ticks.is_multiple_of(60) {
                         tasks.push(self.check_server());
                     }
+                    // every minute: home network or not (the local network address answers or it doesn't)
+                    if !self.api.is_offline() && self.ticks.is_multiple_of(120) {
+                        tasks.push(self.choose_route());
+                    }
                 }
                 tasks.push(crate::desktop::on_tick(self));
                 Task::batch(tasks)
             }
             Message::CheckServer => self.check_server(),
+            Message::Route(r) => {
+                // a switch shows once; the same address again says nothing
+                if r.via != self.route_via {
+                    self.toast(format!("Connected through {}", r.label()), ToastKind::Ok);
+                    self.route_via = r.via;
+                }
+                Task::none()
+            }
             Message::ServerBack(false) => Task::none(),
             Message::ServerBack(true) => {
                 // the open page and the shell's badges load again from the server
@@ -702,6 +725,7 @@ impl App {
                 self.booting = false;
                 if first {
                     Task::batch([
+                        self.choose_route(),
                         self.navigate(Page::Home, false),
                         link::start(self.api.clone(), &self.config).map(Message::Link),
                         self.load_shell(),

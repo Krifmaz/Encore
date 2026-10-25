@@ -29,6 +29,8 @@ fun buildHttpClient(context: Context, store: SessionStore): OkHttpClient =
         .followSslRedirects(true)
         .cache(Cache(File(context.cacheDir, "http"), 50L * 1024L * 1024L))
         .addInterceptor(AuthInterceptor(store))
+        // after the session is added for the home address: to the local network address while it answers
+        .addInterceptor(RouteInterceptor())
         // every hop of a redirect: the session stays on the server's own host
         .addNetworkInterceptor(SessionOffHostInterceptor(store))
         .build()
@@ -57,8 +59,10 @@ class AuthInterceptor(private val store: SessionStore) : Interceptor {
         // the server's CSRF check for cookie sessions; harmless with a bearer token
         if (req.method != "GET" && req.method != "HEAD") b.header("X-Requested-With", "encore")
         val res = chain.proceed(b.build())
-        // only the server's own 401 signs out, not one from the host a redirect went on to
-        if (s != null && su != null && authed && res.code == 401 && SessionRules.sameHost(res.request.url, su)) store.onUnauthorized(s.token)
+        // only the server's own 401 signs out (at its home or its route address, ServerRoute), not one from the host a
+        // redirect went on to
+        val own = su != null && (SessionRules.sameHost(res.request.url, su) || ServerRoute.isRouteHost(res.request.url))
+        if (s != null && authed && res.code == 401 && own) store.onUnauthorized(s.token)
         return res
     }
 }
@@ -75,7 +79,8 @@ class SessionOffHostInterceptor(private val store: SessionStore) : Interceptor {
         val req = chain.request()
         val s = store.current ?: return chain.proceed(req)
         val server = s.server.toHttpUrlOrNull()
-        if (server != null && SessionRules.sameHost(req.url, server)) return chain.proceed(req)
+        // the server's own host, or the address ServerRoute moved the request to (it answered as this server)
+        if (server != null && (SessionRules.sameHost(req.url, server) || ServerRoute.isRouteHost(req.url))) return chain.proceed(req)
         val cookie = req.header("Cookie")
         val auth = req.header("Authorization")
         val keptCookie = cookie?.let { SessionRules.cookieWithout(it, s.token) }

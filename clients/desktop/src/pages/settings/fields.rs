@@ -87,6 +87,7 @@ pub const SECTIONS: &[Card] = &[
     Card { id: "general", title: "General", desc: "Your server's name and address, who can sign up, and how requests are approved.", test: None, test_label: None, fields: &[
         s("app_name", "App name", "text"),
         s("base_url", "Public URL", "text").help("e.g. https://music.example.com – used in links & notifications"),
+        s("local_url", "Local network address", "text").help("e.g. http://192.168.1.10:8080 – the desktop, phone and TV apps use it instead of the public URL while they're on your home network"),
         s("share_preview", "Shared link preview", "select").options(&[("small", "Small card (small cover)"), ("large", "Big picture"), ("playable", "Playable card (play button and seek bar)")]).help("How shared links look in Discord, X and other chat apps"),
         s("signup_mode", "Sign-up mode", "select").options(&[("invite", "Invite only"), ("open", "Open to anyone"), ("closed", "Closed")]),
         s("auto_approve", "Auto-approve all requests", "bool").help("Otherwise only admins and users with auto-approve skip the approval queue"),

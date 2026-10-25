@@ -708,7 +708,8 @@ async fn get(
     auth: &Auth,
     decoders: bool,
 ) -> Result<reqwest::Response, String> {
-    let mut req = client.get(url).header(auth.0.as_str(), auth.1.as_str());
+    // on the address in use: a song saved at home comes over the local network
+    let mut req = client.get(crate::route::net(url)).header(auth.0.as_str(), auth.1.as_str());
     if decoders {
         req = req.header("X-Encore-Decoders", tracks::DECODERS);
     }

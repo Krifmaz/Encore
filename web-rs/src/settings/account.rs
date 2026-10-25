@@ -23,6 +23,42 @@ fn session_title(s: &Value) -> String {
     }
 }
 
+/// The Apps card's address line for a page opened at `origin`, from `GET /api/auth/addresses`
+/// (`{public, local}`): which address this browser uses, and the local one as a link while on the
+/// public one. Empty when the server has no Local network address.
+pub(crate) fn address_line(origin: &str, v: &Value) -> String {
+    let local = v.s("local").trim().trim_end_matches('/').to_string();
+    if local.is_empty() {
+        return String::new();
+    }
+    let here = origin.trim_end_matches('/');
+    if here.eq_ignore_ascii_case(&local) {
+        return format!("This browser uses the server's <b>local network address</b> ({}).", esc(&local));
+    }
+    format!(
+        r#"This browser uses {}. On your home network <a href="{}" target="_blank" rel="noopener">{}</a> is faster (sign in there once); the desktop, phone and TV apps switch to it on their own."#,
+        if v.s("public").trim_end_matches('/').eq_ignore_ascii_case(here) { "the server's <b>public address</b>" } else { "this address" },
+        esc(&local),
+        esc(&local),
+    )
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::address_line;
+    use serde_json::json;
+
+    #[test]
+    fn says_which_address_and_links_the_local_one() {
+        let v = json!({ "public": "https://encore.example.uk", "local": "http://10.0.1.7:8080" });
+        assert_eq!(address_line("http://10.0.1.7:8080", &v), "This browser uses the server's <b>local network address</b> (http://10.0.1.7:8080).");
+        let away = address_line("https://encore.example.uk", &v);
+        assert!(away.starts_with("This browser uses the server's <b>public address</b>. On your home network <a href=\"http://10.0.1.7:8080\""), "{away}");
+        assert!(address_line("http://localhost:8080", &v).starts_with("This browser uses this address."));
+        assert_eq!(address_line("https://encore.example.uk", &json!({ "public": "https://encore.example.uk", "local": "" })), "");
+    }
+}
+
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let me = api::get("/auth/me").await.map_err(|e| e.message)?;
@@ -81,6 +117,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     </form>
     <div class="card stack mt" style="max-width:720px"><h3>Apps</h3>
       <p class="small muted" style="margin:0">Android app and desktop apps for Windows, macOS and Linux: <a href="https://github.com/Krifmaz/Encore/releases" target="_blank" rel="noopener">download from the Releases page</a>. On a phone you can also use your browser's <b>Add to Home screen</b>.</p>
+      <p class="small muted" id="addr-line" style="margin:0" hidden></p>
       </div>
     {twofa}
     <div class="section-head"><h2>Active sessions</h2>{logout_all}</div>
@@ -96,6 +133,19 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             email = esc(&me.s("email")),
         ));
 
+        // which of the server's addresses this browser uses (the apps switch on their own; a browser can't
+        // carry its sign-in to another address, so it only says so and links the other one)
+        if has("addresses") {
+            if let Some(line) = dom::qs_in(&view, "#addr-line") {
+                dom::spawn(async move {
+                    let Ok(v) = api::get("/auth/addresses").await else { return };
+                    let html = address_line(&dom::location().origin().unwrap_or_default(), &v);
+                    if html.is_empty() { return }
+                    dom::set_html(&line, &html);
+                    if let Ok(e) = line.dyn_into::<web_sys::HtmlElement>() { e.set_hidden(false); }
+                });
+            }
+        }
         let Some(bx) = dom::qs_in(&view, "#sessions") else { return Ok(()) };
         let load_sessions: Rc<dyn Fn()> = {
             let bx = bx.clone();
