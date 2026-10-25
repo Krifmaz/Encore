@@ -7,21 +7,39 @@
  * Screen off is turned on by its button in the player's top bar, or by itself after the remote has sat untouched for
  * the time Settings → TV → When idle gives ([TvIdleOff], never by default), fully black or only dimmed
  * ([TvIdleStyle], black by default).
+ *
+ * While the screen is fully off this also goes as far as an app can towards a really dark panel:
+ * - the mouse / air-mouse pointer is hidden over the black layer (a pointer drawn by a separate "mouse toggle" app is
+ *   that app's own overlay and can't be hidden from here);
+ * - the window's brightness is set to off ([WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF]), which turns the
+ *   backlight down or off on TVs and boxes that honour it (many TVs ignore it and only the black picture remains);
+ * - the window never holds the screen on ([WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON] is cleared), so the TV's own
+ *   "turn off display when inactive" setting can switch the panel off. Playback runs in its foreground service with a
+ *   CPU-only wake lock, so the music keeps playing either way.
+ * Actually switching the panel off on command takes system rights (HDMI-CEC standby, the power manager) that a store
+ * app doesn't get, so that is left to the TV's own power button and settings.
  */
 package app.encore.android.ui.tv
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,10 +51,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.ui.Nav
@@ -172,6 +193,27 @@ object ScreenOffRules {
 @Composable
 fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit, alpha: Float = 1f) {
     if (!on) return
+    val context = LocalContext.current
+    // an empty pointer, so a mouse or air-mouse cursor doesn't float over the black screen
+    val noPointer = remember(context) {
+        PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
+    }
+    // fully off: the window's backlight down too, put back as it was when the screen comes back on
+    if (alpha >= 1f) {
+        DisposableEffect(context) {
+            val window = context.findActivity()?.window
+            val before = window?.attributes?.screenBrightness
+            window?.let { w ->
+                w.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                w.attributes = w.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_OFF }
+            }
+            onDispose {
+                if (window != null && before != null) {
+                    window.attributes = window.attributes.apply { screenBrightness = before }
+                }
+            }
+        }
+    }
     val focus = remember { FocusRequester() }
     var hint by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
@@ -183,6 +225,9 @@ fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit, alpha: Float = 1f)
         Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = alpha))
+            .pointerHoverIcon(noPointer, overrideDescendants = true)
+            // a mouse click wakes the screen too, rather than pressing an unseen button of the player underneath
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onWake)
             .focusRequester(focus)
             .onPreviewKeyEvent { e ->
                 when (ScreenOffRules.actionOf(e.key.nativeKeyCode)) {
@@ -218,4 +263,11 @@ fun ScreenOffLayer(on: Boolean, nav: Nav, onWake: () -> Unit, alpha: Float = 1f)
             )
         }
     }
+}
+
+/** The activity this context belongs to (a Compose context may be wrapped), or null when there is none. */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
