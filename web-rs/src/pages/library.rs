@@ -62,9 +62,11 @@ pub(crate) fn show_all_label(count: Option<u64>, shown: usize, limit: usize) -> 
 }
 
 /// The album kind a list asks for: the Albums tab with a search lists the singles too, as the results view's
-/// count does (client-shapes §3.4: `counts.albums` includes singles), so "Show all N" opens N albums.
-fn album_kind<'a>(tab: &'a str, q: &str) -> &'a str {
-    if tab == "albums" && !q.is_empty() { "" } else { tab }
+/// count does (client-shapes §3.4: `counts.albums` includes singles), so "Show all N" opens N albums. One
+/// artist's Albums tab (`?artist=`) lists its singles and EPs too: an artist with only a single (a featured
+/// artist, one half of a collaboration) showed "No albums found".
+fn album_kind<'a>(tab: &'a str, q: &str, artist: &str) -> &'a str {
+    if tab == "albums" && (!q.is_empty() || !artist.is_empty()) { "" } else { tab }
 }
 
 /// `history.replaceState(null, '', url)`: the address follows the page without a new history entry or a redraw.
@@ -497,7 +499,7 @@ impl Lib {
     fn albums_query(&self) -> lt::AlbumsQuery {
         let st = self.st.borrow();
         lt::AlbumsQuery {
-            q: st.q.clone(), sort: st.sort.clone(), dir: st.dir.clone(), kind: album_kind(&st.tab, &st.q).to_string(), filter: st.filter.clone(),
+            q: st.q.clone(), sort: st.sort.clone(), dir: st.dir.clone(), kind: album_kind(&st.tab, &st.q, &st.artist).to_string(), filter: st.filter.clone(),
             artist: st.artist.clone(), album_type: if st.tab == "albums" { st.album_type.clone() } else { String::new() },
         }
     }
@@ -2012,8 +2014,11 @@ mod search_tests {
 
     #[test]
     fn the_albums_tab_with_a_search_lists_the_singles_too() {
-        assert_eq!(album_kind("albums", "crazy"), "");
-        assert_eq!(album_kind("albums", ""), "albums");
-        assert_eq!(album_kind("singles", "crazy"), "singles");
+        assert_eq!(album_kind("albums", "crazy", ""), "");
+        assert_eq!(album_kind("albums", "", ""), "albums");
+        assert_eq!(album_kind("singles", "crazy", ""), "singles");
+        // one artist's albums include its singles
+        assert_eq!(album_kind("albums", "", "3R2"), "");
+        assert_eq!(album_kind("singles", "", "3R2"), "singles");
     }
 }

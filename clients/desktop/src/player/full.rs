@@ -29,7 +29,7 @@ fn queue_rows(state: &State) -> (Vec<QueueRow>, usize) {
             .into_iter()
             .map(|x| QueueRow {
                 title: fmt::s(&x, "title"),
-                artist: fmt::s(&x, "artist"),
+                artist: fmt::s(&x, "artist") + &fmt::feat_text(&x),
                 cover: x["album_id"]
                     .as_str()
                     .filter(|a| !a.is_empty())

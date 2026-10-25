@@ -1654,7 +1654,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         <td class="muted">{}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn sm ghost icon" data-more-track="{rid}" title="More like this" aria-label="More like this">{}</button><button class="btn sm ghost icon" data-pick-track="{rid}" title="Pick a download for this song" aria-label="Pick a download">{}</button>
           {right}</td>
-      </tr>"#, esck(t, "artist"), fmt::dur(t.f("length")), icon("spark"), icon("search"), rid = esck(t, "recording_id"))
+      </tr>"#, crate::ui::artist_links(t), fmt::dur(t.f("length")), icon("spark"), icon("search"), rid = esck(t, "recording_id"))
             }).collect();
             format!(r#"<div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Artist</th><th>Length</th><th></th></tr></thead>

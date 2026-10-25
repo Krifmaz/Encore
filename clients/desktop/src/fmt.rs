@@ -127,6 +127,27 @@ pub fn s(v: &Value, key: &str) -> String {
     }
 }
 
+/// " feat. A, B" for a song row: the featured artists the server found (`featured`: from the song's ARTISTS tag,
+/// its MusicBrainz credit or its title) that its title and artist text don't already name, or "" for none.
+/// "Let Somebody Go" by Coldplay → " feat. Selena Gomez"; a row whose artist text has the names already (a
+/// saved queue that went through here before) gains nothing.
+pub fn feat_text(v: &Value) -> String {
+    let (title, artist) = (s(v, "title").to_lowercase(), s(v, "artist").to_lowercase());
+    let names: Vec<String> = items(&v["featured"])
+        .iter()
+        .map(|a| s(a, "name"))
+        .filter(|n| {
+            let l = n.to_lowercase();
+            !l.is_empty() && !title.contains(&l) && !artist.contains(&l)
+        })
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" feat. {}", names.join(", "))
+    }
+}
+
 /// `f(v, "key")`: a JSON number field or 0.
 pub fn f(v: &Value, key: &str) -> f64 {
     v.get(key).and_then(Value::as_f64).unwrap_or(0.0)

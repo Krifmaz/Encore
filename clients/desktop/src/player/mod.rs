@@ -257,7 +257,7 @@ impl State {
             return Some(Now {
                 id: s["id"].as_i64(),
                 title: fmt::s(s, "title"),
-                artist: fmt::s(s, "artist"),
+                artist: fmt::s(s, "artist") + &fmt::feat_text(s),
                 album: fmt::s(s, "album"),
                 album_id: s["album_id"].as_str().filter(|a| !a.is_empty()).map(str::to_string),
                 cover: s["cover"].as_str().filter(|c| !c.is_empty()).map(str::to_string),
@@ -1144,7 +1144,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::GoToArtist => {
-            if let Some(a) = state.now().map(|n| n.artist).filter(|a| !a.is_empty()) {
+            // the main artist: the text before " feat. " (the featured ones have links of their own elsewhere)
+            if let Some(a) = state.now().map(|n| n.artist.split(" feat. ").next().unwrap_or("").trim().to_string()).filter(|a| !a.is_empty()) {
                 close_views(state);
                 ctx.navigate(Page::ArtistName(a));
             }

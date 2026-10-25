@@ -2273,9 +2273,10 @@ fn keep_route(state: &State, ctx: &mut Ctx) {
 }
 
 /// The album kind a list asks for: the Albums tab with a query lists the singles too, as the
-/// results view's count does (client-shapes §3.4).
+/// results view's count does (client-shapes §3.4). One artist's Albums tab lists its singles and
+/// EPs too: an artist with only a single (a featured artist, half of a collaboration) showed none.
 fn album_kind(state: &State) -> &str {
-    if state.tab == "albums" && !state.q.trim().is_empty() {
+    if state.tab == "albums" && (!state.q.trim().is_empty() || !state.artist.is_empty()) {
         ""
     } else {
         state.tab.as_str()
@@ -3855,6 +3856,9 @@ mod tests {
         st.q = "  ".into();
         assert!(!results_view(&st));
         assert_eq!(album_kind(&st), "albums");
+        // one artist's Albums tab lists its singles too
+        st.artist = "3R2".into();
+        assert_eq!(album_kind(&st), "");
         st.q = "x".into();
         st.artist = "Beta Band".into();
         assert!(!results_view(&st));

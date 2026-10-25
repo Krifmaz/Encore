@@ -121,7 +121,7 @@ pub fn link_state(s: Value, online: bool) {
 pub(super) fn remote_track() -> Option<Value> {
     let s = link_state_value();
     if !s.truthy("title") { return None; }
-    Some(json!({ "id": s.g("id"), "title": s.g("title"), "artist": s.g("artist"), "artists": s.g("artists"), "album": s.g("album"), "album_id": s.g("album_id"), "format": s.g("format"), "duration": s.g("duration"), "cover": s.g("cover"), "remote": true }))
+    Some(json!({ "id": s.g("id"), "title": s.g("title"), "artist": s.g("artist"), "artists": s.g("artists"), "featured": s.g("featured"), "album": s.g("album"), "album_id": s.g("album_id"), "format": s.g("format"), "duration": s.g("duration"), "cover": s.g("cover"), "remote": true }))
 }
 /// The song in front of you: the linked device's when linked, else this device's.
 pub(super) fn now_track() -> Option<Value> { if is_linked() { remote_track() } else { current() } }

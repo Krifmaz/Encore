@@ -118,12 +118,14 @@ pub fn from_encore(base: &str, auth: &Auth, v: &Value) -> Option<Track> {
         })
         .filter(|a| !a.is_empty());
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    // the artist text, with the featured artists it leaves out (shown in the bar, the full player and the
+    // system's media controls; "Go to artist" goes by the text before " feat. ")
     let artist = {
         let a = s("artist");
         if a.is_empty() {
             s("albumartist")
         } else {
-            a
+            a + &crate::fmt::feat_text(v)
         }
     };
     Some(Track {

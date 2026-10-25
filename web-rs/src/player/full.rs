@@ -211,7 +211,7 @@ pub(super) fn render_full() {
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
         big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esc(&crate::ui::tr(&t, "title")), title_sub = crate::ui::tr_sub(&t, "title"), quality = esc(&quality(&t)),
-        mini_art = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200), mini_artist = esc(&crate::ui::tr_inline(&t, "artist")),
+        mini_art = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200), mini_artist = esc(&(crate::ui::tr_inline(&t, "artist") + &crate::ui::feat_text(&t))),
         shuffle = shuffle, prev = icon("prev"), pp = PP, next = icon("next"), repeat = repeat_btn,
         volume_ic = icon_attr("volume", r#"width="18""#), vol = volume,
         on_name = on_name, auto = auto, q_btns = queue_buttons(link.is_some(), up_next.len()),

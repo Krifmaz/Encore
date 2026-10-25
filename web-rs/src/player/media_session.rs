@@ -22,7 +22,7 @@ pub(super) fn set_media_metadata(t: &Value) {
     let Some(ms) = media_session() else { return };
     let init = js_sys::Object::new();
     js_set(&init, "title", &crate::ui::tr_inline(t, "title").into());
-    js_set(&init, "artist", &crate::ui::tr_inline(t, "artist").into());
+    js_set(&init, "artist", &(crate::ui::tr_inline(t, "artist") + &crate::ui::feat_text(t)).into());
     js_set(&init, "album", &crate::ui::tr_inline(t, "album").into());
     let artwork = js_sys::Array::new();
     let cov = cover_at(t, 600);

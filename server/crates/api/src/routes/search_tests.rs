@@ -147,11 +147,13 @@ async fn ye_ranks_first_and_spellings_merge() {
 }
 
 #[tokio::test]
-async fn collaborations_split_only_when_every_part_exists() {
+async fn collaborations_split_when_a_part_exists() {
     let mut e = owners_library("collab").await;
-    // "Kanye West" isn't an artist of its own (yet): the collaboration stays whole
+    // XXXTENTACION is an artist of the library: the collaboration splits, Kanye West becoming an artist of its own
     let all = e.artist_names("/api/library/artists?sort=name").await;
-    assert!(all.contains(&"Kanye West & XXXTENTACION".to_string()), "{all:?}");
+    assert!(!all.contains(&"Kanye West & XXXTENTACION".to_string()), "{all:?}");
+    assert!(all.contains(&"Kanye West".to_string()) && all.contains(&"XXXTENTACION".to_string()), "{all:?}");
+    // neither half known: one band
     assert!(all.contains(&"Simon & Garfunkel".to_string()), "{all:?}");
     assert!(all.contains(&"Elton John & Years & Years".to_string()), "{all:?}");
     // Ye is also known as Kanye West (MusicBrainz alias): now it splits into Ye and XXXTENTACION
@@ -266,7 +268,8 @@ async fn removing_an_artist_removes_every_merged_spelling() {
     let r = call(&e.app, "DELETE", "/api/library/artists?name=XXXTENTACION", &e.cookie).await;
     assert_eq!(r.1["removed"], 3);
     let all = e.get("/api/library/artists?sort=name").await;
-    let collab = all.as_array().unwrap().iter().find(|a| a["name"] == "Kanye West & XXXTENTACION").expect("the collaboration stays");
+    // the collaboration's songs stay, under each of its artists: XXXTENTACION is still listed, with them
+    let collab = all.as_array().unwrap().iter().find(|a| a["name"] == "XXXTENTACION").expect("the collaboration stays");
     assert_eq!(collab["tracks"], 2);
     // an artist named with symbols only is still an artist
     e.many(2, "!!!", "Thr!!!er", "");

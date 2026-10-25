@@ -788,8 +788,34 @@ pub fn artist_links(t: &Value) -> String {
         out.push_str(&format!(r#"{}<a class="artist-link" href="{}">{}</a>"#, esc(&s[at..i]), artist_url(a), esc(&name)));
         at = i + name.len();
     }
-    if at == 0 { return format!(r#"<a class="artist-link" href="{}">{}</a>"#, artist_url(&serde_json::json!({ "name": s })), esc(&s)); }
-    out + &esc(&s[at..])
+    if at == 0 { return format!(r#"<a class="artist-link" href="{}">{}</a>"#, artist_url(&serde_json::json!({ "name": s })), esc(&s)) + &feat_links(t); }
+    out + &esc(&s[at..]) + &feat_links(t)
+}
+
+/// The featured artists a song's title and artist text don't show (the server's `featured`: from its ARTISTS tag,
+/// its MusicBrainz credit or its title), as `{name, mbid?}` values. "Let Somebody Go" by Coldplay → Selena Gomez;
+/// "Song (feat. X)" → nobody, the title already says it.
+pub fn featured_shown(t: &Value) -> Vec<Value> {
+    let (title, artist) = (t.s("title").to_lowercase(), t.s("artist").to_lowercase());
+    t.a("featured").into_iter().filter(|a| {
+        let n = a.s("name").to_lowercase();
+        !n.is_empty() && !title.contains(&n) && !artist.contains(&n)
+    }).collect()
+}
+
+/// " feat. A, B" after a song's artist links, each featured artist a link of its own (see `featured_shown`); ""
+/// when there is nobody to add.
+pub fn feat_links(t: &Value) -> String {
+    let list = featured_shown(t);
+    if list.is_empty() { return String::new(); }
+    let links: Vec<String> = list.iter().map(|a| format!(r#"<a class="artist-link" href="{}">{}</a>"#, artist_url(a), esc(&a.s("name")))).collect();
+    format!(r#"<span class="feat"> feat. {}</span>"#, links.join(", "))
+}
+
+/// " feat. A, B" as plain text (the player bar and the system's media controls, which show no links).
+pub fn feat_text(t: &Value) -> String {
+    let names: Vec<String> = featured_shown(t).iter().map(|a| a.s("name")).collect();
+    if names.is_empty() { String::new() } else { format!(" feat. {}", names.join(", ")) }
 }
 /// `albumLink(t)`: a song's album name as a link to the album (library album page), or plain text when it has no album id.
 pub fn album_link(t: &Value) -> String {

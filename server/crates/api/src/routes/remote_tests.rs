@@ -239,5 +239,6 @@ async fn songs_carry_each_artist_for_links() {
     e.st.library.artists.invalidate();
     let r = call(&e.app, "GET", "/api/library/tracks/10", &e.cookie, None).await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
-    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": false }]), "{}", r.1);
+    // the featured singer is an artist of the library too (0.41.1: featured artists have pages of their own)
+    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": true }]), "{}", r.1);
 }

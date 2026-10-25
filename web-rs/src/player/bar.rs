@@ -453,7 +453,7 @@ pub(super) fn render() {
         paused = paused_html("p-catchup"), ctl = ctl_attr(), ctl_title = ctl_attr().replace(" disabled", ""),
         thumb = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200),
         title = esc(&crate::ui::tr(&t, "title")),
-        artist = esc(&crate::ui::tr_inline(&t, "artist")),
+        artist = esc(&(crate::ui::tr_inline(&t, "artist") + &crate::ui::feat_text(&t))),
         album = if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(&t, "album"))) } else { String::new() },
         prev = icon("prev"), pp = super::full::PP, next = icon("next"),
         right = right_html(Some(&t), true));
