@@ -25,7 +25,7 @@ async fn health_and_sign_in_facts_answer_without_a_session() {
     let app = s.app();
     let (code, v) = get(&app, "/api/health").await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(v, json!({ "ok": true, "server": "rust", "version": encore_api::VERSION }));
+    assert_eq!(v, json!({ "ok": true, "server": "rust", "version": encore_api::VERSION, "web": null }), "no web build in a test server: `web` is null");
     let (code, v) = get(&app, "/api/auth/info").await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!((v["server"].as_str(), v["api"].as_i64()), (Some("rust"), Some(2)));

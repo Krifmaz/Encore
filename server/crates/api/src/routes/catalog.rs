@@ -162,7 +162,7 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
         return Ok(json!({ "enabled": false, "releases": [] }));
     }
     let filter = encore_config::release_types::ReleaseFilter::for_artist(&st.cfg, &mbid);
-    let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
+    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
     // a dozen MusicBrainz look-ups (the artist's barcodes, ISRCs) for a section shown under the page: after any
     // page someone opens meanwhile (the album they tap next doesn't wait for them)
     let found = mb::with_priority(mb::Priority::Section, merged(&st, &a)).await;

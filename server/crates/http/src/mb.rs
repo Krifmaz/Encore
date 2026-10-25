@@ -265,21 +265,55 @@ impl Mb {
     }
 
     /// The call itself: a turn in the line at `class`, MusicBrainz's answer, kept in memory and (a look-up) on
-    /// disk. 503s are asked again as [`Mb::get`] says.
+    /// disk. 503s are asked again as [`Mb::get`] says. A call that never reached MusicBrainz or never heard back
+    /// (a timeout, a failed DNS lookup, a refused or reset connection: reqwest's "error sending request") and a
+    /// gateway error (502, 504) are asked again too, after [`retry_after`], up to [`TRANSPORT_TRIES`] times. When
+    /// every try failed, a look-up's answer on disk is used however old it is ([`Mb::last_known`]) rather than
+    /// failing the page: an artist page from a 3-week-old answer beats an error screen.
     async fn fetch(&self, st: &impl Ctx, key: &str, path: &str, params: &[(&str, String)], class: Priority) -> anyhow::Result<Value> {
         let mut ps: Vec<(String, String)> = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
         ps.push(("fmt".into(), "json".into()));
         let base = st.cfg().str("musicbrainz_url");
         let base = if base.is_empty() { "https://musicbrainz.org".to_string() } else { base.trim_end_matches('/').to_string() };
         let gap = gap(st);
-        let contact = st.cfg().str("contact_email");
-        let ua = format!("Encore/{} ( {} )", encore_core::VERSION, if contact.is_empty() { "https://github.com/Krifmaz/Encore".into() } else { contact });
+        let ua = crate::client::user_agent(&st.cfg().str("contact_email"));
+        let timeout = call_timeout(class);
         let mut place = None;
+        // the last failure, returned when no try succeeds and nothing is on disk
+        let mut last: anyhow::Error = Busy.into();
+        // tries that failed in transport (or at a gateway) so far; 503s are counted by `attempt` alone
+        let mut transport = 0;
         for attempt in 0..4 {
             place = Some(self.line.turn(class, gap, place).await);
-            let r = st.http().get(format!("{base}/ws/2/{path}")).query(&ps).header("User-Agent", &ua).send().await?;
-            if r.status().as_u16() == 503 {
+            let sent = st.http().get(format!("{base}/ws/2/{path}")).query(&ps).header("User-Agent", &ua).timeout(timeout).send().await;
+            let r = match sent {
+                Ok(r) => r,
+                Err(e) => {
+                    transport += 1;
+                    tracing::warn!("MusicBrainz {path}: try {transport}/{TRANSPORT_TRIES} failed: {e:#}");
+                    last = e.into();
+                    if transport >= TRANSPORT_TRIES {
+                        break;
+                    }
+                    tokio::time::sleep(retry_after(transport)).await;
+                    continue;
+                }
+            };
+            let code = r.status().as_u16();
+            if code == 503 {
+                last = Busy.into();
                 tokio::time::sleep(Duration::from_millis(1500 * (attempt + 1))).await;
+                continue;
+            }
+            if code == 502 || code == 504 {
+                // a proxy in front of MusicBrainz (or a mirror) that couldn't reach it: as a transport failure
+                transport += 1;
+                tracing::warn!("MusicBrainz {path}: try {transport}/{TRANSPORT_TRIES} got {code}");
+                last = r.error_for_status().expect_err("a 502/504 is an error").into();
+                if transport >= TRANSPORT_TRIES {
+                    break;
+                }
+                tokio::time::sleep(retry_after(transport)).await;
                 continue;
             }
             let v: Value = r.error_for_status()?.json().await?;
@@ -291,7 +325,57 @@ impl Mb {
             }
             return Ok(v);
         }
-        Err(Busy.into())
+        if let Some(v) = self.last_known(key, params).await {
+            tracing::warn!("MusicBrainz {path} unreachable ({last:#}): using the answer kept on disk");
+            // a short while only, so the next page after MusicBrainz is back asks it again
+            self.remember(key, &v, STALE_TTL);
+            return Ok(v);
+        }
+        Err(last)
+    }
+
+    /// The look-up's answer on disk whatever its age (None for a search, without a file, or when never asked).
+    async fn last_known(&self, key: &str, params: &[(&str, String)]) -> Option<Value> {
+        let store = self.store.clone().filter(|_| kept_on_disk(params))?;
+        let k = key.to_string();
+        tokio::task::spawn_blocking(move || store.get(&k)).await.ok().flatten().map(|(v, _)| v)
+    }
+}
+
+/// How many times a call that failed in transport (or at a gateway) is tried in all before it gives up.
+pub const TRANSPORT_TRIES: u32 = 3;
+
+/// How long to wait after the `n`th (from 1) transport failure before trying again: 1 s, 2 s, 4 s …
+fn retry_after(n: u32) -> Duration {
+    Duration::from_secs(1u64 << n.saturating_sub(1).min(5))
+}
+
+/// How long one call may take before it counts as a transport failure: 10 s for a page someone is looking at
+/// (three tries and their back-off stay under a minute, so the TV doesn't sit on a spinner), the client's 30 s
+/// for work nobody watches.
+fn call_timeout(class: Priority) -> Duration {
+    match class {
+        Priority::Interactive | Priority::Section => Duration::from_secs(10),
+        _ => Duration::from_secs(30),
+    }
+}
+
+/// What a person may be shown for a failed MusicBrainz call: never reqwest's own words, which carry the
+/// request's URL ("error sending request for url (https://musicbrainz.org/ws/2/…)"). The full error belongs in
+/// the server log.
+pub fn user_message(e: &anyhow::Error) -> String {
+    if is_busy(e) {
+        return Busy.to_string();
+    }
+    let r = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>());
+    match r {
+        Some(r) if r.is_timeout() => "MusicBrainz took too long to answer, try again shortly".into(),
+        Some(r) if r.is_connect() || r.is_request() => "Couldn't reach MusicBrainz, check the server's internet connection".into(),
+        Some(r) => match r.status() {
+            Some(s) => format!("MusicBrainz answered {}", s.as_u16()),
+            None => "MusicBrainz sent an answer Encore couldn't read".into(),
+        },
+        None => "MusicBrainz is unavailable right now".into(),
     }
 }
 
@@ -389,14 +473,24 @@ pub async fn search_recordings(st: &impl Ctx, q: &str, limit: usize, artist: Opt
     }).collect())
 }
 
-/// An artist with its tags, links and every release group (all pages).
+/// An artist with its tags, links and every release group (all pages). Only the artist itself must answer: a
+/// page of release groups that fails ends the list there (logged, `partial` true) instead of failing the page.
 pub async fn artist(st: &impl Ctx, mbid: &str) -> anyhow::Result<Value> {
     let a = st.mb().get(st, &format!("artist/{mbid}"), &[("inc", "tags+url-rels".into())]).await?;
     let name = s(&a["name"]);
     let mut rgs = vec![];
     let mut offset = 0;
+    // whether a page of release groups failed (the list is then the pages before it)
+    let mut partial = false;
     loop {
-        let page = st.mb().get(st, "release-group", &[("artist", mbid.into()), ("limit", "100".into()), ("offset", offset.to_string())]).await?;
+        let page = match st.mb().get(st, "release-group", &[("artist", mbid.into()), ("limit", "100".into()), ("offset", offset.to_string())]).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("MusicBrainz release groups of artist {mbid} from {offset}: {e:#}");
+                partial = true;
+                break;
+            }
+        };
         rgs.extend(page["release-groups"].as_array().cloned().unwrap_or_default());
         offset += 100;
         if offset >= page["release-group-count"].as_i64().unwrap_or(0) || offset >= 2000 {
@@ -422,6 +516,7 @@ pub async fn artist(st: &impl Ctx, mbid: &str) -> anyhow::Result<Value> {
     Ok(json!({
         "id": s(&a["id"]), "name": name, "disambiguation": s(&a["disambiguation"]), "type": s(&a["type"]), "country": s(&a["country"]),
         "begin": s(&a["life-span"]["begin"]), "tags": top_tags(&a["tags"], 8), "links": links, "urls": urls, "release_groups": groups,
+        "partial": partial,
     }))
 }
 

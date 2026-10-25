@@ -485,3 +485,65 @@ async fn a_restart_answers_lookups_from_disk() {
     assert_eq!(n("artist/kept"), 3);
     ts.remove();
 }
+
+/// A MusicBrainz nobody can reach: a port on 127.0.0.1 nothing listens on, so every call is refused at once
+/// (reqwest's "error sending request", as on the owner's TV on Oct 25).
+const NOWHERE: &str = "http://127.0.0.1:1";
+
+/// The owner on Oct 25: an artist page on the TV was a full-screen "MusicBrainz error: error sending request for
+/// url (https://musicbrainz.org/ws/2/artist/…)". While MusicBrainz can't be reached the page is the library's
+/// (its albums and songs, `mb_unavailable` set), and an artist the library doesn't have is an error a person
+/// can read: never a URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreachable_musicbrainz_still_shows_the_library_artist_page() {
+    let ts = TestServer::new("mb-unreachable");
+    let st = ts.st.clone();
+    st.cfg.set_many(&json!({ "musicbrainz_url": NOWHERE, "musicbrainz_rate": 50.0 }));
+    let mbid = "d72ae77d-ca32-498d-870e-8204165b8ee4";
+    for (i, title) in ["One", "Two"].iter().enumerate() {
+        st.db.execute("INSERT INTO tracks (path, album_id, album, albumartist, artist, title, track, year, mb_albumartistid, mb_artistid) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            p![format!("/m/band/{i}.flac"), "band-album", "Album", "Band", "Band", *title, i as i64 + 1, "2020", mbid, mbid]).unwrap();
+    }
+    user(&st, "tv-box", "user");
+    let app = ts.app();
+    let (code, _, cookie) = crate::test_support::call(&app, "POST", "/api/auth/login", "", Some(json!({ "username": "tv-box", "password": "a-long-password-1" }))).await;
+    assert_eq!(code, axum::http::StatusCode::OK);
+    let cookie = cookie.split(';').next().unwrap_or("").to_string();
+    let t0 = std::time::Instant::now();
+    let (code, page, _) = crate::test_support::call(&app, "GET", &format!("/api/discover/artist/{mbid}"), &cookie, None).await;
+    assert_eq!(code, axum::http::StatusCode::OK, "{page}");
+    assert_eq!(page["name"], "Band");
+    assert_eq!(page["mb_unavailable"], true);
+    assert_eq!(page["library_albums"].as_array().map(|a| a.len()), Some(1), "{page}");
+    assert_eq!(page["library_tracks"], 2);
+    assert_eq!(page["release_groups"], json!([]));
+    assert!(!page["mb_message"].as_str().unwrap().contains("http"), "{page}");
+    // three tries, 1 s and 2 s apart
+    assert!(t0.elapsed() >= Duration::from_secs(3), "tried again: {:?}", t0.elapsed());
+    // nothing in the library: an error, in words
+    let (code, e, _) = crate::test_support::call(&app, "GET", "/api/discover/artist/00000000-0000-0000-0000-000000000000", &cookie, None).await;
+    assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY, "{e}");
+    let text = e.to_string();
+    assert!(!text.contains("http") && !text.contains("ws/2"), "{text}");
+    assert!(text.contains("Couldn't reach MusicBrainz"), "{text}");
+    ts.remove();
+}
+
+/// While MusicBrainz can't be reached, a look-up kept on disk is the answer however old it is (background work
+/// too, which otherwise asks again past an hour), instead of an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreachable_musicbrainz_falls_back_to_the_answer_on_disk() {
+    let ts = TestServer::new("mb-unreachable-disk");
+    let st = ts.st.clone();
+    st.cfg.set_many(&json!({ "musicbrainz_url": NOWHERE, "musicbrainz_rate": 50.0 }));
+    let file = ts.dir.join("mb-old.db");
+    // a day-old answer for the artist, as the key `Mb::get` uses (fmt=json among the parameters)
+    encore_http::mb_store::Store::open(&file).unwrap().put("artist/old?fmt=json", &json!({ "id": "old" }), now() - 86400.0);
+    let m = mb::Mb::with_store(&file);
+    let v = mb::with_priority(Priority::Background, m.get(&st, "artist/old", &[])).await.unwrap();
+    assert_eq!(v["id"], "old");
+    // a search has nothing on disk: the transport error, which a person is shown in words
+    let e = m.get(&st, "artist", &[("query", "x".to_string())]).await.unwrap_err();
+    assert!(mb::user_message(&e).starts_with("Couldn't reach MusicBrainz"), "{}", mb::user_message(&e));
+    ts.remove();
+}
