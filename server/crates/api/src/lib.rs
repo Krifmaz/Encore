@@ -129,6 +129,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::library::router())
         .merge(routes::discover::router())
         .merge(routes::foryou::router())
+        .merge(routes::taste::router())
         .merge(routes::catalog::router())
         .merge(routes::requests::router())
         .merge(routes::report::router())

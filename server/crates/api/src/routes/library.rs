@@ -601,7 +601,7 @@ async fn artist_tracks(State(st): State<AppState>, User(u): User, Query(q): Quer
 mod search_tests;
 
 /// `cols` of these songs, in this order: one indexed lookup by id (at most `MAX_IDS`, or a page of a list).
-fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<encore_db::Row>> {
+pub(super) fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<encore_db::Row>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -678,7 +678,7 @@ struct ShuffleQ {
 /// GET /api/library/shuffle: random songs.
 async fn shuffle_get(State(st): State<AppState>, User(u): User, Query(q): Query<ShuffleQ>) -> ApiResult<Json<Value>> {
     let ex: Vec<i64> = q.exclude.split(',').filter_map(|x| x.trim().parse().ok()).take(500).collect();
-    let Json(mut v) = shuffle_inner(&st, q.limit.unwrap_or(50), &ex)?;
+    let Json(mut v) = shuffle_inner(&st, u.i("id"), q.limit.unwrap_or(50), &ex)?;
     enrich(&st, Some(&u), &mut v).await;
     Ok(Json(v))
 }
@@ -695,15 +695,17 @@ struct ShuffleBody {
 
 /// Random songs nobody heard yet this session (the web player sends what it already played), with their
 /// loudness for normalization (the player queues them as they are).
-async fn shuffle_post(State(st): State<AppState>, User(_): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
-    let Json(mut v) = shuffle_inner(&st, b.limit.unwrap_or(50), &b.exclude[..b.exclude.len().min(20000)])?;
+async fn shuffle_post(State(st): State<AppState>, User(u): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
+    let Json(mut v) = shuffle_inner(&st, u.i("id"), b.limit.unwrap_or(50), &b.exclude[..b.exclude.len().min(20000)])?;
     encore_library::loudness::stamp(&st.db, &mut v);
     Ok(Json(v))
 }
 
-/// Random songs from the cached id list, without `exclude`.
-fn shuffle_inner(st: &AppState, limit: i64, exclude: &[i64]) -> ApiResult<Json<Value>> {
-    let ex: std::collections::HashSet<i64> = exclude.iter().copied().collect();
+/// Random songs from the cached id list, without `exclude` and without what user `uid` disliked (songs, and
+/// every song of a disliked artist: see routes::taste).
+fn shuffle_inner(st: &AppState, uid: i64, limit: i64, exclude: &[i64]) -> ApiResult<Json<Value>> {
+    let mut ex: std::collections::HashSet<i64> = exclude.iter().copied().collect();
+    ex.extend(super::taste::disliked_song_ids(st, uid)?);
     // random picks from the cached id list (`ORDER BY RANDOM()` read and sorted every song for 50 of them)
     let all = track_ids(st, "")?;
     let ids = draw(all.as_array().map(|a| a.as_slice()).unwrap_or(&[]), limit.clamp(1, 200) as usize, &ex);
@@ -1481,6 +1483,8 @@ async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) ->
         st.db.execute("INSERT INTO playlist_items (playlist_id, position, title, artist, album, duration, isrc, mbid, source, track_id, match_reason, added_at) VALUES (?,?,?,?,?,?,?,?,'library',?,'added from library',?)",
             p![pid, pos, t.s("title"), t.s("artist"), t.s("album"), t.f("duration"), t.get("isrc"), t.get("mb_trackid"), id, now()])?;
         st.db.execute("UPDATE playlists SET updated_at=? WHERE id=?", p![now(), pid])?;
+        // a like takes back a dislike of the song (the two buttons are opposites)
+        super::taste::forget_dislike(&st, u.i("id"), id)?;
         return Ok(Json(json!({ "liked": true, "added": 1 })));
     }
     Ok(Json(json!({ "liked": true, "added": 0 })))
@@ -1488,7 +1492,14 @@ async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) ->
 
 /// DELETE /api/likes/{id}: unlike a song.
 async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    let pid = liked_playlist(&st, u.i("id"))?;
+    remove_like(&st, u.i("id"), id).await?;
+    Ok(Json(json!({ "liked": false })))
+}
+
+/// Takes song `id` out of user `uid`'s Liked Songs (nothing when it isn't there): the unlike button, and a
+/// dislike (routes::taste), which is the opposite of a like.
+pub(super) async fn remove_like(st: &AppState, uid: i64, id: i64) -> ApiResult<()> {
+    let pid = liked_playlist(st, uid)?;
     // the song goes and the list is numbered 0, 1, 2 … again in one transaction on the write connection (off
     // the async runtime); only the rows whose position moves are written
     st.db.write(move |c| c.transaction(|c| {
@@ -1501,7 +1512,7 @@ async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) 
         }
         Ok::<_, rusqlite::Error>(())
     })).await?;
-    Ok(Json(json!({ "liked": false })))
+    Ok(())
 }
 
 // ---- share links ----------------------------------------------------------------------------------

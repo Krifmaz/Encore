@@ -27,6 +27,7 @@ pub mod wrapper;
 pub mod ytauth;
 pub mod discover;
 pub mod foryou;
+pub mod taste;
 pub mod catalog;
 pub mod changelog;
 #[cfg(test)]
