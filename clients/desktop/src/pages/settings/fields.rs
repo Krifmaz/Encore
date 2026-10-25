@@ -117,6 +117,7 @@ pub const SECTIONS: &[Card] = &[
         s("rename_on_import", "Rename & organise files", "bool"),
         s("naming_template", "Album naming template", "text").full().help("Fields: {albumartist} {artist} {album} {year} {disc} {discprefix} {track:02d} {title} {genre} {label} {type} {format}"),
         s("single_template", "Single-track naming template", "text").full(),
+        s("file_names", "Emoji and symbols in file names", "select").options(&[("keep", "Keep them"), ("words", "Write them as words (♾️ → Infinity)"), ("ascii", "Plain ASCII names only")]).help("Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)"),
         s("save_cover", "Save cover.jpg in album folders", "bool"),
         s("embed_cover", "Embed cover art in files", "bool"),
     ] },

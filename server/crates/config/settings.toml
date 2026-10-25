@@ -1214,6 +1214,19 @@ label = "Single-track naming template"
 type = "text"
 full = true
 
+[keys.file_names]
+env = "ENCORE_FILE_NAMES"
+default = "keep"
+group = "library"
+label = "Emoji and symbols in file names"
+type = "select"
+options = [
+    ["keep", "Keep them"],
+    ["words", "Write them as words (♾️ → Infinity)"],
+    ["ascii", "Plain ASCII names only"],
+]
+help = "Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)"
+
 [keys.save_cover]
 env = "ENCORE_SAVE_COVER"
 default = true

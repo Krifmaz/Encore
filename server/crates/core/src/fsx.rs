@@ -101,12 +101,25 @@ pub struct StepError {
     /// a copy or link that failed because its source could not be read (see [`copy`]): the source is the
     /// failing side, not the destination
     pub source_failed: bool,
+    /// set by [`narrow`]: the failing file's folder passed a fresh probe, so the error is this one file's
+    /// (a read-only disk of a pooled library, a name that disk refuses), not the storage's
+    pub only_file: Option<OnlyFile>,
+}
+
+/// What [`narrow`] found out about a file whose write failed although its folder can be written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnlyFile {
+    /// the folder that was probed and could be written
+    pub dir: PathBuf,
+    /// where the file really is, when a mergerfs pool says so (its `user.mergerfs.fullpath` attribute): the
+    /// disk of the pool that holds it, so the admin knows which disk to look at
+    pub branch: Option<PathBuf>,
 }
 
 impl StepError {
     /// An error of `op` on `path` (and `to`) during `step`.
     pub fn new(step: Step, op: &'static str, path: &Path, to: Option<&Path>, source: io::Error) -> StepError {
-        StepError { step, op, path: path.to_path_buf(), to: to.map(Path::to_path_buf), errno: source.raw_os_error(), source, source_failed: false }
+        StepError { step, op, path: path.to_path_buf(), to: to.map(Path::to_path_buf), errno: source.raw_os_error(), source, source_failed: false, only_file: None }
     }
 
     /// The operation, its path and the error: "mkdir /music/Duumu: Input/output error (os error 5)".
@@ -124,8 +137,9 @@ impl StepError {
 
     /// A storage error ([`is_storage`]) on a folder Encore downloads into or imports to ([`roots`]): the
     /// disk's problem, not the source's.
+    /// An error [`narrow`] pinned on the one file is never a storage error: the folder can be written.
     pub fn is_storage(&self) -> bool {
-        self.errno.is_some_and(is_storage) && (roots::covers(&self.path) || self.to.as_deref().is_some_and(roots::covers))
+        self.only_file.is_none() && self.errno.is_some_and(is_storage) && (roots::covers(&self.path) || self.to.as_deref().is_some_and(roots::covers))
     }
 
     /// The path that failed, as far as it can be told: the destination of a rename, copy or link when it lies
@@ -139,26 +153,34 @@ impl StepError {
         }
     }
 
-    /// What to do about it, when that can be told from the errno.
-    pub fn hint(&self) -> Option<&'static str> {
+    /// What to do about it, when that can be told from the errno (or from [`narrow`]'s probe).
+    pub fn hint(&self) -> Option<String> {
+        if let Some(o) = &self.only_file {
+            // the folder passed a probe just now: say which folder was tested, and where the file really is
+            let on = o.branch.as_ref().map(|b| format!(" (the file is on {})", b.display())).unwrap_or_default();
+            return Some(format!("{} can be written, this file can't{on}: it is on a read-only disk of the pool, or the disk refuses its name – \
+                                 not the source, and not the whole storage", o.dir.display()));
+        }
         let errno = self.errno?;
         if self.is_storage() {
-            return Some("storage problem, not the source");
+            return Some("storage problem, not the source".into());
         }
-        match errno {
-            13 | 1 if self.op == "start" => Some("Encore may not run it (check the file's mode and owner, or a noexec mount)"),
-            13 | 1 if matches!(self.op, "read" | "open") => Some("Encore may not read there (check the folder's owner, PUID/PGID)"),
-            13 | 1 => Some("Encore may not write there (check the folder's owner, PUID/PGID)"),
-            2 if self.op == "start" => Some("the program is missing"),
-            2 if roots::is_root(&self.path) || roots::root_of(&self.path).is_some_and(|r| !r.exists()) => Some("the folder is missing (check the volume mapping)"),
-            _ => None,
-        }
+        let h = match errno {
+            13 | 1 if self.op == "start" => "Encore may not run it (check the file's mode and owner, or a noexec mount)",
+            13 | 1 if matches!(self.op, "read" | "open") => "Encore may not read there (check the folder's owner, PUID/PGID)",
+            13 | 1 => "Encore may not write there (check the folder's owner, PUID/PGID)",
+            2 if self.op == "start" => "the program is missing",
+            2 if roots::is_root(&self.path) || roots::root_of(&self.path).is_some_and(|r| !r.exists()) => "the folder is missing (check the volume mapping)",
+            _ => return None,
+        };
+        Some(h.into())
     }
 
     /// The error for the API: `{step, op, path, to, errno, error, storage, text}`.
     pub fn json(&self) -> Value {
         json!({ "step": self.step.as_str(), "op": self.op, "path": self.path.to_string_lossy(), "to": self.to.as_ref().map(|t| t.to_string_lossy()),
-                "errno": self.errno, "error": self.source.to_string(), "storage": self.is_storage(), "text": self.to_string() })
+                "errno": self.errno, "error": self.source.to_string(), "storage": self.is_storage(), "text": self.to_string(),
+                "only_file": self.only_file.as_ref().map(|o| json!({ "dir": o.dir.to_string_lossy(), "branch": o.branch.as_ref().map(|b| b.to_string_lossy()) })) })
     }
 }
 
@@ -182,6 +204,51 @@ pub fn find(e: &anyhow::Error) -> Option<&StepError> {
 /// The storage error in an error's chain ([`StepError::is_storage`]).
 pub fn storage(e: &anyhow::Error) -> Option<&StepError> {
     find(e).filter(|s| s.is_storage())
+}
+
+/// The errnos a file can fail with on its own while its folder is fine: EROFS 30 (a mergerfs pool whose disk
+/// holding the file is read-only, while new files land on another disk), EILSEQ 84 and EINVAL 22 (a disk that
+/// refuses a character of the name: an emoji on exFAT or a FAT stick, say).
+pub const FILE_ERRNOS: [i32; 3] = [30, 84, 22];
+
+/// Look again at a failed write of one file: when its errno is one a single file can fail with
+/// ([`FILE_ERRNOS`]) and its folder passes a fresh [`probe`] now, the error is pinned on that file
+/// ([`StepError::only_file`]) – it is no storage problem, a wait for the storage would never end, and the
+/// message names the folder that was tested and, in a mergerfs pool, the disk the file is on. A `mkdir`, a
+/// probe's own error, or a folder that fails its probe too is left as it is.
+pub fn narrow(mut e: StepError) -> StepError {
+    if e.only_file.is_some() || e.op == "mkdir" || !e.errno.is_some_and(|n| FILE_ERRNOS.contains(&n)) {
+        return e;
+    }
+    let file = e.failing_path().to_path_buf();
+    if file.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".encore-probe-")) {
+        return e;
+    }
+    let Some(dir) = file.parent().filter(|d| d.is_dir()).map(Path::to_path_buf) else { return e };
+    if probe(&dir, e.step).is_ok() {
+        e.only_file = Some(OnlyFile { branch: mergerfs_fullpath(&file), dir });
+    }
+    e
+}
+
+/// Where a file of a mergerfs pool really is: its `user.mergerfs.fullpath` attribute (None off a pool, or
+/// when the file isn't there).
+pub fn mergerfs_fullpath(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let name = c"user.mergerfs.fullpath";
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: both strings are NUL-terminated and `buf` is writable for its whole length
+    let n = unsafe { libc::getxattr(c.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    // the value may or may not end in a NUL
+    while buf.last() == Some(&0) {
+        buf.pop();
+    }
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf)))
 }
 
 /// An error in full, every context of its chain: what a request's message and the log show.

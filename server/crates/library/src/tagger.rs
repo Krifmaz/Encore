@@ -146,24 +146,38 @@ fn record_verification(st: &impl Ctx, results: &[(PathBuf, Option<Value>)]) {
 
 use encore_media::tags::write_tags;
 
-/// Write the tags (and the cover) into a file. A tag the file can't take is only logged; a storage error
-/// (the disk under the download or the library failing) stops the import as a [`fsx::StepError`], so the
-/// request waits for the storage with its files kept.
-fn tag_file(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) -> Result<(), StepError> {
+/// Write the tags (and the cover) into a file → where the tagged file is now (its own path, unless it had to
+/// be written anew under another name: [`rewrite_copy`]). A tag the file can't take is only logged; a storage
+/// error (the disk under the download or the library failing) stops the import as a [`fsx::StepError`], so
+/// the request waits for the storage with its files kept. A file that can't be written while its folder can
+/// (one on a read-only disk of a mergerfs pool: [`fsx::narrow`]) is written anew next to itself.
+pub fn tag_file(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) -> Result<PathBuf, StepError> {
     let cover = if st.cfg().bool("embed_cover") { cover } else { None };
-    fsx::fault_point(Step::Import, "write", path)?;
-    match write_tags(path, vals, cover) {
-        Ok(()) => Ok(()),
-        Err(e) => tag_failed(st, path, e),
+    let res = match fsx::fault_point(Step::Import, "write", path) {
+        Err(e) => Err(fsx::narrow(e)),
+        Ok(()) => match write_tags(path, vals, cover) {
+            Ok(()) => return Ok(path.to_path_buf()),
+            Err(e) => tag_failed(st, path, e),
+        },
+    };
+    match res {
+        Ok(()) => Ok(path.to_path_buf()),
+        Err(e) if e.only_file.is_some() => rewrite_copy(st, path, vals, cover).map_err(|again| {
+            // the copy didn't work either: the first error says what is wrong, the log says the rest
+            st.db().log("warning", &format!("Could not write {} anew either: {again}", path.display()));
+            e
+        }),
+        Err(e) => Err(e),
     }
 }
 
-/// What a failed tag write of an import means: a storage error stops the import (a [`fsx::StepError`]); a
-/// tag the file can't take is only logged.
+/// What a failed tag write of an import means: a storage error stops the import (a [`fsx::StepError`]), and
+/// so does a file that can't be written while its folder can ([`fsx::narrow`]: the caller can write it anew);
+/// a tag the file can't take is only logged.
 pub fn tag_failed(st: &impl Ctx, path: &Path, e: anyhow::Error) -> Result<(), StepError> {
     if let Some(io) = io_error_of(&e) {
-        let se = StepError::new(Step::Import, "write", path, None, io);
-        if se.is_storage() {
+        let se = fsx::narrow(StepError::new(Step::Import, "write", path, None, io));
+        if se.is_storage() || se.only_file.is_some() {
             return Err(se);
         }
         st.db().log("warning", &format!("Could not tag {}: {se}", path.file_name().unwrap_or_default().to_string_lossy()));
@@ -171,6 +185,52 @@ pub fn tag_failed(st: &impl Ctx, path: &Path, e: anyhow::Error) -> Result<(), St
     }
     st.db().log("warning", &format!("Could not tag {}: {e:#}", path.file_name().unwrap_or_default().to_string_lossy()));
     Ok(())
+}
+
+/// Numbers the temporary files of [`rewrite_copy`] so two never share a name.
+static REWRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Write a file anew that can't be written where it is, while its folder can: in a mergerfs pool with a
+/// read-only disk (`/mnt/media2=RO`), a file on that disk can be read but not changed, and a new file in the
+/// same folder lands on a writable disk. The file is copied to a temporary name next to it (on a writable
+/// disk), tagged there and renamed over its own name: the pool then shows the new copy, and the old one
+/// stays on the read-only disk, out of sight (a warning says where). When the pool still shows the old file
+/// after that, or the rename is refused, the new copy keeps a free name of its own ("Song (2).opus", or the
+/// name in words when the disk refuses the name: [`crate::file_names::fallback`]) and the caller's library
+/// row follows it. → the tagged file's path
+fn rewrite_copy(st: &impl Ctx, path: &Path, vals: &Row, cover: Option<&[u8]>) -> Result<PathBuf, StepError> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let n = REWRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // a plain ASCII name, so a disk that refuses the real name still takes it
+    let tmp = dir.join(format!(".encore-rewrite-{}-{n}{ext}", std::process::id()));
+    let old_branch = fsx::mergerfs_fullpath(path);
+    let gone = |e: StepError| {
+        let _ = std::fs::remove_file(&tmp);
+        e
+    };
+    fsx::copy(path, &tmp, Step::Import).and_then(|_| fsx::fsync(&tmp, Step::Import))?;
+    if let Err(e) = write_tags(&tmp, vals, cover) {
+        tag_failed(st, &tmp, e).map_err(gone)?;
+    }
+    let where_old = old_branch.as_ref().map(|b| format!(" (on {})", b.display())).unwrap_or_default();
+    if fsx::rename(&tmp, path, Step::Import).is_ok() {
+        // the pool shows the new copy when the name can now be opened for writing
+        if std::fs::OpenOptions::new().write(true).open(path).is_ok() {
+            st.db().log("warning", &format!("{} could not be changed where it was{where_old}, a read-only disk: it was written anew on a writable disk, \
+                                             and the old copy stays on the read-only one", path.display()));
+            return Ok(path.to_path_buf());
+        }
+        // renamed, but the old file still shows: the new copy is out of sight and can't be told apart by name
+        return Err(StepError::new(Step::Import, "write", path, None, std::io::Error::from_raw_os_error(libc::EROFS)));
+    }
+    // the name can't be taken over: the new copy keeps a free name of its own
+    let wanted = crate::file_names::fallback(path).filter(|f| !f.exists()).unwrap_or_else(|| path.to_path_buf());
+    let alt = free_name(&wanted, &Default::default());
+    fsx::rename(&tmp, &alt, Step::Import).map_err(gone)?;
+    st.db().log("warning", &format!("{} could not be changed where it was{where_old}: the tagged copy is {} now, and the old file stays",
+        path.display(), alt.display()));
+    Ok(alt)
 }
 
 /// The io error under a tag write's error (lofty's errors give it as their source), as a fresh io::Error.
@@ -324,7 +384,9 @@ pub fn render_path(st: &impl Ctx, v: &Row, ext: &str, single: bool) -> PathBuf {
     let rel = format_template(&tpl, &data, &nums).unwrap_or_else(|| format_template("{albumartist}/{album} ({year})/{track:02d} - {title}", &data, &nums).unwrap());
     let rel = rel.replace(" ()", "").replace("(0000)", "");
     let mut out = PathBuf::from(st.cfg().str("library_path"));
-    let parts: Vec<String> = rel.trim().split('/').filter(|p| !p.trim().is_empty()).map(clean).collect();
+    // the `file_names` setting: emoji and symbols kept, in words, or every name in ASCII ([`crate::file_names`])
+    let mode = crate::file_names::Mode::parse(&st.cfg().str("file_names"));
+    let parts: Vec<String> = rel.trim().split('/').filter(|p| !p.trim().is_empty()).map(|p| clean(&crate::file_names::apply(p, mode))).collect();
     for (i, part) in parts.iter().enumerate() {
         out.push(if i + 1 == parts.len() { format!("{part}{}", ext.to_lowercase()) } else { part.clone() });
     }
@@ -358,7 +420,14 @@ fn mv(src: &Path, dest: &Path) -> Result<(), StepError> {
         Err(e) if e.errno == Some(libc::EXDEV) => {}
         // the source can't be renamed (a read-only download folder, say): copy it over
         Err(e) if !fsx::roots::covers(dest) || !e.errno.is_some_and(fsx::is_storage) => {}
-        Err(e) => return Err(e),
+        // a file the folder can take while this one can't be moved (the source on a read-only disk of a
+        // mergerfs pool: [`fsx::narrow`]) is copied over too; the old copy stays where it is (warned below)
+        Err(e) => {
+            let e = fsx::narrow(e);
+            if e.only_file.is_none() {
+                return Err(e);
+            }
+        }
     }
     if let Err(e) = fsx::copy(src, dest, Step::Import).and_then(|_| fsx::fsync(dest, Step::Import)) {
         let _ = std::fs::remove_file(dest);
@@ -408,6 +477,7 @@ pub async fn move_file(st: &impl Ctx, src: &Path, dest: &Path, replace_same: boo
 }
 
 /// What [`place_all`] does with one file.
+#[derive(Clone)]
 enum Place {
     /// already where it belongs
     Same,
@@ -540,20 +610,25 @@ pub fn place_new(moves: &[(PathBuf, PathBuf)]) -> anyhow::Result<Vec<PathBuf>> {
 
 /// The moves of [`place_all`] as planned, `beat` called as they move.
 fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place], beat: &dyn Fn()) -> anyhow::Result<Vec<PathBuf>> {
+    // a new file whose name its disk refuses takes the name in words instead (step 1)
+    let mut plan: Vec<Place> = plan.to_vec();
     // 1. every new file next to its destination, under its temporary name
     let mut parts: Vec<PathBuf> = vec![];
     let placed: Result<(), StepError> = (|| {
-        for ((src, _), p) in moves.iter().zip(plan) {
-            let (Place::New(d) | Place::Replace(d)) = p else { continue };
-            fsx::mkdir_all(d.parent().unwrap(), Step::Import)?;
-            let part = part_name(d);
-            let _ = std::fs::remove_file(&part); // left by an import that stopped part way
-            parts.push(part.clone());
-            beat();
-            if fsx::hard_link(src, &part, Step::Import).is_err() {
-                // another file system (or one without hard links): a copy, on the disk before the source goes
-                fsx::copy_beating(src, &part, Step::Import, beat)?;
-                fsx::fsync(&part, Step::Import)?;
+        for (i, (src, _)) in moves.iter().enumerate() {
+            let (Place::New(d) | Place::Replace(d)) = &plan[i] else { continue };
+            let d = d.clone();
+            match put_part(src, &d, &mut parts, beat) {
+                Ok(()) => {}
+                // the folder takes files, but not this name (an emoji on exFAT, say): once more in words
+                Err(e) if matches!(plan[i], Place::New(_)) => {
+                    let e = fsx::narrow(e);
+                    let Some(alt) = e.only_file.as_ref().and_then(|_| crate::file_names::fallback(&d)).filter(|a| !a.exists()) else { return Err(e) };
+                    put_part(src, &alt, &mut parts, beat).map_err(|_| e)?;
+                    tracing::warn!("{} was refused by its disk: the file is {} instead", d.display(), alt.display());
+                    plan[i] = Place::New(alt);
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -566,9 +641,14 @@ fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place], beat: &dyn Fn()) 
     }
     // 2. into place
     let mut done: Vec<PathBuf> = vec![];
-    for p in plan {
+    // a destination that was taken by a file of its own name ([`taken_over`]): where its new file went
+    let mut moved_to: std::collections::HashMap<PathBuf, PathBuf> = Default::default();
+    for p in &plan {
         let (Place::New(d) | Place::Replace(d)) = p else { continue };
-        if let Err(e) = fsx::rename(part_name(d), d, Step::Import) {
+        let res = fsx::rename(part_name(d), d, Step::Import).or_else(|e| taken_over(d, e).inspect(|alt| {
+            moved_to.insert(d.clone(), alt.clone());
+        }).map(|_| ()));
+        if let Err(e) = res {
             for q in &parts {
                 let _ = std::fs::remove_file(q);
             }
@@ -581,23 +661,54 @@ fn place_planned(moves: &[(PathBuf, PathBuf)], plan: &[Place], beat: &dyn Fn()) 
             }
             return Err(e.into());
         }
-        done.push(d.clone());
+        done.push(moved_to.get(d).cloned().unwrap_or_else(|| d.clone()));
     }
     // 3. the downloaded copies go: the files are in the library now, so a copy that can't be removed only
     // stays behind (the download folder's clean-up takes it later)
     let mut out = vec![];
-    for ((src, _), p) in moves.iter().zip(plan) {
+    for ((src, _), p) in moves.iter().zip(&plan) {
         match p {
             Place::Same => out.push(src.clone()),
             Place::New(d) | Place::Replace(d) | Place::Keep(d) => {
                 if let Err(e) = fsx::remove_file(src, Step::Import) {
                     tracing::warn!("{e}");
                 }
-                out.push(d.clone());
+                out.push(moved_to.get(d).cloned().unwrap_or_else(|| d.clone()));
             }
         }
     }
     Ok(out)
+}
+
+/// Step 1 of [`place_planned`] for one file: `src` next to `d` under its temporary name (a hard link on the
+/// same file system, else a copy flushed to the disk), noted in `parts` so a failure later removes it.
+fn put_part(src: &Path, d: &Path, parts: &mut Vec<PathBuf>, beat: &dyn Fn()) -> Result<(), StepError> {
+    fsx::mkdir_all(d.parent().unwrap(), Step::Import)?;
+    let part = part_name(d);
+    let _ = std::fs::remove_file(&part); // left by an import that stopped part way
+    parts.push(part.clone());
+    beat();
+    if fsx::hard_link(src, &part, Step::Import).is_err() {
+        // another file system (or one without hard links): a copy, on the disk before the source goes
+        fsx::copy_beating(src, &part, Step::Import, beat)?;
+        fsx::fsync(&part, Step::Import)?;
+    }
+    Ok(())
+}
+
+/// A new file couldn't be renamed into place over `d` (`e`): when that is because of the one file there – it
+/// is on a read-only disk of a mergerfs pool while the folder can be written ([`fsx::narrow`]) – the new
+/// file takes a free name of its own next to it ("Song (2).opus") and the old one stays, with a warning.
+/// → that name, else the error.
+fn taken_over(d: &Path, e: StepError) -> Result<PathBuf, StepError> {
+    let e = fsx::narrow(e);
+    if e.only_file.is_none() {
+        return Err(e);
+    }
+    let alt = free_name(&crate::file_names::fallback(d).filter(|f| !f.exists()).unwrap_or_else(|| d.to_path_buf()), &Default::default());
+    fsx::rename(part_name(d), &alt, Step::Import).map_err(|_| e)?;
+    tracing::warn!("{} can't be replaced where it is (a read-only disk): the new file is {}, and the old one stays", d.display(), alt.display());
+    Ok(alt)
 }
 
 /// Imported files into the library ([`library::index_files`]: one transaction per 200 files), then the
@@ -869,7 +980,8 @@ pub async fn apply_preview(st: &impl Ctx, pv: &Value, rename: bool, source_root:
             new_paths.push(path);
             continue;
         };
-        tag_file(st, &path, vals, cover.as_deref())?;
+        // the file may have been written anew under another name ([`rewrite_copy`])
+        let path = tag_file(st, &path, vals, cover.as_deref())?;
         // a song in the library is moved only inside `library_path`: one in an extra library folder stays
         let stays = source_root.is_none() && !crate::folders::in_library_path(st.cfg(), &path);
         if rename && !stays {
@@ -1075,7 +1187,9 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
             return Ok((PathBuf::from(ex.s("path")), "already in library – kept existing copy".into()));
         }
     }
-    tag_file(st, path, &vals, cover.as_deref())?;
+    // the file may have been written anew under another name ([`rewrite_copy`])
+    let tagged = tag_file(st, path, &vals, cover.as_deref())?;
+    let path = tagged.as_path();
     let dest = render_path(st, &vals, &ext, true);
     let new = place_all(st, &[(path.to_path_buf(), dest)], true).await?.remove(0);
     library::prune_empty(path.parent().unwrap(), source_root);
@@ -1336,6 +1450,8 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     let mut out = vec![];
     let mut moves = vec![];
     for (i, p) in paths.iter().enumerate() {
+        // the file may be written anew under another name ([`rewrite_copy`])
+        let mut p = p.clone();
         let t = read_tags(&p.to_string_lossy());
         let mut vals = t.clone();
         if t.s("albumartist") == "Unknown Artist" {
@@ -1367,9 +1483,9 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
                            ("date", json!(year)), ("isrc", stt.as_ref().map(|s| s["isrc"].clone()).unwrap_or_default()), ("barcode", meta["upc"].clone())] {
                 w.insert(k.into(), v);
             }
-            tag_file(st, p, &w, cover.as_deref())?;
+            p = tag_file(st, &p, &w, cover.as_deref())?;
         } else if cover.is_some() {
-            tag_file(st, p, &Row::new(), cover.as_deref())?;
+            p = tag_file(st, &p, &Row::new(), cover.as_deref())?;
         }
         let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
         moves.push((p.clone(), render_path(st, &vals, &ext, false)));

@@ -15,6 +15,7 @@ pub mod artists;
 pub mod catalog;
 pub mod contribute;
 pub mod dupes;
+pub mod file_names;
 pub mod folders;
 pub mod lists;
 pub mod lookup;

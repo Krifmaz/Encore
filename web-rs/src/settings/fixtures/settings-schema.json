@@ -604,6 +604,37 @@
             },
             {
               "advanced": false,
+              "default": "keep",
+              "env": "ENCORE_FILE_NAMES",
+              "env_locked": false,
+              "full": false,
+              "help": "Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)",
+              "key": "file_names",
+              "label": "Emoji and symbols in file names",
+              "max": null,
+              "min": null,
+              "options": [
+                {
+                  "label": "Keep them",
+                  "value": "keep"
+                },
+                {
+                  "label": "Write them as words (♾️ → Infinity)",
+                  "value": "words"
+                },
+                {
+                  "label": "Plain ASCII names only",
+                  "value": "ascii"
+                }
+              ],
+              "secret": false,
+              "step": null,
+              "type": "select",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
               "default": true,
               "env": "ENCORE_SAVE_COVER",
               "env_locked": false,
