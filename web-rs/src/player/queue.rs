@@ -36,16 +36,18 @@ pub(super) fn mark_played(t: &Value) {
     }
 }
 /// Random library songs not yet heard (or queued) this session; when everything has played, start a fresh round.
+/// With smart shuffle on (Settings → Playback) the server weights the draw by taste (player/taste.rs).
 async fn fresh_shuffle(limit: usize) -> Result<Vec<Value>, ApiError> {
+    let url = if smart_on() { "/taste/shuffle" } else { "/library/shuffle" };
     let queued: Vec<i64> = st(|s| s.queue.iter().filter(|t| t.g("id").is_number()).map(|t| t.i("id")).collect());
     let mut exclude: Vec<i64> = PLAYED.with(|p| p.borrow().clone());
     for id in queued { if !exclude.contains(&id) { exclude.push(id); } }
-    let mut more = api::post("/library/shuffle", json!({ "limit": limit, "exclude": exclude })).await?.items();
+    let mut more = api::post(url, json!({ "limit": limit, "exclude": exclude })).await?.items();
     if more.is_empty() {
         PLAYED.with(|p| p.borrow_mut().clear());
         if let Some(s) = session_storage() { let _ = s.remove_item("encore.played"); }
         let cur_id: Vec<i64> = cur().filter(|t| t.g("id").is_number()).map(|t| vec![t.i("id")]).unwrap_or_default();
-        more = api::post("/library/shuffle", json!({ "limit": limit, "exclude": cur_id })).await?.items();
+        more = api::post(url, json!({ "limit": limit, "exclude": cur_id })).await?.items();
     }
     Ok(more)
 }
@@ -85,6 +87,7 @@ pub fn play_queue(tracks: Vec<Value>, start: usize, context: &str) {
         s.order = None;
         if s.shuffle && context != "preview" { shuffle_rest(s); }
     });
+    if st(|s| s.shuffle) && context != "preview" { smart_order(); }
     load(false, 0.0, None, None);
 }
 
@@ -145,6 +148,8 @@ pub fn queue() -> (Vec<Value>, usize) {
 pub fn next(auto: bool) {
     if g_next(auto) { return; }
     if !auto && via_link(json!({ "action": "next" })) { return; }
+    // Next before the play counted: a skip, which the recommendations take as a mild "not now"
+    if !auto { report_skip(); }
     if auto && st(|s| s.repeat == "one") { seek_to(0.0); if let Some(a) = audio() { play(&a); } return; }
     if st(|s| s.index < s.queue.len() as i64 - 1) { st_mut(|s| s.index += 1); load(false, 0.0, None, None); return; }
     if st(|s| s.repeat == "all" && !s.queue.is_empty()) { st_mut(|s| s.index = 0); load(false, 0.0, None, None); return; }
@@ -248,6 +253,7 @@ pub(super) fn set_shuffle(on: bool) {
         }
     });
     render(); emit(); preload_next(); save_spot(true);
+    if on { smart_order(); }
 }
 /// `setRepeat(v)`: 'off' | 'all' | 'one'.
 pub(super) fn set_repeat(v: &str) {

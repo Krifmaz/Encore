@@ -13,8 +13,8 @@
 //! bandwidth.rs (Auto quality), transitions.rs (crossfade and overlap), fx.rs (Web Audio effects), bar.rs (the
 //! bar at the bottom), full.rs (the full-screen player and its lyrics mode), lyrics.rs, marquee.rs (long titles
 //! scroll), media_session.rs (lock screen and the native apps), link.rs (this device as a remote, and remote control of
-//! it), norm.rs (volume normalization), signal.rs (the Signal path window) and group.rs (following a group listen,
-//! crate::group).
+//! it), norm.rs (volume normalization), signal.rs (the Signal path window), taste.rs (dislikes, skips, smart
+//! shuffle and radio from the server's recommendations) and group.rs (following a group listen, crate::group).
 //! The shared state, the <audio> elements and the small helpers every part uses live here, with `mount()`.
 
 mod bandwidth;
@@ -32,6 +32,7 @@ mod norm;
 mod queue;
 mod recovery;
 mod signal;
+mod taste;
 mod transitions;
 
 pub use bar::{bar_buttons, customize_bar_modal, set_bar_buttons, BAR_ACTIONS};
@@ -43,6 +44,7 @@ pub use load::{seek_to, set_volume, toggle};
 pub(crate) use load::{can_play, convert_query};
 pub use local::{offline_setting, prefer_local, set_prefer_local};
 pub use norm::norm_setting;
+pub use taste::play_mix;
 pub use queue::{enqueue, group_shuffle, next, play_next, play_queue, prev, preview, queue, restore, saved_spot, shuffle_library};
 pub(crate) use crate::num::{khz, to_fixed1};
 
@@ -61,6 +63,7 @@ use norm::*;
 use queue::*;
 use recovery::*;
 use signal::*;
+use taste::*;
 use transitions::*;
 
 use crate::api::{self, ApiError};

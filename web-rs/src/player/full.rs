@@ -155,7 +155,7 @@ pub(super) fn render_full() {
           <button class="btn ghost icon" id="f-lyrics" aria-label="Lyrics" title="Lyrics">{}</button>
           <button class="btn ghost icon" id="f-more" aria-label="More" title="More">{}</button>
         </div>"#,
-        if can_like(Some(&t)) { like_button("f-like", if is_liked(&t) { "on" } else { "" }) } else { String::new() },
+        if can_like(Some(&t)) { like_button("f-like", if is_liked(&t) { "on" } else { "" }) + &dislike_button("f-dislike", if is_disliked(&t) { "on" } else { "" }) } else { String::new() },
         if can_like(Some(&t)) { format!(r#"<button class="btn ghost icon" id="f-share" aria-label="Share" title="Share link">{}</button>"#, icon("external")) } else { String::new() },
         icon("music"),
         icon("more"));
@@ -258,6 +258,7 @@ pub(super) fn render_full() {
         wire(&mut ls, &f, "#fvol", "input", |e| { if let Some(v) = dom::target_el(e) { local_volume(num(&dom::value(&v))); } });
     }
     { let t2 = t.clone(); wire(&mut ls, &f, "#f-like", "click", move |_| dom::spawn(toggle_like(t2.clone()))); }
+    { let t2 = t.clone(); wire(&mut ls, &f, "#f-dislike", "click", move |_| dom::spawn(toggle_dislike(t2.clone()))); }
     { let t2 = t.clone(); wire(&mut ls, &f, "#f-share", "click", move |_| dom::spawn(share_track(t2.clone()))); }
     wire(&mut ls, &f, "#f-more", "click", |e| { if let Some(b) = dom::closest(e, "#f-more") { more_menu(&b); } });
     if let Some(seek) = qs_in(&f, "#fseek") { bind_seek(&mut ls, &seek, "f-cur"); }
@@ -283,6 +284,7 @@ pub(super) fn render_full() {
     });
     set_full_listeners(ls);
     warm_likes(Some(&t));
+    warm_dislikes(Some(&t));
     update_time();
     sync_lyrics(true);
     measure_titles();

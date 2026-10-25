@@ -1,5 +1,6 @@
 //! Port of web/js/pages/foryou.js – see docs/archive/ui-rewrite/CONTRACT.md
-//! Discovery: "For you" (ListenBrainz recommendations), genre pages, similar artists and "More like this".
+//! Discovery: "For you" (the mixes the server makes from the library and your taste, then ListenBrainz and
+//! Last.fm recommendations), genre pages, similar artists and "More like this".
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom::{self, set_html};
@@ -228,9 +229,48 @@ pub(crate) fn discover_rows(d: &Value) -> String {
     out
 }
 
+/// One "For you" mix as a tile: a cover from its first album, its name and line, and a play button. A click
+/// anywhere on it plays the mix made fresh (`data-mix`).
+fn mix_tile(m: &Value) -> String {
+    let cover = m.a("covers").first().map(|a| format!("/api/library/albums/{}/cover", js_string(a))).unwrap_or_default();
+    format!(r#"<div class="tile" data-mix="{id}" title="Play {title}">
+    <div class="art">{art}<div class="overlay"><button class="fab" data-mix="{id}" aria-label="Play">{play}</button></div></div>
+    <div class="t ellipsis">{title}</div>
+    <div class="s ellipsis">{sub}</div>
+  </div>"#,
+        id = esc(&m.s("id")), art = art(&cover, &m.s("title"), ""), play = icon("play"), title = esc(&m.s("title")), sub = esc(&m.s("subtitle")))
+}
+
+/// The mixes made from the library (`/api/taste/mixes`) and the listener's genres (`/api/taste/genres`) into
+/// `#fy-mixes` and `#fy-genres`: each plays on a click.
+async fn load_mixes(view: Element) {
+    let (Some(rail), Some(chips)) = (dom::qs_in(&view, "#fy-mixes"), dom::qs_in(&view, "#fy-genres")) else { return };
+    match api::get("/taste/mixes?limit=30").await {
+        Ok(d) => {
+            let mixes = d.a("mixes");
+            if mixes.is_empty() {
+                set_html(&rail, &empty_state(&icon("spark"), "No mixes yet", "Mixes appear once the library has songs. They get better the more you play, like and dislike."));
+            } else {
+                let note = if d.truthy("cold") { r#"<p class="small muted" style="margin:0 0 10px">Play, like and dislike songs and these mixes learn what you like.</p>"# } else { "" };
+                set_html(&rail, &format!(r#"{note}<div class="grid rail">{}</div>"#, mixes.iter().map(mix_tile).collect::<String>()));
+            }
+        }
+        Err(e) => set_html(&rail, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))),
+    }
+    if let Ok(g) = api::get("/taste/genres").await {
+        let list: Vec<Value> = g.items().into_iter().take(16).collect();
+        set_html(&chips, &list.iter().map(|x| format!(r#"<button class="badge {}" data-mix="genre:{}" style="padding:6px 12px;font-size:13px;cursor:pointer" title="Play a {} mix">{}{}</button>"#,
+            if x.f("affinity") > 0.0 { "accent" } else { "" }, esc(&x.s("genre")), esc(&x.s("title")), icon_attr("play", r#"width="11" height="11""#), esc(&x.s("title")))).collect::<String>());
+    }
+}
+
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
-        set_html(&view, r#"<h1>For you</h1><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.</p>
+        set_html(&view, r#"<h1>For you</h1><div id="fy-lib">
+    <div class="section-head"><div><h2>Mixes from your library</h2><div class="small muted">Made on this server from what you play, like, skip and dislike</div></div></div>
+    <div id="fy-mixes"><div class="skeleton" style="height:180px"></div></div>
+    <div class="section-head"><div><h2>Your genres</h2><div class="small muted">A mix of each genre in your library</div></div></div><div id="fy-genres" class="chips"></div></div>
+    <div class="section-head"><h2>From ListenBrainz and Last.fm</h2></div><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.</p>
     <div id="fy-body"><div class="skeleton" style="height:300px"></div></div>
     <div class="section-head"><h2>Browse by genre</h2></div><div id="fy-tags" class="chips"></div>"#);
         {
@@ -246,6 +286,13 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     if *mine { "accent" } else { "" }, String::from(js_sys::encode_uri_component(&js_string(g))), escv(g))).collect::<String>());
             });
         }
+        // the library's mixes: play one with a click (on its tile or a genre chip)
+        dom::spawn(load_mixes(view.clone()));
+        if let Some(lib) = dom::qs_in(&view, "#fy-lib") { dom::on(&lib, "click", |e| {
+            let Some(m) = dom::closest(e, "[data-mix]") else { return };
+            let id = dom::data(&m, "mix");
+            dom::spawn(async move { player::play_mix(&id).await; });
+        }); }
         let Some(body) = dom::qs_in(&view, "#fy-body") else { return Ok(()) };
         let d = match api::get("/discover/for-you").await {
             Ok(d) => d,

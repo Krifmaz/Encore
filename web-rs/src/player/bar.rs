@@ -85,6 +85,9 @@ pub(super) fn more_menu(anchor: &Element) {
     if t.truthy("artist") && !t.truthy("preview") { items.push(MenuItem::link("Go to artist", &icon("user"), &crate::ui::artist_url(&t.a("artists").iter().find(|a| a.truthy("name")).cloned().unwrap_or_else(|| serde_json::json!({ "name": t.s("artist") }))), false)); }
     if t.truthy("album_id") { items.push(MenuItem::link("View album", &icon("disc"), &format!("#/library/album/{}", t.s("album_id")), false)); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new(if is_liked(&t) { "Remove from Liked Songs" } else { "Like" }, &icon("heart"), move || dom::spawn(toggle_like(t2.clone())))); }
+    if lib { let t2 = t.clone(); items.push(MenuItem::new(if is_disliked(&t) { "Take back the dislike" } else { "Dislike" }, &icon("thumbsdown"), move || dom::spawn(toggle_dislike(t2.clone())))); }
+    if lib && t.truthy("artist") { let name = t.s("artist"); items.push(MenuItem::new(&format!("Don't play {name}"), &icon("x"), move || dom::spawn(dislike_artist(name.clone())))); }
+    if lib { let t2 = t.clone(); items.push(MenuItem::new("Start radio", &icon("spark"), move || dom::spawn(start_radio(t2.clone())))); }
     if lib { let id = t.i("id"); items.push(MenuItem::new("Add to playlist", &icon("plus"), move || crate::pages::playlists::add_to_playlist_modal(vec![id]))); }
     if lib { items.push(MenuItem::new("Lyrics", &icon("music"), || open_full("lyrics"))); }
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(share_track(t2.clone())))); }
@@ -192,6 +195,7 @@ pub const BAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("shuffle", "Shuffle", "shuffle"),
     ("repeat", "Repeat", "refresh"),
     ("like", "Like", "heart"),
+    ("dislike", "Dislike", "thumbsdown"),
     ("album", "View album", "disc"),
     ("playlist", "Add to playlist", "plus"),
     ("lyrics", "Lyrics", "music"),
@@ -200,10 +204,10 @@ pub const BAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("devices", "Other devices", "devices"),
 ];
 const BAR_KEY: &str = "encore.barButtons";
-const BAR_DEFAULT: &[&str] = &["quality", "shuffle", "repeat", "like", "lyrics", "queue", "devices"];
+const BAR_DEFAULT: &[&str] = &["quality", "shuffle", "repeat", "like", "dislike", "lyrics", "queue", "devices"];
 /// Buttons added after the first version shipped: a saved choice from before gets them once (0.26.6), so they
 /// show up without a visit to "Customize the bar".
-const BAR_ADDED: &[(&str, &[&str])] = &[("encore.barButtons.v2", &["shuffle", "repeat"])];
+const BAR_ADDED: &[(&str, &[&str])] = &[("encore.barButtons.v2", &["shuffle", "repeat"]), ("encore.barButtons.v3", &["dislike"])];
 
 /// The buttons the user chose for the bar (localStorage `encore.barButtons`, a JSON list of BAR_ACTIONS ids).
 pub fn bar_buttons() -> Vec<String> {
@@ -282,6 +286,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
             if repeat != "off" { "on" } else { "" }, repeat_tip(repeat_title(&repeat)), repeat != "off", repeat_attr(), icon("refresh"), if repeat == "one" { "<sup>1</sup>" } else { "" })
     } else { String::new() };
     let like = if bar_has("like") && can_like(t) { like_button("p-like", if t.is_some_and(is_liked) { "on" } else { "" }) } else { String::new() };
+    let dislike = if bar_has("dislike") && can_like(t) { dislike_button("p-dislike", if t.is_some_and(is_disliked) { "on" } else { "" }) } else { String::new() };
     let album = if bar_has("album") && t.is_some_and(|t| t.truthy("album_id")) { btn("album", "View album", "disc") } else { String::new() };
     let playlist = if bar_has("playlist") && lib { btn("playlist", "Add to playlist", "plus") } else { String::new() };
     let lyrics = if bar_has("lyrics") { btn("lyrics", "Lyrics", "music") } else { String::new() };
@@ -295,6 +300,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
       {shuffle}
       {repeat_btn}
       {like}
+      {dislike}
       {album}
       {playlist}
       <button class="btn ghost icon" id="p-more" aria-label="More" title="More">{more}</button>
@@ -312,6 +318,7 @@ fn right_html(t: Option<&Value>, closable: bool) -> String {
 }
 fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
     wire(ls, el, "#p-like", "click", |_| { if let Some(t) = now_track() { dom::spawn(toggle_like(t)); } });
+    wire(ls, el, "#p-dislike", "click", |_| { if let Some(t) = now_track() { dom::spawn(toggle_dislike(t)); } });
     wire(ls, el, "#p-more", "click", |e| { if let Some(b) = dom::closest(e, "#p-more") { more_menu(&b); } });
     wire(ls, el, "#p-shuffle", "click", |_| { let (on, _) = mode_state(); set_shuffle(!on); });
     wire(ls, el, "#p-repeat", "click", |_| { let (_, r) = mode_state(); set_repeat(next_repeat(&r)); });
@@ -329,6 +336,7 @@ fn bind_right(ls: &mut Vec<EventListener>, el: &Element) {
         wire(ls, el, "#vol", "input", |e| { if let Some(v) = dom::target_el(e) { local_volume(num(&dom::value(&v))); } });
     }
     warm_likes(now_track().as_ref());
+    warm_dislikes(now_track().as_ref());
 }
 
 fn render_linked(el: &Element) {
