@@ -28,9 +28,31 @@ pub fn router() -> Router<AppState> {
         .route("/api/discover/new-releases", get(new_releases))
 }
 
-/// A MusicBrainz error as a 502.
-fn mb_err(e: anyhow::Error) -> ApiError {
-    err(502, format!("MusicBrainz error: {e}"))
+/// A MusicBrainz error as an API error: 404 when MusicBrainz doesn't know the id, else a 502 whose message a
+/// person can read ([`mb::user_message`]: never reqwest's words with the request's URL in them). The full error
+/// goes to the server log.
+pub(crate) fn mb_err(e: anyhow::Error) -> ApiError {
+    if mb::is_not_found(&e) {
+        return err(404, "MusicBrainz doesn't know this one");
+    }
+    tracing::warn!("MusicBrainz: {e:#}");
+    err(502, mb::user_message(&e))
+}
+
+/// An artist page's MusicBrainz part when MusicBrainz can't be reached: the library's name for the artist and
+/// nothing else (no tags, links or releases), with `mb_unavailable` and the reason, so the page still shows the
+/// artist's albums and songs in the library. None when the library has no songs with this artist's id.
+fn artist_from_library(st: &AppState, mbid: &str, e: &anyhow::Error) -> ApiResult<Option<Value>> {
+    // the album artist's name first (it is the artist as a whole), else a song's artist
+    let row = st.db.one(
+        "SELECT n FROM (SELECT albumartist n, 0 k FROM tracks WHERE mb_albumartistid=? AND albumartist<>''
+                        UNION ALL SELECT artist n, 1 k FROM tracks WHERE mb_artistid=? AND artist<>'')
+         ORDER BY k LIMIT 1", p![mbid, mbid])?;
+    Ok(row.map(|r| json!({
+        "id": mbid, "name": r.s("n"), "disambiguation": "", "type": "", "country": "", "begin": "",
+        "tags": [], "links": {}, "urls": [], "release_groups": [], "partial": true,
+        "mb_unavailable": true, "mb_message": mb::user_message(e),
+    })))
 }
 
 /// The request status of each MusicBrainz id that has a request.
@@ -210,10 +232,23 @@ async fn search_answer(State(st): State<AppState>, User(_): User, Query(sq): Que
 }
 
 /// An artist page: MusicBrainz's artist and releases, then (on the blocking pool) what the library and the
-/// requests know about them.
+/// requests know about them. When MusicBrainz can't be reached the page is the library's alone
+/// ([`artist_from_library`]): the error is logged, not shown, and the page is an error only when the library
+/// has nothing of the artist either.
 async fn artist(State(st): State<AppState>, User(u): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
-    let mut a = mb::artist(&st, &mbid).await.map_err(mb_err)?;
+    let found = mb::artist(&st, &mbid).await;
     st.blocking(move |st| {
+        let mut a = match found {
+            Ok(a) => a,
+            Err(e) if mb::is_not_found(&e) => return Err(mb_err(e)),
+            Err(e) => match artist_from_library(st, &mbid, &e)? {
+                Some(a) => {
+                    tracing::warn!("MusicBrainz artist {mbid}: {e:#} – showing the library's artist page");
+                    a
+                }
+                None => return Err(mb_err(e)),
+            },
+        };
         // the artist's own release types, else the setting's
         let own = encore_config::release_types::ReleaseFilter::artist_own(&st.cfg, &mbid);
         a["release_types_own"] = json!(own.is_some());

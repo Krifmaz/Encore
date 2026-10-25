@@ -480,7 +480,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
 
 /// GET /api/discover/artist/{mbid}/similar: 18 similar artists, enriched.
 async fn artist_similar(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
-    let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
+    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
     let mut v = similar_artists(&st, &mbid, a["name"].as_str().unwrap_or(""), 18).await;
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
@@ -634,7 +634,7 @@ async fn wikipedia(st: &AppState, links: &Value) -> anyhow::Result<Value> {
 
 /// GET /api/discover/artist/{mbid}/extras: the artist's photo, bio and popular songs (cached for a day).
 async fn artist_extras(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
-    let a = mb::artist(&st, &mbid).await.map_err(|e| err(502, format!("MusicBrainz error: {e}")))?;
+    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
     let name = s(&a["name"]);
     let data = cached(&st, &format!("extras:{mbid}"), 86400, || async {
         let mut d = json!({ "image": null, "bio": "", "bio_url": null, "top": [] });
