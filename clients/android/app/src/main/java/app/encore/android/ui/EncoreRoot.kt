@@ -1,5 +1,6 @@
 package app.encore.android.ui
 
+import app.encore.android.data.api.ServerRoute
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -250,7 +251,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
 
     LaunchedEffect(session) {
         // the server's local network address while on the home network, its public one otherwise
-        app.encore.android.data.api.ServerRoute.start(graph.app)
+        ServerRoute.start(graph.app)
         OfflineMode.start(graph.app)
     }
     // who is signed in (role and permissions), for the song menu's correcting entries and the Library's admin tab
