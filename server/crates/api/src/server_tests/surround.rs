@@ -106,6 +106,16 @@ async fn surround_songs_stay_out_of_the_stereo_library_and_play_by_id() {
     let (code, v, _) = call(&app, "POST", &uri, &boss, None).await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert!(v["detail"].as_str().unwrap_or("").contains("wrapper-v2"), "{v}");
+    // the library sweep: admins only, and the same need
+    let (code, _, _) = call(&app, "GET", "/api/surround/sweep", &member, None).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let (code, v, _) = call(&app, "GET", "/api/surround/sweep", &boss, None).await;
+    assert_eq!((code, v["running"].as_bool(), v["can_fetch"].as_bool()), (StatusCode::OK, Some(false), Some(false)));
+    let (code, v, _) = call(&app, "POST", "/api/surround/sweep", &boss, None).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(v["detail"].as_str().unwrap_or("").contains("wrapper-v2"), "{v}");
+    let (code, v, _) = call(&app, "DELETE", "/api/surround/sweep", &boss, None).await;
+    assert_eq!((code, v["stopping"].as_bool()), (StatusCode::OK, Some(false)));
 
     // an import: of a download's files, the surround one is filed in the Surround folder (its name from its
     // tags) and linked to the stereo album the request names; the stereo one stays for the stereo import

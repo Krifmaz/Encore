@@ -70,6 +70,10 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
         "loudness" => encore_library::loudness::scheduled(st).await?,
         "types" => encore_library::album_types::scheduled(st).await?,
         "update" => encore_system::update::scheduled(st).await?,
+        "atmos" => {
+            let batch = st.cfg.int("surround_sweep_batch").max(1) as usize;
+            encore_requests::surround::sweep(st, None, batch).await?.line()
+        }
         _ => {
             let mut out = encore_requests::upkeep::cleanup(st)?;
             // the file manager's Trash keeps items `trash_days` days
