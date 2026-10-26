@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -84,7 +85,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Toasts like the web's `toast(msg, type)` (web-rs/src/ui.rs): panels with a coloured left border at the bottom of
- * the screen. Shared seam: any part calls [show] from any thread; [ToastHost] draws them, in a small window of their
+ * the screen (at the top over the full player, see [ToastHost]). Shared seam: any part calls [show] from any thread; [ToastHost] draws them, in a small window of their
  * own above every sheet, dialog and the full player (see there).
  *
  * `kind` is the web's type: "info" (the default, accent border), "ok" (green), "err" (red), "warn" (amber). A toast
@@ -120,8 +121,11 @@ object Toasts {
 }
 
 /**
- * Draws [Toasts] at the bottom of the screen; put it once in the root, [bottomPadding] above the bottom of the screen
- * (above the mini player and the tabs).
+ * Draws [Toasts]; put it once in the root. They sit [bottomPadding] above the bottom of the screen (above the mini
+ * player and the tabs), or, when [topPadding] is given, at the top: that far below the status bar. The full player
+ * (phone and TV) has its seek bar and buttons at the bottom, so while it is open the root passes its header's height
+ * here and the toasts drop in over the cover instead (the owner, Oct 26: a "Got it – you won't hear this song…" toast
+ * sat over the seek bar and the times).
  *
  * A ModalBottomSheet, a Dialog and an AlertDialog are windows of their own above the activity's window, so toasts
  * drawn in the activity's content were hidden behind them. The toasts get a small window instead, added to the
@@ -133,7 +137,7 @@ object Toasts {
  * toasts show. Menus and popups are sub-windows of their own window, below the toasts.
  */
 @Composable
-fun ToastHost(bottomPadding: Dp) {
+fun ToastHost(bottomPadding: Dp, topPadding: Dp? = null) {
     val stack by Toasts.stack.collectAsState()
     // a toast that is not an error goes after a few seconds; a repeat starts its time again (a new seq)
     for (t in stack) {
@@ -153,15 +157,23 @@ fun ToastHost(bottomPadding: Dp) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val density = LocalDensity.current
     // above the keyboard while it is open (the toasts' window is above the keyboard's)
+    val top = topPadding != null
+    // at the bottom: above the keyboard while it is open (the toasts' window is above the keyboard's); at the top:
+    // below the status bar and the header passed in
     val liftPx = with(density) {
-        val ime = WindowInsets.ime.getBottom(density).toDp().value
-        val nav = WindowInsets.navigationBars.getBottom(density).toDp().value
-        ToastRules.lift(bottomPadding.value, ime, nav).dp.roundToPx()
+        if (topPadding != null) {
+            val status = WindowInsets.statusBars.getTop(density).toDp().value
+            ToastRules.drop(topPadding.value, status).dp.roundToPx()
+        } else {
+            val ime = WindowInsets.ime.getBottom(density).toDp().value
+            val nav = WindowInsets.navigationBars.getBottom(density).toDp().value
+            ToastRules.lift(bottomPadding.value, ime, nav).dp.roundToPx()
+        }
     }
     val any = stack.isNotEmpty()
     val newest = ToastRules.newest(stack)
 
-    LaunchedEffect(window, liftPx) { window.setLift(liftPx) }
+    LaunchedEffect(window, top, liftPx) { window.place(top, liftPx) }
     LaunchedEffect(window, any, newest) {
         when {
             !any || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) -> window.remove()
@@ -239,7 +251,7 @@ private class ToastWindow(private val activity: Activity, private val host: View
         v.setViewTreeSavedStateRegistryOwner(host.findViewTreeSavedStateRegistryOwner())
         // the theme and the rest of the root's composition locals
         v.setParentCompositionContext(parent)
-        v.setContent { ToastStack(seen) }
+        v.setContent { ToastStack(seen, top) }
         try {
             activity.windowManager.addView(v, params)
             view = v
@@ -270,11 +282,25 @@ private class ToastWindow(private val activity: Activity, private val host: View
         add()
     }
 
-    /** How high above the bottom the toasts sit; the space below them (mini player, tabs) is outside the window. */
-    fun setLift(px: Int) {
-        if (px == params.y) return
+    /** Whether the toasts sit at the top of the screen (else the bottom); [ToastStack] draws them for that edge. */
+    var top = false
+        private set
+
+    /**
+     * Where the toasts sit: at the [top] or the bottom of the screen, [px] from that edge. The space between the edge
+     * and the toasts (the status bar and a header, or the mini player and the tabs) is outside the window, so touches
+     * there reach the app. The stack's order and slide follow the edge ([ToastStack]), so a change of edge draws the
+     * window's content again.
+     */
+    fun place(top: Boolean, px: Int) {
+        val gravity = if (top) Gravity.TOP else Gravity.BOTTOM
+        if (px == params.y && gravity == params.gravity) return
+        val edgeChanged = top != this.top
         params.y = px
+        params.gravity = gravity
+        this.top = top
         val v = view ?: return
+        if (edgeChanged) v.setContent { ToastStack(seen, top) }
         try {
             activity.windowManager.updateViewLayout(v, params)
         } catch (_: IllegalArgumentException) {
@@ -308,25 +334,29 @@ private fun Context.findActivity(): Activity? {
     return null
 }
 
-/** The toasts, oldest first and the newest nearest the bottom; scrolls when they are taller than most of the screen. */
+/**
+ * The toasts; scrolls when they are taller than most of the screen. At the bottom the newest is nearest the bottom and
+ * slides up into place; at the [top] the newest is nearest the top and slides down ([ToastRules.drawOrder]).
+ */
 @Composable
-private fun ToastStack(seen: MutableSet<Long>) {
+private fun ToastStack(seen: MutableSet<Long>, top: Boolean) {
     val stack by Toasts.stack.collectAsState()
     val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
     Column(
         Modifier
             .fillMaxWidth()
             .heightIn(max = maxHeight)
-            .verticalScroll(rememberScrollState(), reverseScrolling = true)
+            // scrolled to the newest: the bottom of the column at the bottom, its top at the top
+            .verticalScroll(rememberScrollState(), reverseScrolling = !top)
             // room for the shadows inside the window
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (t in stack) {
+        for (t in ToastRules.drawOrder(stack, top)) {
             key(t.id) {
                 val appear = remember { MutableTransitionState(t.id in seen).apply { targetState = true } }
                 SideEffect { seen += t.id }
-                AnimatedVisibility(visibleState = appear, enter = fadeIn() + slideInVertically { it / 3 }) {
+                AnimatedVisibility(visibleState = appear, enter = fadeIn() + slideInVertically { if (top) -it / 3 else it / 3 }) {
                     ToastCard(t)
                 }
             }

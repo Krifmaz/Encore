@@ -146,6 +146,29 @@ class ToastRulesTest {
         assertEquals(150f, ToastRules.lift(150f, 120f, 48f), 0.01f)
     }
 
+    /**
+     * Over the full player the toasts sit at the top, below the status bar and the player's header, so they cover
+     * neither the seek bar and buttons at the bottom nor the ⌄ and Up next at the top. The owner (Oct 26): a
+     * "Got it – you won't hear this song…" toast sat over the seek bar and the times.
+     */
+    @Test
+    fun overThePlayerTheToastsSitBelowTheStatusBarAndHeader() {
+        assertEquals(24f + 56f, ToastRules.drop(56f, 24f), 0.01f)
+        // no status bar (a TV, a full-screen window): just below the header
+        assertEquals(68f, ToastRules.drop(68f, 0f), 0.01f)
+        // a nonsense negative inset never pulls them up over the status bar
+        assertEquals(56f, ToastRules.drop(56f, -10f), 0.01f)
+    }
+
+    /** At the bottom the newest is nearest the bottom; at the top it is nearest the top. */
+    @Test
+    fun theNewestToastIsNearestTheEdgeTheToastsComeFrom() {
+        var stack = add(emptyList(), "Added to queue")
+        stack = add(stack, "Saved")
+        assertEquals(listOf("Added to queue", "Saved"), messages(ToastRules.drawOrder(stack, top = false)))
+        assertEquals(listOf("Saved", "Added to queue"), messages(ToastRules.drawOrder(stack, top = true)))
+    }
+
     @Test
     fun anUndoToastHasItsButtonAndItsOwnTime() {
         var undone = 0
