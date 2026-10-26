@@ -208,6 +208,12 @@ fun EncoreRoot(graph: AppGraph, player: PlayerConnection) {
     }
 }
 
+/** The phone's full player's header row (⌄, "Now playing", Up next): a 48 dp button and 4 dp above and below. */
+private val PLAYER_HEADER = 56.dp
+
+/** The TV player's header row: its 12 dp padding, a 48 dp button, and a little room under it. */
+private val TV_PLAYER_HEADER = 68.dp
+
 /** A song's "⋯" menu, requested by any list; drawn once at the root. */
 private class TrackMenuRequest(val track: Track, val onAlbumPage: Boolean)
 
@@ -433,8 +439,12 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
         SongFixHost(nav)
         // toasts sit above the mini player and the tabs, in a window of their own above every sheet and dialog
-        // (the TV layout has no bars at the bottom)
-        ToastHost(bottomPadding = if (tv) 24.dp else if (nowPlaying != null) 150.dp else 84.dp)
+        // (the TV layout has no bars at the bottom). The full player (phone and TV) has its seek bar and buttons at
+        // the bottom, so while it is open they drop in at the top instead, below its header row (⌄, "Now playing")
+        ToastHost(
+            bottomPadding = if (tv) 24.dp else if (nowPlaying != null) 150.dp else 84.dp,
+            topPadding = if (showPlayer && nowPlaying != null) (if (tv) TV_PLAYER_HEADER else PLAYER_HEADER) else null,
+        )
     }
 }
 

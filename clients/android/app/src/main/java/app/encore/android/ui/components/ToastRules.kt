@@ -117,4 +117,18 @@ object ToastRules {
      */
     fun lift(base: Float, imeDp: Float, navDp: Float): Float =
         if (imeDp <= navDp) base else maxOf(base, imeDp - navDp + KEYBOARD_GAP)
+
+    /**
+     * How far below the top of the screen the toasts sit when they are at the top (over the full player, whose seek bar
+     * and buttons fill the bottom), in dp: below the status bar ([statusDp], its top inset) and the [header] under it
+     * (the player's ⌄ / "Now playing" row), so neither is covered.
+     */
+    fun drop(header: Float, statusDp: Float): Float = maxOf(0f, statusDp) + maxOf(0f, header)
+
+    /**
+     * The toasts in the order they are drawn, top to bottom. At the bottom the newest is nearest the bottom (the
+     * stack's own order, oldest first); at the [top] the newest is nearest the top, so a new toast always appears at
+     * the edge the toasts come from and pushes older ones away from it.
+     */
+    fun drawOrder(stack: List<ToastItem>, top: Boolean): List<ToastItem> = if (top) stack.asReversed() else stack
 }
