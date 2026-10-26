@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>How Encore recommends music</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+  :root { --ink:#1d1b26; --muted:#6b6880; --acc:#6d4aff; --acc2:#e0517a; --acc3:#1aa39a; --soft:#f4f2fb; --line:#e4e2ee; }
+  * { box-sizing: border-box; }
+  body { font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--ink); font-size: 10.6pt; line-height: 1.5; margin: 0; background:#fff; }
+  h1 { font-size: 30pt; line-height: 1.1; margin: 0 0 8px; letter-spacing: -0.5px; }
+  h2 { font-size: 16pt; margin: 0 0 6px; padding-top: 4px; color: var(--ink); }
+  h2 .n { color: var(--acc); margin-right: 8px; }
+  h3 { font-size: 11.5pt; margin: 14px 0 4px; }
+  p { margin: 0 0 8px; }
+  section { break-before: page; }
+  section.flow { break-before: auto; margin-top: 18px; }
+  .lead { font-size: 12pt; color: var(--muted); }
+  .cover { height: 255mm; display: flex; flex-direction: column; justify-content: space-between; }
+  .cover .band { background: linear-gradient(135deg, #6d4aff, #e0517a); color: #fff; border-radius: 14px; padding: 34px 32px; }
+  .cover .band p { color: #f1ecff; font-size: 12.5pt; }
+  .tag { display:inline-block; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 1.2px; opacity: .85; margin-bottom: 14px; }
+  .box { background: var(--soft); border-radius: 10px; padding: 10px 14px; margin: 10px 0; break-inside: avoid; }
+  .box.warn { background: #fdeef3; }
+  .box.ok { background: #e8f7f5; }
+  .box b.t { display:block; margin-bottom: 2px; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 9.4pt; break-inside: avoid; }
+  th, td { text-align: left; padding: 4px 7px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 8.4pt; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.neg { color: var(--acc2); }
+  tr.blk td { color: var(--muted); font-style: italic; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  svg.chart, svg.diag { width: 100%; height: auto; display: block; margin: 6px 0 4px; }
+  svg text { font-family: inherit; }
+  .tick { font-size: 10px; fill: var(--muted); }
+  .axis { font-size: 10.5px; fill: var(--muted); }
+  .leg { font-size: 10.5px; fill: var(--ink); }
+  .lab { font-size: 11px; fill: var(--ink); }
+  .cap { font-size: 9pt; color: var(--muted); margin-top: -2px; }
+  .formula { font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace; font-size: 9.6pt; background: #1d1b26; color: #f0eefa; padding: 10px 14px; border-radius: 8px; margin: 8px 0; white-space: pre; break-inside: avoid; }
+  .formula .c { color: #a99cff; }
+  .pill { display:inline-block; padding: 0 7px; border-radius: 99px; font-size: 8.8pt; background: var(--soft); }
+  ol, ul { margin: 4px 0 8px 18px; padding: 0; }
+  li { margin: 2px 0; }
+  .toc li { margin: 4px 0; }
+  .feature { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 8px 0; break-inside: avoid; }
+  .feature h3 { margin-top: 0; }
+  .src { font-size: 8.6pt; color: var(--muted); }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: 8.8pt; background: var(--soft); padding: 0 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============================== cover -->
+<div class="cover">
+  <div class="band">
+    <div class="tag">Encore 0.41 · How it works</div>
+    <h1>How Encore recommends music</h1>
+    <p>Smart shuffle, taste scores, likes, skips and dislikes, the “For you” mixes, Start radio and Genre shuffle, explained step by step with diagrams and worked numbers.</p>
+  </div>
+  <div>
+    <h3>In this guide</h3>
+    <ol class="toc">
+      <li>The big picture</li>
+      <li>What Encore pays attention to</li>
+      <li>Memory fades: how old plays and skips count less</li>
+      <li>Your taste profile</li>
+      <li>Co-listening: artists people play together</li>
+      <li>Scoring a song</li>
+      <li>The never-play rules</li>
+      <li>Picking the queue: the weighted draw and spreading artists out</li>
+      <li>Every feature, and how it uses the same engine</li>
+      <li>All the numbers in one place</li>
+    </ol>
+    <div class="box"><b class="t">Everything stays on your server</b>
+      Encore works out recommendations from your own library and your own listening only. No outside service is asked anything, and every number in this guide is taken from the code that ships in Encore (the server's taste engine, <code>server/crates/library/src/taste.rs</code>). The worked example was checked by running that code.</div>
+    <p class="src">Written 26 October 2026 for Encore 0.41.1.</p>
+  </div>
+</div>
+
+<!-- ============================== 1 -->
+<section>
+  <h2><span class="n">1</span>The big picture</h2>
+  <p class="lead">Every recommendation in Encore, from pressing Shuffle to a “For you” mix, goes through the same four steps.</p>
+  <svg class="diag" viewBox="0 0 680 330" role="img" aria-label="Signals flow into a taste profile, then each song gets a score, then the queue is drawn">
+    <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#6b6880"/></marker></defs>
+    <!-- column titles -->
+    <g font-size="10" fill="#6b6880" font-weight="600" letter-spacing="1">
+      <text x="72" y="16" text-anchor="middle">1 · SIGNALS</text>
+      <text x="250" y="16" text-anchor="middle">2 · TASTE PROFILE</text>
+      <text x="430" y="16" text-anchor="middle">3 · SCORE EVERY SONG</text>
+      <text x="600" y="16" text-anchor="middle">4 · BUILD THE QUEUE</text>
+    </g>
+    <!-- signals -->
+    <g font-size="11">
+      <rect x="6" y="28" width="132" height="30" rx="7" fill="#efeaff"/><text x="72" y="47" text-anchor="middle">Plays  +1 (fading)</text>
+      <rect x="6" y="64" width="132" height="30" rx="7" fill="#efeaff"/><text x="72" y="83" text-anchor="middle">Liked Songs  +4</text>
+      <rect x="6" y="100" width="132" height="30" rx="7" fill="#efeaff"/><text x="72" y="119" text-anchor="middle">Your playlists  +0.75</text>
+      <rect x="6" y="136" width="132" height="30" rx="7" fill="#fde6ee"/><text x="72" y="155" text-anchor="middle">Skips  −0.6 (fading)</text>
+      <rect x="6" y="172" width="132" height="30" rx="7" fill="#fde6ee"/><text x="72" y="191" text-anchor="middle">Dislikes  −3 / block</text>
+      <rect x="6" y="226" width="132" height="44" rx="7" fill="#e3f6f3"/><text x="72" y="244" text-anchor="middle">Everyone's plays</text><text x="72" y="259" text-anchor="middle" font-size="9.5" fill="#6b6880">on this server</text>
+    </g>
+    <!-- profile -->
+    <rect x="180" y="40" width="140" height="150" rx="10" fill="#fff" stroke="#6d4aff" stroke-width="1.6"/>
+    <g font-size="11"><text x="250" y="62" text-anchor="middle" font-weight="700">Your profile</text>
+      <text x="196" y="86">♪ Artists   −1…+1</text><text x="196" y="106">♪ Genres    −1…+1</text><text x="196" y="126">♪ Decades   −1…+1</text><text x="196" y="146">♪ Each song −1…+1</text>
+      <text x="196" y="170" fill="#e0517a">✕ Blocked songs</text></g>
+    <rect x="180" y="222" width="140" height="52" rx="10" fill="#fff" stroke="#1aa39a" stroke-width="1.6"/>
+    <text x="250" y="243" text-anchor="middle" font-size="11" font-weight="700">Co-listening</text><text x="250" y="260" text-anchor="middle" font-size="9.5" fill="#6b6880">artists heard together</text>
+    <!-- arrows signals->profile -->
+    <g stroke="#6b6880" stroke-width="1.3" fill="none" marker-end="url(#ar)">
+      <path d="M138 43 C160 43 160 90 178 95"/><path d="M138 79 C158 79 162 100 178 103"/><path d="M138 115 L178 115"/>
+      <path d="M138 151 C160 151 160 128 178 125"/><path d="M138 187 C160 187 162 150 178 145"/>
+      <path d="M138 248 L178 248"/>
+      <path d="M250 222 L250 194"/>
+    </g>
+    <!-- score -->
+    <rect x="360" y="60" width="140" height="190" rx="10" fill="#1d1b26"/>
+    <g font-size="10.5" fill="#f0eefa"><text x="430" y="82" text-anchor="middle" font-weight="700" font-size="11.5">score =</text>
+      <text x="374" y="104">0.30 × artist</text><text x="374" y="122">+ 0.25 × genre</text><text x="374" y="140">+ 0.08 × era</text>
+      <text x="374" y="158">+ 0.17 × co-listening</text><text x="374" y="176">+ 0.20 × the song</text>
+      <text x="374" y="200" fill="#ff9ab6">− just played</text><text x="374" y="218" fill="#ff9ab6">− skipped lately</text>
+      <text x="430" y="240" text-anchor="middle" fill="#a99cff" font-size="9.5">about −1 … +1</text></g>
+    <g stroke="#6b6880" stroke-width="1.3" fill="none" marker-end="url(#ar)"><path d="M320 115 L358 125"/><path d="M320 248 L358 210"/></g>
+    <!-- queue -->
+    <g font-size="10.5">
+      <rect x="540" y="40" width="124" height="56" rx="9" fill="#efeaff"/><text x="602" y="60" text-anchor="middle" font-weight="700">Filter</text><text x="602" y="76" text-anchor="middle" font-size="9.5">no dislikes, no songs</text><text x="602" y="88" text-anchor="middle" font-size="9.5">already played this session</text>
+      <rect x="540" y="112" width="124" height="56" rx="9" fill="#efeaff"/><text x="602" y="132" text-anchor="middle" font-weight="700">Weighted draw</text><text x="602" y="148" text-anchor="middle" font-size="9.5">random, but higher</text><text x="602" y="160" text-anchor="middle" font-size="9.5">scores come up more</text>
+      <rect x="540" y="184" width="124" height="56" rx="9" fill="#efeaff"/><text x="602" y="204" text-anchor="middle" font-weight="700">Spread out</text><text x="602" y="220" text-anchor="middle" font-size="9.5">no artist twice within</text><text x="602" y="232" text-anchor="middle" font-size="9.5">4 songs, ≤ 1/8 each</text>
+      <rect x="540" y="258" width="124" height="40" rx="9" fill="#6d4aff"/><text x="602" y="283" text-anchor="middle" fill="#fff" font-weight="700">▶ Your queue</text>
+    </g>
+    <g stroke="#6b6880" stroke-width="1.3" fill="none" marker-end="url(#ar)">
+      <path d="M500 150 C520 150 520 70 538 68"/><path d="M602 96 L602 110"/><path d="M602 168 L602 182"/><path d="M602 240 L602 256"/>
+    </g>
+    <text x="340" y="322" text-anchor="middle" font-size="10" fill="#6b6880">The profile is made fresh on every request, from what is in the database at that moment.</text>
+  </svg>
+  <h3>In plain words</h3>
+  <ol>
+    <li><b>Signals.</b> Encore notices what you play, like, put on playlists, skip and dislike.</li>
+    <li><b>Profile.</b> Each signal is credited not just to the song but also to its artists, its genres and its decade. Added up, that gives a number between −1 (you avoid it) and +1 (you love it) for every artist, genre and decade you've touched. Encore also knows which artists people on your server tend to play together.</li>
+    <li><b>Score.</b> Every song in the library gets a score from those numbers. Songs you heard in the last few hours, or skipped lately, lose points for a while.</li>
+    <li><b>Queue.</b> Songs are picked at random, but a high score makes a song more likely to be picked. Songs you've disliked are never picked. Finally the list is reordered so the same artist doesn't come up again within the next three songs.</li>
+  </ol>
+  <div class="box"><b class="t">Why random at all?</b>
+    If Encore always played the highest scores it would play the same 50 songs forever. A <i>weighted</i> draw means favourites come up more often, but any song you haven't ruled out can still turn up. That's how you rediscover things.</div>
+  <div class="box ok"><b class="t">Brand new listener?</b>
+    With no plays, likes, skips or dislikes yet, every song scores the same and smart shuffle is simply a plain shuffle (still with artists spread out). It starts adapting from the first counted play.</div>
+</section>
+
+<!-- ============================== 2 -->
+<section>
+  <h2><span class="n">2</span>What Encore pays attention to</h2>
+  <p class="lead">Six kinds of signal. Each has a weight (how much it says about your taste) and a lifetime.</p>
+  <table>
+    <tr><th>Signal</th><th class="num">Weight</th><th>Lifetime</th><th>Details</th></tr>
+    {{SIGNAL_ROWS}}
+  </table>
+  <h3>When is it a play, and when a skip?</h3>
+  <svg class="diag" viewBox="0 0 680 120" role="img">
+    <rect x="40" y="40" width="600" height="26" rx="13" fill="#efeaff"/>
+    <rect x="40" y="40" width="12" height="26" rx="6" fill="#d9d6e4"/>
+    <rect x="52" y="40" width="288" height="26" fill="#fde6ee"/>
+    <rect x="340" y="40" width="300" height="26" rx="0" fill="#e4dcff"/>
+    <rect x="626" y="40" width="14" height="26" rx="7" fill="#e4dcff"/>
+    <g font-size="10.5" text-anchor="middle">
+      <text x="46" y="32">0 s</text><text x="58" y="88" fill="#6b6880">2 s</text>
+      <text x="196" y="57" fill="#a8284f" font-weight="600">Next pressed here = skip</text>
+      <text x="490" y="57" fill="#4b2fd1" font-weight="600">play counted</text>
+      <text x="340" y="32">half the song (or 4 min)</text><text x="640" y="32">end</text>
+      <text x="46" y="104" fill="#6b6880">Next in the first 2 s: nothing recorded (flicking through)</text>
+    </g>
+    <line x1="340" y1="36" x2="340" y2="70" stroke="#1d1b26" stroke-width="1.5"/>
+  </svg>
+  <ul>
+    <li>A song counts as <b>played</b> once you've heard half of it or 4 minutes, whichever comes first (the same rule Last.fm uses). Songs under 30 seconds count at the end.</li>
+    <li>Pressing <b>Next</b> after the first 2 seconds but before the play counted is a <b>skip</b>. Songs ending on their own are never skips, and Next on a disliked song isn't sent as a skip (the dislike already says more).</li>
+    <li>Encore reads your plays of the last 400 days (up to 20,000 of the newest) and your skips of the last 90 days. Older skips are deleted.</li>
+  </ul>
+  <h3>Dislikes and likes cancel each other</h3>
+  <p>Disliking a song removes it from Liked Songs; liking a disliked song takes the dislike back. Both kinds of dislike can be undone at any time, and the song or artist immediately becomes playable again.</p>
+</section>
+
+<!-- ============================== 3 -->
+<section>
+  <h2><span class="n">3</span>Memory fades</h2>
+  <p class="lead">Taste drifts. A play from last week says more about you than one from last year, so every play and skip counts less as it gets older.</p>
+  {{FADE_CHART}}
+  <p class="cap">How much one play or skip still counts, by age. Plays halve every 120 days. Skips are forgotten much faster: they halve every 21 days and stop counting at all after 90.</p>
+  <div class="two">
+    <div>
+      <table>
+        <tr><th>Age</th><th class="num">A play counts</th><th class="num">A skip counts</th></tr>
+        {{FADE_ROWS}}
+      </table>
+    </div>
+    <div>
+      <h3 style="margin-top:4px">Example: a play</h3>
+      <p>You played a song 30 days ago. It still adds <b>+0.84</b> instead of +1.0. A year-old play adds only <b>+0.12</b>.</p>
+      <h3>Example: a skip</h3>
+      <p>You skipped a song 7 days ago. It takes off 0.6 × 79% = <b>−0.48</b>. Three weeks later the same skip is only worth −0.15, and after 90 days it's gone.</p>
+      <h3>Likes never fade</h3>
+      <p>A song in Liked Songs is always worth +4, however long ago you liked it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 4 -->
+<section>
+  <h2><span class="n">4</span>Your taste profile</h2>
+  <p class="lead">Each signal is credited to four places at once: the song, its artists, its genres and its decade.</p>
+  <svg class="diag" viewBox="0 0 680 170" role="img">
+    <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#6d4aff"/></marker></defs>
+    <rect x="10" y="55" width="190" height="60" rx="10" fill="#6d4aff"/>
+    <text x="105" y="80" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">You like a song  (+4)</text>
+    <text x="105" y="98" text-anchor="middle" fill="#e8e2ff" font-size="10">2 artists · 2 genres · 1997</text>
+    <g stroke="#6d4aff" stroke-width="1.5" fill="none" marker-end="url(#ar2)">
+      <path d="M200 70 C250 70 250 22 300 22"/><path d="M200 80 C250 80 260 64 300 64"/><path d="M200 92 C250 92 260 106 300 106"/><path d="M200 102 C250 102 250 148 300 148"/>
+    </g>
+    <g font-size="11">
+      <rect x="302" y="8" width="360" height="28" rx="7" fill="#efeaff"/><text x="314" y="27"><tspan font-weight="700">The song itself</tspan>  +4</text>
+      <rect x="302" y="50" width="360" height="28" rx="7" fill="#efeaff"/><text x="314" y="69"><tspan font-weight="700">Each artist</tspan>  +4 ÷ 2 = +2  <tspan fill="#6b6880">(shared out)</tspan></text>
+      <rect x="302" y="92" width="360" height="28" rx="7" fill="#efeaff"/><text x="314" y="111"><tspan font-weight="700">Each genre</tspan>  +4 ÷ 2 = +2  <tspan fill="#6b6880">(shared out)</tspan></text>
+      <rect x="302" y="134" width="360" height="28" rx="7" fill="#efeaff"/><text x="314" y="153"><tspan font-weight="700">The 1990s</tspan>  +4 × ½ = +2  <tspan fill="#6b6880">(era counts half)</tspan></text>
+    </g>
+  </svg>
+  <p>Sharing out means a song tagged with five genres doesn't count five times as much as a song with one. Songs with no genre tag borrow the two genres their main artist's other songs use most, so they still land in the right genre mixes.</p>
+
+  <h3>Squeezing totals into −1 … +1</h3>
+  <p>After adding everything up, one favourite artist might have a total of 200 while others have 3. To stop one giant from drowning everyone else out, totals are squeezed onto a −1 … +1 scale:</p>
+  <div class="formula">affinity = tanh( 1.5 × total ÷ typical )
+<span class="c">typical = the average of your ten biggest positive totals (at least 1)
+tanh   = a smooth curve that flattens out near −1 and +1</span></div>
+  <p>A song's own total is squeezed with a fixed scale instead: <code>tanh(total ÷ 3)</code>. So one like (+4) already makes a song's own value +0.87.</p>
+
+  <h3>Worked example: meet Sam</h3>
+  <p>Sam's history, which the rest of this guide follows:</p>
+  <ul>
+    <li><b>A</b> Radiohead “Paranoid Android” (1997, alternative rock): played every 3 days for two months (19 plays), liked, on a playlist.</li>
+    <li><b>B</b> Radiohead “Idioteque” (2000): on a playlist, never played.</li>
+    <li><b>D</b> Portishead “Glory Box” (1994, trip hop): liked, on a playlist, 5 plays about six months ago, and played again <b>2 hours ago</b>.</li>
+    <li><b>E</b> Taylor Swift “Blank Space” (2014, pop): skipped 2 and 5 days ago.</li>
+    <li><b>H</b> Muse “Starlight” (2006, alternative rock): disliked.</li>
+    <li><b>C</b> Massive Attack “Teardrop”, <b>F</b> Miles Davis “So What” and <b>G</b> Muse “Hysteria”: never touched.</li>
+  </ul>
+  <div class="three">
+    <table><tr><th>Artist</th><th class="num">Total</th><th class="num">Affinity</th></tr>{{PROFILE_ROWS}}</table>
+    <table><tr><th>Genre</th><th class="num">Total</th><th class="num">Affinity</th></tr>{{GENRE_PROF_ROWS}}</table>
+    <table><tr><th>Decade</th><th class="num">Total</th><th class="num">Affinity</th></tr>{{DEC_ROWS}}</table>
+  </div>
+  <p class="cap">Radiohead's total is {{RH_RAW}}: 19 fading plays (≈ 16.8) + like 4 + two playlist songs 1.5. The “typical” value here is {{SCALE_A}}, so tanh(1.5 × {{RH_RAW}} ÷ {{SCALE_A}}) = {{RH_TANH}}. Muse is negative because of the one disliked song, yet alternative rock as a genre stays strongly liked.</p>
+</section>
+
+<!-- ============================== 5 -->
+<section>
+  <h2><span class="n">5</span>Co-listening: artists people play together</h2>
+  <p class="lead">Encore learns which artists belong together from how people on your server actually listen. With one listener it learns from your own sessions; with several it becomes a small “people who play X also play Y”.</p>
+  <svg class="diag" viewBox="0 0 680 150" role="img">
+    <g font-size="10.5">
+      <text x="10" y="18" fill="#6b6880" font-weight="600">One listening session (plays less than 30 minutes apart)</text>
+      <rect x="10" y="30" width="96" height="34" rx="8" fill="#efeaff"/><text x="58" y="51" text-anchor="middle">Radiohead</text>
+      <rect x="116" y="30" width="96" height="34" rx="8" fill="#e3f6f3"/><text x="164" y="51" text-anchor="middle">Massive Attack</text>
+      <rect x="222" y="30" width="96" height="34" rx="8" fill="#fde6ee"/><text x="270" y="51" text-anchor="middle">Portishead</text>
+      <rect x="328" y="30" width="96" height="34" rx="8" fill="#fff4dd"/><text x="376" y="51" text-anchor="middle">Björk</text>
+      <rect x="434" y="30" width="96" height="34" rx="8" fill="#efeaff" stroke="#6d4aff" stroke-width="2"/><text x="482" y="51" text-anchor="middle" font-weight="700">Radiohead</text>
+      <text x="550" y="44" fill="#6b6880">… 40 min pause …</text><text x="550" y="60" fill="#6b6880">new session</text>
+      <g stroke="#1aa39a" stroke-width="1.6" fill="none">
+        <path d="M482 66 C482 110 376 110 376 66"/><path d="M482 66 C482 126 270 126 270 66"/><path d="M482 66 C482 142 164 142 164 66"/>
+      </g>
+      <text x="390" y="100" fill="#1aa39a" font-weight="700">+1</text><text x="300" y="118" fill="#1aa39a" font-weight="700">+½</text><text x="200" y="136" fill="#1aa39a" font-weight="700">+⅓</text>
+    </g>
+  </svg>
+  <p>Each play is linked to the three songs before it in the same session: the one right before counts 1, two back ½, three back ⅓. The counts for every pair of artists, across everyone's plays of the last year, become a similarity between 0 and 1:</p>
+  <div class="formula">similarity(X, Y) = together ÷ √(plays of X × plays of Y)  ×  together ÷ (together + 1)
+<span class="c">the second part damps pairs heard together only once or twice</span></div>
+  <div class="box"><b class="t">Example</b>
+    Radiohead was played 20 times, Massive Attack 10 times, and the “together” count is 6. Similarity = 6 ÷ √200 × 6 ÷ 7 = 0.42 × 0.86 = <b>0.36</b>. Each artist keeps its 40 closest neighbours. This is rebuilt at most every 10 minutes.</div>
+  <h3>How it reaches your profile</h3>
+  <p>For every artist you like, Encore adds <i>your liking × their similarity</i> to each neighbour, then divides by the biggest result so the top neighbour is 1. That's the <b>co-listening</b> value in the score: it lets an artist you've never played come up because it sits next to artists you love.</p>
+  <p>In Sam's example we suppose the server has learned: Radiohead–Massive Attack 0.40, Portishead–Massive Attack 0.55, Radiohead–Muse 0.30, Radiohead–Portishead 0.20. Massive Attack gets 0.98 × 0.40 + 0.66 × 0.55 = {{MA_NEAR_RAW}}, the highest, so its co-listening value is <b>1.00</b>; Muse gets <b>{{MUSE_NEAR}}</b>.</p>
+</section>
+
+<!-- ============================== 6 -->
+<section>
+  <h2><span class="n">6</span>Scoring a song</h2>
+  <p class="lead">Every song gets one number, roughly between −1 and +1. Higher means a better fit for you right now.</p>
+  <div class="formula">score = 0.30 × artist        <span class="c">average affinity of the song's artists</span>
+      + 0.25 × genre         <span class="c">average affinity of its genres</span>
+      + 0.08 × era           <span class="c">affinity of its decade</span>
+      + 0.17 × co-listening  <span class="c">best co-listening value among its artists</span>
+      + 0.20 × the song      <span class="c">its own history (plays, like, playlists, skips)</span>
+      − just-played penalty
+      − 0.25 × recent skips  <span class="c">the faded skip count</span></div>
+  <h3>The just-played cooldown</h3>
+  {{COOL_CHART}}
+  <table><tr>{{COOL_ROWS}}</tr></table>
+  <p class="cap">A strong dip for the next few hours (0.8, fading over ~6 hours) plus a gentle one for the next few days (0.25, fading over ~3 days). On top of that, the player never repeats a song within the same listening session until everything else has played.</p>
+
+  <h3>Sam's scores</h3>
+  {{SCORE_CHART}}
+  <table>
+    <tr><th>Song</th><th class="num">Artist</th><th class="num">Genre</th><th class="num">Era</th><th class="num">Co-l.</th><th class="num">Song</th><th class="num">Penalty</th><th class="num">Score</th><th class="num">1st pick</th></tr>
+    {{SCORE_ROWS}}
+  </table>
+  <ul>
+    <li><b>A</b> is the favourite ({{A_SCORE}}) even though it was heard 3 days ago (−{{A_COOL}}).</li>
+    <li><b>B</b> was never played, but Radiohead and alternative rock carry it to second place. This is how you get more of what you like.</li>
+    <li><b>C</b> Massive Attack has never been played by Sam, but trip hop, the 1990s and co-listening lift it well above neutral: a new find.</li>
+    <li><b>D</b> is a liked favourite, but it played 2 hours ago, so it loses {{D_COOL}} and drops below zero. In a day or two it's back near the top.</li>
+    <li><b>E</b> Two skips this week (faded weight {{E_SKIP}}) cost {{E_SKIP_PEN}} on top of the small negatives from the skips themselves.</li>
+    <li><b>F</b> Miles Davis has nothing for or against it: exactly 0. Still playable, just less often.</li>
+    <li><b>G</b> Muse is held back by the disliked Muse song, but the alternative rock genre keeps it positive.</li>
+  </ul>
+</section>
+
+<!-- ============================== 7 -->
+<section>
+  <h2><span class="n">7</span>The never-play rules</h2>
+  <p class="lead">Scores decide how <i>often</i>. These rules decide <i>never</i>: a blocked song isn't even scored, so no amount of luck brings it back.</p>
+  <table>
+    <tr><th>Rule</th><th>What is blocked</th><th>How to undo</th></tr>
+    <tr><td><b>Disliked song</b></td><td>That song, in every shuffle, mix, radio and in “keep going”. Disliking the song that's playing moves straight on to the next one (not counted as a skip). It also pulls its artist, genres and decade down by 3 (shared out), so similar songs come up less.</td><td>Take the dislike back, or like the song.</td></tr>
+    <tr><td><b>Don't play this artist</b></td><td>Every song where the artist is the <i>main</i> artist. Songs where they're only featured stay playable but rank far lower.</td><td>Take it back from the dislikes list.</td></tr>
+    <tr><td><b>Skipped again and again</b></td><td>A song whose faded skips add up to 2.5 or more is left out until the skips fade below that.</td><td>Happens on its own, or like the song: a liked song is never dropped for skips, it only sinks for a while.</td></tr>
+    <tr><td><b>Already played this session</b></td><td>“Keep going” and Shuffle never repeat a song you've heard (or that's already queued) in this listening session, until the whole library has played.</td><td>Starts over automatically when everything has played.</td></tr>
+  </table>
+  <div class="box warn"><b class="t">Example: when do skips block a song?</b>
+    Three skips today: 1 + 1 + 1 = 3.0 → <b>blocked</b>.<br>
+    Three skips a week ago: 3 × 0.79 = 2.38 → still allowed, but its score is down by 0.25 × 2.38 = 0.60.<br>
+    Four skips a week ago: 4 × 0.79 = 3.17 → <b>blocked</b> for about another week, until they fade below 2.5.<br>
+    Sam's two skips of “Blank Space” add up to {{E_SKIP}}: not blocked, just pushed down.</div>
+  <div class="box"><b class="t">Plain shuffle respects dislikes too</b>
+    Even with smart shuffle switched off (Settings → Playback), the plain library shuffle still leaves out disliked songs and artists. Only the taste weighting is switched off.</div>
+</section>
+
+<!-- ============================== 8 -->
+<section>
+  <h2><span class="n">8</span>Picking the queue</h2>
+  <h3>Step 1: the weighted draw</h3>
+  <p>Each allowed song gets a weight from its score. Then songs are drawn one after another, without repeats, each time with a chance proportional to its weight.</p>
+  <div class="formula">weight = e<sup> score ÷ 0.3</sup>      <span class="c">0.3 is the “temperature”: lower follows the scores more strictly,</span>
+                             <span class="c">higher is closer to a plain shuffle</span></div>
+  <div class="two">
+    <table><tr><th class="num">Score</th><th class="num">Weight (vs. a neutral song)</th></tr>{{TEMP_ROWS}}</table>
+    <div><p>A song scoring +0.9 is about <b>20 times</b> as likely to be picked as a song you've never touched (score 0), and a song at −0.5 about <b>5 times less</b> likely. Nothing allowed ever has zero chance.</p>
+      <p class="src">Technically this is the Efraimidis–Spirakis method (equivalently “Gumbel top-k”): each song gets a random key from its weight and the best keys win, which is the same as drawing one by one.</p></div>
+  </div>
+  <h3>Sam's first pick</h3>
+  {{SHARE_CHART}}
+  <p class="cap">The chance each song is picked first out of Sam's seven allowed songs. A real library has thousands of songs, so each one's share is much smaller, but the ratios are the same: “Paranoid Android” is 12× as likely as Miles Davis, and Miles Davis is still 7× as likely as the twice-skipped Taylor Swift song.</p>
+
+  <h3>Step 2: spreading artists out</h3>
+  <p>The draw gives an order with favourites near the front, which could put three Radiohead songs in a row. Encore then walks down that order and, for each place, takes the first song that breaks none of these rules:</p>
+  <ol>
+    <li>Its main artist isn't one of the last three songs' main artists (so an artist comes back at most once every four songs).</li>
+    <li>No artist, and no album, takes more than an eighth of the list (at least 2 songs each; 6 in a 50-song list).</li>
+  </ol>
+  <p>If nothing in the next 400 songs fits, rule 2 is relaxed first, then rule 1, so a list made of only one artist still fills up.</p>
+  <svg class="diag" viewBox="0 0 680 170" role="img">
+    <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#9b98ad"/></marker></defs>
+    <text x="8" y="22" font-size="10.5" fill="#6b6880" font-weight="600">DRAWN ORDER</text>
+    <text x="8" y="122" font-size="10.5" fill="#6b6880" font-weight="600">QUEUE</text>
+    <g font-size="10.5" text-anchor="middle" font-weight="600">
+      <!-- drawn: R1 R2 R3 MA1 P1 R4 MD1 MA2 R5 -->
+      <rect x="100" y="30" width="58" height="28" rx="6" fill="#efeaff"/><text x="129" y="48">R1</text>
+      <rect x="164" y="30" width="58" height="28" rx="6" fill="#efeaff"/><text x="193" y="48">R2</text>
+      <rect x="228" y="30" width="58" height="28" rx="6" fill="#efeaff"/><text x="257" y="48">R3</text>
+      <rect x="292" y="30" width="58" height="28" rx="6" fill="#e3f6f3"/><text x="321" y="48">MA1</text>
+      <rect x="356" y="30" width="58" height="28" rx="6" fill="#fde6ee"/><text x="385" y="48">P1</text>
+      <rect x="420" y="30" width="58" height="28" rx="6" fill="#efeaff"/><text x="449" y="48">R4</text>
+      <rect x="484" y="30" width="58" height="28" rx="6" fill="#fff4dd"/><text x="513" y="48">MD1</text>
+      <rect x="548" y="30" width="58" height="28" rx="6" fill="#e3f6f3"/><text x="577" y="48">MA2</text>
+      <rect x="612" y="30" width="58" height="28" rx="6" fill="#efeaff"/><text x="641" y="48">R5</text>
+      <!-- queue: R1 MA1 P1 MD1 R2 MA2 R3 R4 -->
+      <rect x="100" y="130" width="58" height="28" rx="6" fill="#efeaff"/><text x="129" y="148">R1</text>
+      <rect x="164" y="130" width="58" height="28" rx="6" fill="#e3f6f3"/><text x="193" y="148">MA1</text>
+      <rect x="228" y="130" width="58" height="28" rx="6" fill="#fde6ee"/><text x="257" y="148">P1</text>
+      <rect x="292" y="130" width="58" height="28" rx="6" fill="#fff4dd"/><text x="321" y="148">MD1</text>
+      <rect x="356" y="130" width="58" height="28" rx="6" fill="#efeaff"/><text x="385" y="148">R2</text>
+      <rect x="420" y="130" width="58" height="28" rx="6" fill="#e3f6f3"/><text x="449" y="148">MA2</text>
+      <rect x="484" y="130" width="58" height="28" rx="6" fill="#efeaff" stroke="#e0517a" stroke-dasharray="3 2"/><text x="513" y="148">R3</text>
+      <rect x="548" y="130" width="58" height="28" rx="6" fill="#efeaff" stroke="#e0517a" stroke-dasharray="3 2"/><text x="577" y="148">R4</text>
+    </g>
+    <g stroke="#9b98ad" stroke-width="1.1" fill="none" marker-end="url(#ar3)">
+      <path d="M129 58 L129 128"/><path d="M321 58 L193 128"/><path d="M385 58 L257 128"/><path d="M513 58 L321 128"/>
+      <path d="M193 58 L385 128"/><path d="M577 58 L449 128"/><path d="M257 58 L513 128"/><path d="M449 58 L577 128"/>
+    </g>
+  </svg>
+  <p class="cap">A tiny 8-song example (R = Radiohead, MA = Massive Attack, P = Portishead, MD = Miles Davis; R1, R2 and R4 are on the same album). Radiohead is spaced out every four songs. At the end only Radiohead is left and Radiohead already has its 2-song share, so both rules are eased and R3, R4 (dashed) fill the last places. With a real library there are almost always other artists to pick, so this rarely happens.</p>
+</section>
+
+<!-- ============================== 9 -->
+<section>
+  <h2><span class="n">9</span>Every feature, and how it uses the same engine</h2>
+  <p class="lead">All features share one profile and one scoring formula. They differ only in <b>which songs</b> are in the running and <b>how strictly</b> the score is followed.</p>
+  <svg class="diag" viewBox="0 0 680 230" role="img">
+    <circle cx="340" cy="115" r="62" fill="#1d1b26"/>
+    <text x="340" y="108" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">Profile + score</text>
+    <text x="340" y="126" text-anchor="middle" fill="#a99cff" font-size="10">+ never-play rules</text>
+    <g font-size="10.5" text-anchor="middle">
+      <g><rect x="20" y="14" width="190" height="44" rx="9" fill="#efeaff"/><text x="115" y="33" font-weight="700">Smart shuffle / Keep going</text><text x="115" y="49" fill="#6b6880">whole library, T = 0.3</text></g>
+      <g><rect x="20" y="93" width="190" height="44" rx="9" fill="#efeaff"/><text x="115" y="112" font-weight="700">Shuffling a playlist/album</text><text x="115" y="128" fill="#6b6880">only its songs, reordered</text></g>
+      <g><rect x="20" y="172" width="190" height="44" rx="9" fill="#efeaff"/><text x="115" y="191" font-weight="700">Genre shuffle</text><text x="115" y="207" fill="#6b6880">songs of the ticked genres</text></g>
+      <g><rect x="470" y="14" width="190" height="44" rx="9" fill="#e3f6f3"/><text x="565" y="33" font-weight="700">“For you” mixes</text><text x="565" y="49" fill="#6b6880">8 to 12 different song pools</text></g>
+      <g><rect x="470" y="93" width="190" height="44" rx="9" fill="#e3f6f3"/><text x="565" y="112" font-weight="700">Artist radio (in For you)</text><text x="565" y="128" fill="#6b6880">artist + 12 neighbours, +0.3</text></g>
+      <g><rect x="470" y="172" width="190" height="44" rx="9" fill="#fde6ee"/><text x="565" y="191" font-weight="700">Start radio / More like this</text><text x="565" y="207" fill="#6b6880">similarity + ¼ score, T = 0.12</text></g>
+    </g>
+    <g stroke="#9b98ad" stroke-width="1.4"><line x1="210" y1="36" x2="290" y2="80"/><line x1="210" y1="115" x2="278" y2="115"/><line x1="210" y1="194" x2="290" y2="150"/>
+      <line x1="470" y1="36" x2="390" y2="80"/><line x1="470" y1="115" x2="402" y2="115"/><line x1="470" y1="194" x2="390" y2="150"/></g>
+  </svg>
+
+  <div class="feature"><h3>Smart shuffle and “keep going”</h3>
+    <p>On by default (Settings → Playback → Smart shuffle). The Shuffle button asks for 50 songs from the whole library, drawn as in section 8. When your queue runs out, Encore keeps the music going with another 50 the same way, leaving out every song already played or queued this session. If you switch smart shuffle off, both become a plain random shuffle (dislikes still left out).</p></div>
+
+  <div class="feature"><h3>Shuffling a playlist or album</h3>
+    <p>Turning shuffle on for a list first shuffles it on your device instantly, then asks the server for a taste-weighted order of the same songs: favourites tend to come earlier, the same artist is spread out, disliked songs drop out. If the server can't answer, or the queue changed meanwhile, the plain shuffle stays.</p></div>
+
+  <div class="feature"><h3>Genre shuffle</h3>
+    <p>Pick one or more genres (your favourite genres are listed first, each with its song count; genres with fewer than 3 songs aren't listed). Encore draws 100 songs that carry any of the ticked genres, weighted by taste. When the queue runs out, “keep going” sticks to the same genres until you play something else. Untagged songs count under their artist's usual genres.</p></div>
+
+  <div class="feature"><h3>“For you” mixes</h3>
+    <table>
+      <tr><th>Mix</th><th>Which songs are in the running</th></tr>
+      <tr><td><b>Your mix</b></td><td>The whole library.</td></tr>
+      <tr><td><b>Fresh finds</b></td><td>Songs you've never played and haven't liked. The score still steers it towards what fits you (like Massive Attack for Sam).</td></tr>
+      <tr><td><b>Rediscover</b></td><td>Songs you liked or played at least twice, but not in the last 30 days.</td></tr>
+      <tr><td><b>Genre mixes</b> (up to 6)</td><td>Your best-liked genres that have at least 8 songs; one mix each, songs of that genre only. A brand new listener gets the library's biggest genres.</td></tr>
+      <tr><td><b>Artist radios</b> (up to 3)</td><td>Your top 3 artists. The pool is the artist's songs plus the songs of their 12 closest co-listened artists (and, if that's under twice the mix size, the artist's main genre). The artist's own songs get +0.3 so the mix stays recognisably theirs.</td></tr>
+    </table>
+    <p>Each mix shows 30 songs on the page; pressing play makes a fresh 100-song version. Mixes with fewer than 5 songs are hidden. Every refresh is a new draw, so mixes change each visit.</p></div>
+
+  <div class="feature"><h3>Start radio (“More like this”)</h3>
+    <p>Starts with the song you picked, followed by 50 songs like it. Here the main ingredient is how <b>similar</b> each song is to the seed, with your taste as a nudge:</p>
+    <div class="formula">similarity = 0.45 × artist   <span class="c">same artist 1, otherwise their co-listening similarity</span>
+           + 0.40 × genres   <span class="c">shared genres ÷ all genres of both</span>
+           + 0.15 × era      <span class="c">1 − decades apart ÷ 30 years (0.3 if unknown)</span>
+candidate  = similarity + 0.25 × your score</div>
+    <p>Songs with similarity 0.05 or less are left out. The best 400 candidates go into a much stricter draw (temperature 0.12 instead of 0.3) so the radio stays on topic, and the seed's own artist may fill at most a quarter of the list (12 of 50): the point is to find <i>other</i> artists like it.</p>
+    <p><b>Example, radio from Sam's “Paranoid Android” (A):</b></p>
+    <table><tr><th>Song</th><th class="num">Artist</th><th class="num">Genre</th><th class="num">Era</th><th class="num">Similarity</th><th class="num">Candidate value</th></tr>{{RADIO_ROWS}}</table>
+    <p class="cap">“Idioteque” leads (same artist and genre). Muse's “Hysteria” comes next on genre and co-listening. Massive Attack makes it through co-listening and the shared decade. Miles Davis (no link, 40 years apart) and Taylor Swift (exactly 0.05) never appear in this radio.</p></div>
+</section>
+
+<!-- ============================== 10 -->
+<section>
+  <h2><span class="n">10</span>All the numbers in one place</h2>
+  <table>
+    <tr><th>Setting</th><th class="num">Value</th><th>What it does</th></tr>
+    <tr><td>Play weight / half-life</td><td class="num">+1.0 / 120 days</td><td>Each counted play, halving in value every 120 days</td></tr>
+    <tr><td>Like weight</td><td class="num">+4.0</td><td>Each song in Liked Songs, never fades</td></tr>
+    <tr><td>Playlist weight</td><td class="num">+0.75</td><td>Each song on your own playlists, once</td></tr>
+    <tr><td>Skip weight / half-life / window</td><td class="num">−0.6 / 21 d / 90 d</td><td>Next pressed after 2 s and before the play counted</td></tr>
+    <tr><td>Skips to drop a song</td><td class="num">2.5</td><td>Faded skip total that blocks a song (unless liked)</td></tr>
+    <tr><td>Dislike weight</td><td class="num">−3.0</td><td>Taken from the disliked song's artists, genres and decade</td></tr>
+    <tr><td>Era share</td><td class="num">½</td><td>A signal counts half towards the decade</td></tr>
+    <tr><td>Squeeze</td><td class="num">tanh(1.5 × total ÷ typical)</td><td>typical = mean of your top 10 totals, at least 1; a song's own value is tanh(total ÷ 3)</td></tr>
+    <tr><td>Score mix</td><td class="num">0.30 / 0.25 / 0.08 / 0.17 / 0.20</td><td>artist / genre / era / co-listening / the song itself</td></tr>
+    <tr><td>Just-played penalty</td><td class="num">0.8·e<sup>−h/6</sup> + 0.25·e<sup>−h/72</sup></td><td>h = hours since you last heard the song</td></tr>
+    <tr><td>Recent-skip penalty</td><td class="num">0.25 × faded skips</td><td></td></tr>
+    <tr><td>Shuffle temperature</td><td class="num">0.3</td><td>weight = e<sup>score/0.3</sup>; +0.9 ≈ 20× a neutral song</td></tr>
+    <tr><td>Radio temperature</td><td class="num">0.12</td><td>Stricter, keeps “More like this” on topic</td></tr>
+    <tr><td>Artist spacing</td><td class="num">3 songs</td><td>An artist can't return while it's among the last 3 songs</td></tr>
+    <tr><td>Share per artist / album</td><td class="num">⅛ of the list (min 2)</td><td>Eased only when nothing else is left</td></tr>
+    <tr><td>Co-listening session gap / reach</td><td class="num">30 min / 3 songs</td><td>Weights 1, ½, ⅓; top 40 neighbours per artist; last year of plays; rebuilt ≤ every 10 min</td></tr>
+    <tr><td>Similarity (radio)</td><td class="num">0.45 / 0.40 / 0.15</td><td>artist / shared genres / era; minimum 0.05; own artist ≤ ¼</td></tr>
+    <tr><td>History read</td><td class="num">400 days</td><td>Up to 20,000 newest plays per listener</td></tr>
+    <tr><td>Mixes</td><td class="num">3 + 6 + 3</td><td>Your mix, Fresh finds, Rediscover + genre mixes (≥ 8 songs) + artist radios; hidden under 5 songs</td></tr>
+    <tr><td>Rediscover</td><td class="num">30 days</td><td>Liked or ≥ 2 plays, not heard in the last month</td></tr>
+  </table>
+  <h3>Where it lives</h3>
+  <ul class="src">
+    <li><code>server/crates/library/src/taste.rs</code>: the engine (catalog, co-listening, profile, score, draw, spreading, mixes, radio).</li>
+    <li><code>server/crates/api/src/routes/taste.rs</code>: the <code>/api/taste/…</code> endpoints (shuffle, mixes, mix, like-this, genres, profile, skip, dislikes) and what is read from the database.</li>
+    <li><code>web-rs/src/player/taste.rs</code> and <code>queue.rs</code>: the player side (dislike button, skip reporting, smart order, Start radio, Genre shuffle, keep going).</li>
+  </ul>
+</section>
+
+</body>
+</html>
