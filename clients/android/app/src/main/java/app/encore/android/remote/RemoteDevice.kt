@@ -375,9 +375,21 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             return
         }
         val from = c.str("from")
+        // music sent here while this phone is a remote: it plays here now, so the link ends (one device plays)
+        if (_link.value != null && startsHere(c)) unlink()
         if (c.str("action") == "play_queue" && from.isNotEmpty()) Toasts.show("Music sent here from $from", "ok")
         try { h.run(c) } catch (_: Exception) {}
         beatSoon()
+    }
+
+    /**
+     * Whether another device's command starts the music on this phone: play, a new queue, or a toggle while
+     * nothing plays here. Main thread.
+     */
+    private fun startsHere(c: JsonObject): Boolean = when (c.str("action")) {
+        "play", "play_queue" -> true
+        "toggle" -> !hostPlaying
+        else -> false
     }
 
     // ---- the other devices ----------------------------------------------------------------------------
@@ -477,6 +489,7 @@ class RemoteDevice private constructor(context: Context, private val graph: AppG
             "play" -> mapOf("playing" to JsonPrimitive(true), "position" to JsonPrimitive(pos))
             "seek" -> mapOf("position" to JsonPrimitive(body.dbl("value")))
             "volume" -> mapOf("volume" to JsonPrimitive(body.dbl("value")))
+            "system_volume" -> mapOf("system_volume" to JsonPrimitive(body.dbl("value")))
             "shuffle" -> mapOf("shuffle" to JsonPrimitive(body.bool("value")))
             "repeat" -> mapOf("repeat" to JsonPrimitive(body.str("value")))
             else -> null

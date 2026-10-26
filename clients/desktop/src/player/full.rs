@@ -29,7 +29,7 @@ fn queue_rows(state: &State) -> (Vec<QueueRow>, usize) {
             .into_iter()
             .map(|x| QueueRow {
                 title: fmt::s(&x, "title"),
-                artist: fmt::s(&x, "artist"),
+                artist: fmt::s(&x, "artist") + &fmt::feat_text(&x),
                 cover: x["album_id"]
                     .as_str()
                     .filter(|a| !a.is_empty())
@@ -324,6 +324,15 @@ fn lyrics_mode<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now) -> El<'a, Message
     // wrong words or timing: Report a problem with Wrong lyrics ticked (a song of the library, not a Surround one,
     // whose lyrics are its stereo song's – ids from 1 000 000 000, server surround::BASE_ID)
     if state.lyrics.shown(now.id) && now.id.is_some_and(|id| id < 1_000_000_000) {
+        // time-synced lines a little early or late: nudge them for every device, or ask for another timing
+        if state.lyrics.nudgeable(now.id) {
+            let shift = state.lyrics.shift_ms;
+            back = back
+                .push(widgets::btn("Earlier", Btn::Ghost, Some(Message::NudgeLyrics(-1))))
+                .push(widgets::btn(shift_label(shift), Btn::Ghost, (shift != 0).then_some(Message::NudgeLyricsReset)))
+                .push(widgets::btn("Later", Btn::Ghost, Some(Message::NudgeLyrics(1))))
+                .push(widgets::btn("Other timing", Btn::Ghost, Some(Message::ReportLyricsSync)));
+        }
         back = back.push(widgets::btn("Report lyrics", Btn::Ghost, Some(Message::ReportLyrics)));
     }
     let body = column![
@@ -439,4 +448,14 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .height(Length::Fill)
             .style(theme::app_bg),
     )
+}
+
+/// The lyrics nudge as shown between Earlier and Later: "In sync", or "+0.25 s" / "−1.5 s" (lines later / earlier).
+fn shift_label(ms: i64) -> String {
+    if ms == 0 {
+        return "In sync".into();
+    }
+    let num = format!("{:.2}", ms.unsigned_abs() as f64 / 1000.0);
+    let num = num.trim_end_matches('0').trim_end_matches('.');
+    format!("{}{num} s", if ms > 0 { "+" } else { "\u{2212}" })
 }

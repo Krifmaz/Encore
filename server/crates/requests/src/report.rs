@@ -35,14 +35,12 @@ pub fn is_lyrics_reason(reason: &str) -> bool {
     encore_library::lyrics::Complaint::of_reason(reason).is_some()
 }
 
-/// Days a reported file stays in the trash once its replacement arrived.
-const TRASH_DAYS: f64 = 7.0;
 /// A report still 'filing' after this long was interrupted (server stopped while parking files).
 const FILING_STUCK_SECS: f64 = 3600.0;
 
-/// Where reported files are parked.
+/// Where reported files are parked: Encore's Trash, on the music disk.
 pub fn trash_dir(st: &impl Ctx) -> PathBuf {
-    st.data_dir().join("trash")
+    encore_library::folders::trash_dir(st.cfg(), st.data_dir())
 }
 
 // ---- where a file came from (track_origin) and what is blocked ----------------------------------
@@ -385,9 +383,12 @@ pub fn reconcile(st: &impl Ctx) {
     }
 }
 
-/// Files in the trash older than 7 days are deleted (scheduler: Clean up).
+/// Parked files (a reported song's, a song replaced with someone's own file) are deleted once nothing waits on
+/// them: straight away while the Trash keeps nothing (`trash_keep` off), after `trash_days` days while it does
+/// (scheduler: Clean up). The file manager's items are folders with a note: never touched here.
 pub fn purge_trash(st: &impl Ctx) -> usize {
-    let cutoff = now() - TRASH_DAYS * 86400.0;
+    let days = if encore_library::folders::trash_keep(st.cfg()) { encore_library::folders::trash_days(st.cfg()) as f64 } else { 0.0 };
+    let cutoff = now() - days * 86400.0;
     // files of reports still waiting for their replacement stay, however long that takes
     let waiting: Vec<String> = st.db().query("SELECT p.trash_path FROM track_parked p JOIN reports r ON r.id=p.report_id WHERE r.status IN ('replacing','filing')", p![])
         .unwrap_or_default().iter().map(|r| r.s("trash_path")).filter(|t| !t.is_empty()).collect();
@@ -399,6 +400,10 @@ pub fn purge_trash(st: &impl Ctx) -> usize {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
+            // only parked files: never a file manager item (a folder), nor .plexignore and the like
+            if name.starts_with('.') || !e.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
             let t = name.split('-').next().and_then(|x| x.parse::<f64>().ok())
                 .or_else(|| e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()))
                 .unwrap_or(now());

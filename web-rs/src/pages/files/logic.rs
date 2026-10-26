@@ -292,6 +292,39 @@ pub fn failure_line(answer: &Value) -> String {
 }
 
 /// "Moved" / "Moved 3 items", "Moved to trash" / "Moved 3 items to trash", "Restored" / "Restored 3 items".
+/// The delete action's words: "Move to trash" while the Trash keeps files, "Delete" while deletes are for good.
+pub fn delete_label(keep: bool) -> &'static str {
+    if keep { "Move to trash" } else { "Delete" }
+}
+
+/// The delete dialog's question.
+pub fn delete_title(names: &[String], keep: bool) -> String {
+    match (names.len() == 1, keep) {
+        (true, true) => format!("Move “{}” to trash?", names[0]),
+        (false, true) => format!("Move {} items to trash?", names.len()),
+        (true, false) => format!("Delete “{}” for good?", names[0]),
+        (false, false) => format!("Delete {} items for good?", names.len()),
+    }
+}
+
+/// The delete dialog's words: how long the Trash keeps them, or that it is for good and where to change that.
+pub fn delete_body(keep: bool, days: i64) -> String {
+    match (keep, days > 0) {
+        (true, true) => format!("You can restore them from Trash for {days} days. Songs in the library are taken out of it until they are restored."),
+        (true, false) => "You can restore them from Trash. Songs in the library are taken out of it until they are restored.".into(),
+        (false, _) => "This can't be undone: Keep deleted files in Trash is off (Settings → Library → Deleting files).".into(),
+    }
+}
+
+/// The empty Trash's line.
+pub fn trash_empty_line((keep, days): (bool, i64)) -> String {
+    match (keep, days > 0) {
+        (true, true) => format!("Files you delete wait here for {days} days, then they are deleted for good."),
+        (true, false) => "Files you move to trash wait here until you delete them forever.".into(),
+        (false, _) => "Deletes are for good: turn on Keep deleted files in Trash in Settings → Library → Deleting files to keep them here first.".into(),
+    }
+}
+
 pub fn done_line(what: &str, n: usize) -> String {
     match (what, n == 1) {
         ("trash", true) => "Moved to trash".into(),

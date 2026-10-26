@@ -45,6 +45,7 @@ import app.encore.android.data.api.User
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.session.Session
 import app.encore.android.features.offline.OfflineMode
+import app.encore.android.features.offline.SavedOnPhoneRow
 import app.encore.android.features.offline.shuffleLibrary
 import app.encore.android.features.requests.RequestCard
 import app.encore.android.features.requests.RequestSheets
@@ -168,6 +169,9 @@ fun HomeScreen(nav: Nav, session: Session) {
         }
     }
 
+    // offline: the songs saved on this phone lead the page (the server's sections are only its last answers then)
+    val offline by OfflineMode.active.collectAsState()
+
     LoadableContent(loader) { data ->
         // admins: the file manager in the menu, once the server says it has one (0.33)
         val filesHere by FilesAccess.available.collectAsState()
@@ -229,6 +233,9 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
+            // offline: the albums saved on this phone, playable from their files (nothing when none are saved)
+            if (offline) item(key = "saved") { Column { SavedOnPhoneRow(nav) { nav.showTab(Tab.LIBRARY) } } }
+
             // group listens on this server (0.31): nothing when there are none, or on an older server
             item { ListeningTogetherRow(nav) }
 
@@ -265,9 +272,10 @@ fun HomeScreen(nav: Nav, session: Session) {
                 }
             }
 
-            item { SectionHead("Recently added", action = "Library") { nav.showTab(Tab.LIBRARY) } }
+            // offline with no kept answer: no "Recently added" at all rather than a wrong "Your library is empty"
+            if (!(offline && data.recent.isEmpty())) item { SectionHead("Recently added", action = "Library") { nav.showTab(Tab.LIBRARY) } }
             if (data.recent.isEmpty()) {
-                item { EmptyState(R.drawable.ic_library, "Your library is empty", "Search above or paste a link to get started.") }
+                if (!offline) item { EmptyState(R.drawable.ic_library, "Your library is empty", "Search above or paste a link to get started.") }
             } else {
                 item {
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {

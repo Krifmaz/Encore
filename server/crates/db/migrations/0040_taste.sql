@@ -1,4 +1,4 @@
--- Schema 39: what each listener tells the recommendations (encore_library::taste) beyond plays and likes.
+-- Schema 40: what each listener tells the recommendations (encore_library::taste) beyond plays and likes.
 
 -- dislikes: a song (kind 'track', ref = the song's id) or a whole artist (kind 'artist', ref = the artist's name,
 -- lower-cased). A disliked song or artist is never queued by a shuffle, a mix or "More like this" again, and pulls

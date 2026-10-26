@@ -256,7 +256,7 @@ mod tests {
         std::os::unix::fs::symlink(&out, r.join("match link")).unwrap();
         // a loop: A/loop → the root
         std::os::unix::fs::symlink(&r, r.join("A/loop")).unwrap();
-        let roots = vec![root(&r).fenced(&r.join("config"))];
+        let roots = vec![root(&r).fenced(&r.join("config"), &r.join("config/trash"))];
         let t = Target::new(&roots[0], "").unwrap();
         let v = search(&roots, &t, "match", None).unwrap();
         assert_eq!(paths(&v), ["match link"], "the link is found by name; nothing behind it or in the config folder: {v}");

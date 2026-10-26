@@ -58,6 +58,24 @@ fn source_line(t: &Value, info: Option<&Value>) -> String {
     if info.truthy("bitrate") { parts.push(format!("{} kbps", info.s("bitrate"))); }
     parts.join(" · ")
 }
+/// "Your own file – uploaded by alex on 24 Oct 2026, replacing an MP3" when someone replaced the song's file
+/// with their own (⋯ → Replace with my own file; `/info`'s `own_file`), else "".
+pub(super) fn own_file_note(info: Option<&Value>) -> String {
+    let Some(o) = info.map(|i| i.g("own_file")).filter(|o| o.is_object()) else { return String::new() };
+    let mut s = "Your own file".to_string();
+    if o.truthy("by") { s.push_str(&format!(" – uploaded by {}", o.s("by"))); }
+    if o.f("at") > 0.0 { s.push_str(&format!(" on {}", crate::ui::fmt::day(o.f("at")))); }
+    if o.truthy("old_format") { s.push_str(&format!(", replacing {}", article(&o.s("old_format").to_uppercase()))); }
+    s
+}
+
+/// "an MP3" / "a FLAC": the article a format's name takes when read out.
+fn article(name: &str) -> String {
+    // letters said with a vowel sound first: A, E, F, H, I, L, M, N, O, R, S, X
+    let vowel = name.chars().next().is_some_and(|c| "AEFHILMNORSX".contains(c)) && name != "FLAC";
+    format!("{} {name}", if vowel { "an" } else { "a" })
+}
+
 /// The Signal path window: three rows, and a plain verdict on whether what you hear is the file untouched.
 pub(super) async fn signal_path() {
     let Some(t) = now_track() else { return };
@@ -76,7 +94,7 @@ pub(super) async fn signal_path() {
         let note = if converted { format!("Converted from the server's file: {}", source_line(&t, info.as_ref())) } else { [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ") };
         rows.push(("Source".into(), format!("Downloaded copy on this device · {}", copy_quality(&t)), note));
     } else {
-        rows.push(("Source".into(), source_line(&t, info.as_ref()), [lossy_note, suspect].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")));
+        rows.push(("Source".into(), source_line(&t, info.as_ref()), [lossy_note, suspect, own_file_note(info.as_ref())].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")));
     }
     let pure;
     let mut untouched = false;

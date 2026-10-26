@@ -6,7 +6,7 @@ use encore_core::audio::STREAMRIP_EXTS as AUDIO;
 use encore_core::fsx::{self, Step, StepError};
 use encore_library::matcher::{compare, describe};
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// The command line streamrip runs with unless Settings give another: the placeholders are filled in per run.
@@ -714,16 +714,18 @@ pub fn run_log(e: &anyhow::Error) -> Option<&str> {
 
 // ---- resolving a request to a service link ------------------------------------------------------
 
-/// The Deezer track with this ISRC, or `None`.
-pub async fn deezer_isrc(st: &impl Ctx, isrc: &str) -> Option<Value> {
-    let d: Value = encore_http::deezer::track_by_isrc(st, isrc).send().await.ok()?.json().await.ok()?;
-    d["error"].is_null().then_some(d)
+/// The Deezer track with this ISRC: `Ok(None)` when Deezer doesn't know the ISRC, `Err` when the lookup
+/// itself failed (network, quota, an error answer). Paced with every other Deezer call
+/// ([`encore_http::deezer::get_found`]), so a burst of requests at start doesn't run into Deezer's quota.
+pub async fn deezer_isrc(st: &impl Ctx, isrc: &str) -> anyhow::Result<Option<Value>> {
+    encore_http::deezer::get_found(st, encore_http::deezer::track_by_isrc(st, isrc)).await
 }
 
-/// Deezer's search for `q` in `kind` ("track", "album"): its first 15 hits.
-async fn deezer_search(st: &impl Ctx, kind: &str, q: &str) -> Vec<Value> {
-    let Ok(r) = encore_http::deezer::search(st, kind, q, 15).send().await else { return vec![] };
-    r.json::<Value>().await.ok().and_then(|d| d["data"].as_array().cloned()).unwrap_or_default()
+/// Deezer's search for `q` in `kind` ("track", "album"): its first 15 hits, `Err` when the search failed
+/// (an empty list is a real "nothing found"). Paced like [`deezer_isrc`].
+async fn deezer_search(st: &impl Ctx, kind: &str, q: &str) -> anyhow::Result<Vec<Value>> {
+    let d = encore_http::deezer::get_found(st, encore_http::deezer::search(st, kind, q, 15)).await?;
+    Ok(d.and_then(|d| d["data"].as_array().cloned()).unwrap_or_default())
 }
 
 /// Tidal developer-API token (client credentials), cached until it expires.
@@ -776,79 +778,193 @@ pub fn services(st: &impl Ctx) -> Vec<String> {
     if legacy.is_empty() { vec!["tidal".into(), "deezer".into()] } else { legacy }
 }
 
+/// What looking a request up on the streamrip services came to: the links found, in the source order,
+/// plus what kept a service from answering. A failed lookup is never "not found": [`Resolved::none_message`]
+/// names it, so the request (and the plugin card, [`last_lookup_problem`]) says "Deezer lookup failed: Quota
+/// limit exceeded" or "Deezer needs an ARL cookie" instead of "not found on Deezer/Tidal".
+#[derive(Debug, Default)]
+pub struct Resolved {
+    /// Links to download, best first.
+    pub urls: Vec<String>,
+    /// The services that answered (found it or not), by name ("Deezer", "Tidal").
+    pub searched: Vec<&'static str>,
+    /// Why a service wasn't asked or its lookup failed, one line each ("Deezer lookup failed: …").
+    pub problems: Vec<String>,
+}
+
+impl Resolved {
+    /// A lookup on `service` that failed with `e`: noted for the request and kept for the plugin card.
+    fn failed(&mut self, st: &impl Ctx, service: &str, e: &anyhow::Error) {
+        let line = format!("{service} lookup failed: {}", one_line(&format!("{e:#}")));
+        st.db().log("warning", &format!("streamrip: {line}"));
+        remember_problem(st, &line);
+        self.problems.push(line);
+    }
+
+    /// The request's message when no link was found: what failed first (with "not found on …" for the
+    /// services that did answer), else "not found on Deezer/Tidal" naming the services asked, else that
+    /// none could be asked.
+    pub fn none_message(&self) -> String {
+        let not_found = (!self.searched.is_empty()).then(|| format!("not found on {}", self.searched.join("/")));
+        match (self.problems.is_empty(), not_found) {
+            (true, Some(nf)) => nf,
+            (true, None) => "no streaming service to search – turn Deezer or Tidal on in the Source order".into(),
+            (false, nf) => self.problems.iter().cloned().chain(nf).collect::<Vec<_>>().join("; "),
+        }
+    }
+}
+
+/// `text` on one line, cut to 200 characters: an error for a request's message.
+fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    cap(&flat, 200)
+}
+
+/// The cache key of the last failed lookup ([`last_lookup_problem`]).
+const PROBLEM_KEY: &str = "streamrip_lookup_problem";
+
+/// How long a failed lookup stays on the plugin card after the last one: an hour.
+const PROBLEM_SECS: u64 = 3600;
+
+/// Keep `line` as the last failed lookup, for the plugin card.
+fn remember_problem(st: &impl Ctx, line: &str) {
+    st.cache_put(PROBLEM_KEY, json!(line), PROBLEM_SECS);
+}
+
+/// The last lookup that failed within the hour ("Deezer lookup failed: Quota limit exceeded"), for the
+/// streamrip plugin card; `None` once lookups work again or an hour has gone by.
+pub fn last_lookup_problem(st: &impl Ctx) -> Option<String> {
+    st.cache_get(PROBLEM_KEY).and_then(|v| v.as_str().map(String::from)).filter(|s| !s.is_empty())
+}
+
+/// A lookup that answered: an earlier failure no longer stands on the plugin card.
+fn lookup_worked(st: &impl Ctx) {
+    if last_lookup_problem(st).is_some() {
+        st.cache_put(PROBLEM_KEY, json!(""), 1);
+    }
+}
+
+/// Whether Deezer can be asked at all: it downloads only with an ARL cookie, so without one the lookup is
+/// skipped and the request says so ([`ARL_MSG`]) instead of "not found".
+fn deezer_usable(st: &impl Ctx, res: &mut Resolved) -> bool {
+    if deezer_arl_set(st) {
+        return true;
+    }
+    remember_problem(st, ARL_MSG);
+    res.problems.push(ARL_MSG.into());
+    false
+}
+
 /// Links for an album on each streamrip service, in the source order: by its first song's ISRC, else the best
-/// match of a search.
-pub async fn resolve_album(st: &impl Ctx, artist: &str, album: &str, track_count: Option<usize>, first_isrc: Option<&str>) -> Vec<String> {
-    let mut urls = vec![];
+/// match of a search. A service whose lookup fails is named in [`Resolved::problems`], never taken for "not
+/// there".
+pub async fn resolve_album(st: &impl Ctx, artist: &str, album: &str, track_count: Option<usize>, first_isrc: Option<&str>) -> Resolved {
+    let mut res = Resolved::default();
     let want = describe(album, artist, None, None, None);
     for svc in services(st) {
         if svc == "deezer" {
-            if let Some(t) = match first_isrc { Some(i) => deezer_isrc(st, i).await, None => None } {
-                if let Some(id) = t["album"]["id"].as_i64() {
-                    urls.push(format!("https://www.deezer.com/album/{id}"));
-                    continue;
-                }
+            if !deezer_usable(st, &mut res) {
+                continue;
             }
-            let mut res = deezer_search(st, "album", &format!("artist:\"{artist}\" album:\"{album}\"")).await;
-            if res.is_empty() {
-                res = deezer_search(st, "album", &format!("{artist} {album}")).await;
-            }
-            let mut best: Option<(f64, i64)> = None;
-            for a in res {
-                let v = compare(&want, &describe(a["title"].as_str().unwrap_or(""), a["artist"]["name"].as_str().unwrap_or(""), None, None, None), true);
-                if !v.matched {
-                    continue;
+            match deezer_album(st, artist, album, track_count, first_isrc, &want).await {
+                Ok(found) => {
+                    lookup_worked(st);
+                    res.searched.push("Deezer");
+                    res.urls.extend(found.map(|id| format!("https://www.deezer.com/album/{id}")));
                 }
-                let s = v.score + if track_count.is_some_and(|n| a["nb_tracks"].as_u64() == Some(n as u64)) { 0.2 } else { 0.0 };
-                if best.is_none_or(|(b, _)| s > b) {
-                    best = Some((s, a["id"].as_i64().unwrap_or(0)));
-                }
-            }
-            if let Some((_, id)) = best {
-                urls.push(format!("https://www.deezer.com/album/{id}"));
+                Err(e) => res.failed(st, "Deezer", &e),
             }
         } else if svc == "tidal" && first_isrc.is_some() && !st.cfg().str("tidal_client_id").is_empty() {
             match tidal_by_isrc(st, first_isrc.unwrap(), true).await {
-                Ok(Some(u)) => urls.push(u),
-                Ok(None) => {}
-                Err(e) => st.db().log("warning", &format!("streamrip: tidal lookup failed: {e}")),
+                Ok(u) => {
+                    lookup_worked(st);
+                    res.searched.push("Tidal");
+                    res.urls.extend(u);
+                }
+                Err(e) => res.failed(st, "Tidal", &e),
             }
         }
     }
-    urls
+    res
 }
 
-/// Links for a song on each streamrip service, in the source order: by its ISRC, else the best match of a search.
-pub async fn resolve_track(st: &impl Ctx, artist: &str, title: &str, isrc: Option<&str>, length: Option<f64>) -> Vec<String> {
-    let mut urls = vec![];
+/// The Deezer album id for [`resolve_album`]: by the first song's ISRC, else the best match of a search
+/// (`want`, with a bonus for the same number of songs). `Ok(None)`: Deezer answered and has no match.
+async fn deezer_album(st: &impl Ctx, artist: &str, album: &str, track_count: Option<usize>, first_isrc: Option<&str>, want: &encore_library::matcher::Desc) -> anyhow::Result<Option<i64>> {
+    if let Some(i) = first_isrc {
+        if let Some(id) = deezer_isrc(st, i).await?.and_then(|t| t["album"]["id"].as_i64()) {
+            return Ok(Some(id));
+        }
+    }
+    let mut res = deezer_search(st, "album", &format!("artist:\"{artist}\" album:\"{album}\"")).await?;
+    if res.is_empty() {
+        res = deezer_search(st, "album", &format!("{artist} {album}")).await?;
+    }
+    let mut best: Option<(f64, i64)> = None;
+    for a in res {
+        let v = compare(want, &describe(a["title"].as_str().unwrap_or(""), a["artist"]["name"].as_str().unwrap_or(""), None, None, None), true);
+        if !v.matched {
+            continue;
+        }
+        let s = v.score + if track_count.is_some_and(|n| a["nb_tracks"].as_u64() == Some(n as u64)) { 0.2 } else { 0.0 };
+        if best.is_none_or(|(b, _)| s > b) {
+            best = Some((s, a["id"].as_i64().unwrap_or(0)));
+        }
+    }
+    Ok(best.map(|(_, id)| id))
+}
+
+/// Links for a song on each streamrip service, in the source order: by its ISRC, else the best match of a
+/// search. A service whose lookup fails is named in [`Resolved::problems`], never taken for "not there".
+pub async fn resolve_track(st: &impl Ctx, artist: &str, title: &str, isrc: Option<&str>, length: Option<f64>) -> Resolved {
+    let mut res = Resolved::default();
     let want = describe(title, artist, length, isrc, None);
     for svc in services(st) {
         if svc == "deezer" {
-            let mut t = match isrc { Some(i) => deezer_isrc(st, i).await, None => None };
-            if t.is_none() {
-                for c in deezer_search(st, "track", &format!("artist:\"{artist}\" track:\"{title}\"")).await {
-                    let mut ct = c["title"].as_str().unwrap_or("").to_string();
-                    if let Some(v) = c["title_version"].as_str().filter(|v| !v.is_empty() && !ct.to_lowercase().contains(&v.to_lowercase())) {
-                        ct = format!("{ct} {v}");
-                    }
-                    if compare(&want, &describe(&ct, c["artist"]["name"].as_str().unwrap_or(""), c["duration"].as_f64(), None, None), true).matched {
-                        t = Some(c);
-                        break;
-                    }
-                }
+            if !deezer_usable(st, &mut res) {
+                continue;
             }
-            if let Some(id) = t.and_then(|t| t["id"].as_i64()) {
-                urls.push(format!("https://www.deezer.com/track/{id}"));
+            match deezer_track(st, artist, title, isrc, &want).await {
+                Ok(found) => {
+                    lookup_worked(st);
+                    res.searched.push("Deezer");
+                    res.urls.extend(found.map(|id| format!("https://www.deezer.com/track/{id}")));
+                }
+                Err(e) => res.failed(st, "Deezer", &e),
             }
         } else if svc == "tidal" && isrc.is_some() && !st.cfg().str("tidal_client_id").is_empty() {
             match tidal_by_isrc(st, isrc.unwrap(), false).await {
-                Ok(Some(u)) => urls.push(u),
-                Ok(None) => {}
-                Err(e) => st.db().log("warning", &format!("streamrip: tidal lookup failed: {e}")),
+                Ok(u) => {
+                    lookup_worked(st);
+                    res.searched.push("Tidal");
+                    res.urls.extend(u);
+                }
+                Err(e) => res.failed(st, "Tidal", &e),
             }
         }
     }
-    urls
+    res
+}
+
+/// The Deezer track id for [`resolve_track`]: by its ISRC, else the first search hit that matches `want`
+/// (title with its version, artist, length). `Ok(None)`: Deezer answered and has no match.
+async fn deezer_track(st: &impl Ctx, artist: &str, title: &str, isrc: Option<&str>, want: &encore_library::matcher::Desc) -> anyhow::Result<Option<i64>> {
+    if let Some(i) = isrc {
+        if let Some(id) = deezer_isrc(st, i).await?.and_then(|t| t["id"].as_i64()) {
+            return Ok(Some(id));
+        }
+    }
+    for c in deezer_search(st, "track", &format!("artist:\"{artist}\" track:\"{title}\"")).await? {
+        let mut ct = c["title"].as_str().unwrap_or("").to_string();
+        // "Song" + its version "Remastered 2009" → "Song Remastered 2009", unless the title already says it
+        if let Some(v) = c["title_version"].as_str().filter(|v| !v.is_empty() && !ct.to_lowercase().contains(&v.to_lowercase())) {
+            ct = format!("{ct} {v}");
+        }
+        if compare(want, &describe(&ct, c["artist"]["name"].as_str().unwrap_or(""), c["duration"].as_f64(), None, None), true).matched {
+            return Ok(c["id"].as_i64());
+        }
+    }
+    Ok(None)
 }
 
 // ---- running streamrip --------------------------------------------------------------------------
@@ -1625,5 +1741,20 @@ sleep 300"#);
         assert!(e.to_string().starts_with(&format!("config failed: start {}: Permission denied (os error 13)", d2.display())), "{e}");
         assert_eq!(e.errno, Some(13));
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// A lookup that failed is never "not found": the request names what failed (and where it did look);
+    /// "not found on …" only when every service asked answered.
+    #[test]
+    fn a_failed_lookup_is_not_reported_as_not_found() {
+        let answered = Resolved { urls: vec![], searched: vec!["Deezer", "Tidal"], problems: vec![] };
+        assert_eq!(answered.none_message(), "not found on Deezer/Tidal");
+        let failed = Resolved { urls: vec![], searched: vec![], problems: vec!["Deezer lookup failed: Quota limit exceeded".into()] };
+        assert_eq!(failed.none_message(), "Deezer lookup failed: Quota limit exceeded");
+        let mixed = Resolved { urls: vec![], searched: vec!["Tidal"], problems: vec![ARL_MSG.into()] };
+        assert_eq!(mixed.none_message(), format!("{ARL_MSG}; not found on Tidal"));
+        assert!(Resolved::default().none_message().starts_with("no streaming service to search"));
+        // an error's lines become one, cut short for the request's message
+        assert_eq!(one_line("Deezer:\n  Quota   limit exceeded"), "Deezer: Quota limit exceeded");
     }
 }

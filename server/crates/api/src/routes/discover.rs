@@ -593,7 +593,7 @@ async fn new_releases_answer(st: &AppState, limit: usize) -> ApiResult<Value> {
             st.cache_put(&fresh_key, json!(true), NEW_RELEASES_FRESH);
             let st = st.clone();
             tokio::spawn(async move {
-                if let Ok(v) = compute_new_releases(&st, limit).await {
+                if let Ok(v) = compute_new_releases(&st, limit, true).await {
                     st.cache_put(&format!("new-releases:{limit}"), v, 7 * 86400);
                 }
             });
@@ -605,14 +605,50 @@ async fn new_releases_answer(st: &AppState, limit: usize) -> ApiResult<Value> {
     if let Some(v) = st.cache_get(&keep_key) {
         return Ok(v);
     }
-    let v = compute_new_releases(st, limit).await?;
+    // without the MusicBrainz look-ups (about a second each): the album pages they open follow in the background
+    let v = compute_new_releases(st, limit, false).await?;
     st.cache_put(&fresh_key, json!(true), NEW_RELEASES_FRESH);
     st.cache_put(&keep_key, v.clone(), 7 * 86400);
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        if let Ok(v) = compute_new_releases(&st2, limit, true).await {
+            st2.cache_put(&format!("new-releases:{limit}"), v, 7 * 86400);
+        }
+    });
     Ok(v)
 }
 
-/// Work out the new releases: the latest albums of the library's 60 biggest artists.
-async fn compute_new_releases(st: &AppState, limit: usize) -> ApiResult<Value> {
+/// How long a new release's MusicBrainz release group is kept (and a miss, before it is asked again).
+const RELEASE_RG_SECS: u64 = 30 * 86400;
+/// How long "MusicBrainz has no such release group" is kept: new releases reach MusicBrainz within days.
+const RELEASE_RG_MISS_SECS: u64 = 86400;
+
+/// The MusicBrainz release group of a new release (`artist`, `title`), so its card opens the album page instead
+/// of the artist's: one exact match (title and artist, without " - Single" and "(feat. …)"), kept for a month;
+/// None when MusicBrainz doesn't list it (yet) or `lookup` is off and nothing is kept.
+async fn release_group_of(st: &AppState, artist: &str, title: &str, lookup: bool) -> Option<String> {
+    let ck = format!("nr-rg:{}:{}", name_key(artist), name_key(title));
+    if let Some(v) = st.cache_get(&ck) {
+        return v.as_str().filter(|id| !id.is_empty()).map(String::from);
+    }
+    if !lookup {
+        return None;
+    }
+    let query = format!("releasegroup:\"{}\" AND artist:\"{}\"", encore_http::mb::esc(title), encore_http::mb::esc(artist));
+    // an error (MusicBrainz down) is not kept: the next refresh asks again
+    let hits = encore_http::mb::search_albums(st, &query, 10).await.ok()?;
+    let key = encore_library::catalog::title_key;
+    let (want_t, want_a) = (key(title), key(artist));
+    let id = hits.iter()
+        .find(|h| key(h["title"].as_str().unwrap_or("")) == want_t && key(h["artist"].as_str().unwrap_or("")) == want_a)
+        .and_then(|h| h["id"].as_str()).unwrap_or("").to_string();
+    st.cache_put(&ck, json!(id), if id.is_empty() { RELEASE_RG_MISS_SECS } else { RELEASE_RG_SECS });
+    Some(id).filter(|id| !id.is_empty())
+}
+
+/// Work out the new releases: the latest albums of the library's 60 biggest artists, each with its MusicBrainz
+/// release group as `mbid` when known (looked up when `lookup`, else only the ones kept from before).
+async fn compute_new_releases(st: &AppState, limit: usize, lookup: bool) -> ApiResult<Value> {
     // the library's 60 biggest artists: a GROUP BY over every song, on a read connection
     let names: Vec<String> = st.db.read(|c| c.query(
         "SELECT MAX(albumartist) n FROM tracks WHERE albumartist NOT IN ('', 'Unknown Artist', 'Various Artists')
@@ -646,8 +682,10 @@ async fn compute_new_releases(st: &AppState, limit: usize) -> ApiResult<Value> {
         if !seen.insert((name_key(&artist), name_key(&title))) {
             continue;
         }
+        // the release group opens the album page (the card went to the artist's page without one)
+        let mbid = release_group_of(st, &artist, &title, lookup).await;
         let mut item = json!({ "title": title, "artist": artist, "date": a["date"], "type": a["type"], "cover": a["cover"],
-            "followed": false, "in_library": in_library, "mbid": null });
+            "followed": false, "in_library": in_library, "mbid": mbid });
         mark_skipped(&filter, std::slice::from_mut(&mut item));
         res.push(item);
         // the limit counts what is shown with "Hide skipped types" on; the skipped ones ride along

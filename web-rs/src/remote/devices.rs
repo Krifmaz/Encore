@@ -37,7 +37,7 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
             format!(r#"<button class="btn sm ghost icon" data-a="prev" aria-label="Previous">{}</button>
             <button class="btn sm" data-a="toggle">{}</button>
             <button class="btn sm ghost icon" data-a="next" aria-label="Next">{}</button>
-            <input type="range" min="0" max="1" step="0.05" value="{}" data-vol title="Volume" style="width:110px;accent-color:var(--accent)">
+            <input type="range" min="0" max="1" step="0.05" value="{}" data-vol title="Encore's volume on this device" aria-label="Player volume" style="width:110px;accent-color:var(--accent)">
             {}"#,
                 icon("prev"),
                 if s.truthy("playing") { format!("{}Pause", icon("pause")) } else { format!("{}Play", icon("play")) },
@@ -45,11 +45,19 @@ fn device_card(d: &Value, devices: &[Value], l: Option<&player::Link>, me: &str)
                 if s.is_nullish("volume") { "0.9".to_string() } else { s.s("volume") },
                 if is_linked { "" } else { r#"<button class="btn sm" data-a="here" title="Continue this song on this device">Play here</button>"# })
         } else { String::new() };
+        // the device's own output volume (its media or speaker volume), when it reports one: also while nothing plays
+        let device_vol = match s.g("system_volume").as_f64() {
+            Some(v) => format!(r#"<label class="row small muted" style="gap:6px" title="{}'s own volume (its system volume, not just Encore's)">{}Device
+            <input type="range" min="0" max="1" step="0.05" value="{}" data-sysvol aria-label="Device volume" style="width:110px;accent-color:var(--accent)"></label>"#,
+                esc(&name), ui::icon_attr("volume", r#"width="14""#), v.clamp(0.0, 1.0)),
+            None => String::new(),
+        };
         let send_btn = if player::current().is_some() && l.is_none() {
             format!(r#"<button class="btn sm primary" data-a="send" title="Move what you're playing to {}">Send my music there</button>"#, esc(&name))
         } else { String::new() };
         format!(r#"<div class="row wrap" style="gap:8px">
           {transport}
+          {device_vol}
           {send_btn}
         </div>"#)
     };
@@ -269,11 +277,16 @@ pub fn open() {
     {
         let send = send.clone();
         dom::on(&list, "change", move |e| {
-            let Some(v) = dom::closest(e, "[data-vol]") else { return };
+            // the player volume slider sends `volume`, the device volume slider `system_volume` (both 0..1)
+            let (v, action) = match (dom::closest(e, "[data-vol]"), dom::closest(e, "[data-sysvol]")) {
+                (Some(v), _) => (v, "volume"),
+                (None, Some(v)) => (v, "system_volume"),
+                (None, None) => return,
+            };
             let id = dom::closest_of(&v, "[data-id]").map(|c| dom::data(&c, "id")).unwrap_or_default();
             let n: f64 = num(&dom::value(&v));
             let value = if n.fract() == 0.0 { json!(n as i64) } else { json!(n) };
-            send(id, json!({ "action": "volume", "value": value }));
+            send(id, json!({ "action": action, "value": value }));
         });
     }
     ON_DEVICES.with(|o| *o.borrow_mut() = Some(paint.clone()));

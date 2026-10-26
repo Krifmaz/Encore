@@ -393,6 +393,8 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 
 pub fn subscription(state: &State) -> Subscription<Message> {
     match state.section.unwrap_or(Section::Account) {
+        Section::Account => account::subscription(&state.account).map(Message::Account),
+        Section::Diagnostics => diagnostics::subscription(&state.diagnostics).map(Message::Diagnostics),
         Section::Playback => playback::subscription(&state.playback).map(Message::Playback),
         Section::Connections => connections::subscription(&state.connections).map(Message::Connections),
         Section::General

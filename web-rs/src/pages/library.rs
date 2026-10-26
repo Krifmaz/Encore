@@ -62,9 +62,11 @@ pub(crate) fn show_all_label(count: Option<u64>, shown: usize, limit: usize) -> 
 }
 
 /// The album kind a list asks for: the Albums tab with a search lists the singles too, as the results view's
-/// count does (client-shapes §3.4: `counts.albums` includes singles), so "Show all N" opens N albums.
-fn album_kind<'a>(tab: &'a str, q: &str) -> &'a str {
-    if tab == "albums" && !q.is_empty() { "" } else { tab }
+/// count does (client-shapes §3.4: `counts.albums` includes singles), so "Show all N" opens N albums. One
+/// artist's Albums tab (`?artist=`) lists its singles and EPs too: an artist with only a single (a featured
+/// artist, one half of a collaboration) showed "No albums found".
+fn album_kind<'a>(tab: &'a str, q: &str, artist: &str) -> &'a str {
+    if tab == "albums" && (!q.is_empty() || !artist.is_empty()) { "" } else { tab }
 }
 
 /// `history.replaceState(null, '', url)`: the address follows the page without a new history entry or a redraw.
@@ -178,6 +180,8 @@ pub fn track_menu(anchor: &Element, t: &Value, admin: bool, on_deleted: Option<R
         items.push(MenuItem::new("Get Dolby Atmos version", &icon("download"), move || get_atmos(format!("/library/tracks/{id}/surround"), done.clone())));
     }
     { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Report a problem", &icon("shield"), move || { let done = done.clone(); crate::pages::report::report_modal("track", t.g("id").clone(), &t.s("title"), "", Some(Rc::new(move |_| done()))) })); }
+    // bring your own music: this song's file replaced with one you upload (admins and the "own_files" permission)
+    if crate::pages::own_file::allowed() { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Replace with my own file", &icon("disc"), move || crate::pages::own_file::replace_modal(&t, Some(done.clone())))); }
     if ui::translate_mode() != "off" { let (t, done) = (t.clone(), done.clone()); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t.s("title"), "title", Some(done.clone())))); }
     if admin { let t = t.clone(); items.push(MenuItem::new("Edit song details…", &icon("edit"), move || fix_song_modal(&t))); }
     if can_fix {
@@ -495,7 +499,7 @@ impl Lib {
     fn albums_query(&self) -> lt::AlbumsQuery {
         let st = self.st.borrow();
         lt::AlbumsQuery {
-            q: st.q.clone(), sort: st.sort.clone(), dir: st.dir.clone(), kind: album_kind(&st.tab, &st.q).to_string(), filter: st.filter.clone(),
+            q: st.q.clone(), sort: st.sort.clone(), dir: st.dir.clone(), kind: album_kind(&st.tab, &st.q, &st.artist).to_string(), filter: st.filter.clone(),
             artist: st.artist.clone(), album_type: if st.tab == "albums" { st.album_type.clone() } else { String::new() },
         }
     }
@@ -619,6 +623,7 @@ impl Lib {
                 Err(e) => { toast(&e.message, "err"); return; }
             };
             if !trash_dialog(&d).await { return; }
+            let keep = lt::keeps(&d);
             me.moving.set(true);
             let n = ids.len();
             let bar = dom::qs_in(&me.view, "#lib-selbar");
@@ -636,7 +641,11 @@ impl Lib {
             }
             me.moving.set(false);
             if first_reason.is_empty() && moved < n { first_reason = "It is no longer in the library".into(); }
-            ui::toast_action(&lt::moved_text(moved, n, &first_reason), "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+            if keep {
+                ui::toast_action(&lt::moved_text(moved, n, &first_reason), "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+            } else {
+                toast(&lt::deleted_text(moved, n, &first_reason), if moved == n { "ok" } else { "err" });
+            }
             me.leave_select();
             me.load_types();
             me.reload();
@@ -962,13 +971,17 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         <button class="btn sm" id="art-all">{}Find missing artwork</button>
       </div>"##, icon("refresh"), icon("tag"), icon("disc"), icon("shield"), icon("disc"))
         } else { String::new() };
+        // bring your own music: a batch of your own files matched to the songs they are
+        let own_html = if crate::pages::own_file::allowed_for(&ctx.user) {
+            format!(r##"<button class="btn sm" id="own-files-btn" title="Replace songs with your own copies: each file is matched to its song by its tags">{}Upload your own files</button>"##, icon("disc"))
+        } else { String::new() };
         let artist_html = if !st.artist.is_empty() {
             format!(r##"<span class="badge accent">{} <a href="#/library" style="margin-left:4px">✕</a></span><button class="btn sm" id="artist-share" title="Share link">{}Share</button>"##, esc(&st.artist), icon("external"))
         } else { String::new() };
         dom::set_html(&view, &format!(r##"
     <div class="row wrap between" style="margin-bottom:18px">
       <div class="row" style="gap:12px;align-items:center"><div><h1>Library</h1><div class="muted small" id="lib-sub"></div></div>
-        <button class="btn primary sm" id="shuffle-lib" title="Play everything in random order – no song twice this session">{shuffle}Shuffle</button></div>
+        <button class="btn primary sm" id="shuffle-lib" title="Play everything in random order – no song twice this session">{shuffle}Shuffle</button>{own_html}</div>
       {admin_html}
     </div>
     <div id="bulk" class="hidden card" style="margin-bottom:16px"></div>
@@ -993,6 +1006,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             shuffle = icon("shuffle"), search = icon("search"), q = esc(&st.q),
             select_btn = if admin && !crate::offline::mode::active() { format!(r##"<button class="btn sm hidden" id="lib-select" title="Pick albums to delete">{}Select</button>"##, icon("check")) } else { String::new() }));
         dom::on_sel(&view, "#shuffle-lib", "click", |_| dom::spawn(async { if player::shuffle_library().await == 0 { toast("Your library is empty", "err"); } }));
+        dom::on_sel(&view, "#own-files-btn", "click", |_| crate::pages::own_file::bulk_modal(None));
         { let name = st.artist.clone(); dom::on_sel(&view, "#artist-share", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
         let body = need(&view, "#lib-body")?;
         let more = need(&view, "#more")?;
@@ -1259,17 +1273,20 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     })
 }
 
-/// The Delete… / Move album to Trash dialog from a dry run (POST /api/library/albums/trash `dry_run`): its title is the
+/// The Delete… / Delete album… dialog from a dry run (POST /api/library/albums/trash `dry_run`): its title is the
 /// server's ("Delete 12 albums (3.4 GB)?"), the Trash's words, the other-disk sentence and what stays; Move to Trash /
-/// Cancel. When the Trash's disk hasn't room: the server's words and Close only. → true on Move to Trash
+/// Cancel (Delete / Cancel while the Trash keeps nothing). When the Trash's disk hasn't room: the server's words and
+/// Close only. → true on Move to Trash or Delete
 async fn trash_dialog(d: &Value) -> bool {
     if d.g("room") == &json!(false) {
         modal(ModalOpts::new(&esc(&d.s("text")), &format!(r##"<p class="muted" style="margin:0">{}</p>"##, esck(d, "room_text")))
             .footer(r##"<button class="btn" data-close>Close</button>"##));
         return false;
     }
-    let body = lt::confirm_body(d.truthy("other_disk"), &d.s("skipped_text"));
-    ui::confirm_dialog_html(&d.s("text"), &format!(r##"<p class="muted" style="margin:0;white-space:pre-line">{}</p>"##, esc(&body)), "Move to Trash", true).await
+    let keep = lt::keeps(d);
+    let body = lt::confirm_body(keep, d.f("days") as i64, d.truthy("other_disk"), &d.s("skipped_text"));
+    ui::confirm_dialog_html(&d.s("text"), &format!(r##"<p class="muted" style="margin:0;white-space:pre-line">{}</p>"##, esc(&body)),
+        if keep { "Move to Trash" } else { "Delete" }, true).await
 }
 
 /// The song ⋯ menu's first line (0.36): who added the song, asked when the menu opens (the line shows once it
@@ -1660,7 +1677,11 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
                     match api::del(&format!("/library/albums/{id}")).await {
                         Ok(r) => {
                             let text = if r.truthy("text") { r.s("text") } else { lt::moved_text(1, 1, "") };
-                            ui::toast_action(&text, "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+                            if lt::keeps(&r) {
+                                ui::toast_action(&text, "Open Trash", 8000, || dom::set_hash(lt::TRASH_HREF));
+                            } else {
+                                toast(&text, "ok");
+                            }
                             app::navigate("/library");
                         }
                         Err(e) => toast(&e.message, "err"),
@@ -1993,8 +2014,11 @@ mod search_tests {
 
     #[test]
     fn the_albums_tab_with_a_search_lists_the_singles_too() {
-        assert_eq!(album_kind("albums", "crazy"), "");
-        assert_eq!(album_kind("albums", ""), "albums");
-        assert_eq!(album_kind("singles", "crazy"), "singles");
+        assert_eq!(album_kind("albums", "crazy", ""), "");
+        assert_eq!(album_kind("albums", "", ""), "albums");
+        assert_eq!(album_kind("singles", "crazy", ""), "singles");
+        // one artist's albums include its singles
+        assert_eq!(album_kind("albums", "", "3R2"), "");
+        assert_eq!(album_kind("singles", "", "3R2"), "singles");
     }
 }

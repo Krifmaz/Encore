@@ -515,6 +515,8 @@ pub fn toggle() {
 /// Play pressed (button, headset, lock screen, another device): a stream that broke off is loaded again where it was.
 pub(super) fn user_play() {
     if g_play() { return; }
+    // linked: the headset / lock screen play is the linked device's play (nothing starts here)
+    if via_link(json!({ "action": "play" })) { media_state(); return; }
     let (Some(a), Some(t)) = (audio(), cur()) else { return };
     st_mut(|s| s.want = true);
     resume_fx();
@@ -524,6 +526,8 @@ pub(super) fn user_play() {
 /// A real pause: it stays paused – nothing picks the song up again until play is pressed.
 pub(super) fn user_pause() {
     if g_pause() { return; }
+    // linked: the headset / lock screen pause goes to the linked device (and this one stays silent anyway)
+    if via_link(json!({ "action": "pause" })) { silence_here(); return; }
     st_mut(|s| s.want = false);
     let t = REC.with(|r| r.borrow_mut().timer.take());
     drop(t);
@@ -538,6 +542,9 @@ pub(super) fn shows_playing() -> bool {
 }
 /// play() – when the browser refuses (autoplay rules), say so: never sit silently paused with a pause button showing.
 pub(super) fn play_el(a: &HtmlMediaElement) {
+    // linked: a load or retry that finishes after linking (a pre-render, a downloaded copy, a seek) must not
+    // start the song here as well – that played it on both devices
+    if !may_play_here() { return; }
     let Ok(p) = a.play() else { return };
     let el = a.clone();
     dom::spawn(async move {

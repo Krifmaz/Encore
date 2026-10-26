@@ -14,6 +14,7 @@ use crate::fmt;
 use crate::pages::{Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::choice::select;
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::text_area::text_area;
 use crate::widgets::{
     self, badge, btn, btn_icon, btn_sm, card, empty, error_box, field, grid, icon, modal, muted, page_head,
@@ -239,6 +240,8 @@ pub struct Import {
     /// Save to (a new import only): None makes a new playlist, Some(id) adds to that one or Liked Songs.
     pub to: Option<i64>,
     pub targets: Vec<Target>,
+    /// A .txt list dragged onto the window: it goes into *Paste a list*.
+    pub drop: DropZone,
 }
 
 impl Import {
@@ -257,6 +260,7 @@ impl Import {
             importing: false,
             to: None,
             targets: vec![],
+            drop: DropZone::default(),
         }
     }
 
@@ -292,6 +296,8 @@ pub enum ImportMsg {
     /// "Choose a .txt file": its lines go into the list as if they were pasted.
     PickFile,
     Picked(Option<String>),
+    /// A file dragged over or dropped on the window: a dropped .txt list is read like a chosen one.
+    Drop(drop_zone::Event),
     /// "Show all" / "Collapse" on a long pasted list.
     LinesOpen(bool),
     Name(String),
@@ -348,7 +354,7 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
                     async move {
                         let f = rfd::AsyncFileDialog::new()
                             .set_title("Choose a list")
-                            .add_filter("Text", &["txt"])
+                            .add_filter("Text", LIST_FILES.exts)
                             .pick_file()
                             .await?;
                         Some(String::from_utf8_lossy(&f.read().await).into_owned())
@@ -358,7 +364,28 @@ pub fn import_update(imp: &mut Import, msg: ImportMsg, ctx: &mut Ctx) -> (Task<I
                 None,
             );
         }
+        ImportMsg::Drop(ev) => {
+            if imp.importing {
+                imp.drop.hovering = false;
+                return (Task::none(), None);
+            }
+            match imp.drop.handle(ev, &LIST_FILES) {
+                Outcome::Take(path) => {
+                    return (
+                        Task::perform(
+                            async move { tokio::fs::read(&path).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned()) },
+                            ImportMsg::Picked,
+                        ),
+                        None,
+                    );
+                }
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
+        }
         ImportMsg::Picked(Some(t)) => {
+            // a dropped list may come while *From a link* is shown: it is a list all the same
+            imp.mode = "text".into();
             imp.lines = text_editor::Content::with_text(&t);
             imp.lines_open = false;
         }
@@ -566,7 +593,15 @@ fn import_body<'a>(imp: &'a Import) -> El<'a, ImportMsg> {
     ));
     col = col.push(opts.wrap());
     col = col.push(preview_view(imp));
-    col.width(Length::Fill).into()
+    drop_zone::view(col.width(Length::Fill), &imp.drop, "Drop a .txt list (one Artist - Title per line) to import it")
+}
+
+/// The lists *Choose a .txt file* takes, picked or dropped.
+const LIST_FILES: drop_zone::Accept = drop_zone::Accept::one(&["txt"]);
+
+/// The window's drag and drop for an open import dialog (for the pages that show it).
+pub fn import_events() -> Subscription<ImportMsg> {
+    drop_zone::events().map(ImportMsg::Drop)
 }
 
 /// The whole modal in the page's message type. `wrap` lifts the dialog's messages, `on_close`
@@ -1240,8 +1275,12 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
     }
 }
 
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::none()
+/// A .txt list dragged onto the window while the import dialog is open.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    match state.dialog {
+        Some(Dialog::Import(_)) => import_events().map(Message::Import),
+        _ => Subscription::none(),
+    }
 }
 
 #[cfg(test)]

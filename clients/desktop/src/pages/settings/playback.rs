@@ -15,6 +15,7 @@ use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::eq_graph::{self, GraphEvent};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn_sm, icon_btn, seg, Icon};
 use cadenza::config::{RateSetting, Settings};
 use cadenza::engine::Status;
@@ -160,6 +161,8 @@ pub struct State {
     eq_range: f32,
     eq_live: Option<(Vec<Band>, Instant)>,
     convolution: String,
+    /// Impulse responses dragged onto the window for *Convolution*.
+    conv_drop: DropZone,
     test_busy: bool,
     /// A slider is being dragged: the 2 s re-read leaves the settings alone.
     dragging: bool,
@@ -183,6 +186,7 @@ impl Default for State {
             eq_range: 12.0,
             eq_live: None,
             convolution: String::new(),
+            conv_drop: DropZone::default(),
             test_busy: false,
             dragging: false,
             wrote_at: None,
@@ -243,6 +247,8 @@ pub enum Message {
     ConvInput(String),
     ConvPick,
     ConvPicked(Option<PathBuf>),
+    /// A file dragged over or dropped on the window: a dropped impulse response is used.
+    ConvDrop(drop_zone::Event),
     ConvCommit,
     ConvClear,
     TestSound,
@@ -683,7 +689,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 async move {
                     rfd::AsyncFileDialog::new()
                         .set_title("Impulse response")
-                        .add_filter("Impulse responses", &["wav", "txt"])
+                        .add_filter("Impulse responses", IMPULSE_FILES.exts)
                         .pick_file()
                         .await
                         .map(|f| f.path().to_path_buf())
@@ -697,6 +703,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             apply(state, ctx, |s| s.dsp.convolution = c);
         }
         Message::ConvPicked(None) => {}
+        Message::ConvDrop(ev) => match state.conv_drop.handle(ev, &IMPULSE_FILES) {
+            Outcome::Take(path) => return Task::done(Message::ConvPicked(Some(path))),
+            Outcome::Refused(m) => ctx.toast_err(m),
+            Outcome::Nothing => {}
+        },
         Message::ConvCommit => {
             let c = state.convolution.trim().to_string();
             apply(state, ctx, |s| s.dsp.convolution = c);
@@ -1106,7 +1117,7 @@ fn cadenza_card<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         lines.push(block(
             "Convolution",
             vec![
-                row![
+                drop_zone::view(row![
                     super::input("Impulse response file (WAV or text)", &state.convolution, Message::ConvInput)
                         .on_submit(Message::ConvCommit)
                         .width(Length::Fill),
@@ -1114,8 +1125,7 @@ fn cadenza_card<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     btn_sm("Clear", Btn::Ghost, (!state.convolution.is_empty()).then_some(Message::ConvClear)),
                 ]
                 .spacing(8)
-                .align_y(Alignment::Center)
-                .into(),
+                .align_y(Alignment::Center), &state.conv_drop, "Drop an impulse response (.wav or .txt) to use it"),
                 help("Room correction or a speaker filter, applied after the EQ.").into(),
             ],
         ));
@@ -1222,8 +1232,15 @@ pub fn overlay<'a>(_state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>>
     None
 }
 
+/// The impulse responses *Convolution* takes, picked or dropped.
+const IMPULSE_FILES: drop_zone::Accept = drop_zone::Accept::one(&["wav", "txt"]);
+
+/// The engine's state every 2 s, and the window's drag and drop for *Convolution*.
 pub fn subscription(_state: &State) -> Subscription<Message> {
-    iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick)
+    Subscription::batch([
+        iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
+        drop_zone::events().map(Message::ConvDrop),
+    ])
 }
 
 #[cfg(test)]

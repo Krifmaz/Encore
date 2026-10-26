@@ -1,5 +1,7 @@
 package app.encore.android.ui.screens
 
+import app.encore.android.data.api.RouteRules
+import app.encore.android.data.api.ServerRoute
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -268,8 +270,10 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
                 }
             }
             NavLabel("You")
-            // which server this phone is signed in to (This device has the whole address and how)
-            NavRow("Account", "${session.username} · ${session.server.substringAfter("://")}") { open("account") }
+            // which server this phone is signed in to, at which of its addresses (local network or public) right now
+            // (This device has the whole address and how)
+            val route by ServerRoute.route.collectAsState()
+            NavRow("Account", "${session.username} · ${RouteRules.summary(route, session.server)}") { open("account") }
             NavRow("Appearance", appearanceSummary(settings)) { open("appearance") }
             NavRow("Language") { open("language") }
             NavRow("Playback", playbackSummary(prefs)) { open("playback") }

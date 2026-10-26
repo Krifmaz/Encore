@@ -10,7 +10,7 @@ fn state(name: &str) -> (AppState, PathBuf) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("music")).unwrap();
     let st = crate::test_support::state_in(&dir);
-    st.cfg.set_many(&json!({ "library_path": dir.join("music").to_string_lossy(), "quality_check_on_import": false }));
+    st.cfg.set_many(&json!({ "trash_keep": true, "library_path": dir.join("music").to_string_lossy(), "quality_check_on_import": false }));
     (st, dir)
 }
 
@@ -54,7 +54,7 @@ async fn report_blocks_parks_and_the_replacement_keeps_the_id() {
     assert!(slskd_blocked(&st, &bad) && !slskd_blocked(&st, &same_user_other_file) && !slskd_blocked(&st, &good));
     // 2. the file (and its lyrics) went to the trash, the row waits for the replacement
     assert!(!f.exists() && !f.with_extension("lrc").exists());
-    let trash: Vec<_> = std::fs::read_dir(trash_dir(&st)).unwrap().flatten().collect();
+    let trash: Vec<_> = std::fs::read_dir(trash_dir(&st)).unwrap().flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).collect();
     assert_eq!(trash.len(), 2, "{trash:?}");
     assert!(st.db.one("SELECT 1 FROM tracks WHERE id=?", p![tid]).unwrap().is_none());
     assert!(st.db.one("SELECT 1 FROM track_parked WHERE id=?", p![tid]).unwrap().is_some());
@@ -204,7 +204,7 @@ async fn a_lyrics_report_keeps_the_song_and_finds_other_lyrics() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("music")).unwrap();
     let st = crate::test_support::TestServer::in_dir(&dir).with_urls(encore_http::Urls { lrclib: lrclib().await, ..Default::default() }).st;
-    st.cfg.set_many(&json!({ "library_path": dir.join("music").to_string_lossy(), "quality_check_on_import": false, "lyrics_save_files": true, "lyrics_embed": false }));
+    st.cfg.set_many(&json!({ "trash_keep": true, "library_path": dir.join("music").to_string_lossy(), "quality_check_on_import": false, "lyrics_save_files": true, "lyrics_embed": false }));
     let listener = user(&st, "listener", "user");
     let (tid, f) = song(&st, &dir, "Travis Scott/Singles/Travis Scott - 90210.flac", "90210", 0, "single-90210");
     st.db.execute("INSERT INTO plays (user_id, track_id, seconds, played_at) VALUES (?,?,?,?)", p![listener.i("id"), tid, 200.0, now()]).unwrap();
@@ -230,7 +230,7 @@ async fn a_lyrics_report_keeps_the_song_and_finds_other_lyrics() {
     assert!(st.db.one("SELECT 1 FROM source_block", p![]).unwrap().is_none());
     assert!(st.db.one("SELECT 1 FROM track_parked", p![]).unwrap().is_none());
     assert!(st.db.one("SELECT 1 FROM requests", p![]).unwrap().is_none());
-    assert!(!trash_dir(&st).exists() || std::fs::read_dir(trash_dir(&st)).unwrap().next().is_none());
+    assert!(!trash_dir(&st).exists() || !std::fs::read_dir(trash_dir(&st)).unwrap().flatten().any(|e| !e.file_name().to_string_lossy().starts_with('.')));
     // a later lookup (the file gone again) still never picks the wrong words
     std::fs::remove_file(f.with_extension("lrc")).unwrap();
     let t = st.db.one("SELECT * FROM tracks WHERE id=?", p![tid]).unwrap().unwrap();

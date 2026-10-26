@@ -55,8 +55,13 @@ object ReportUi {
     fun track(id: Long, title: String, reason: String, onDone: (() -> Unit)?) { _open.value = Request("track", id.toString(), title, onDone, reason) }
     fun album(id: String, title: String, onDone: (() -> Unit)? = null) { _open.value = Request("album", id, title, onDone) }
 
-    /** The lyrics view's "Report lyrics": the sheet for song [id] with Wrong lyrics ticked; [onDone] reloads the lyrics. */
-    fun lyrics(id: Long, title: String, onDone: (() -> Unit)?) { _open.value = Request("track", id.toString(), title, onDone, ReportRules.WRONG_LYRICS) }
+    /**
+     * The lyrics view's "Report lyrics" (Wrong lyrics ticked) or "Other timing" ([reason] = [ReportRules.LYRICS_SYNC]):
+     * the sheet for song [id]; [onDone] reloads the lyrics.
+     */
+    fun lyrics(id: Long, title: String, onDone: (() -> Unit)?, reason: String = ReportRules.WRONG_LYRICS) {
+        _open.value = Request("track", id.toString(), title, onDone, reason)
+    }
     fun close() { _open.value = null }
 }
 

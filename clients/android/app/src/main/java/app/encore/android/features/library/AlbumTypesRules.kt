@@ -36,6 +36,8 @@ object AlbumTypesRules {
     const val NO_ALBUMS_OF_TYPE = "No albums of this type"
     const val AT_MOST = "At most 5000 albums at a time"
     const val TRASH_BODY = "Their songs go to the Trash in Files, where you can restore them. The space is freed when the Trash is emptied."
+    /** The Delete dialog's words while Keep deleted files in Trash is off (the default since 0.38). */
+    const val DELETE_BODY = "Their songs are deleted for good. To be able to restore what you delete, turn on Keep deleted files in Trash in Settings → Library → Deleting files."
     const val OTHER_DISK = " The Trash is on another disk, so the files are copied there first – this can take a while."
     const val ONE_OFF_HELP = "A song or two from a compilation, remix album or soundtrack: shown on the artist's page under One-offs, not with the albums."
     const val ONE_OFFS = "One-offs"
@@ -43,8 +45,10 @@ object AlbumTypesRules {
     const val CHANGE_TYPE = "Change type…"
     const val CHANGE_TYPE_TITLE = "Change type"
     const val TYPE_SAVED = "Type saved"
-    const val MOVE_ALBUM = "Move album to Trash"
+    const val MOVE_ALBUM = "Delete album…"
     const val MOVE_TO_TRASH = "Move to Trash"
+    /** The dialog's button while deletes are for good. */
+    const val DELETE_GO = "Delete"
     const val OPEN_TRASH = "Open Trash"
     const val SELECT = "Select"
     const val CLEAR_SELECTION = "Clear selection"
@@ -53,7 +57,7 @@ object AlbumTypesRules {
     /** The first reason when a call moved fewer albums than it was given and named none. */
     const val GONE = "It is no longer in the library"
 
-    /** The admin part of the album page's ⋯, in its order: Change type… after Edit details, Move album to Trash last. */
+    /** The admin part of the album page's ⋯, in its order: Change type… after Edit details, Delete album… last. */
     fun albumAdminItems(admin: Boolean, hasType: Boolean): List<String> {
         if (!admin) return emptyList()
         val v = mutableListOf("Tag / match metadata", "Edit details (album, artist, songs)")
@@ -239,36 +243,63 @@ object AlbumTypesRules {
         return "Moved $moved of $total albums to the Trash – ${total - moved} couldn't be moved: $firstReason"
     }
 
-    /** The sums of the real runs: albums moved, and the first reason one couldn't be. */
-    data class Moved(val moved: Int = 0, val firstReason: String = "") {
+    /** The toast after a delete for good (Keep deleted files in Trash off). */
+    fun deletedText(deleted: Int, total: Int, firstReason: String): String {
+        if (deleted == total) return if (deleted == 1) "Deleted 1 album" else "Deleted $deleted albums"
+        return "Deleted $deleted of $total albums – ${total - deleted} couldn't be deleted: $firstReason"
+    }
+
+    /** Does a dry run's (or a run's) answer say the Trash keeps what is deleted? (A server before 0.38 always did.) */
+    fun keeps(d: JsonObject): Boolean {
+        val k = d["keep"]
+        return !(k is JsonPrimitive && k !is JsonNull && k.content == "false")
+    }
+
+    /** The dialog's button: Move to Trash, or Delete while deletes are for good. */
+    fun goLabel(keep: Boolean): String = if (keep) MOVE_TO_TRASH else DELETE_GO
+
+    /** The sums of the real runs: albums moved, and the first reason one couldn't be; [keep] false: deleted for good. */
+    data class Moved(val moved: Int = 0, val firstReason: String = "", val keep: Boolean = true) {
         /** After one call's answer (`albums`, `failed[].reason`). */
         fun plus(answer: JsonObject): Moved = Moved(
             moved + answer.int("albums").coerceAtLeast(0),
             firstReason.ifEmpty { answer.arr("failed").objectsOf().firstOrNull()?.str("reason").orEmpty() },
+            keep,
         )
 
         /** After a call that failed. */
         fun failed(message: String): Moved = copy(firstReason = firstReason.ifEmpty { message })
 
         /** The toast for [n] albums asked for. */
-        fun text(n: Int): String = movedText(moved, n, if (firstReason.isEmpty() && moved < n) GONE else firstReason)
+        fun text(n: Int): String {
+            val reason = if (firstReason.isEmpty() && moved < n) GONE else firstReason
+            return if (keep) movedText(moved, n, reason) else deletedText(moved, n, reason)
+        }
     }
 
-    /** The Delete… dialog's text: the Trash's words, the other-disk sentence, and what stays on its own line. */
-    fun confirmBody(otherDisk: Boolean, skippedText: String): String {
-        var body = TRASH_BODY
+    /**
+     * The Delete… dialog's text: deleted for good, or the Trash's words with its days and the other-disk sentence; what
+     * stays on its own line.
+     */
+    fun confirmBody(keep: Boolean, days: Int, otherDisk: Boolean, skippedText: String): String {
+        var body = when {
+            !keep -> DELETE_BODY
+            days > 0 -> "Their songs go to the Trash in Files, where you can restore them for $days days. Then they are deleted for good."
+            else -> TRASH_BODY
+        }
         if (otherDisk) body += OTHER_DISK
         if (skippedText.isNotEmpty()) body += "\n" + skippedText
         return body
     }
 
     /** The Delete… / Move album to Trash dialog from a dry run: its title, its words, and false when only Close. */
-    data class TrashDialog(val title: String, val text: String, val canGo: Boolean)
+    data class TrashDialog(val title: String, val text: String, val canGo: Boolean, val keep: Boolean = true)
 
     fun trashDialog(dry: JsonObject): TrashDialog {
         val room = dry["room"]
-        if (room is JsonPrimitive && room !is JsonNull && room.content == "false") return TrashDialog(dry.str("text"), dry.str("room_text"), false)
-        return TrashDialog(dry.str("text"), confirmBody(dry.bool("other_disk"), dry.str("skipped_text")), true)
+        val keep = keeps(dry)
+        if (room is JsonPrimitive && room !is JsonNull && room.content == "false") return TrashDialog(dry.str("text"), dry.str("room_text"), false, keep)
+        return TrashDialog(dry.str("text"), confirmBody(keep, dry.int("days"), dry.bool("other_disk"), dry.str("skipped_text")), true, keep)
     }
 
     // ---- the album page (§6.2) -----------------------------------------------------------------------------------

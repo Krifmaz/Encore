@@ -44,6 +44,24 @@
             },
             {
               "advanced": false,
+              "default": "",
+              "env": "ENCORE_LOCAL_URL",
+              "env_locked": false,
+              "full": false,
+              "help": "e.g. http://192.168.1.10:8080 – the desktop, phone and TV apps use it instead of the public URL while they're on your home network",
+              "key": "local_url",
+              "label": "Local network address",
+              "max": null,
+              "min": null,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "url",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
               "default": "small",
               "env": "SHARE_PREVIEW",
               "env_locked": false,
@@ -363,6 +381,52 @@
           "test": null,
           "test_label": null,
           "title": "Group listens"
+        },
+        {
+          "desc": "Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted.",
+          "fields": [
+            {
+              "advanced": false,
+              "default": 3,
+              "env": "ENCORE_BACKUP_KEEP",
+              "env_locked": false,
+              "full": false,
+              "help": "Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each.",
+              "key": "backup_keep",
+              "label": "Backups to keep",
+              "max": 60,
+              "min": 1,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": 1,
+              "env": "ENCORE_BACKUP_KEEP_UPGRADE",
+              "env_locked": false,
+              "full": false,
+              "help": "The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above.",
+              "key": "backup_keep_upgrade",
+              "label": "Pre-upgrade copies to keep",
+              "max": 10,
+              "min": 0,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": null,
+              "when": null
+            }
+          ],
+          "id": "backups",
+          "part": "",
+          "test": null,
+          "test_label": null,
+          "title": "Database backups"
         }
       ],
       "id": "general",
@@ -535,6 +599,37 @@
               "secret": false,
               "step": null,
               "type": "text",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": "keep",
+              "env": "ENCORE_FILE_NAMES",
+              "env_locked": false,
+              "full": false,
+              "help": "Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)",
+              "key": "file_names",
+              "label": "Emoji and symbols in file names",
+              "max": null,
+              "min": null,
+              "options": [
+                {
+                  "label": "Keep them",
+                  "value": "keep"
+                },
+                {
+                  "label": "Write them as words (♾️ → Infinity)",
+                  "value": "words"
+                },
+                {
+                  "label": "Plain ASCII names only",
+                  "value": "ascii"
+                }
+              ],
+              "secret": false,
+              "step": null,
+              "type": "select",
               "unit": null,
               "when": null
             },
@@ -898,6 +993,52 @@
           "test": null,
           "test_label": null,
           "title": "Surround (Dolby Atmos)"
+        },
+        {
+          "desc": "What happens to a file when you delete an album, a song or a file. Off: it is deleted for good straight away. On: it waits in the Trash (Settings → System → Files → Trash, on the music disk) and can be restored until the days run out.",
+          "fields": [
+            {
+              "advanced": false,
+              "default": false,
+              "env": "ENCORE_TRASH_KEEP",
+              "env_locked": false,
+              "full": false,
+              "help": "Off: deleting an album, a song or a file deletes it for good. On: it goes to the Trash first, where you can restore it.",
+              "key": "trash_keep",
+              "label": "Keep deleted files in Trash",
+              "max": null,
+              "min": null,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "bool",
+              "unit": null,
+              "when": null
+            },
+            {
+              "advanced": false,
+              "default": 30,
+              "env": "ENCORE_TRASH_DAYS",
+              "env_locked": false,
+              "full": false,
+              "help": "After this many days a file in the Trash is deleted for good (also what a reported song's old file waits once its replacement arrived).",
+              "key": "trash_days",
+              "label": "Keep them for",
+              "max": 3650,
+              "min": 1,
+              "options": [],
+              "secret": false,
+              "step": null,
+              "type": "number",
+              "unit": "days",
+              "when": null
+            }
+          ],
+          "id": "trash",
+          "part": "",
+          "test": null,
+          "test_label": null,
+          "title": "Deleting files"
         }
       ],
       "id": "library",

@@ -15,14 +15,16 @@ pub const ALL_TYPES: &str = "All types";
 pub const NO_ALBUMS_OF_TYPE: &str = "No albums of this type";
 pub const AT_MOST: &str = "At most 5000 albums at a time";
 pub const TRASH_BODY: &str = "Their songs go to the Trash in Files, where you can restore them. The space is freed when the Trash is emptied.";
+/// The Delete dialog's words while Keep deleted files in Trash is off (the default since 0.38).
+pub const DELETE_BODY: &str = "Their songs are deleted for good. To be able to restore what you delete, turn on Keep deleted files in Trash in Settings → Library → Deleting files.";
 pub const OTHER_DISK: &str = " The Trash is on another disk, so the files are copied there first – this can take a while.";
 pub const ONE_OFF_HELP: &str = "A song or two from a compilation, remix album or soundtrack: shown on the artist's page under One-offs, not with the albums.";
 pub const ONE_OFFS_LINE: &str = "Songs from compilations, remix albums and soundtracks where you have only a few songs.";
 pub const CHANGE_TYPE: &str = "Change type…";
-pub const MOVE_ALBUM: &str = "Move album to Trash";
+pub const MOVE_ALBUM: &str = "Delete album…";
 
 /// The admin part of the album page's ⋯ menu, in its order: Change type… sits after Edit details and before
-/// Change artwork…, Move album to Trash ends it; none of it for others.
+/// Change artwork…, Delete album… ends it; none of it for others.
 pub fn album_admin_items(admin: bool, has_type: bool) -> Vec<&'static str> {
     if !admin {
         return vec![];
@@ -210,9 +212,29 @@ pub fn moved_text(moved: usize, total: usize, first_reason: &str) -> String {
     format!("Moved {moved} of {total} albums to the Trash – {} couldn't be moved: {first_reason}", total - moved)
 }
 
-/// The Delete… dialog's text: the Trash's words, the other-disk sentence, and what stays on its own line.
-pub fn confirm_body(other_disk: bool, skipped_text: &str) -> String {
-    let mut body = TRASH_BODY.to_string();
+/// The toast after a delete for good (Keep deleted files in Trash off).
+pub fn deleted_text(deleted: usize, total: usize, first_reason: &str) -> String {
+    if deleted == total {
+        return if deleted == 1 { "Deleted 1 album".into() } else { format!("Deleted {deleted} albums") };
+    }
+    format!("Deleted {deleted} of {total} albums – {} couldn't be deleted: {first_reason}", total - deleted)
+}
+
+/// Does a dry run's answer say the Trash keeps what is deleted? (A server before 0.38 always did.)
+pub fn keeps(d: &serde_json::Value) -> bool {
+    d.get("keep").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+/// The Delete… dialog's text: deleted for good, or the Trash's words with its days and the other-disk sentence;
+/// what stays on its own line.
+pub fn confirm_body(keep: bool, days: i64, other_disk: bool, skipped_text: &str) -> String {
+    let mut body = if !keep {
+        DELETE_BODY.to_string()
+    } else if days > 0 {
+        format!("Their songs go to the Trash in Files, where you can restore them for {days} days. Then they are deleted for good.")
+    } else {
+        TRASH_BODY.to_string()
+    };
     if other_disk {
         body.push_str(OTHER_DISK);
     }
@@ -350,9 +372,14 @@ mod tests {
         assert_eq!(moved_text(12, 12, ""), "Moved 12 albums to the Trash");
         assert_eq!(moved_text(10, 12, "Its files are outside the folders Encore manages"),
                    "Moved 10 of 12 albums to the Trash – 2 couldn't be moved: Its files are outside the folders Encore manages");
-        assert_eq!(confirm_body(false, ""), TRASH_BODY);
-        assert_eq!(confirm_body(true, "1 of them can't be moved to the Trash and stays: X"),
+        assert_eq!(confirm_body(true, 0, false, ""), TRASH_BODY);
+        assert_eq!(confirm_body(true, 0, true, "1 of them can't be moved to the Trash and stays: X"),
                    format!("{TRASH_BODY}{OTHER_DISK}\n1 of them can't be moved to the Trash and stays: X"));
+        assert_eq!(confirm_body(false, 30, false, ""), DELETE_BODY);
+        assert!(confirm_body(true, 30, false, "").contains("restore them for 30 days"));
+        assert_eq!(deleted_text(1, 1, ""), "Deleted 1 album");
+        assert_eq!(deleted_text(10, 12, "X"), "Deleted 10 of 12 albums – 2 couldn't be deleted: X");
+        assert!(!keeps(&serde_json::json!({ "keep": false })) && keeps(&serde_json::json!({})));
         assert!(OTHER_DISK.starts_with(' '));
     }
 

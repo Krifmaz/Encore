@@ -13,7 +13,10 @@ pub const ALIVE: f64 = 15.0;
 /// "shuffle" {value: bool} shuffles the rest of the queue (false puts the order back); "repeat" {value: "off"|"all"|"one"}.
 /// A device's check-in state carries `shuffle` and `repeat` the same way. "prefs" {norm: {mode, target, clip}} sets the
 /// device's own volume normalization (0.31; its state reports them as `norm`, client-shapes §5.1).
-pub const ACTIONS: [&str; 15] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat", "prefs"];
+/// "volume" {value: 0..1} is the app player's volume; "system_volume" {value: 0..1} is the device's own
+/// output volume (Android's media volume, the computer's speaker volume), which a device that can reach it
+/// reports as `system_volume` in its state (0 while muted; left out or null when it cannot).
+pub const ACTIONS: [&str; 16] = ["toggle", "play", "pause", "next", "prev", "seek", "volume", "system_volume", "play_queue", "enqueue", "play_next", "stop", "engine", "shuffle", "repeat", "prefs"];
 
 /// One player device of a user, as its check-ins left it.
 pub struct Device {

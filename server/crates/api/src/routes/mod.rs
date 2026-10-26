@@ -4,6 +4,7 @@ pub mod bugreports;
 pub mod files;
 pub mod group;
 pub mod library;
+pub mod own_file;
 pub mod perf;
 pub mod picker;
 pub mod playback;

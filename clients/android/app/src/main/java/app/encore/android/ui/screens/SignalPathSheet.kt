@@ -45,7 +45,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * `GET /api/library/tracks/{id}/info`: what's in the file. [gainSource] is where the song's loudness comes from
  * (`gain.source`, 0.31: "tags" | "measured"; "" when unknown or from an older server).
  */
-class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val channels: Int, val bitrate: Int, val lossless: Boolean?, val gainSource: String = "") {
+class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val channels: Int, val bitrate: Int, val lossless: Boolean?, val gainSource: String = "",
+                /** "Your own file – uploaded by alex on …" when someone replaced the song's file with their own ("" otherwise) */
+                val ownFile: String = "") {
     companion object {
         fun from(o: JsonObject): TrackInfo {
             val l = (o["lossless"] as? JsonPrimitive)?.content
@@ -53,6 +55,7 @@ class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val c
                 o.stringOnly("codec"), o.int("sample_rate"), o.int("bit_depth"), o.int("channels"), o.int("bitrate"),
                 when (l) { "true" -> true; "false" -> false; else -> null },
                 (o["gain"] as? JsonObject)?.stringOnly("source") ?: "",
+                app.encore.android.features.library.OwnFileRules.note(o["own_file"] as? JsonObject) { app.encore.android.ui.components.formatDay(it) },
             )
         }
     }
@@ -109,7 +112,8 @@ fun SignalPathSheet(nav: Nav, onDismiss: () -> Unit) {
             val net = if ((s?.connectionKbps ?: 0.0) > 0) " · connection ≈ ${Quality.mbit(s!!.connectionKbps)} Mbit/s" else ""
 
             PathRow("Source", if (loading && info == null) sourceLine(t, null) else sourceLine(t, info),
-                if (info?.lossless == false) "A lossy file: what the file lost is gone before Encore touches it" else "")
+                listOf(if (info?.lossless == false) "A lossy file: what the file lost is gone before Encore touches it" else "", info?.ownFile.orEmpty())
+                    .filter { it.isNotEmpty() }.joinToString(" · "))
             PathRow("Encore → this device", transport + net, "")
 
             val outRate = out.rateHz

@@ -7,6 +7,7 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn, btn_icon, btn_sm, modal, small_muted, t, Icon};
 use iced::widget::{column, container, row, space};
 use iced::{Alignment, Length, Task};
@@ -36,6 +37,8 @@ pub struct State {
     /// Raw answers and full reports that are unfolded.
     open: HashSet<String>,
     dialog: Option<Dialog>,
+    /// Backups dragged onto the window for *Upload a backup…*.
+    drop: DropZone,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +53,8 @@ pub enum Message {
     BackedUp(Result<Value, ApiError>),
     PickBackup,
     BackupPicked(Option<PathBuf>),
+    /// A file dragged over or dropped on the window: a dropped database backup is uploaded.
+    Drop(drop_zone::Event),
     Uploaded(Result<Value, ApiError>),
     Download(String),
     Downloaded(Result<String, String>),
@@ -390,13 +395,25 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 async move {
                     rfd::AsyncFileDialog::new()
                         .set_title("Upload a backup")
-                        .add_filter("Database backups", &["db", "sqlite", "sqlite3"])
+                        .add_filter("Database backups", BACKUP_FILES.exts)
                         .pick_file()
                         .await
                         .map(|f| f.path().to_path_buf())
                 },
                 Message::BackupPicked,
             );
+        }
+        Message::Drop(ev) => {
+            // like *Upload a backup…*: not while a backup is being made, uploaded or restored
+            if state.backups_busy {
+                state.drop.hovering = false;
+                return Task::none();
+            }
+            match state.drop.handle(ev, &BACKUP_FILES) {
+                Outcome::Take(path) => return Task::done(Message::BackupPicked(Some(path))),
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
         }
         Message::BackupPicked(None) => {}
         Message::BackupPicked(Some(path)) => {
@@ -696,7 +713,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             }
         }
     };
-    page = page.push(
+    page = page.push(drop_zone::view(
         widgets::card(
             column![
                 help("Encore keeps copies of its database here (daily, and before every upgrade). Download one now and then to keep it somewhere else."),
@@ -706,7 +723,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .width(Length::Fill),
         )
         .width(Length::Fill),
-    );
+        &state.drop,
+        "Drop a database backup (.db, .sqlite, .sqlite3) to upload it",
+    ));
 
     // app crashes
     let crashes = state.crashes.as_ref().map(|c| fmt::items(&c["crashes"])).unwrap_or_default();
@@ -792,6 +811,14 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
             Message::CloseDialog,
         ),
     })
+}
+
+/// The database backups *Upload a backup…* takes, picked or dropped.
+const BACKUP_FILES: drop_zone::Accept = drop_zone::Accept::one(&["db", "sqlite", "sqlite3"]);
+
+/// The window's drag and drop, for *Upload a backup…*.
+pub fn subscription(_state: &State) -> iced::Subscription<Message> {
+    drop_zone::events().map(Message::Drop)
 }
 
 #[cfg(test)]

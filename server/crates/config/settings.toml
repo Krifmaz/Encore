@@ -39,7 +39,8 @@ listed_last = [
     "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
     "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
     "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
-    "tools_auto_translator", "translate_background", "single_to_album",
+    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days", "backup_keep",
+    "backup_keep_upgrade",
 ]
 
 [sections.general]
@@ -106,6 +107,16 @@ desc = "Where translated and romanized titles come from, strongest first: correc
 section = "library"
 title = "Surround (Dolby Atmos)"
 desc = "Dolby Atmos and other 5.1 and 7.1 versions of songs, in a Surround library of their own: never in the stereo lists, shuffle, playlists or stats. Admins fetch an album's or a song's Atmos version from its page (gamdl with a wrapper-v2 server); a surround file a normal request downloads lands here too. Kodi, Plex or Jellyfin can read the folder as a library of its own."
+
+[groups.trash]
+section = "library"
+title = "Deleting files"
+desc = "What happens to a file when you delete an album, a song or a file. Off: it is deleted for good straight away. On: it waits in the Trash (Settings → System → Files → Trash, on the music disk) and can be restored until the days run out."
+
+[groups.backups]
+section = "general"
+title = "Database backups"
+desc = "Encore copies its database once a day and before every upgrade (config/backups, or .encore-backups in the music folder when the config disk is full). Older copies are deleted at every start and after every backup; uploaded backups are never deleted."
 
 [groups.pipeline]
 section = "downloads"
@@ -213,6 +224,14 @@ group = "general"
 label = "Public URL"
 type = "url"
 help = "e.g. https://music.example.com – used in links & notifications"
+
+[keys.local_url]
+env = "ENCORE_LOCAL_URL"
+default = ""
+group = "general"
+label = "Local network address"
+type = "url"
+help = "e.g. http://192.168.1.10:8080 – the desktop, phone and TV apps use it instead of the public URL while they're on your home network"
 
 [keys.share_preview]
 env = "SHARE_PREVIEW"
@@ -1116,6 +1135,25 @@ type = "textarea"
 full = true
 help = "One folder per line, inside the container. Their songs are in the library where and as they are: Encore never moves, renames or retags files there. Files → Import with “Keep the files where they are” adds a folder here."
 
+[keys.trash_keep]
+env = "ENCORE_TRASH_KEEP"
+default = false
+group = "trash"
+label = "Keep deleted files in Trash"
+type = "bool"
+help = "Off: deleting an album, a song or a file deletes it for good. On: it goes to the Trash first, where you can restore it."
+
+[keys.trash_days]
+env = "ENCORE_TRASH_DAYS"
+default = 30
+group = "trash"
+label = "Keep them for"
+type = "number"
+unit = "days"
+min = 1
+max = 3650
+help = "After this many days a file in the Trash is deleted for good (also what a reported song's old file waits once its replacement arrived)."
+
 [keys.staging_path]
 env = "ENCORE_STAGING_PATH"
 default = "/downloads/encore"
@@ -1175,6 +1213,19 @@ group = "library"
 label = "Single-track naming template"
 type = "text"
 full = true
+
+[keys.file_names]
+env = "ENCORE_FILE_NAMES"
+default = "keep"
+group = "library"
+label = "Emoji and symbols in file names"
+type = "select"
+options = [
+    ["keep", "Keep them"],
+    ["words", "Write them as words (♾️ → Infinity)"],
+    ["ascii", "Plain ASCII names only"],
+]
+help = "Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)"
 
 [keys.save_cover]
 env = "ENCORE_SAVE_COVER"
@@ -1695,6 +1746,26 @@ help = "Update plugins task on/off."
 default = 1440
 help = "How often the Update plugins task runs, in minutes."
 
+[keys.backup_keep]
+env = "ENCORE_BACKUP_KEEP"
+default = 3
+group = "backups"
+label = "Backups to keep"
+type = "number"
+min = 1
+max = 60
+help = "Copies kept in all, shared out daily, weekly and monthly: 3 is the newest, one from an earlier week and one from an earlier month; 6 is two of each."
+
+[keys.backup_keep_upgrade]
+env = "ENCORE_BACKUP_KEEP_UPGRADE"
+default = 1
+group = "backups"
+label = "Pre-upgrade copies to keep"
+type = "number"
+min = 0
+max = 10
+help = "The copies taken just before an upgrade (to go back to the older Encore), kept besides the ones above."
+
 [keys.task_backup_enabled]
 env = "TASK_BACKUP_ENABLED"
 default = true
@@ -2039,6 +2110,10 @@ help = "Embed the plain lyrics in the song's tags, except when only plain lyrics
 default = ""
 secret = true
 help = "The server's API key: made at the first start, shown to the owner on the API key card (POST /api/admin/settings/api-key makes a new one)."
+
+[keys.server_id]
+default = ""
+help = "This server's identity, made at the first start: GET /api/auth/info shows it, so an app that tries the local network address knows it reached this server and not another one."
 
 [keys.plex_client_id]
 default = ""

@@ -211,7 +211,7 @@ pub(super) fn render_full() {
     </div>"##,
         x = icon("x"), tab_now = tab("now", "Now playing"), tab_lyrics = tab("lyrics", "Lyrics"), tab_queue = tab("queue", "Up next"),
         big_art = art(&cover(&t), &album_or_title(&t), "big"), title = esc(&crate::ui::tr(&t, "title")), title_sub = crate::ui::tr_sub(&t, "title"), quality = esc(&quality(&t)),
-        mini_art = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200), mini_artist = esc(&crate::ui::tr_inline(&t, "artist")),
+        mini_art = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200), mini_artist = esc(&(crate::ui::tr_inline(&t, "artist") + &crate::ui::feat_text(&t))),
         shuffle = shuffle, prev = icon("prev"), pp = PP, next = icon("next"), repeat = repeat_btn,
         volume_ic = icon_attr("volume", r#"width="18""#), vol = volume,
         on_name = on_name, auto = auto, q_btns = queue_buttons(link.is_some(), up_next.len()),
@@ -278,8 +278,11 @@ pub(super) fn render_full() {
         if let Some(it) = dom::closest(e, "[data-i]") { jump(num(&dom::data(&it, "i")) as i64); }
     });
     wire(&mut ls, &f, "#np-lyrics", "click", |e| {
-        // "Report lyrics" under the lyrics, else a line: seek there
-        if dom::closest(e, "[data-lyrics-report]").is_some() { report_lyrics(); return; }
+        // "Report lyrics" / the timing controls under the lyrics, else a line: seek there
+        if dom::closest(e, "[data-lyrics-report]").is_some() { report_lyrics("wrong_lyrics"); return; }
+        if dom::closest(e, "[data-lyrics-other]").is_some() { report_lyrics("lyrics_sync"); return; }
+        if let Some(b) = dom::closest(e, "[data-lyrics-nudge]") { nudge_lyrics(num(&dom::data(&b, "lyricsNudge")) as i64); return; }
+        if dom::closest(e, "[data-lyrics-reset]").is_some() { nudge_lyrics_to(0); return; }
         if let Some(l) = dom::closest(e, "[data-t]") { seek_to(num(&dom::data(&l, "t"))); }
     });
     set_full_listeners(ls);

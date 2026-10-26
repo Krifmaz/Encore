@@ -1,5 +1,6 @@
 package app.encore.android.playback
 
+import app.encore.android.data.api.ServerRoute
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -50,6 +51,7 @@ import app.encore.android.playback.output.EffectsChain
 import app.encore.android.playback.output.OutputRouter
 import app.encore.android.remote.RemoteDevice
 import app.encore.android.remote.ServiceHost
+import app.encore.android.remote.SystemVolume
 import app.encore.android.ui.MainActivity
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
@@ -153,6 +155,8 @@ class EncorePlaybackService : MediaLibraryService() {
         // server to ask a copy always plays
         resolver.localCopy = { id -> if (offline.preferLocal.value || OfflineMode.noServer()) offline.localUri(id) else null }
         // offline mode and the outbox also when only the car is in use (MainActivity never opens)
+        // Android Auto without the app: the address is chosen here too (local network at home)
+        ServerRoute.start(this)
         OfflineMode.start(this)
         // Cadenza on this phone + bit-perfect USB: the device's own settings (PrefsRepository.phone)
         output = OutputRouter(this, resolver, graph.prefs.phone.value, released = { released }, publish = { publish() })
@@ -302,6 +306,8 @@ class EncorePlaybackService : MediaLibraryService() {
             norm = { graph.prefs.norm.value },
             setNorm = { n -> graph.prefs.setNorm(n) },
             normLine = { current.track()?.let { normRow(it).first } ?: "" },
+            // the phone's (or TV's) own media volume, for a device controlling this one
+            systemVolume = SystemVolume(this),
         ).also { it.start() }
         // a group listen: the player follows the group's queue and clock, and this phone's controls go to the group
         GroupListen.init(this)

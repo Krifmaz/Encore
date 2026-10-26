@@ -440,13 +440,16 @@ fun AlbumScreen(nav: Nav, albumId: String) {
     // ⋯ → Get the rest of the album, not on MusicBrainz: the catalogue's track list, or the songs to type in
     restFound?.let { (artist, m) -> ExtTracksSheet(nav, artist, m, restStatuses, onDismiss = { restFound = null }) }
     restTyped?.let { ask -> RestTypedDialog(nav, ask, me?.isAdmin == true, onDismiss = { restTyped = null }) }
-    // ⋯ → Move album to Trash (admins): the dry run's words, then the album goes; Open Trash in the toast
+    // ⋯ → Delete album… (admins): the dry run's words, then the album goes; Open Trash in the toast while kept
     trashDialog?.let { d ->
         TrashConfirm(d, onDismiss = { trashDialog = null }) {
             albumAction {
                 val r = withContext(Dispatchers.IO) { api.moveAlbumToTrash(albumId) }
-                Toasts.show(r.str("text").ifEmpty { AlbumTypesRules.movedText(1, 1, "") }, "ok", action = AlbumTypesRules.OPEN_TRASH, showMs = AlbumTypesRules.TOAST_MS) {
-                    nav.open(Screen.Files("trash"))
+                val text = r.str("text").ifEmpty { AlbumTypesRules.movedText(1, 1, "") }
+                if (AlbumTypesRules.keeps(r)) {
+                    Toasts.show(text, "ok", action = AlbumTypesRules.OPEN_TRASH, showMs = AlbumTypesRules.TOAST_MS) { nav.open(Screen.Files("trash")) }
+                } else {
+                    Toasts.show(text, "ok")
                 }
                 // the Library's albums list and Type counts load again
                 AlbumSelect.generation += 1

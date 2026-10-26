@@ -28,7 +28,7 @@ object LinkClock {
     const val COMMAND_GRACE_MS = 1500L
 
     /** The keys of a state that move with time or that a command of ours sets ahead of the device's own word. */
-    private val LIVE_KEYS = listOf("position", "playing", "volume", "shuffle", "repeat")
+    private val LIVE_KEYS = listOf("position", "playing", "volume", "system_volume", "shuffle", "repeat")
 
     /**
      * The link after a check-in of its device arrived.

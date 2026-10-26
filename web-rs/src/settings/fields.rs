@@ -52,6 +52,8 @@ pub struct Field {
     pub full: bool,
     /// a number input's step, as the attribute reads it ("0.1")
     pub step: Option<String>,
+    /// drawn under the card's "Show advanced" fold rather than with the other fields
+    pub advanced: bool,
 }
 
 impl Field {
@@ -67,6 +69,7 @@ impl Field {
             secret: f.truthy("secret"),
             full: f.truthy("full"),
             step: if f.is_nullish("step") { None } else { Some(js_string(f.g("step"))) },
+            advanced: f.truthy("advanced"),
         }
     }
 

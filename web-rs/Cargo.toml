@@ -33,7 +33,7 @@ web-sys = { version = "0.3", features = [
   "Event", "EventTarget", "KeyboardEvent", "MouseEvent", "PointerEvent", "WheelEvent", "CustomEvent", "CustomEventInit",
   "HashChangeEvent", "StorageEvent", "MessageEvent", "EventSource",
   "Node", "NodeList", "Text", "DomRect", "CssStyleDeclaration", "DomTokenList", "TimeRanges",
-  "File", "FileList", "FileReader", "FormData", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior",
+  "File", "FileList", "DataTransfer", "DataTransferItem", "DataTransferItemList", "EventInit", "FileReader", "FormData", "Url", "UrlSearchParams", "ScrollToOptions", "ScrollBehavior",
   "MutationObserver", "MutationObserverInit", "MutationRecord", "console",
   "AudioContext", "AudioContextState", "AudioNode", "AudioParam", "AudioDestinationNode", "MediaElementAudioSourceNode",
   "BiquadFilterNode", "BiquadFilterType", "IirFilterNode", "BaseAudioContext", "GainNode", "DelayNode", "StereoPannerNode", "ChannelSplitterNode", "ChannelMergerNode",

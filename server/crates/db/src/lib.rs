@@ -177,14 +177,16 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (36, "song_copies", include_str!("../migrations/0036_song_copies.sql")),
     (37, "playlist_item_origin", include_str!("../migrations/0037_playlist_item_origin.sql")),
     (38, "lyrics_reject", include_str!("../migrations/0038_lyrics_reject.sql")),
-    (39, "taste", include_str!("../migrations/0039_taste.sql")),
+    (39, "own_files", include_str!("../migrations/0039_own_files.sql")),
+    (40, "taste", include_str!("../migrations/0040_taste.sql")),
+    (41, "lyrics_shift", include_str!("../migrations/0041_lyrics_shift.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 39;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
@@ -207,6 +209,22 @@ impl std::fmt::Display for NewerDatabase {
     }
 }
 impl std::error::Error for NewerDatabase {}
+
+/// A failed open or migration because the disk is full says which folder that is, what it has free and
+/// how big the database is, so the owner knows what to clear; any other error is returned as it is.
+fn full_disk_hint(e: anyhow::Error, data_dir: &Path) -> anyhow::Error {
+    let text = e.to_string();
+    if !(text.contains("disk is full") || text.contains("No space left")) {
+        return e;
+    }
+    let free = encore_core::fsinfo::free_bytes(data_dir).map(encore_core::text::size_text).unwrap_or_else(|| "nothing".into());
+    let db = encore_core::text::size_text(crate::backup::needed_bytes(data_dir));
+    e.context(format!(
+        "the disk of {} is full ({free} free; the database needs about {db} to work in): free space there (old copies in {}, the cache folder) and start again",
+        data_dir.display(),
+        crate::backup::dir(data_dir).display()
+    ))
+}
 
 /// Pragmas, then every migration (tables, missing columns, indexes), then the version stamp: run on
 /// every open.
@@ -425,9 +443,10 @@ impl Db {
         let conn = Connection::open(&path)?;
         if let Some(found) = upgrade_from {
             tracing::info!("database schema {found} → {SCHEMA_VERSION}: backing up first");
-            crate::backup::create(&conn, data_dir, crate::backup::Kind::BeforeUpgrade)?;
+            // a full disk is a warning here, not a start that fails over and over (see before_upgrade)
+            crate::backup::before_upgrade(&conn, data_dir)?;
         }
-        prepare(&conn)?;
+        prepare(&conn).map_err(|e| full_disk_hint(e, data_dir))?;
         if upgrade_from.is_some() {
             analyze(&conn);
         }

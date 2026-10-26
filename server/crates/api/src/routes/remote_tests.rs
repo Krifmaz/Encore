@@ -200,6 +200,21 @@ async fn shuffle_and_repeat_commands_reach_the_device_and_its_state_shows_them()
 }
 
 #[tokio::test]
+async fn a_system_volume_command_reaches_the_device_and_its_state_shows_the_level() {
+    let e = setup("system-volume", 9107).await;
+    let mut s = playing(1, 5.0);
+    s["system_volume"] = json!(0.4);
+    e.beat("phone", "Pixel", s).await;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
+    assert_eq!(d[0]["state"]["system_volume"], json!(0.4), "{d}");
+    let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(json!({ "action": "system_volume", "value": 0.75 }))).await;
+    assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
+    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) }))).await;
+    let cmds = r.1["commands"].as_array().unwrap().clone();
+    assert_eq!(cmds.iter().map(|c| (c["action"].clone(), c["value"].clone())).collect::<Vec<_>>(), vec![(json!("system_volume"), json!(0.75))]);
+}
+
+#[tokio::test]
 async fn a_prefs_command_reaches_the_device_and_its_state_shows_its_normalization() {
     let e = setup("prefs", 9106).await;
     let mut s = playing(1, 5.0);
@@ -224,5 +239,6 @@ async fn songs_carry_each_artist_for_links() {
     e.st.library.artists.invalidate();
     let r = call(&e.app, "GET", "/api/library/tracks/10", &e.cookie, None).await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
-    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": false }]), "{}", r.1);
+    // the featured singer is an artist of the library too (0.41.1: featured artists have pages of their own)
+    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": true }]), "{}", r.1);
 }

@@ -59,8 +59,9 @@ fn stream(key: &Key) -> impl Stream<Item = Ev> {
         let mut wait = 1u64;
         loop {
             let opened = std::time::Instant::now();
+            // on the address in use, asked again at every reconnect (the local network address while it answers)
             let sent = client
-                .get(&url)
+                .get(crate::route::net(&url))
                 .header("Accept", "text/event-stream")
                 .header("Cache-Control", "no-cache")
                 .header(key.auth.0.as_str(), key.auth.1.as_str())

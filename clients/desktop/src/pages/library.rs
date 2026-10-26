@@ -419,6 +419,30 @@ pub enum Act {
     AtmosAsked(Result<Value, ApiError>),
     /// `GET /library/tracks/{id}/added` for the open menu's song (0.36): who added it, its first line.
     AddedGot(i64, Result<Value, ApiError>),
+    /// ⋯ → Replace with my own file: open its dialog for this song.
+    ReplaceOwn(Box<Value>),
+    /// Its "Choose a file…": the file chooser, then the upload.
+    ReplaceOwnPick,
+    /// The file to upload, chosen or dropped (None: the chooser was closed).
+    ReplaceOwnFile(Option<std::path::PathBuf>),
+    /// A file dragged over or dropped on the window while an own-file dialog is open.
+    OwnDrop(crate::widgets::drop_zone::Event),
+    /// The upload's answer (None: no file was chosen).
+    ReplacedOwn(Option<Result<Value, ApiError>>),
+    /// Library → Upload your own files: open its dialog.
+    OwnBulk,
+    /// Its "Choose files…".
+    OwnBulkPick,
+    /// The files chosen.
+    OwnBulkPicked(Vec<std::path::PathBuf>),
+    /// The server staged (and matched) file `usize` of the batch.
+    OwnBulkStaged(usize, Result<Value, ApiError>),
+    /// The song file `usize` replaces (None: leave it out).
+    OwnBulkChoose(usize, Option<i64>),
+    /// Replace N songs.
+    OwnBulkApply,
+    /// The server's answer to Replace.
+    OwnBulkApplied(Result<Value, ApiError>),
 }
 
 /// Edit song details.
@@ -477,6 +501,10 @@ pub enum Dialog {
         busy: bool,
     },
     Fix(Box<FixState>),
+    /// ⋯ → Replace with my own file (pages::own_file).
+    ReplaceOwn(Box<super::own_file::ReplaceState>),
+    /// Library → Upload your own files (pages::own_file).
+    OwnBulk(Box<super::own_file::BulkState>),
     Confirm {
         title: String,
         text: String,
@@ -574,6 +602,10 @@ fn song_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
         )
         .icon(Icon::Shield),
     );
+    // bring your own music: this song's file replaced with one you upload (admins and the "own_files" permission)
+    if admin || ctx.session.perm("own_files") {
+        items.push(MenuItem::new("Replace with my own file", Act::ReplaceOwn(b())).icon(Icon::Disc));
+    }
     if admin {
         items.push(MenuItem::new("Edit song details…", Act::FixSong(b())).icon(Icon::Edit));
     }
@@ -632,6 +664,31 @@ fn surround_track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
         );
     }
     sh.menu = Some((ctx.cursor, items));
+}
+
+/// The window's drag and drop events while an own-file dialog takes files (pages add it to their subscription).
+pub fn shared_subscription(sh: &Shared) -> Subscription<Act> {
+    let takes = match &sh.dialog {
+        Some(Dialog::ReplaceOwn(s)) => s.takes_files(),
+        Some(Dialog::OwnBulk(b)) => b.takes_files(),
+        _ => false,
+    };
+    if takes {
+        crate::widgets::drop_zone::events().map(Act::OwnDrop)
+    } else {
+        Subscription::none()
+    }
+}
+
+/// The batch upload's next file, one at a time (each answer starts the next).
+fn next_own_upload(b: &mut super::own_file::BulkState, ctx: &Ctx) -> Task<Act> {
+    if b.uploading.is_some() {
+        return Task::none();
+    }
+    let Some(i) = b.next_pending() else { return Task::none() };
+    b.uploading = Some(i);
+    let (api, path) = (ctx.api.clone(), b.rows[i].path.clone());
+    Task::perform(super::own_file::stage(api, path), move |r| Act::OwnBulkStaged(i, r))
 }
 
 /// Open a Report a problem dialog (songs and albums).
@@ -1019,6 +1076,107 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
             }
             ctx.toast_err(e.message);
         }
+        Act::ReplaceOwn(t) => {
+            sh.menu = None;
+            sh.dialog = Some(Dialog::ReplaceOwn(Box::new(super::own_file::ReplaceState::new(*t))));
+        }
+        Act::ReplaceOwnPick => {
+            if let Some(Dialog::ReplaceOwn(s)) = &mut sh.dialog {
+                if s.busy {
+                    return Task::none();
+                }
+                return Task::perform(super::own_file::pick_file(), Act::ReplaceOwnFile);
+            }
+        }
+        Act::ReplaceOwnFile(path) => {
+            if let (Some(Dialog::ReplaceOwn(s)), Some(path)) = (&mut sh.dialog, path) {
+                if !s.takes_files() {
+                    return Task::none();
+                }
+                (s.busy, s.error) = (true, String::new());
+                let (api, id) = (ctx.api.clone(), fmt::i(&s.track, "id"));
+                return Task::perform(super::own_file::replace(api, id, path), |r| Act::ReplacedOwn(Some(r)));
+            }
+        }
+        Act::OwnDrop(ev) => {
+            use crate::widgets::drop_zone::Outcome;
+            let out = match &mut sh.dialog {
+                Some(Dialog::ReplaceOwn(s)) => s.drop.handle(ev, &super::own_file::ONE),
+                Some(Dialog::OwnBulk(b)) => b.drop.handle(ev, &super::own_file::MANY),
+                _ => Outcome::Nothing,
+            };
+            match out {
+                Outcome::Take(path) if matches!(sh.dialog, Some(Dialog::ReplaceOwn(_))) => return shared_update(sh, Act::ReplaceOwnFile(Some(path)), ctx),
+                Outcome::Take(path) => return shared_update(sh, Act::OwnBulkPicked(vec![path]), ctx),
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
+        }
+        Act::ReplacedOwn(r) => {
+            if let Some(Dialog::ReplaceOwn(s)) = &mut sh.dialog {
+                s.busy = false;
+                match r {
+                    None => {}
+                    Some(Ok(v)) => {
+                        s.done = super::own_file::result_text(&v);
+                        sh.changed = true;
+                        ctx.toast_ok("Replaced with your file");
+                    }
+                    Some(Err(e)) => s.error = e.message,
+                }
+            }
+        }
+        Act::OwnBulk => {
+            sh.menu = None;
+            sh.dialog = Some(Dialog::OwnBulk(Box::default()));
+        }
+        Act::OwnBulkPick => return Task::perform(super::own_file::pick_files(), Act::OwnBulkPicked),
+        Act::OwnBulkPicked(paths) => {
+            if let Some(Dialog::OwnBulk(b)) = &mut sh.dialog {
+                b.add(paths);
+                return next_own_upload(b, ctx);
+            }
+        }
+        Act::OwnBulkStaged(i, r) => {
+            if let Some(Dialog::OwnBulk(b)) = &mut sh.dialog {
+                b.uploading = None;
+                b.staged(i, r);
+                return next_own_upload(b, ctx);
+            }
+        }
+        Act::OwnBulkChoose(i, pick) => {
+            if let Some(Dialog::OwnBulk(b)) = &mut sh.dialog {
+                if let Some(r) = b.rows.get_mut(i) {
+                    r.pick = pick;
+                }
+            }
+        }
+        Act::OwnBulkApply => {
+            if let Some(Dialog::OwnBulk(b)) = &mut sh.dialog {
+                if b.applying || b.chosen() == 0 {
+                    return Task::none();
+                }
+                b.applying = true;
+                let (api, body) = (ctx.api.clone(), b.apply_body());
+                return Task::perform(async move { api.post_slow("/library/own-files/apply", body).await }, Act::OwnBulkApplied);
+            }
+        }
+        Act::OwnBulkApplied(r) => {
+            if let Some(Dialog::OwnBulk(b)) = &mut sh.dialog {
+                match r {
+                    Ok(v) => {
+                        b.applied(&v);
+                        let n = v["replaced"].as_array().map(Vec::len).unwrap_or(0);
+                        sh.changed = true;
+                        ctx.toast_ok(if n == 1 { "Replaced 1 song".to_string() } else { format!("Replaced {n} songs") });
+                    }
+                    Err(e) => {
+                        b.applying = false;
+                        ctx.toast_err(e.message);
+                    }
+                }
+            }
+        }
         Act::FixSong(t) => {
             sh.menu = None;
             let or = |k: &str, fallback: String| if fmt::truthy(&t, k) { fmt::s(&t, k) } else { fallback };
@@ -1382,6 +1540,8 @@ fn dialog_view<'a>(d: &'a Dialog, ctx: &Ctx<'a>) -> El<'a, Act> {
             .spacing(10);
             modal(format!("Lyrics · {title}"), body, Some(footer.into()), false, Act::CloseDialog)
         }
+        Dialog::ReplaceOwn(s) => super::own_file::replace_view(s),
+        Dialog::OwnBulk(b) => super::own_file::bulk_view(b, ctx),
         Dialog::Report {
             kind,
             title,
@@ -1630,7 +1790,7 @@ pub enum LibDialog {
     },
     /// Delete… of the picked albums (0.36): the dry run's title and words; `can_go` false when the Trash's
     /// disk has no room (then only Close).
-    Trash { title: String, text: String, can_go: bool },
+    Trash { title: String, text: String, can_go: bool, keep: bool },
 }
 
 /// A Move to Trash on its way (0.36): the selection in chunks of 100, one call after the other.
@@ -1644,6 +1804,8 @@ pub struct Moving {
     done: usize,
     moved: usize,
     first_reason: String,
+    /// the Trash keeps them (false: deleted for good)
+    keep: bool,
 }
 
 #[derive(Debug, Default)]
@@ -2111,9 +2273,10 @@ fn keep_route(state: &State, ctx: &mut Ctx) {
 }
 
 /// The album kind a list asks for: the Albums tab with a query lists the singles too, as the
-/// results view's count does (client-shapes §3.4).
+/// results view's count does (client-shapes §3.4). One artist's Albums tab lists its singles and
+/// EPs too: an artist with only a single (a featured artist, half of a collaboration) showed none.
 fn album_kind(state: &State) -> &str {
-    if state.tab == "albums" && !state.q.trim().is_empty() {
+    if state.tab == "albums" && (!state.q.trim().is_empty() || !state.artist.is_empty()) {
         ""
     } else {
         state.tab.as_str()
@@ -2172,7 +2335,13 @@ fn trash_next(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     }
     let m = state.moving.take().unwrap_or_default();
     let reason = if m.first_reason.is_empty() && m.moved < m.n { "It is no longer in the library".to_string() } else { m.first_reason };
-    ctx.toast_action(lt::moved_text(m.moved, m.n, &reason), lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+    if m.keep {
+        ctx.toast_action(lt::moved_text(m.moved, m.n, &reason), lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+    } else if m.moved == m.n {
+        ctx.toast_ok(lt::deleted_text(m.moved, m.n, &reason));
+    } else {
+        ctx.toast_err(lt::deleted_text(m.moved, m.n, &reason));
+    }
     leave_select(state);
     Task::batch([load_types(state, ctx), load(state, ctx, false)])
 }
@@ -2425,10 +2594,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::DryRun(Ok(d)) => {
             let (title, text, can_go) = lt::trash_dialog_words(&d);
-            state.dialog = Some(LibDialog::Trash { title, text, can_go });
+            state.dialog = Some(LibDialog::Trash { title, text, can_go, keep: lt::keeps(&d) });
         }
         Message::DryRun(Err(e)) => ctx.toast_err(e.message),
         Message::MoveToTrash => {
+            let keep = !matches!(state.dialog, Some(LibDialog::Trash { keep: false, .. }));
             state.dialog = None;
             if state.sel.is_empty() || state.moving.is_some() {
                 return Task::none();
@@ -2437,6 +2607,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             state.moving = Some(Moving {
                 chunks: lt::chunks(&ids),
                 n: ids.len(),
+                keep,
                 ..Default::default()
             });
             return trash_next(state, ctx);
@@ -2969,9 +3140,12 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         tooltip::Position::Bottom,
     )
     .gap(4);
-    let mut head = row![title_col, shuffle, space().width(Length::Fill)]
-        .spacing(14)
-        .align_y(Alignment::Center);
+    let mut head = row![title_col, shuffle].spacing(14).align_y(Alignment::Center);
+    // bring your own music: a batch of your own files matched to the songs they are
+    if super::own_file::allowed_for(&ctx.session.user) {
+        head = head.push(btn_icon(Icon::Disc, "Upload your own files", Btn::Default, Some(Message::Shared(Act::OwnBulk))));
+    }
+    let mut head = head.push(space().width(Length::Fill));
     if state.admin {
         let stats = state.stats.as_ref();
         let mut verify_badges: Vec<El<'a, Message>> = Vec::new();
@@ -3572,11 +3746,11 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             danger,
             on_ok,
         }) => Some(confirm(title, text, ok, *danger, (**on_ok).clone(), Message::CloseDialog)),
-        Some(LibDialog::Trash { title, text, can_go }) => {
+        Some(LibDialog::Trash { title, text, can_go, keep }) => {
             let footer = if *can_go {
                 row![
                     btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-                    btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::MoveToTrash)),
+                    btn(lt::go_label(*keep), Btn::Danger, Some(Message::MoveToTrash)),
                 ]
                 .spacing(10)
             } else {
@@ -3642,6 +3816,8 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     if state.selecting && state.moving.is_none() && state.dialog.is_none() && state.shared.menu.is_none() && state.shared.dialog.is_none() {
         subs.push(iced::event::listen_with(select_key));
     }
+    // files dropped on Replace with my own file / Upload your own files
+    subs.push(shared_subscription(&state.shared).map(Message::Shared));
     Subscription::batch(subs)
 }
 
@@ -3680,6 +3856,9 @@ mod tests {
         st.q = "  ".into();
         assert!(!results_view(&st));
         assert_eq!(album_kind(&st), "albums");
+        // one artist's Albums tab lists its singles too
+        st.artist = "3R2".into();
+        assert_eq!(album_kind(&st), "");
         st.q = "x".into();
         st.artist = "Beta Band".into();
         assert!(!results_view(&st));

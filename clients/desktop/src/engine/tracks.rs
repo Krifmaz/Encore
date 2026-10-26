@@ -86,14 +86,16 @@ pub fn stream_url(base: &str, id: i64) -> String {
     format!("{base}/api/library/tracks/{id}/stream")
 }
 
-/// The stream to play: the original, or what the playback settings ask for (`?q=…`, `?dsp=1…`).
+/// The stream to play: the original, or what the playback settings ask for (`?q=…`, `?dsp=1…`), on the
+/// address in use (the local network address while it answers, [`crate::route::net`]).
 fn play_url(base: &str, id: i64) -> String {
     let q = query();
-    if q.is_empty() {
+    let url = if q.is_empty() {
         stream_url(base, id)
     } else {
         format!("{}?{q}", stream_url(base, id))
-    }
+    };
+    crate::route::net(&url)
 }
 
 /// A track id from a JSON row (number or numeric string).
@@ -116,12 +118,14 @@ pub fn from_encore(base: &str, auth: &Auth, v: &Value) -> Option<Track> {
         })
         .filter(|a| !a.is_empty());
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    // the artist text, with the featured artists it leaves out (shown in the bar, the full player and the
+    // system's media controls; "Go to artist" goes by the text before " feat. ")
     let artist = {
         let a = s("artist");
         if a.is_empty() {
             s("albumartist")
         } else {
-            a
+            a + &crate::fmt::feat_text(v)
         }
     };
     Some(Track {

@@ -61,6 +61,15 @@ fun songLinks(
     } else {
         append(s.substring(at))
     }
+    // the featured artists the text leaves out ("Coldplay feat. Selena Gomez"), each its own link
+    val feat = track.featShown()
+    if (feat.isNotEmpty()) {
+        append(" feat. ")
+        feat.forEachIndexed { i, a ->
+            if (i > 0) append(", ")
+            withLink(LinkAnnotation.Clickable("artist:${a.name}", style) { onArtist(a) }) { append(a.name) }
+        }
+    }
     if (withAlbum && track.album.isNotEmpty()) {
         if (length > 0) append(" · ")
         if (onAlbum != null && track.albumId.isNotEmpty()) {

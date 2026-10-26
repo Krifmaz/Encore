@@ -1,58 +1,135 @@
 <!doctype html>
-<html lang="en">
+<!-- The public share page (/s/<token>): a song, album, artist or playlist anyone with the link can play.
+     It wears Encore's own look through the app's stylesheet: data-theme="encore" picks the charcoal-and-cream
+     palette, data-brand the logo's cream accent (both in css/app.css), so a change to the app's theme reaches
+     this page too. The styles below lay the page out and only ever use the theme's variables for colour; a test
+     in web-rs/src/appearance.rs checks that. The server fills in the link-preview tags (share_page_html in the api crate). -->
+<html lang="en" data-theme="encore" data-brand data-bg="solid">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
+<!-- the browser bar, and the colour bar of the link's card in chat apps that read it: the brand accent -->
+<meta name="theme-color" content="#f0ead6">
 <title>Shared song</title>
 <!--META-->
-<link rel="icon" href="/favicon.svg">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/app.css">
 <style>
-  :root { color-scheme: dark; --bg: #0b0b12; --panel: #161622; --text: #f3f3f8; --muted: #9a9ab0; --accent: #8b5cf6; }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at 30% 0%, #2a1b4a, var(--bg) 60%); color: var(--text);
-    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px 16px; }
-  .card { width: min(420px, 100%); background: var(--panel); border-radius: 20px; padding: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.5); text-align: center; }
-  .art { position: relative; aspect-ratio: 1; border-radius: 14px; overflow: hidden; background: #22223a; }
+  /* the page: one card in the middle, over the cover blurred (as in the app's full-screen player) */
+  html, body { height: auto; }
+  body { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; overflow-x: hidden; }
+  .sp-backdrop { position: fixed; inset: -60px; background: center / cover no-repeat; filter: blur(60px) saturate(1.3); opacity: .35; pointer-events: none; z-index: 0; }
+  .share { position: relative; z-index: 1; width: min(440px, 100%); padding: 22px; box-shadow: var(--shadow); text-align: center; }
+  .art { position: relative; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--panel-2); box-shadow: var(--shadow); }
   .art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  h1 { font-size: 22px; margin: 18px 0 2px; }
-  .muted { color: var(--muted); }
-  audio { width: 100%; margin-top: 16px; }
-  .foot { margin-top: 16px; font-size: 13px; }
-  .small { font-size: 13px; margin-top: 6px; }
-  a { color: var(--accent); }
+  .share h1 { font-size: 24px; margin: 18px 0 4px; overflow-wrap: anywhere; }
+  .share .small { font-size: 13px; margin-top: 4px; }
+  .share a { color: var(--accent); }
+  .share a:hover { text-decoration: underline; }
+  .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .err { padding: 30px 0; }
+  .err h1 { margin-top: 0; }
+  .empty { padding: 24px 0 8px; }
+  .loading { padding: 30px 0; }
+
+  /* the player: the app's round play button and its accent-filled seek bar, with the time on both sides */
+  .sp { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 16px; }
+  .sp audio { display: none; }
+  .sp-seek { width: 100%; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--faint); }
+  .sp-seek span { min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
+  .sp-seek input { -webkit-appearance: none; appearance: none; flex: 1; min-width: 0; height: 26px; margin: 0; background: transparent; cursor: pointer; touch-action: none; --p: 0%; }
+  .sp-seek input::-webkit-slider-runnable-track { height: 5px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+  .sp-seek input::-moz-range-track { height: 5px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--p), var(--border) var(--p)); }
+  .sp-seek input::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; margin-top: -5px; border-radius: 50%; background: var(--text); border: 0; }
+  .sp-seek input::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; background: var(--text); border: 0; }
+  .sp .play-btn { width: 56px; height: 56px; }
+  .sp .play-btn svg { width: 22px; height: 22px; }
+  .sp .play-btn:active { transform: scale(.96); }
+
+  /* the songs of an album, artist or playlist: the playing one in the accent colour */
   .songs { list-style: none; margin: 14px 0 0; padding: 0; text-align: left; max-height: 360px; overflow-y: auto; }
-  .songs button { width: 100%; display: flex; gap: 10px; align-items: baseline; background: none; border: 0; border-radius: 8px; padding: 7px 8px; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-  .songs button:hover, .songs button.on { background: #22223a; }
-  .songs button.on .t { color: var(--accent); }
+  .songs button { width: 100%; display: flex; gap: 10px; align-items: baseline; background: none; border: 0; border-radius: 10px; padding: 7px 8px; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .songs button:hover, .songs button.on { background: var(--panel-2); }
+  .songs button.on .t { color: var(--accent); font-weight: 600; }
   .songs .n { width: max(22px, calc(var(--nw, 0px) + 2px)); flex: none; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
   .songs .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .songs .d { flex: none; font-size: 13px; }
   .songs .more button { justify-content: center; color: var(--accent); }
+
+  /* Play / Shuffle / Add / Save a copy: the app's buttons */
   .btns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
-  .btn { background: #22223a; color: var(--text); border: 0; border-radius: 99px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
-  .btn:hover { background: #2c2c48; }
-  .btn.accent { background: var(--accent); color: #fff; }
-  .btn:disabled { opacity: .6; cursor: default; }
   .btns .small { align-self: center; margin-top: 0; }
-  .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .empty { padding: 24px 0 8px; }
+
+  /* "Shared from Encore", after the app's logo */
+  .foot { margin-top: 16px; font-size: 13px; }
+  .foot img { display: inline-block; width: 18px; height: 18px; border-radius: 5px; margin-right: 7px; vertical-align: -4px; }
 </style>
 </head>
 <body>
-<div class="card" id="card"><div class="muted">Loading…</div></div>
+<div class="sp-backdrop" aria-hidden="true"></div>
+<div class="card share" id="card"><div class="muted loading">Loading…</div></div>
 <script>
 (async () => {
   const token = location.pathname.split('/').pop();
   const card = document.getElementById('card');
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const clock = (d) => { const s = Math.round(d); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  // the app's play and pause icons (ui.rs `icon`)
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>';
+  const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+  // The player's markup: a hidden <audio> (`preload`, optional `src`; `d` = the song's length in seconds, for
+  // a stream that doesn't tell its own, such as a transcoded one), the play button and the seek bar.
+  const player = (preload, src, d) => `<div class="sp"><audio preload="${preload}"${src ? ` src="${src}"` : ''}${d ? ` data-d="${Number(d)}"` : ''}></audio>
+    <button type="button" class="play-btn" aria-label="Play">${ICON_PLAY}</button>
+    <div class="sp-seek"><span class="sp-cur">0:00</span><input type="range" min="0" max="1000" step="1" value="0" aria-label="Seek"><span class="sp-dur">–:––</span></div></div>`;
+  // Wires a player (see `player`) to its <audio>: the button plays and pauses, the bar follows the song and
+  // seeks when let go. Listeners are added (not set), so the callers' onended / onerror stay theirs.
+  const wire = (a) => {
+    const root = a.closest('.sp');
+    const pp = root.querySelector('.play-btn'), seek = root.querySelector('input'), cur = root.querySelector('.sp-cur'), dur = root.querySelector('.sp-dur');
+    let dragging = false;
+    const length = () => (Number.isFinite(a.duration) && a.duration > 0 ? a.duration : Number(a.dataset.d) || 0);
+    const paint = () => {
+      const d = length();
+      if (!dragging) seek.value = d ? Math.round(Math.min(a.currentTime / d, 1) * 1000) : 0;
+      seek.style.setProperty('--p', `${seek.value / 10}%`);
+      cur.textContent = clock(dragging ? (seek.value / 1000) * d : a.currentTime);
+      dur.textContent = d ? clock(d) : '–:––';
+    };
+    const state = () => {
+      pp.innerHTML = a.paused ? ICON_PLAY : ICON_PAUSE;
+      pp.setAttribute('aria-label', a.paused ? 'Play' : 'Pause');
+    };
+    pp.onclick = () => { if (a.paused) a.play().catch(() => {}); else a.pause(); };
+    seek.oninput = () => { dragging = true; paint(); };
+    seek.onchange = () => {
+      const d = length();
+      if (d) a.currentTime = (seek.value / 1000) * d;
+      dragging = false;
+      paint();
+    };
+    ['loadstart', 'timeupdate', 'durationchange', 'loadedmetadata', 'emptied', 'seeked'].forEach((e) => a.addEventListener(e, paint));
+    ['play', 'pause', 'ended', 'emptied'].forEach((e) => a.addEventListener(e, state));
+    paint();
+    state();
+  };
+  // the cover, blurred behind the card once it has loaded (a link without a picture keeps the plain background)
+  const backdrop = (src) => {
+    const im = new Image();
+    im.onload = () => { document.querySelector('.sp-backdrop').style.backgroundImage = `url("${src}")`; };
+    im.src = src;
+  };
+  // "Shared from Encore", with the app's icon, and the sign-in link when it applies
+  const foot = (app, signIn) => `<div class="foot muted"><img src="/favicon.svg" alt=""><span>Shared from ${esc(app || 'Encore')}${signIn ? ' · <a href="/#/login">Sign in</a> for the whole library' : ''}</span></div>`;
   try {
     const r = await fetch(`/api/share/${encodeURIComponent(token)}`);
     if (!r.ok) throw new Error((await r.json()).detail || 'Not found');
     const t = await r.json();
     const tok = encodeURIComponent(token);
-    const mmss = (d) => { const s = Math.round(d); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    const mmss = clock;
+    backdrop(`/api/share/${tok}/cover`);
     if (t.kind === 'playlist') {
       // a playlist as it is now: the header counts the whole list, the songs come in pages of 200
       document.title = `${t.title} · ${t.owner}`;
@@ -70,12 +147,12 @@
         <h1>${esc(t.title)}</h1><div class="muted">${t.liked ? 'Liked songs' : 'Playlist'} · ${esc(t.owner)}</div>
         ${t.description ? `<div class="muted small desc">${esc(t.description)}</div>` : ''}
         <div class="muted small">${esc(head)}</div>
-        ${n ? `<div class="btns"><button type="button" class="btn accent" id="play">Play</button><button type="button" class="btn" id="shuffle">Shuffle</button>${addPart}${other ? '<button type="button" class="btn" id="copy">Save a copy</button>' : ''}</div>
+        ${n ? `<div class="btns"><button type="button" class="btn primary" id="play">Play</button><button type="button" class="btn" id="shuffle">Shuffle</button>${addPart}${other ? '<button type="button" class="btn" id="copy">Save a copy</button>' : ''}</div>
         <div class="muted small" id="copy-msg" hidden></div>
-        <audio controls preload="none"></audio>
+        ${player('none')}
         <ol class="songs"></ol>` : `${addPart ? `<div class="btns">${addPart}</div>
         <div class="muted small" id="copy-msg" hidden></div>` : ''}<div class="muted empty">No songs here right now</div>`}
-        <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')}${viewer.signed_in ? '' : ' · <a href="/#/login">Sign in</a> for the whole library'}</div>`;
+        ${foot(t.app_name, !viewer.signed_in)}`;
       const add = card.querySelector('#add');
       if (add) add.onclick = async () => {
         const msg = card.querySelector('#copy-msg');
@@ -94,6 +171,7 @@
       };
       if (!n) return;
       const a = card.querySelector('audio');
+      wire(a);
       const list = card.querySelector('.songs');
       // the number column fits the longest number (song 1000 of a long list)
       list.style.setProperty('--nw', `${String(n).length}ch`);
@@ -137,6 +215,7 @@
         if (!songs[i]) return;
         cur = i;
         mark();
+        a.dataset.d = songs[i].duration || '';
         a.src = `/api/share/${tok}/stream?track=${encodeURIComponent(songs[i].id)}`;
         if (play) a.play().catch(() => {});
       };
@@ -196,18 +275,20 @@
       card.innerHTML = `<div class="art"><img src="/api/share/${tok}/cover" alt="" onerror="this.remove()"></div>
         <h1>${esc(t.title)}</h1><div class="muted">${esc(sub)}</div>
         <div class="muted small">${esc(count)}</div>
-        <audio controls preload="none"></audio>
+        ${player('none')}
         <ol class="songs">${songs.map((x, i) => {
           const extra = t.kind === 'artist' ? x.album : (x.artist && x.artist !== t.artist ? x.artist : '');
           return `<li><button type="button" data-i="${i}"><span class="n muted">${i + 1}</span><span class="t">${esc(x.title)}${extra ? `<span class="muted"> · ${esc(extra)}</span>` : ''}</span><span class="d muted">${x.duration ? mmss(x.duration) : ''}</span></button></li>`;
         }).join('')}</ol>
-        <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')} · <a href="/#/login">Sign in</a> for the whole library</div>`;
+        ${foot(t.app_name, true)}`;
       const a = card.querySelector('audio');
+      wire(a);
       const buttons = [...card.querySelectorAll('.songs button')];
       let cur = -1;
       const pick = (i, play) => {
         cur = i;
         buttons.forEach((b, j) => b.classList.toggle('on', j === i));
+        a.dataset.d = songs[i].duration || '';
         a.src = `/api/share/${tok}/stream?track=${encodeURIComponent(songs[i].id)}`;
         if (play) a.play().catch(() => {});
       };
@@ -225,9 +306,10 @@
     card.innerHTML = `<div class="art"><img src="/api/share/${encodeURIComponent(token)}/cover" alt="" onerror="this.remove()"></div>
       <h1>${esc(t.title)}</h1><div class="muted">${esc(t.artist)}${t.album ? ' · ' + esc(t.album) + (t.year ? ' (' + esc(t.year) + ')' : '') : ''}</div>
       ${quality ? `<div class="muted small">${esc(quality)}</div>` : ''}
-      <audio controls preload="metadata" src="/api/share/${encodeURIComponent(token)}/stream"></audio>
-      <div class="foot muted">Shared from ${esc(t.app_name || 'Encore')} · <a href="/#/login">Sign in</a> for the whole library</div>`;
+      ${player('metadata', `/api/share/${encodeURIComponent(token)}/stream`, t.duration)}
+      ${foot(t.app_name, true)}`;
     const a = card.querySelector('audio');
+      wire(a);
     a.onerror = () => { if (!a.src.includes('transcode')) a.src += '?transcode=true'; };
   } catch (e) {
     document.title = 'Link not available';

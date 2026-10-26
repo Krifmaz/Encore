@@ -96,6 +96,14 @@ pub(super) fn more_menu(anchor: &Element) {
     if lib && !linked { items.extend(crate::pages::downloads::menu_items(std::slice::from_ref(&t))); }
     items.push(MenuItem::new("Signal path", &icon("activity"), || dom::spawn(signal_path())));
     if lib { let t2 = t.clone(); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("track", t2.g("id").clone(), &t2.s("title"), "", None))); }
+    // bring your own music: the Signal path forgets what it knew about the old file once it is replaced
+    if lib && crate::pages::own_file::allowed() {
+        let t2 = t.clone();
+        items.push(MenuItem::new("Replace with my own file", &icon("disc"), move || {
+            let id = t2.i("id");
+            crate::pages::own_file::replace_modal(&t2, Some(Rc::new(move || { super::signal::INFO.with(|m| { m.borrow_mut().remove(&id); }); })));
+        }));
+    }
     if lib && crate::ui::translate_mode() != "off" { let t2 = t.clone(); items.push(MenuItem::new("Edit translation", &icon("edit"), move || crate::pages::translate::edit_translation(t2.s("title"), "title", None))); }
     if has_encore_remote() { items.push(MenuItem::new(if linked { "Your devices…" } else { "Play on another device…" }, &icon("devices"), remote_open)); }
     // group listen (0.31): start one with what plays here, or open the one this browser is in
@@ -445,7 +453,7 @@ pub(super) fn render() {
         paused = paused_html("p-catchup"), ctl = ctl_attr(), ctl_title = ctl_attr().replace(" disabled", ""),
         thumb = crate::ui::art_sized(&cover(&t), &album_or_title(&t), "", 200),
         title = esc(&crate::ui::tr(&t, "title")),
-        artist = esc(&crate::ui::tr_inline(&t, "artist")),
+        artist = esc(&(crate::ui::tr_inline(&t, "artist") + &crate::ui::feat_text(&t))),
         album = if t.truthy("album") { format!(" · {}", esc(&crate::ui::tr_inline(&t, "album"))) } else { String::new() },
         prev = icon("prev"), pp = super::full::PP, next = icon("next"),
         right = right_html(Some(&t), true));

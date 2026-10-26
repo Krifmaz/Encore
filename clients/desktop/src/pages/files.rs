@@ -83,10 +83,36 @@ const FIND_LIMIT: usize = 200;
 /// Where the chosen sort is kept on this computer (the web's localStorage key).
 const SORT_KEY: &str = "encore.filesSort";
 
-const INTRO: &str = "The folders Encore may change. Deleted files go to Trash first.";
+const INTRO: &str = "The folders Encore may change.";
 const NO_FILE_MANAGER: &str = "This server has no file manager yet (Encore 0.33 or newer has one).";
 const LINK_NOTE: &str = "This folder is reached through a link, so Encore doesn't change anything in it.";
 const TRASH_NOTE: &str = "You can restore them from Trash. Songs in the library are taken out of it until they are restored.";
+/// The delete dialog's words while Keep deleted files in Trash is off (the default since 0.38).
+const DELETE_NOTE: &str = "This can't be undone: Keep deleted files in Trash is off (Settings → Library → Deleting files).";
+
+/// The delete action's words: "Move to trash" while the Trash keeps files, "Delete" while deletes are for good.
+pub fn delete_label(keep: bool) -> &'static str {
+    if keep { "Move to trash" } else { "Delete" }
+}
+
+/// The delete dialog's question.
+pub fn delete_title(names: &[String], keep: bool) -> String {
+    match (names, keep) {
+        ([one], true) => format!("Move “{one}” to trash?"),
+        (_, true) => format!("Move {} items to trash?", names.len()),
+        ([one], false) => format!("Delete “{one}” for good?"),
+        (_, false) => format!("Delete {} items for good?", names.len()),
+    }
+}
+
+/// The empty Trash's line.
+pub fn trash_empty_line(keep: bool, days: i64) -> String {
+    match (keep, days > 0) {
+        (true, true) => format!("Files you delete wait here for {days} days, then they are deleted for good."),
+        (true, false) => "Files you move to trash wait here until you delete them forever.".into(),
+        (false, _) => "Deletes are for good: turn on Keep deleted files in Trash in Settings → Library → Deleting files to keep them here first.".into(),
+    }
+}
 const KEEP_HELP: &str = "The songs join the library where and as they are: nothing is moved, renamed or retagged.";
 const MOVE_HELP: &str = "Each album is tagged as the release it matches and moved into the library.";
 const NO_MATCH: &str = "No match found: it is imported with its own tags.";
@@ -110,6 +136,10 @@ pub struct Root {
     pub writable: bool,
     /// Bytes free on its disk (0 = unknown).
     pub free: f64,
+    /// Trash's: whether deletes keep files there (Settings → Library → Deleting files; a server before 0.38 always did).
+    pub keep: bool,
+    /// Trash's: the days it keeps them (0: not said).
+    pub days: i64,
 }
 
 impl Root {
@@ -124,6 +154,8 @@ impl Root {
             path: fmt::s(v, "path"),
             writable: v.get("writable").map(|w| w.as_bool().unwrap_or(false)).unwrap_or(true),
             free: fmt::f(v, "free_bytes"),
+            keep: v.get("keep").and_then(Value::as_bool).unwrap_or(true),
+            days: fmt::i(v, "days"),
             id,
         })
     }
@@ -1026,6 +1058,11 @@ impl State {
             Some(Ok(r)) => r,
             _ => &[],
         }
+    }
+
+    /// Does a delete keep files in Trash, and for how many days?
+    fn trash_keep(&self) -> (bool, i64) {
+        self.roots().iter().find(|r| r.is_trash()).map(|r| (r.keep, r.days)).unwrap_or((true, 0))
     }
 
     fn current_root(&self) -> Option<&Root> {
@@ -2424,7 +2461,13 @@ fn done(state: &mut State, act: Act, r: Result<Value, ApiError>, ctx: &mut Ctx) 
         }
         Act::Trash => {
             let n = fmt::i(&v, "trashed");
-            say(ctx, if n == 1 { "Moved to trash".to_string() } else { format!("Moved {n} items to trash") });
+            let gone = fmt::truthy(&v, "deleted");
+            say(ctx, match (n == 1, gone) {
+                (true, false) => "Moved to trash".to_string(),
+                (false, false) => format!("Moved {n} items to trash"),
+                (true, true) => "Deleted".to_string(),
+                (false, true) => format!("Deleted {n} items"),
+            });
             after_write(state, ctx, &[here])
         }
         Act::Tags => {
@@ -2741,7 +2784,7 @@ fn toolbar<'a>(state: &'a State, can_write: bool, via: bool) -> El<'a, Message> 
                 r = r.push(btn_icon(Icon::Edit, "Rename", Btn::Default, Some(Message::AskRename(one.clone()))));
             }
             r = r.push(btn_sm("Move", Btn::Default, Some(Message::AskMove(names.clone()))));
-            r = r.push(btn_icon(Icon::Trash, "Move to trash", Btn::Danger, Some(Message::AskTrash(names))));
+            r = r.push(btn_icon(Icon::Trash, delete_label(state.trash_keep().0), Btn::Danger, Some(Message::AskTrash(names))));
         }
         r = r.push(space().width(Length::Fill));
         r = r.push(btn_sm("Select all", Btn::Ghost, Some(Message::SelectAll)));
@@ -2863,7 +2906,11 @@ fn trash_view<'a>(state: &'a State, roots: &'a [Root]) -> El<'a, Message> {
             column![
                 icon(Icon::Trash, 34.0, p.faint),
                 t("The trash is empty").size(15).font(theme::semibold()),
-                widgets::muted("Files you move to trash wait here until you delete them forever.").size(13),
+                widgets::muted({
+                    let (keep, days) = state.trash_keep();
+                    trash_empty_line(keep, days)
+                })
+                .size(13),
             ]
             .spacing(10)
             .align_x(Alignment::Center),
@@ -3097,11 +3144,11 @@ fn menu_items(state: &State, menu: &Menu) -> Vec<MenuItem<Message>> {
                 if can {
                     v.push(MenuItem::new("Rename", Message::AskRename(e.name.clone())).icon(Icon::Edit));
                     v.push(MenuItem::new("Move", Message::AskMove(vec![e.name.clone()])).icon(Icon::Next));
-                    v.push(MenuItem::new("Move to trash", Message::AskTrash(vec![e.name.clone()])).icon(Icon::Trash).danger());
+                    v.push(MenuItem::new(delete_label(state.trash_keep().0), Message::AskTrash(vec![e.name.clone()])).icon(Icon::Trash).danger());
                 }
             } else if can {
                 v.push(MenuItem::new("Move", Message::AskMove(names.clone())).icon(Icon::Next));
-                v.push(MenuItem::new("Move to trash", Message::AskTrash(names.clone())).icon(Icon::Trash).danger());
+                v.push(MenuItem::new(delete_label(state.trash_keep().0), Message::AskTrash(names.clone())).icon(Icon::Trash).danger());
             }
             v
         }
@@ -3394,15 +3441,10 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Dialog::NewFolder { name } => name_dialog("New folder", name, "Make folder"),
         Dialog::Rename { name, .. } => name_dialog("Rename", name, "Rename"),
         Dialog::Move { names, root, path, dirs, .. } => move_dialog(state, names, root, path, dirs),
-        Dialog::Trash { names } => ask(
-            match names.as_slice() {
-                [one] => format!("Move “{one}” to trash?"),
-                _ => format!("Move {} items to trash?", names.len()),
-            },
-            TRASH_NOTE,
-            "Move to trash",
-            true,
-        ),
+        Dialog::Trash { names } => {
+            let keep = state.trash_keep().0;
+            ask(delete_title(names, keep), if keep { TRASH_NOTE } else { DELETE_NOTE }, delete_label(keep), true)
+        }
         Dialog::Tags { name, original, values, saving } => tags_dialog(name, original, values, *saving),
         Dialog::Upload { items, conflict } => upload_dialog(items, conflict, root_name, &state.path),
         Dialog::Import(imp) => import_dialog(imp, root_name),

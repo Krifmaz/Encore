@@ -1,5 +1,6 @@
 package app.encore.android.ui
 
+import app.encore.android.data.api.ServerRoute
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -254,7 +255,11 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         GroupListen.openInvite(text)
     }
 
-    LaunchedEffect(session) { OfflineMode.start(graph.app) }
+    LaunchedEffect(session) {
+        // the server's local network address while on the home network, its public one otherwise
+        ServerRoute.start(graph.app)
+        OfflineMode.start(graph.app)
+    }
     // who is signed in (role and permissions), for the song menu's correcting entries and the Library's admin tab
     val me by SongFixUi.me.collectAsState()
     LaunchedEffect(session) {
@@ -351,6 +356,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             TvShell(
                 nav = nav,
                 selected = TvNav.selected(showPlayer, stack.lastOrNull(), tab),
+                // another page (or the player closing over it): the focus goes onto the page
+                pageKey = listOf(stack.size, stack.lastOrNull(), tab, showPlayer),
                 onSelect = { item ->
                     when (item) {
                         RailItem.NOW_PLAYING -> { showPlayer = true }
@@ -436,6 +443,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         }
         // ⋯ → Report a problem (songs and albums)
         ReportHost(nav)
+        // bring your own music: Replace with my own file, Upload your own files
+        app.encore.android.features.library.OwnFileHost(nav)
         // ⋯ → Edit song details… / Delete song from disk (correcting a library song)
         SongFixHost(nav)
         // toasts sit above the mini player and the tabs, in a window of their own above every sheet and dialog
@@ -496,6 +505,8 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
                 // its surround version: play it, or (admins) fetch the Dolby Atmos version
                 *SurroundUi.entries(nav, t, me, fixScope).toTypedArray(),
                 if (!surround) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(t.id, t.title) } else null,
+                // bring your own music (admins and the "own_files" permission)
+                app.encore.android.features.library.OwnFileUi.entry(me, t.id, t.title, surround),
                 // admins, and members with "fix" on a song their request brought in (library.rs `track_menu`)
                 *(if (!surround) SongFixUi.entries(nav, t, me, fixScope, req.onAlbumPage) else emptyList()).toTypedArray(),
             ),

@@ -23,7 +23,7 @@ pub const TASKS: [(&str, &str, &str); 16] = [
     ("atmos", "Find Dolby Atmos versions", "Ask Apple Music (gamdl with a wrapper-v2 server) about a batch of stereo albums each run and fetch the Dolby Atmos version of each one it has into the Surround library. Albums with a surround copy are skipped; one without Atmos is asked again after a while. The Surround tab's Find Dolby Atmos versions goes through the whole library at once."),
     ("cleanup", "Clean up", "Remove finished downloads older than the cleanup age from the list and delete leftover staging files and reported files kept in the trash for 7 days."),
     ("tools", "Update plugins", "Check the installed plugins (yt-dlp, streamrip, Soulseek, Cadenza, the Translator and the ones you added) for new versions and install them for the plugins switched to update automatically under Settings → Plugins – no new Encore image needed. A plugin that is switched on but whose program is missing is installed again."),
-    ("backup", "Back up the database", "Copy the database to config/backups (kept for 7 days, then one a week for 8 weeks, plus the last 3 pre-upgrade copies)."),
+    ("backup", "Back up the database", "Copy the database to config/backups, or the music folder's .encore-backups when that disk is full (Settings → General → Database backups says how many are kept)."),
     ("update", "Check for Encore updates", "Look for a new Encore release on GitHub. Settings → Diagnostics shows what changed, with Restart server and, when the Docker socket is mounted, Update now."),
 ];
 

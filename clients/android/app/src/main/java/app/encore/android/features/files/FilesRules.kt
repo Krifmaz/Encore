@@ -159,4 +159,42 @@ object FilesRules {
 
     /** "Import 1 album" / "Import 3 albums". */
     fun importButton(n: Int): String = if (n == 1) "Import 1 album" else "Import $n albums"
+
+    // ---- deleting (0.38: Keep deleted files in Trash, off by default) --------------------------------------------
+
+    /** Does a delete keep files in Trash, and for how many days (Trash's root says)? */
+    fun trashKeep(roots: List<FileRoot>?): Pair<Boolean, Int> = roots?.firstOrNull { it.isTrash }?.let { it.keep to it.days } ?: (true to 0)
+
+    /** The delete action's words: "Move to trash" while the Trash keeps files, "Delete" while deletes are for good. */
+    fun deleteLabel(keep: Boolean): String = if (keep) "Move to trash" else "Delete"
+
+    /** The delete dialog's question. */
+    fun deleteTitle(names: List<String>, keep: Boolean): String = when {
+        keep && names.size == 1 -> "Move “${names[0]}” to trash?"
+        keep -> "Move ${names.size} items to trash?"
+        names.size == 1 -> "Delete “${names[0]}” for good?"
+        else -> "Delete ${names.size} items for good?"
+    }
+
+    /** The delete dialog's words. */
+    fun deleteBody(keep: Boolean, days: Int): String = when {
+        !keep -> "This can't be undone: Keep deleted files in Trash is off (Settings → Library → Deleting files)."
+        days > 0 -> "You can restore them from Trash for $days days. Songs in the library are taken out of it until they are restored."
+        else -> "You can restore them from Trash. Songs in the library are taken out of it until they are restored."
+    }
+
+    /** The toast once they went. */
+    fun deletedLine(n: Int, keep: Boolean): String = when {
+        keep && n == 1 -> "Moved to trash"
+        keep -> "Moved $n items to trash"
+        n == 1 -> "Deleted"
+        else -> "Deleted $n items"
+    }
+
+    /** The empty Trash's line. */
+    fun trashEmptyLine(keep: Boolean, days: Int): String = when {
+        !keep -> "Deletes are for good: turn on Keep deleted files in Trash in Settings → Library → Deleting files to keep them here first."
+        days > 0 -> "Files you delete wait here for $days days, then they are deleted for good."
+        else -> "Files you move to trash wait here until you delete them forever."
+    }
 }

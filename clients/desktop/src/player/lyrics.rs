@@ -14,6 +14,13 @@ use std::sync::Arc;
 pub const SCROLL_ID: &str = "player-lyrics";
 /// The id of the current line's box (the one kept in the middle).
 pub const LINE_ID: &str = "player-lyrics-now";
+/// One click of Earlier / Later, ms.
+pub const NUDGE_STEP_MS: i64 = 250;
+/// The largest nudge either way, ms (the server's `SHIFT_MAX_MS`).
+pub const NUDGE_MAX_MS: i64 = 30_000;
+/// How long after the last click the nudge is saved: a run of clicks is one request.
+pub const NUDGE_SAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// Lyrics mode's sizes on the desktop: the current line, the others (the phone's 28 / 22 sp).
 pub const CURRENT_PX: f32 = 30.0;
 pub const LINE_PX: f32 = 24.0;
@@ -36,6 +43,13 @@ pub struct Lyrics {
     pub instrumental: bool,
     /// The line the music is at (−1 before the first).
     pub current: i64,
+    /// How much later the time-synced lines are shown, ms (the server's `shift_ms`: the song's nudge, shared by
+    /// every device; negative: earlier).
+    pub shift_ms: i64,
+    /// Bumped by every Earlier / Later: only the newest click's save runs ([`Lyrics::nudge_to`]).
+    pub nudge_gen: u64,
+    /// The nudge the server has while clicks wait to be saved (None: nothing waits).
+    pub saved_shift: Option<i64>,
 }
 
 impl Lyrics {
@@ -74,13 +88,62 @@ impl Lyrics {
                 self.lines = if synced { parse_lrc(&text) } else { Vec::new() };
                 self.plain = if synced { String::new() } else { text };
                 self.instrumental = crate::fmt::truthy(&v, "instrumental");
+                // an answer saved with an older download has none: no nudge
+                self.shift_ms = if synced { crate::fmt::i(&v, "shift_ms").clamp(-NUDGE_MAX_MS, NUDGE_MAX_MS) } else { 0 };
             }
             Err(_) => {
                 self.lines.clear();
                 self.plain.clear();
                 self.instrumental = false;
+                self.shift_ms = 0;
             }
         }
+        self.current = -1;
+    }
+
+    /// When line `ln` is shown, seconds: its stamp plus the nudge.
+    pub fn at(&self, ln: &Line) -> f64 {
+        ln.t + self.shift_ms as f64 / 1000.0
+    }
+
+    /// Time-synced lines are on screen for `song`: they can be nudged.
+    pub fn nudgeable(&self, song: Option<i64>) -> bool {
+        self.shown(song) && !self.lines.is_empty()
+    }
+
+    /// Show the lines `ms` later (0: as stamped; clamped to ±[`NUDGE_MAX_MS`]) at once; the save waits for more
+    /// clicks. → the generation the save is to carry (see [`Lyrics::save_due`]).
+    pub fn nudge_to(&mut self, ms: i64) -> u64 {
+        if self.saved_shift.is_none() {
+            self.saved_shift = Some(self.shift_ms);
+        }
+        self.shift_ms = ms.clamp(-NUDGE_MAX_MS, NUDGE_MAX_MS);
+        self.current = -1;
+        self.nudge_gen += 1;
+        self.nudge_gen
+    }
+
+    /// One click of Earlier (`dir` < 0) or Later: a quarter second ([`Lyrics::nudge_to`]).
+    pub fn nudge(&mut self, dir: i64) -> u64 {
+        self.nudge_to(self.shift_ms + dir.signum() * NUDGE_STEP_MS)
+    }
+
+    /// The save of click `gen` on song `id` is due: no newer click came and the song is the same.
+    pub fn save_due(&self, id: i64, gen: u64) -> bool {
+        self.id == Some(id) && self.nudge_gen == gen
+    }
+
+    /// The server answered the save of song `id`: its word (clamped, the .lrc's `[offset:]` counted in), or on a
+    /// failure the nudge it had. Ignored when the song changed.
+    pub fn saved(&mut self, id: i64, r: &Result<Value, ApiError>) {
+        if self.id != Some(id) {
+            return;
+        }
+        match r {
+            Ok(v) => self.shift_ms = crate::fmt::i(v, "shift_ms").clamp(-NUDGE_MAX_MS, NUDGE_MAX_MS),
+            Err(_) => self.shift_ms = self.saved_shift.unwrap_or(self.shift_ms),
+        }
+        self.saved_shift = None;
         self.current = -1;
     }
 
@@ -99,7 +162,8 @@ impl Lyrics {
         if self.lines.is_empty() {
             return false;
         }
-        let i = line_at(&self.lines, position + 0.3);
+        // the nudge moves the lines later: the same as looking that much less ahead
+        let i = line_at(&self.lines, position + 0.3 - self.shift_ms as f64 / 1000.0);
         if i == self.current {
             return false;
         }
@@ -151,7 +215,7 @@ impl Lyrics {
                     .padding([4, 12])
                     .width(Length::Fill)
                     .style(theme::btn(theme::Btn::Row))
-                    .on_press(on_seek(ln.t));
+                    .on_press(on_seek(self.at(ln)));
                 col = col.push(if on { El::from(container(line).id(LINE_ID)) } else { El::from(line) });
             }
             col = col.push(space().height(pad));
@@ -391,6 +455,31 @@ mod tests {
         assert!(l.shown(Some(7)) && !l.shown(Some(8)) && !l.shown(None));
         l.loaded(7, Ok(serde_json::json!({ "lyrics": null })));
         assert!(!l.shown(Some(7)));
+    }
+
+    /// The nudge moves the lines later (or earlier), only the newest click saves, and a failed save puts it back.
+    #[test]
+    fn a_nudge_moves_the_lines_and_saves_once() {
+        let mut l = Lyrics { id: Some(7), loading: true, ..Default::default() };
+        l.loaded(7, Ok(serde_json::json!({ "lyrics": "[00:10.00]a\n[00:20.00]b", "synced": true, "shift_ms": 1000 })));
+        assert_eq!(l.shift_ms, 1000);
+        // the line at 10 s shows at 11 s
+        assert!(!l.sync(10.5) && l.current == -1);
+        assert!(l.sync(10.8) && l.current == 0);
+        let first = l.nudge(-1);
+        let second = l.nudge(-1);
+        assert_eq!(l.shift_ms, 500);
+        assert!(!l.save_due(7, first) && l.save_due(7, second) && !l.save_due(8, second));
+        l.saved(7, &Err(ApiError::new(500, "down")));
+        assert_eq!(l.shift_ms, 1000, "a failed save puts the nudge back");
+        l.nudge_to(99_999);
+        l.saved(7, &Ok(serde_json::json!({ "shift_ms": 30_000 })));
+        assert_eq!(l.shift_ms, NUDGE_MAX_MS);
+        assert!(l.nudgeable(Some(7)));
+        // plain lyrics have no nudge
+        l.loaded(7, Ok(serde_json::json!({ "lyrics": "a", "synced": false, "shift_ms": 900 })));
+        assert_eq!(l.shift_ms, 0);
+        assert!(!l.nudgeable(Some(7)));
     }
 
     #[test]

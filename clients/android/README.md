@@ -30,7 +30,8 @@ What it does:
   TV becomes an Encore device the phone can send music to. To install, sideload `Encore-android-<version>.apk` from
   the releases (for example with the Downloader app, or `adb install`); it then updates itself like on a phone
 - the TV layout (`ui/tv`, on a TV automatically): the whole app zoomed out, a slim side menu instead of the bottom
-  bars (Search, Home, Library, Playlists, For you, Now playing, Settings; Left opens it), and a TV player with the
+  bars (Search, Home, Library, Playlists, For you, Now playing, Settings; Left at the page's edge or Menu opens it,
+  Back or Right closes it; Up / Down always move to the next control, so text fields don't trap the focus), and a TV player with the
   cover and controls on one side and a panel switching between the lyrics and Up next on the other; Left / Right on
   its seek bar seek 10 s; Screen off (top right) blacks the screen out while the music plays on, the playback
   buttons still work and any other button brings it back. Settings → TV (on a TV only): Layout (or the phone layout), Player side, Size
@@ -125,7 +126,9 @@ foreground service, no WorkManager), then the album cover (600 px) and the lyric
   device" (Settings → This device → Downloads, on by default, as the web's switch) turned off streams downloaded
   songs while the server can be reached; offline mode or no network always plays the copy.
 - Offline mode (`OfflineMode`): the signed-in server doesn't answer `/api/health` (or a proxy says 502–504) and songs
-  of it are saved here. The banner with Retry, the Library tab shows Downloaded, the other tabs are greyed; the
+  of it are saved here. The banner with Retry (below the status bar; a tap opens a sheet with the full message, why
+  the check failed – `OfflineReason`: no network, DNS, refused, timeout, HTTPS, or a proxy's 502–504 – and Retry),
+  Home's "Saved on this phone" row, a page still loading starts over from the kept answers, the Library tab shows Downloaded, the other tabs are greyed; the
   server is asked again every 30 s, on network changes and on Retry. Plays and likes made meanwhile wait in the
   outbox (`files/offline/outbox.json`, owned by `<server>|<username>`) and go when it answers: the plays in the list
   form of `POST /api/library/plays`, the likes one by one ("Back online – 3 plays sent"). The hearts use the liked

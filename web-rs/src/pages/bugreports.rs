@@ -333,14 +333,14 @@ pub fn new_report_modal() {
     let page = app::previous_hash();
     let version = app_version();
     let seg: String = PICK_KINDS.iter().enumerate().map(|(i, (k, l))| format!(r#"<button type="button" data-v="{k}" class="{}">{l}</button>"#, if i == 0 { "on" } else { "" })).collect();
-    let body = format!(r#"<div class="stack" style="gap:12px">
+    let body = format!(r#"<div class="stack" style="gap:12px" data-dropzone="br-files">
       <div class="seg" id="br-kind">{seg}</div>
       <label class="field"><span>Title</span><input class="input" id="br-title" maxlength="200" placeholder="A short name for it"></label>
       <label class="field"><span>Description</span><textarea class="input" id="br-body" rows="6" maxlength="20000" placeholder="What happened, what you expected, how to repeat it"></textarea></label>
       <div class="row wrap" style="gap:10px">
         <button type="button" class="btn sm" id="br-add">{upload}Add images</button>
         <input type="file" id="br-files" multiple accept="image/*,.txt,.log" hidden>
-        <span class="small muted">Up to {max} files, 8 MB each. Images, .txt and .log files.</span>
+        <span class="small muted">Up to {max} files, 8 MB each. Images, .txt and .log files (pick or drop them here).</span>
       </div>
       <div class="bug-thumbs" id="br-thumbs"></div>
       <div class="small muted" id="br-meta">Sent along: {page}the app version ({version}) and your browser.</div>
@@ -449,7 +449,7 @@ pub fn render_one(view: Element, ctx: Ctx) -> PageFuture {
     </div>
     <div class="section-head"><h2>Replies</h2></div>
     <div class="card flat" id="bug-thread">{thread}</div>
-    <div class="card mt stack" id="bug-reply" style="gap:10px">
+    <div class="card mt stack" id="bug-reply" style="gap:10px" data-dropzone>
       <textarea class="input" id="bug-reply-text" rows="3" maxlength="20000" placeholder="Write a reply"></textarea>
       <div class="row wrap" style="gap:8px">
         <button type="button" class="btn sm" id="bug-reply-add">{plus}Add images</button>

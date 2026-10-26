@@ -50,7 +50,12 @@ class ServiceHost(
     private val setNorm: (NormPrefs) -> Unit = {},
     /** the Signal path's normalization value for the song that plays ("" while normalization is off) */
     private val normLine: () -> String = { "" },
+    /** this device's own media volume (the `system_volume` snapshot field and command); null leaves it out */
+    private val systemVolume: SystemVolume? = null,
 ) : PlayerHost {
+
+    /** the media volume the last snapshot reported: a settings change that leaves it alone is no news */
+    private var reportedSystem: Double? = null
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -66,6 +71,7 @@ class ServiceHost(
                 ) || (events.contains(Player.EVENT_VOLUME_CHANGED) && !fading())
             ) remote.beatSoon()
             if (events.contains(Player.EVENT_IS_PLAYING_CHANGED)) remote.setPlaying(player.isPlaying)
+            if (events.contains(Player.EVENT_PLAY_WHEN_READY_CHANGED)) stayQuietWhileLinked()
         }
 
         // the app shuffle (CarPlayer.setShuffled) calls this directly, with no onEvents after it
@@ -74,14 +80,30 @@ class ServiceHost(
         }
     }
 
+    /**
+     * While this phone is a remote for another device it plays nothing itself: a play that reaches the service
+     * anyway (the notification, the lock screen, a headset or car button, Android Auto) is paused again at once
+     * and sent to the linked device as its play. Without this the song went on here as well as there.
+     * Commands from other devices that start the music here end the link first (RemoteDevice.runNow), so they
+     * are not caught here.
+     */
+    private fun stayQuietWhileLinked() {
+        if (!player.playWhenReady || remote.link.value == null) return
+        player.pause()
+        remote.sendToLink(buildJsonObject { put("action", "play") })
+    }
+
     fun start() {
         player.addListener(listener)
+        // the volume keys (or anything else) changed the media volume here: the other devices see it at once
+        systemVolume?.watch { if (systemVolume.level() != reportedSystem) remote.beatSoon() }
         remote.attach(this)
         remote.setPlaying(player.isPlaying)
     }
 
     fun stop() {
         player.removeListener(listener)
+        systemVolume?.stop()
         remote.detach(this)
     }
 
@@ -99,8 +121,15 @@ class ServiceHost(
         }
     }
 
-    /** Nothing plays here: the idle state, with this device's normalization settings. */
-    private fun idle(): JsonObject = JsonObject(RemoteDevice.IDLE + ("norm" to normJson()))
+    /** The media volume for the snapshot (remembered for the watch), JSON null when it cannot be changed here. */
+    private fun systemJson(): JsonPrimitive {
+        val v = systemVolume?.level()
+        reportedSystem = v
+        return JsonPrimitive(v)
+    }
+
+    /** Nothing plays here: the idle state, with this device's normalization settings and media volume. */
+    private fun idle(): JsonObject = JsonObject(RemoteDevice.IDLE + ("norm" to normJson()) + ("system_volume" to systemJson()))
 
     override fun snapshot(): JsonObject {
         val item = player.currentMediaItem ?: return idle()
@@ -134,6 +163,7 @@ class ServiceHost(
             put("playing", playingNow())
             put("position", positionMs().coerceAtLeast(0L) / 1000.0)
             put("volume", volume().toDouble())
+            put("system_volume", systemJson())
             put("shuffle", player.shuffleModeEnabled)
             put("repeat", repeatName(player.repeatMode))
             put("index", at)
@@ -180,6 +210,13 @@ class ServiceHost(
             "volume" -> {
                 val v = c.dbl("value")
                 player.volume = (if (v.isNaN()) 0.9 else v).toFloat().coerceIn(0f, 1f)
+            }
+            // this device's own media volume (the volume keys' one), 0..1
+            "system_volume" -> {
+                // a missing or non-numeric value changes nothing (dbl() would read it as 0: silence)
+                val v = (c["value"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toDoubleOrNull() ?: return
+                systemVolume?.set(v)
+                remote.beatSoon()
             }
             // the app shuffle (the player is the session's, so this is the shuffle the car and the phone show)
             "shuffle" -> player.shuffleModeEnabled = c.bool("value")

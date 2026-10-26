@@ -173,10 +173,15 @@ fun <T> rememberLoad(vararg keys: Any?, keep: Boolean = false, block: () -> T): 
         }
     }
     val loader = Loader(state, retry, quiet)
-    // offline mode starting or ending (not its first value): failed pages ask again, shown pages refresh quietly
+    // offline mode starting or ending (not its first value): failed pages ask again, shown pages refresh quietly, and
+    // a page still loading starts over: its calls may be waiting out a timeout to a server that is gone (a spinner
+    // for minutes), while the new load is answered at once from what this phone kept (EncoreApi `call`)
     LaunchedEffect(*keys) {
         OfflineMode.active.drop(1).collect {
-            if (state.value is Loadable.Failed) loader.retry() else if (state.value is Loadable.Ready) loader.refresh()
+            when (state.value) {
+                is Loadable.Failed, is Loadable.Loading -> loader.retry()
+                is Loadable.Ready -> loader.refresh()
+            }
         }
     }
     return loader

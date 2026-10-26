@@ -279,7 +279,17 @@ async fn delete_invite(State(st): State<AppState>, Admin(_): Admin, Path(iid): P
 
 /// GET /api/admin/settings: every setting, secrets masked.
 async fn get_settings(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
-    Json(st.cfg.public_dump())
+    Json(dump(&st))
+}
+
+/// Every setting for the admin UI, with gamdl's wrapper fields credited to the Apple Music wrapper plugin
+/// while it is on and they are its own (the gamdl card then shows them read-only).
+fn dump(st: &AppState) -> Value {
+    let mut out = st.cfg.public_dump();
+    if st.plugins.enabled(encore_requests::wrapper::ID) && encore_requests::wrapper::gamdl_points_here(st) {
+        encore_requests::wrapper::credit_gamdl_fields(&mut out);
+    }
+    out
 }
 
 /// The pages, cards and fields of Settings → Server (docs/contracts/settings-schema.md); the values are in
@@ -311,7 +321,7 @@ async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values)
     // the 0.30 apps' auto-update switches (tools_auto_<id>) are the plugins' own for one more release
     st.plugins.follow_auto_keys(&saved.iter().map(String::as_str).collect::<Vec<_>>());
     st.requests.slskd.poke(); // a changed Soulseek login or port takes effect now, not at the next check
-    let mut out = st.cfg.public_dump();
+    let mut out = dump(&st);
     if !warnings.is_empty() {
         out["_warnings"] = json!(warnings);
     }

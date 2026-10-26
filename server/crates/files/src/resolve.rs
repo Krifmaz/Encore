@@ -76,7 +76,7 @@ pub fn io_error(e: StepError) -> ApiError {
     let mut text = e.what();
     if let Some(h) = e.hint() {
         text.push_str(" – ");
-        text.push_str(h);
+        text.push_str(&h);
     }
     err(status, text)
 }

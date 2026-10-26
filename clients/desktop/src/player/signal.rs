@@ -135,7 +135,7 @@ pub fn rows(st: &Status, info: Option<&Value>, linked: Option<&Linked>) -> (Vec<
     rows.push((
         "Source".into(),
         source_line(&format, bitrate, info),
-        [lossy, suspect]
+        [lossy, suspect, crate::pages::own_file::own_file_note(info)]
             .into_iter()
             .filter(|x| !x.is_empty())
             .collect::<Vec<_>>()

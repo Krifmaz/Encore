@@ -346,6 +346,17 @@ fn gamdl_is_pointed_at_the_managed_wrapper_with_its_decrypt_socket() {
     assert_eq!(st.cfg.str("gamdl_wrapper_url"), "http://encore-wrapper");
     assert_eq!(st.cfg.str("gamdl_wrapper_decrypt"), "encore-wrapper:10020");
     assert!(gamdl_points_here(&st));
+    // the URL typed in by hand with no decrypt address: gamdl takes the URL's host, port 10020, so it is this one
+    st.cfg.set_many(&json!({ "gamdl_wrapper_url": "http://encore-wrapper/", "gamdl_wrapper_decrypt": "" }));
+    assert!(gamdl_points_here(&st));
+    st.cfg.set_many(&json!({ "gamdl_wrapper_decrypt": "elsewhere:10020" }));
+    assert!(!gamdl_points_here(&st));
+    // the settings page credits both fields to the plugin, but never one the environment sets
+    let mut dump = json!({ "_meta": { "gamdl_wrapper_url": { "source": "ui" }, "gamdl_wrapper_decrypt": { "source": "env" } } });
+    credit_gamdl_fields(&mut dump);
+    assert_eq!(dump["_meta"]["gamdl_wrapper_url"]["source"], "plugin");
+    assert_eq!(dump["_meta"]["gamdl_wrapper_url"]["plugin"], NAME);
+    assert_eq!(dump["_meta"]["gamdl_wrapper_decrypt"]["source"], "env");
     assert_eq!(image(&st), built_image());
     st.cfg.set_many(&json!({ "wrapper_image": " ghcr.io/me/wrapper-v2:1 " }));
     assert_eq!(image(&st), "ghcr.io/me/wrapper-v2:1");

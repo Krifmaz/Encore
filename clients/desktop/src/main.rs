@@ -15,6 +15,7 @@ mod fmt;
 mod link;
 mod pages;
 mod player;
+mod route;
 mod theme;
 mod tour;
 mod whats_new;

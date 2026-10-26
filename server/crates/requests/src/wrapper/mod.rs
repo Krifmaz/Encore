@@ -317,10 +317,36 @@ pub async fn container_logs(st: &impl Ctx, lines: usize) -> Result<String, Strin
 
 // ---- gamdl ----------------------------------------------------------------------------------------------
 
-/// Whether gamdl's "Wrapper URL" and decrypt address are this wrapper's.
+/// Whether gamdl's "Wrapper URL" and decrypt address are this wrapper's. An empty decrypt address on either
+/// side means what gamdl reads it as: the Wrapper URL's host, port 10020 (a URL typed in by hand and no
+/// decrypt address is this wrapper when that is where its decrypt socket is).
 pub fn gamdl_points_here(st: &impl encore_http::Ctx) -> bool {
     let Some(u) = url(st) else { return false };
-    st.cfg().str("gamdl_wrapper_url").trim().trim_end_matches('/') == u && st.cfg().str("gamdl_wrapper_decrypt").trim() == decrypt(st)
+    let gamdl_url = st.cfg().str("gamdl_wrapper_url");
+    let gamdl_url = gamdl_url.trim().trim_end_matches('/');
+    let effective = |d: String| if d.trim().is_empty() { default_decrypt(&u) } else { d.trim().to_string() };
+    gamdl_url == u && effective(st.cfg().str("gamdl_wrapper_decrypt")) == effective(decrypt(st))
+}
+
+/// The decrypt address gamdl takes when none is set: the URL's host, port 10020.
+fn default_decrypt(url: &str) -> String {
+    let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+    format!("{host}:10020")
+}
+
+/// The plugin's name, as the settings page credits it.
+pub const NAME: &str = "Apple Music wrapper";
+
+/// Credit gamdl's wrapper fields to this plugin in a settings dump (`Config::public_dump`): their `_meta`
+/// source becomes `plugin` with the plugin's name, so the gamdl card shows the values this wrapper filled in
+/// read-only, and its Save leaves them alone. A field the environment sets stays the environment's.
+pub fn credit_gamdl_fields(dump: &mut Value) {
+    for key in ["gamdl_wrapper_url", "gamdl_wrapper_decrypt"] {
+        let meta = &mut dump["_meta"][key];
+        if meta["source"] == "env" { continue; }
+        meta["source"] = json!("plugin");
+        meta["plugin"] = json!(NAME);
+    }
 }
 
 /// Point gamdl at this wrapper: its "Wrapper URL" and decrypt address. Refused when there is no address yet
@@ -411,7 +437,7 @@ pub async fn overview(st: &impl Ctx) -> Value {
         "arch": stage::Arch::here().map(|a| a.name()),
         "source": { "repo": SOURCE_REPO, "commit": SOURCE_COMMIT },
         "job": { "running": job.running, "step": job.step, "error": job.error, "ended_at": job.ended_at },
-        "gamdl": { "url": st.cfg().str("gamdl_wrapper_url"), "points_here": gamdl_points_here(st), "locked": st.cfg().env_locked("gamdl_wrapper_url") },
+        "gamdl": { "url": st.cfg().str("gamdl_wrapper_url"), "decrypt": st.cfg().str("gamdl_wrapper_decrypt"), "points_here": gamdl_points_here(st), "locked": st.cfg().env_locked("gamdl_wrapper_url") },
     });
     if m == Mode::Managed {
         v["bundle"] = bundle_info(st);

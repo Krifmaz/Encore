@@ -13,6 +13,7 @@ use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{
     self, badge, btn, btn_icon, empty, grid, h1, h3, icon, icon_btn, modal, pop_menu, skeleton_rows,
     small_muted, t, tabs, Icon, MenuItem, Tile, TileKind, TrackRow,
@@ -58,6 +59,8 @@ pub struct ArtState {
     pub candidates: Option<Vec<Value>>,
     pub error: String,
     pub busy: bool,
+    /// A picture dragged onto the window: it is uploaded like *Upload…*.
+    pub drop: DropZone,
 }
 
 #[derive(Debug)]
@@ -68,7 +71,7 @@ pub enum Dialog {
     /// Change type… (0.36): the format picked ("" = Automatic).
     ChangeType { picked: &'static str, busy: bool },
     /// Move album to Trash (0.36): the dry run's title and words; `can_go` false when the Trash has no room.
-    Trash { title: String, text: String, can_go: bool },
+    Trash { title: String, text: String, can_go: bool, keep: bool },
     /// Get the rest of the album for an album MusicBrainz doesn't list: another catalogue's track list, or
     /// one to type in (super::rest_of_album).
     Rest(Box<super::rest_of_album::State>),
@@ -167,6 +170,8 @@ pub enum Message {
     ArtResults(Result<Value, ApiError>),
     ArtPick(usize),
     ArtUpload,
+    /// A file dragged over or dropped on the window while *Change artwork* is open.
+    ArtDrop(drop_zone::Event),
     /// The picked file as a data URL ("" = cancelled), or why it was refused.
     ArtFile(Result<String, String>),
     ArtSet(Result<Value, ApiError>),
@@ -315,25 +320,29 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The pictures *Upload…* takes, picked or dropped.
+const PICTURE_FILES: drop_zone::Accept = drop_zone::Accept::one(&["jpg", "jpeg", "png"]);
+
 /// Pick a picture and read it as a data URL ("" when cancelled).
 async fn pick_picture() -> Result<String, String> {
     let Some(f) = rfd::AsyncFileDialog::new()
-        .add_filter("Pictures", &["jpg", "jpeg", "png"])
+        .add_filter("Pictures", PICTURE_FILES.exts)
         .pick_file()
         .await
     else {
         return Ok(String::new());
     };
     let bytes = f.read().await;
+    picture_data_url(&f.file_name(), &bytes)
+}
+
+/// A picked or dropped picture (its file name and bytes) as a data URL; over 15 MB is refused, as on the web.
+fn picture_data_url(name: &str, bytes: &[u8]) -> Result<String, String> {
     if bytes.len() > 15 * 1024 * 1024 {
         return Err("Picture is larger than 15 MB".into());
     }
-    let mime = if f.file_name().to_ascii_lowercase().ends_with(".png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
-    Ok(format!("data:{mime};base64,{}", base64(&bytes)))
+    let mime = if name.to_ascii_lowercase().ends_with(".png") { "image/png" } else { "image/jpeg" };
+    Ok(format!("data:{mime};base64,{}", base64(bytes)))
 }
 
 fn match_search(state: &mut State, ctx: &Ctx) -> Task<Message> {
@@ -863,6 +872,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 candidates: None,
                 error: String::new(),
                 busy: false,
+                drop: DropZone::default(),
             })));
             return art_search(state, ctx);
         }
@@ -895,6 +905,26 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
         }
         Message::ArtUpload => return Task::perform(pick_picture(), Message::ArtFile),
+        Message::ArtDrop(ev) => {
+            let Some(Dialog::Artwork(a)) = &mut state.dialog else { return Task::none() };
+            if a.busy {
+                a.drop.hovering = false;
+                return Task::none();
+            }
+            match a.drop.handle(ev, &PICTURE_FILES) {
+                Outcome::Take(path) => {
+                    return Task::perform(
+                        async move {
+                            let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+                            picture_data_url(&path.to_string_lossy(), &bytes)
+                        },
+                        Message::ArtFile,
+                    );
+                }
+                Outcome::Refused(m) => ctx.toast_err(m),
+                Outcome::Nothing => {}
+            }
+        }
         Message::ArtFile(Ok(data)) => {
             if !data.is_empty() {
                 return set_art(state, json!({ "data": data }), ctx);
@@ -968,7 +998,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::TrashDry(Ok(d)) => {
             let (title, text, can_go) = lt::trash_dialog_words(&d);
-            state.dialog = Some(Dialog::Trash { title, text, can_go });
+            state.dialog = Some(Dialog::Trash { title, text, can_go, keep: lt::keeps(&d) });
         }
         Message::TrashDry(Err(e)) => ctx.toast_err(e.message),
         Message::TrashGo => {
@@ -979,7 +1009,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         }
         Message::Trashed(Ok(r)) => {
             let text = if fmt::truthy(&r, "text") { fmt::s(&r, "text") } else { lt::moved_text(1, 1, "") };
-            ctx.toast_action(text, lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+            if lt::keeps(&r) {
+                ctx.toast_action(text, lt::OPEN_TRASH, crate::player::Message::OpenTrash, lt::TOAST_MS);
+            } else {
+                ctx.toast_ok(text);
+            }
             ctx.navigate(Page::library(""));
         }
         Message::Trashed(Err(e)) => ctx.toast_err(e.message),
@@ -1576,10 +1610,11 @@ fn art_dialog<'a>(a: &'a ArtState, ctx: &Ctx<'a>) -> El<'a, Message> {
         ]
         .spacing(8)
         .align_y(Alignment::Center),
-        small_muted("Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg."),
+        small_muted("Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg. Or drop a .jpg or .png here."),
         out,
     ]
     .spacing(12);
+    let body = drop_zone::view(body, &a.drop, "Drop a .jpg or .png to use it as the cover");
     modal("Change artwork", body, None, true, Message::CloseDialog)
 }
 
@@ -1605,12 +1640,13 @@ fn change_type_dialog<'a>(state: &'a State, picked: &'static str, busy: bool) ->
     modal(lt::CHANGE_TYPE_TITLE, body, Some(footer.into()), false, Message::CloseDialog)
 }
 
-/// Move album to Trash (0.36): the dry run's words; Move to Trash / Cancel, or Close when there is no room.
-fn trash_dialog<'a>(title: &'a str, text: &'a str, can_go: bool) -> El<'a, Message> {
+/// Delete album… (0.36): the dry run's words; Move to Trash (Delete while deletes are for good) / Cancel, or Close
+/// when there is no room.
+fn trash_dialog<'a>(title: &'a str, text: &'a str, can_go: bool, keep: bool) -> El<'a, Message> {
     let footer = if can_go {
         row![
             btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-            btn(lt::MOVE_TO_TRASH, Btn::Danger, Some(Message::TrashGo)),
+            btn(lt::go_label(keep), Btn::Danger, Some(Message::TrashGo)),
         ]
         .spacing(10)
     } else {
@@ -1629,15 +1665,20 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Some(Dialog::Match(m)) => return Some(match_dialog(m, ctx)),
         Some(Dialog::Artwork(a)) => return Some(art_dialog(a, ctx)),
         Some(Dialog::ChangeType { picked, busy }) => return Some(change_type_dialog(state, picked, *busy)),
-        Some(Dialog::Trash { title, text, can_go }) => return Some(trash_dialog(title, text, *can_go)),
+        Some(Dialog::Trash { title, text, can_go, keep }) => return Some(trash_dialog(title, text, *can_go, *keep)),
         Some(Dialog::Rest(r)) => return Some(super::rest_of_album::view(r, Message::Rest, Message::CloseDialog)),
         None => {}
     }
     state.menu.map(|at| album_menu(state, ctx, at))
 }
 
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::none()
+/// A picture dragged onto the window while *Change artwork* is open.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    match state.dialog {
+        Some(Dialog::Artwork(_)) => drop_zone::events().map(Message::ArtDrop),
+        // files dropped on Replace with my own file
+        _ => super::library::shared_subscription(&state.shared).map(Message::Shared),
+    }
 }
 
 #[cfg(test)]

@@ -170,6 +170,14 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
     /** GET /api/library/tracks/{id}/lyrics: `{lyrics, synced, source, instrumental?}` (looked up on LRCLIB and saved when missing). */
     fun lyrics(trackId: Long, force: Boolean = false): JsonObject = getObject("/api/library/tracks/$trackId/lyrics" + if (force) "?force=true" else "")
 
+    /**
+     * PUT /api/library/tracks/{id}/lyrics/shift {shift_ms}: show the song's time-synced lines [shiftMs] later
+     * (negative: earlier; 0: as stamped) on every device. → the lyrics answer with the saved `shift_ms`.
+     */
+    fun lyricsShift(trackId: Long, shiftMs: Long): JsonObject =
+        call("PUT", url("/api/library/tracks/$trackId/lyrics/shift"), JsonObject(mapOf("shift_ms" to kotlinx.serialization.json.JsonPrimitive(shiftMs)))) as? JsonObject
+            ?: JsonObject(emptyMap())
+
     /** POST /api/library/tracks/{id}/share → the public link (`base + path`, as the web player builds it). */
     fun shareLink(trackId: Long): String {
         val o = post("/api/library/tracks/$trackId/share", JsonObject(emptyMap())) as? JsonObject ?: throw IOException("Couldn't create the link")

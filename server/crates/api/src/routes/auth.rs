@@ -26,6 +26,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/logout-all", post(logout_all))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/addresses", get(addresses))
         .route("/api/auth/profile", put(profile))
         .route("/api/auth/prefs", get(get_prefs).put(put_prefs))
         .route("/api/auth/password", post(change_password))
@@ -65,7 +66,7 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 /// GET /api/auth/info: what the server offers before signing in (features, sign-up mode, the API level).
 async fn info(State(st): State<AppState>) -> Json<Value> {
     // "surround" (0.35): the Surround library (its tab, the album pages' Stereo/Surround links, /api/surround/…)
-    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token", "surround"];
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token", "surround", "addresses"];
     if encore_requests::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }
@@ -83,7 +84,26 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
         // the web app turns features on only when the server has them
         "features": features,
         "email_login": email::enabled(&st) && st.cfg.bool("email_login"),
+        // which server this is: an app that tries the local network address (GET /api/auth/addresses) checks
+        // that the answer there carries the same id before it sends its session to that address
+        "server_id": st.cfg.str("server_id"),
     }))
+}
+
+/// GET /api/auth/addresses: the addresses the apps may reach this server at, for signed-in users only (the
+/// home network's address is nobody else's business).
+///
+/// `public` is Settings → General → Public URL and `local` its Local network address, both without a trailing
+/// slash ("" when not set); `server_id` is the id `/api/auth/info` shows, which an app compares before it
+/// switches to `local`. The desktop, Android and TV apps keep both and use `local` while it answers.
+async fn addresses(State(st): State<AppState>, User(_u): User) -> Json<Value> {
+    Json(addresses_json(&st))
+}
+
+/// The answer of [`addresses`]: each address trimmed and without its trailing `/`.
+pub(crate) fn addresses_json(st: &AppState) -> Value {
+    let clean = |key: &str| st.cfg.str(key).trim().trim_end_matches('/').to_string();
+    json!({ "public": clean("base_url"), "local": clean("local_url"), "server_id": st.cfg.str("server_id") })
 }
 
 /// An invite that exists, isn't expired and has uses left; 400 otherwise.

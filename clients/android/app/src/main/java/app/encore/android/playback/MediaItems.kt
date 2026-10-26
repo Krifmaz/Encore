@@ -33,6 +33,9 @@ object MediaItems {
     const val EXTRA_ARTIST_NAMES = "artist_names"
     const val EXTRA_ARTIST_MBIDS = "artist_mbids"
     const val EXTRA_ARTIST_IN_LIBRARY = "artist_in_library"
+    /** the song's featured artists (Track.featured): their names and MusicBrainz ids, in order */
+    const val EXTRA_FEATURED_NAMES = "featured_names"
+    const val EXTRA_FEATURED_MBIDS = "featured_mbids"
     /** the original title / artist / album and their translations (the metadata shows them as Settings → Language asks) */
     const val EXTRA_TITLE = "orig_title"
     const val EXTRA_ARTIST = "orig_artist"
@@ -73,6 +76,10 @@ object MediaItems {
                 putStringArrayList(EXTRA_ARTIST_NAMES, ArrayList(t.artists.map { it.name }))
                 putStringArrayList(EXTRA_ARTIST_MBIDS, ArrayList(t.artists.map { it.mbid }))
                 putBooleanArray(EXTRA_ARTIST_IN_LIBRARY, t.artists.map { it.inLibrary }.toBooleanArray())
+            }
+            if (t.featured.isNotEmpty()) {
+                putStringArrayList(EXTRA_FEATURED_NAMES, ArrayList(t.featured.map { it.name }))
+                putStringArrayList(EXTRA_FEATURED_MBIDS, ArrayList(t.featured.map { it.mbid }))
             }
         }
         // the notification, the lock screen and the car show the titles the listener asked for
@@ -134,7 +141,15 @@ object MediaItems {
             gain = TrackGain.fromArray(x?.getDoubleArray(EXTRA_GAIN)),
             sampleRate = x?.getInt(EXTRA_SAMPLE_RATE) ?: 0,
             bitDepth = x?.getInt(EXTRA_BIT_DEPTH) ?: 0,
+            featured = featuredOf(x),
         )
+    }
+
+    /** The featured artists saved with an item (see [EXTRA_FEATURED_NAMES]); empty when it has none. */
+    private fun featuredOf(x: Bundle?): List<ArtistCredit> {
+        val names = x?.getStringArrayList(EXTRA_FEATURED_NAMES) ?: return emptyList()
+        val mbids = x.getStringArrayList(EXTRA_FEATURED_MBIDS)
+        return names.mapIndexed { i, n -> ArtistCredit(n, mbids?.getOrNull(i) ?: "", true) }
     }
 
     private fun artistsOf(x: Bundle?): List<ArtistCredit> {

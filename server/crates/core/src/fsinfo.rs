@@ -1,6 +1,7 @@
 //! Which file system a folder is on (Linux `statfs`). The database keeps its read connections off on a
 //! network file system (several connections to one file are slow or unsafe with their locking), and
-//! Diagnostics shows the type of /config and /music so the owner can report it.
+//! Diagnostics shows the type of /config and /music so the owner can report it. [`free_bytes`] tells how
+//! much room a disk has left (the database's backups check it before they write a copy).
 use std::path::Path;
 
 /// The file system a folder is on.
@@ -68,6 +69,30 @@ pub fn of(path: &Path) -> Option<FsInfo> {
     }
 }
 
+/// Bytes an unprivileged program may still write on the disk `path` is on (`statvfs`'s `f_bavail` ×
+/// `f_frsize`, so the blocks reserved for root don't count); None when it cannot be asked (not Unix, or
+/// the path is missing).
+#[allow(clippy::unnecessary_cast)]
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: an all-zero statvfs is a valid value for the call to fill in.
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is a NUL-terminated path that outlives the call, `s` a valid statvfs to write to.
+        if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+            return None;
+        }
+        Some((s.f_bavail as u64).saturating_mul(s.f_frsize as u64))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +109,13 @@ mod tests {
         assert_eq!(classify(0xFFFF_FFFF_FF53_4D42).name, "CIFS");
         // something not in the list is taken as a local disk, so the read pool stays on
         assert_eq!(classify(0x1234_5678), FsInfo { name: "unknown", network: false });
+    }
+
+    #[test]
+    fn tells_the_free_room_of_a_real_folder() {
+        // the temp folder is on a real disk with some room; a missing path can't be asked
+        assert!(free_bytes(&std::env::temp_dir()).is_some_and(|n| n > 0));
+        assert_eq!(free_bytes(Path::new("/no/such/folder/encore")), None);
     }
 
     #[test]

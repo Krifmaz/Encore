@@ -314,6 +314,55 @@ pub fn write_tags_to(file: &mut std::fs::File, vals: &Row, cover: Option<&[u8]>)
     Ok(())
 }
 
+/// Does a tag item describe the audio of the file it sits in (its loudness, its encoder) rather than the song?
+/// Those are never carried from one file to another: the new audio has its own.
+/// (Items lofty has no name for – "ITUNNORM" and the like – never reach a generic tag, so they can't be carried.)
+fn about_the_audio(key: ItemKey) -> bool {
+    matches!(key, ItemKey::ReplayGainTrackGain | ItemKey::ReplayGainTrackPeak | ItemKey::ReplayGainAlbumGain | ItemKey::ReplayGainAlbumPeak
+        | ItemKey::R128TrackGain | ItemKey::R128AlbumGain | ItemKey::EncoderSoftware | ItemKey::EncoderSettings | ItemKey::EncodedBy)
+}
+
+/// Tags a file that takes another file's place in the library ("Replace with my own file"): whatever the new
+/// file said about itself is dropped and it gets the song's tags instead. In order: every item and picture of
+/// the `old` file's tag (when it is still readable) except the ones about its audio ([`about_the_audio`]: its
+/// loudness and encoder), then the library's own values `vals` (as [`write_tags`] takes them) on top. The new
+/// file keeps only its own ReplayGain / R128 tags, which do describe its audio. Tags of other kinds the new
+/// file carried (an ID3v1 beside the ID3v2, an APE tag) are removed, so no reader finds its old words.
+pub fn retag_like(old: Option<&Path>, new: &Path, vals: &Row) -> anyhow::Result<()> {
+    let mut f = lofty::read_from_path(new)?;
+    let kind = f.primary_tag_type();
+    let mut fresh = Tag::new(kind);
+    // the new file's own loudness tags are true of its audio: they stay
+    for t in f.tags() {
+        for item in t.items().filter(|i| about_the_audio(i.key()) && !matches!(i.key(), ItemKey::EncoderSoftware | ItemKey::EncoderSettings | ItemKey::EncodedBy)) {
+            fresh.push(item.clone());
+        }
+    }
+    // the old file's tag: the song's words, ids, lyrics and pictures
+    if let Some(old_file) = old.and_then(|o| lofty::read_from_path(o).ok()) {
+        if let Some(src) = old_file.primary_tag().or_else(|| old_file.first_tag()) {
+            for item in src.items().filter(|i| !about_the_audio(i.key())) {
+                // an item this kind of tag has no name for is left out (push checks the mapping)
+                fresh.push(item.clone());
+            }
+            for pic in src.pictures() {
+                fresh.push_picture(pic.clone());
+            }
+        }
+    }
+    // every other tag the new file had goes, so its own words can't be read from one of them
+    let others: Vec<lofty::tag::TagType> = f.tags().iter().map(|t| t.tag_type()).filter(|t| *t != kind).collect();
+    f.clear();
+    f.insert_tag(fresh);
+    set_tags(&mut f, vals, None);
+    f.save_to_path(new, WriteOptions::default())?;
+    for t in others {
+        // a kind this format can't hold anyway errors here: nothing to remove then
+        let _ = t.remove_from_path(new, WriteOptions::default());
+    }
+    Ok(())
+}
+
 /// Write the edited fields `vals` (and `cover`) into the file's primary tag, creating one when it has none.
 fn set_tags(f: &mut lofty::file::TaggedFile, vals: &Row, cover: Option<&[u8]>) {
     if f.primary_tag().is_none() {

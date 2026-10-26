@@ -74,7 +74,15 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             let batch = st.cfg.int("surround_sweep_batch").max(1) as usize;
             encore_requests::surround::sweep(st, None, batch).await?.line()
         }
-        _ => encore_requests::upkeep::cleanup(st)?,
+        _ => {
+            let mut out = encore_requests::upkeep::cleanup(st)?;
+            // the file manager's Trash keeps items `trash_days` days
+            let gone = encore_files::trash::purge(st);
+            if gone > 0 {
+                out.push_str(&format!(", {gone} item(s) older than {} days deleted from the Trash", encore_library::folders::trash_days(&st.cfg)));
+            }
+            out
+        }
     })
 }
 

@@ -86,7 +86,21 @@ data class Track(
     val atmos: Boolean = false,
     val stereoAlbumId: String = "",
     val surroundId: Long = 0L,
+    /**
+     * the artists the song features that its artist text leaves out (the server's `featured`: from its ARTISTS tag,
+     * its MusicBrainz credit or its title; "Let Somebody Go" by Coldplay → Selena Gomez), each with its own link
+     */
+    val featured: List<ArtistCredit> = emptyList(),
 ) {
+    /** The featured artists to show: the ones neither the title nor the artist text names already. */
+    fun featShown(): List<ArtistCredit> = featured.filter {
+        val n = it.name.lowercase()
+        n.isNotEmpty() && !title.lowercase().contains(n) && !artist.lowercase().contains(n)
+    }
+
+    /** " feat. A, B" after the artist text ("" when nobody is featured beyond it). */
+    fun featText(): String = featShown().let { f -> if (f.isEmpty()) "" else " feat. " + f.joinToString(", ") { it.name } }
+
     /** A song of the Surround library (by its class, or its id after a trip through the player): no likes or playlists. */
     val isSurround: Boolean get() = trackClass == "surround" || SurroundRules.isSurroundTrack(id)
 
@@ -96,7 +110,8 @@ data class Track(
     /** The title, artist and album as the listener asked to see them (Settings → Language). */
     fun shownTitle(): String = Translations.shown(title, titleTr)
     fun titleUnder(): String? = Translations.under(titleTr)
-    fun shownArtist(): String = Translations.inline(artist, artistTr)
+    /** The artist text as the listener asked to see it, with the featured artists it leaves out. */
+    fun shownArtist(): String = Translations.inline(artist, artistTr) + featText()
     fun shownAlbum(): String = Translations.inline(album, albumTr)
 
     companion object {
@@ -142,6 +157,7 @@ data class Track(
             atmos = o.bool("atmos"),
             stereoAlbumId = o.str("stereo_album_id"),
             surroundId = o.long("surround_id"),
+            featured = ArtistCredit.fromJson(o["featured"]),
         )
     }
 }

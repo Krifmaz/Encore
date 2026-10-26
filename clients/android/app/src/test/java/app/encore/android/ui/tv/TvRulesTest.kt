@@ -103,6 +103,20 @@ class TvRulesTest {
         assertEquals(ScreenOffAction.WAKE, ScreenOffRules.actionOf(KeyEvent.KEYCODE_DPAD_LEFT))
     }
 
+    /** Left / Right / Menu are the side menu's buttons; Up / Down are the frame's own focus moves. */
+    @Test
+    fun remoteButtonsOfTheFrame() {
+        assertEquals(RailKey.LEFT, TvRules.railKey(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertEquals(RailKey.RIGHT, TvRules.railKey(KeyEvent.KEYCODE_DPAD_RIGHT))
+        assertEquals(RailKey.MENU, TvRules.railKey(KeyEvent.KEYCODE_MENU))
+        // OK never opens the menu
+        assertNull(TvRules.railKey(KeyEvent.KEYCODE_DPAD_CENTER))
+        assertNull(TvRules.railKey(KeyEvent.KEYCODE_ENTER))
+        assertEquals(true, TvRules.verticalMove(KeyEvent.KEYCODE_DPAD_DOWN))
+        assertEquals(false, TvRules.verticalMove(KeyEvent.KEYCODE_DPAD_UP))
+        assertNull(TvRules.verticalMove(KeyEvent.KEYCODE_DPAD_LEFT))
+    }
+
     /** The idle settings read back as written; unknown or missing ones fall to Never and to a fully black screen. */
     @Test
     fun idleSettingsRoundTrip() {

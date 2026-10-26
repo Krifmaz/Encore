@@ -70,6 +70,20 @@ pub fn moved_text(albums: usize) -> String {
     if albums == 1 { "Moved 1 album to the Trash".into() } else { format!("Moved {albums} albums to the Trash") }
 }
 
+/// "Deleted 1 album" / "Deleted 12 albums": the toast while the Trash keeps nothing.
+pub fn deleted_text(albums: usize) -> String {
+    if albums == 1 { "Deleted 1 album".into() } else { format!("Deleted {albums} albums") }
+}
+
+/// The Delete dialog's sentence: deleted for good, or kept in the Trash for `days` days.
+pub fn confirm_body(keep: bool, days: i64) -> String {
+    if keep {
+        format!("Their songs go to the Trash, where you can restore them for {days} days. Then they are deleted for good.")
+    } else {
+        "Their songs are deleted for good. To be able to restore deleted files, turn on Keep deleted files in Trash in Settings → Library → Deleting files.".into()
+    }
+}
+
 /// Why some of them stay ("" when none do).
 pub fn skipped_text(skipped: &[Value]) -> String {
     let Some(first) = skipped.first() else { return String::new() };
@@ -83,7 +97,7 @@ pub fn skipped_text(skipped: &[Value]) -> String {
 
 /// The text when the Trash's disk hasn't room for them.
 pub fn room_text(bytes: u64, free: u64) -> String {
-    format!("There isn't room in the Trash for {} ({} free on its disk). Empty the Trash first, or delete fewer albums.", size_text(bytes), size_text(free))
+    format!("There isn't room in the Trash for {} ({} free on its disk). Empty the Trash first, delete fewer albums, or turn off Keep deleted files in Trash (Settings → Library → Deleting files).", size_text(bytes), size_text(free))
 }
 
 /// The albums' songs (in the order asked, each album once) and the ids the library doesn't have.
@@ -120,7 +134,7 @@ fn root_of<'a>(roots: &'a [Root], path: &Path) -> Option<&'a Root> {
 
 /// Is the Trash on another disk than one of these roots (a move there is then a copy)?
 fn other_disk(st: &impl Ctx, roots: &[&Root]) -> bool {
-    let trash = roots::trash_dir(st.data_dir());
+    let trash = roots::trash_dir(st.cfg(), st.data_dir());
     let _ = std::fs::create_dir_all(&trash);
     let Ok(t) = std::fs::metadata(&trash) else { return false };
     roots.iter().any(|r| r.canon.as_ref().and_then(|c| std::fs::metadata(c).ok()).is_some_and(|m| m.dev() != t.dev()))
@@ -180,14 +194,18 @@ pub fn trash_albums(st: &impl Ctx, who: &Who, roots: &[Root], ids: &[String], dr
         }
         v
     };
-    let far = other_disk(st, &used);
-    let free = free_bytes(&roots::trash_dir(st.data_dir()));
+    // while the Trash keeps nothing the files are deleted where they are: no copy, no room needed
+    let keep = encore_library::folders::trash_keep(st.cfg());
+    let days = encore_library::folders::trash_days(st.cfg());
+    let far = keep && other_disk(st, &used);
+    let free = if far { free_bytes(&roots::trash_dir(st.cfg(), st.data_dir())) } else { 0 };
     let room = !far || bytes + SPARE <= free;
     if dry_run {
         return Ok(json!({
             "albums": go.len(), "songs": songs, "bytes": bytes, "size": size_text(bytes), "text": confirm_text(go.len(), bytes),
             "skipped": skipped, "skipped_text": skipped_text(&skipped), "other_disk": far, "room": room,
             "room_text": if room { String::new() } else { room_text(bytes, free) }, "missing": missing,
+            "keep": keep, "days": days, "body": confirm_body(keep, days),
         }));
     }
     if !room {
@@ -204,10 +222,12 @@ pub fn trash_albums(st: &impl Ctx, who: &Who, roots: &[Root], ids: &[String], dr
     }
     if !moved.is_empty() {
         let what = if moved.len() == 1 { "1 album".to_string() } else { format!("{} albums", moved.len()) };
-        st.db().log("info", &format!("{} moved {what} to the Trash ({moved_songs} songs, {})", who.name, size_text(moved_bytes)));
+        let how = if keep { "moved {what} to the Trash" } else { "deleted {what} for good" }.replace("{what}", &what);
+        st.db().log("info", &format!("{} {how} ({moved_songs} songs, {})", who.name, size_text(moved_bytes)));
     }
+    let text = if keep { moved_text(moved.len()) } else { deleted_text(moved.len()) };
     Ok(json!({ "albums": moved.len(), "songs": moved_songs, "bytes": moved_bytes, "items": done.items, "failed": failed,
-               "missing": missing, "text": moved_text(moved.len()) }))
+               "missing": missing, "text": text, "keep": keep }))
 }
 
 /// What the moves did.

@@ -140,12 +140,13 @@ object AlbumSelect {
     /** The dialog's Move to Trash: the real runs, 100 albums a call, a toast that counts; one toast at the end. */
     fun move(nav: Nav) {
         val ids = picked
+        val keep = dialog?.keep ?: true
         dialog = null
         if (ids.isEmpty() || moving) return
         moving = true
         val n = ids.size
         nav.graph.scope.launch {
-            var sums = AlbumTypesRules.Moved()
+            var sums = AlbumTypesRules.Moved(keep = keep)
             var done = 0
             var counter = Toasts.show(AlbumTypesRules.movingText(0, n), "info", showMs = 600_000L)
             for (chunk in AlbumTypesRules.chunks(ids)) {
@@ -160,7 +161,11 @@ object AlbumSelect {
                 Toasts.close(counter)
                 counter = if (done < n) Toasts.show(AlbumTypesRules.movingText(done, n), "info", showMs = 600_000L) else 0L
             }
-            Toasts.show(sums.text(n), "ok", action = AlbumTypesRules.OPEN_TRASH, showMs = AlbumTypesRules.TOAST_MS) { nav.open(Screen.Files("trash")) }
+            if (keep) {
+                Toasts.show(sums.text(n), "ok", action = AlbumTypesRules.OPEN_TRASH, showMs = AlbumTypesRules.TOAST_MS) { nav.open(Screen.Files("trash")) }
+            } else {
+                Toasts.show(sums.text(n), if (sums.moved == n) "ok" else "err")
+            }
             moving = false
             leave()
             generation += 1
@@ -209,7 +214,7 @@ fun TrashConfirm(d: AlbumTypesRules.TrashDialog, onDismiss: () -> Unit, onMove: 
         text = { Text(d.text) },
         confirmButton = {
             if (d.canGo) {
-                TextButton(onClick = { onDismiss(); onMove() }) { Text(AlbumTypesRules.MOVE_TO_TRASH, color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
+                TextButton(onClick = { onDismiss(); onMove() }) { Text(AlbumTypesRules.goLabel(d.keep), color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
             } else {
                 TextButton(onClick = onDismiss) { Text("Close", color = p.text) }
             }

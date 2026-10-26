@@ -150,6 +150,10 @@ impl Config {
         if self.str("api_key").is_empty() {
             self.set_many(&json!({ "api_key": encore_core::ids::random_hex(24) }));
         }
+        // the identity the apps check when they try the local network address (GET /api/auth/info)
+        if self.str("server_id").is_empty() {
+            self.set_many(&json!({ "server_id": encore_core::ids::random_hex(16) }));
+        }
         Ok(())
     }
 

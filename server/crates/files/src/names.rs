@@ -31,7 +31,7 @@ pub const FOLDER_TAKEN: &str = "A folder with that name is already there";
 /// A path that names nothing.
 pub const MISSING: &str = "That file or folder isn't there";
 /// A path in Encore's own config folder (its database, backups and Trash), reached through a root that holds it.
-pub const CONFIG_FOLDER: &str = "That is Encore's own config folder: the file manager leaves it alone";
+pub const CONFIG_FOLDER: &str = "That is Encore's own config folder or its Trash: the file manager leaves it alone here (open Trash for what it holds)";
 
 /// Characters a name may not hold: control characters (C0, DEL, C1), the line and paragraph separators, and
 /// the bidi embeddings, overrides and isolates (they make "song\u{202e}calf.exe" read as "songexe.flac").

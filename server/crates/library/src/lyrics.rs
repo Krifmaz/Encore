@@ -5,6 +5,11 @@
 //! [`reject_current`] remembers the lyrics shown now in `lyrics_reject`, deletes the file next to the
 //! song, and every later lookup skips LRCLIB versions with that text ([`Rejects::screen`]), so another
 //! version (time-synced first) is picked – or none, rather than the wrong ones again.
+//!
+//! Lyrics whose words are right but run a little early or late are nudged instead ([`set_shift`]): the
+//! lyrics view's Earlier / Later buttons save one shift per song in `lyrics_shift`, and every answer of
+//! `GET /api/library/tracks/{id}/lyrics` carries it as `shift_ms` ([`with_shift`]), together with an
+//! `[offset:…]` tag the .lrc file itself may have, so every device shows the lines at the same moment.
 use encore_db::{Row, RowExt};
 use encore_db::p;
 use crate::Ctx;
@@ -237,6 +242,8 @@ pub async fn reject_current(st: &impl Ctx, t: &Row, complaint: Complaint, report
             }
         }
     };
+    // the nudge was made on the lyrics that go now
+    let _ = st.db().execute("DELETE FROM lyrics_shift WHERE track_id=?", p![t.i("id")]);
     for (kind, key) in reject_rows(shown.as_ref().map(|(l, s)| (l.as_str(), *s)), complaint) {
         st.db().execute("INSERT OR IGNORE INTO lyrics_reject (track_id, kind, key, report_id, created_at) VALUES (?,?,?,?,?)",
             p![t.i("id"), kind, key, report_id, encore_db::now()])?;
@@ -268,6 +275,69 @@ fn unembed(path: &Path) -> anyhow::Result<()> {
     tag.remove_key(ItemKey::Lyrics);
     f.save_to_path(path, WriteOptions::default())?;
     Ok(())
+}
+
+// ---- timing nudges ------------------------------------------------------------------------------
+
+/// The largest nudge either way, ms: lines more than this far off are other lyrics, not a late start.
+pub const SHIFT_MAX_MS: i64 = 30_000;
+
+/// The shift an `[offset:±N]` tag of a .lrc asks for, in ms (0 without one). The LRC convention: a positive
+/// offset shows the lines *sooner*, so the shift (how much *later* they are shown) is its negative.
+pub fn lrc_offset_shift(text: &str) -> i64 {
+    for line in text.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some((key, value)) = rest.split_once(':') else { continue };
+        if !key.trim().eq_ignore_ascii_case("offset") {
+            continue;
+        }
+        // "[offset:+250]" → "+250"; anything that isn't a whole number counts as no tag
+        let value = value.trim_end_matches(']').trim().trim_start_matches('+');
+        if let Ok(ms) = value.parse::<i64>() {
+            return (-ms).clamp(-SHIFT_MAX_MS, SHIFT_MAX_MS);
+        }
+    }
+    0
+}
+
+/// The key a nudge is saved under: the time-synced text it was made on, normalised like a rejected timing.
+fn shift_key(synced_text: &str) -> String {
+    digest(&synced_norm(synced_text))
+}
+
+/// The saved nudge of track `id` for the time-synced lyrics `synced_text` (ms, 0 when there is none or it was
+/// made on other lyrics).
+pub fn shift_of(st: &impl Ctx, id: i64, synced_text: &str) -> i64 {
+    st.db().one("SELECT shift_ms, lyrics_key FROM lyrics_shift WHERE track_id=?", p![id]).ok().flatten()
+        .filter(|r| r.s("lyrics_key") == shift_key(synced_text))
+        .map(|r| r.i("shift_ms"))
+        .unwrap_or(0)
+}
+
+/// A lyrics answer ({lyrics, synced, source, …}) for track `id` with `shift_ms` added: how much later every
+/// time-synced line is to be shown (the song's saved nudge plus the file's own `[offset:]` tag; 0 for plain
+/// lyrics or none).
+pub fn with_shift(st: &impl Ctx, id: i64, mut answer: Value) -> Value {
+    let shift = match (answer["synced"].as_bool().unwrap_or(false), answer["lyrics"].as_str()) {
+        (true, Some(text)) => (shift_of(st, id, text) + lrc_offset_shift(text)).clamp(-SHIFT_MAX_MS, SHIFT_MAX_MS),
+        _ => 0,
+    };
+    answer["shift_ms"] = json!(shift);
+    answer
+}
+
+/// Save the nudge of track `id`'s time-synced lyrics `synced_text` (`shift_ms` later, clamped to
+/// ±[`SHIFT_MAX_MS`]; 0 takes it away). → the saved nudge, ms.
+pub fn set_shift(st: &impl Ctx, id: i64, synced_text: &str, shift_ms: i64) -> anyhow::Result<i64> {
+    let shift = shift_ms.clamp(-SHIFT_MAX_MS, SHIFT_MAX_MS);
+    if shift == 0 {
+        st.db().execute("DELETE FROM lyrics_shift WHERE track_id=?", p![id])?;
+    } else {
+        st.db().execute("INSERT INTO lyrics_shift (track_id, shift_ms, lyrics_key, updated_at) VALUES (?,?,?,?) \
+            ON CONFLICT(track_id) DO UPDATE SET shift_ms=excluded.shift_ms, lyrics_key=excluded.lyrics_key, updated_at=excluded.updated_at",
+            p![id, shift, shift_key(synced_text), encore_db::now()])?;
+    }
+    Ok(shift)
 }
 
 /// The lyrics a dismissed report rejected may be shown again.
@@ -321,6 +391,23 @@ mod tests {
         assert!(instr.screen(json!({ "instrumental": true })).is_none());
         assert!(instr.screen(other_song).is_some());
         assert!(Rejects::default().is_empty() && !instr.is_empty());
+    }
+
+    /// An `[offset:]` tag shows lines sooner when positive: the shift is its negative; no tag, no shift.
+    #[test]
+    fn lrc_offset_tags() {
+        assert_eq!(lrc_offset_shift("[ar:x]\n[offset:+250]\n[00:01.00] a"), -250);
+        assert_eq!(lrc_offset_shift("[OFFSET: -1200]\n[00:01.00] a"), 1200);
+        assert_eq!(lrc_offset_shift("[00:01.00] a"), 0);
+        assert_eq!(lrc_offset_shift("[offset:soon]"), 0);
+        assert_eq!(lrc_offset_shift("[offset:-999999]"), SHIFT_MAX_MS);
+    }
+
+    /// A nudge is keyed by the lyrics it was made on, whatever their line endings and blank lines.
+    #[test]
+    fn shift_keys_ignore_layout() {
+        assert_eq!(shift_key("[00:01.00] a\r\n\r\n[00:02.00] b "), shift_key("[00:01.00] a\n[00:02.00] b"));
+        assert_ne!(shift_key("[00:01.00] a"), shift_key("[00:01.50] a"));
     }
 
     /// Only the two lyrics reasons are complaints about lyrics.

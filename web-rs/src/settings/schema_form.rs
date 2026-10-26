@@ -44,6 +44,9 @@ fn source_note(f: &Field, v: &Value, meta: &Value) -> String {
         let env = if m.truthy("env") { format!(r##" – or set <span class="mono">{}</span> in your compose file"##, esc(&m.s("env"))) } else { String::new() };
         return format!(r##"<small class="src">Not set{env}</small>"##);
     }
+    if m.s("source") == "plugin" {
+        return format!(r##"<small class="src plugin">🔗 Filled in by the <b>{}</b> plugin – it changes this itself</small>"##, esc(&m.s("plugin")));
+    }
     if m.s("source") == "ui" { return String::new(); }
     if m.truthy("env") { format!(r##"<small class="src faint">Default · env var <span class="mono">{}</span></small>"##, esc(&m.s("env"))) } else { String::new() }
 }
@@ -54,7 +57,8 @@ pub fn field_html(f: &Field, v: &Value, meta: &Value, reveal: bool) -> String {
     let key = esc(&f.key);
     let id = format!("f-{key}");
     let locked = meta.o(&f.key).s("source") == "env";
-    let dis = if locked { "disabled" } else { "" };
+    // a value another plugin fills in (gamdl's wrapper fields) shows, read-only: Save leaves it out
+    let dis = if locked { "disabled" } else if meta.o(&f.key).s("source") == "plugin" { "readonly" } else { "" };
     let help = format!("{}{}", f.help.as_deref().map(|h| format!("<small>{}</small>", esc(h))).unwrap_or_default(), source_note(f, v, meta));
     let cls = if f.full || f.kind == "textarea" { "full" } else { "" };
     let label = esc(&f.label);
@@ -129,8 +133,18 @@ pub fn bind_show_when(card: &Element) {
 }
 
 /// The settings grid of a card, one cell per field drawn by `one`. The vpn_ fields (Soulseek) get a sub-block
-/// of their own, in place, with the tunnel's state and Test VPN under them (apps.rs).
+/// of their own, in place, with the tunnel's state and Test VPN under them (apps.rs). Fields marked `advanced`
+/// go last, folded under "Show advanced", so a card shows only what most owners set.
 pub fn fields_html(fields: &[&Field], one: impl Fn(&Field) -> String) -> String {
+    let (adv, plain): (Vec<&Field>, Vec<&Field>) = fields.iter().copied().partition(|f| f.advanced);
+    let html = grid_html(&plain, &one);
+    if adv.is_empty() { return html; }
+    let folded: String = adv.iter().map(|f| one(f)).collect();
+    format!(r##"{html}<details class="adv-fields mt"><summary class="small muted">Show advanced</summary><div class="form-grid mt">{folded}</div></details>"##)
+}
+
+/// [`fields_html`]'s grid without the advanced fold.
+fn grid_html(fields: &[&Field], one: &impl Fn(&Field) -> String) -> String {
     let is_vpn = |f: &Field| f.key.starts_with("vpn_");
     let Some(at) = fields.iter().position(|f| is_vpn(f)) else {
         return format!(r##"<div class="form-grid">{}</div>"##, fields.iter().map(|f| one(f)).collect::<String>());
@@ -157,7 +171,7 @@ pub fn form_values(g: &Group, root: &Element, meta: &Value) -> Map<String, Value
     for el in dom::qsa_in(root, "[data-k]") {
         let k = dom::data(&el, "k");
         let Some(f) = g.field(&k) else { continue };
-        if meta.o(&f.key).s("source") == "env" { continue; }            // locked by environment
+        if matches!(meta.o(&f.key).s("source").as_str(), "env" | "plugin") { continue; } // locked by environment, or another plugin's
         let secret = f.is_secret();
         if f.kind == "checks" {
             let on: Vec<String> = dom::qsa_in(&el, "input:checked").iter().map(|i| i.get_attribute("value").unwrap_or_default()).collect();
@@ -172,4 +186,28 @@ pub fn form_values(g: &Group, root: &Element, meta: &Value) -> Map<String, Value
         }
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn advanced_fields_fold_and_a_plugins_value_is_read_only() {
+        let url = Field::from_json(&json!({ "key": "gamdl_wrapper_url", "label": "Wrapper URL", "type": "url" }));
+        let dec = Field::from_json(&json!({ "key": "gamdl_wrapper_decrypt", "label": "Wrapper decrypt address", "advanced": true }));
+        let values = json!({
+            "gamdl_wrapper_url": "http://encore-wrapper", "gamdl_wrapper_decrypt": "encore-wrapper:10020",
+            "_meta": { "gamdl_wrapper_url": { "source": "plugin", "plugin": "Apple Music wrapper" } }
+        });
+        let h = form_html(&[&url, &dec], &values, false);
+        // the advanced field comes after the others, folded
+        let fold = h.find("Show advanced").expect("a fold");
+        assert!(h.find(r#"data-k="gamdl_wrapper_url""#).unwrap() < fold && h.find(r#"data-k="gamdl_wrapper_decrypt""#).unwrap() > fold, "{h}");
+        // the plugin's value shows, read-only, credited to it
+        assert!(h.contains(r#"value="http://encore-wrapper""#) && h.contains("readonly") && h.contains("Filled in by the <b>Apple Music wrapper</b> plugin"), "{h}");
+        // a card without advanced fields has no fold
+        assert!(!form_html(&[&url], &values, false).contains("Show advanced"));
+    }
 }

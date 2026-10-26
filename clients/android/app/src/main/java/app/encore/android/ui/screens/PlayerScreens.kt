@@ -94,6 +94,7 @@ import app.encore.android.ui.components.LikeButton
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
 import app.encore.android.ui.components.PlayerMenuActions
+import app.encore.android.ui.components.ReportRules
 import app.encore.android.ui.components.ReportUi
 import app.encore.android.ui.components.SmallButton
 import app.encore.android.ui.components.Toasts
@@ -364,7 +365,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                             }
                         }
                         ThinSeek(position, duration, onSeek = { ms -> nav.player.seekTo(ms) }, Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp))
-                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth(), onReport = lyricsReport(track, lyrics))
+                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth(), onReport = lyricsReport(track, lyrics), onOtherTiming = lyricsOtherTiming(track, lyrics))
                     }
                 }
                 Box(
@@ -453,7 +454,7 @@ private fun LandscapeBody(
 ) {
     Row(modifier) {
         // left: the lyrics, always on while sideways
-        LyricsPane(nav, lyrics, positionMs, Modifier.weight(1f).fillMaxHeight(), onReport = lyricsReport(track, lyrics))
+        LyricsPane(nav, lyrics, positionMs, Modifier.weight(1f).fillMaxHeight(), onReport = lyricsReport(track, lyrics), onOtherTiming = lyricsOtherTiming(track, lyrics))
         // right: the cover and everything that controls the song
         BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
             val art = PlayerLayout.landscapeArt(maxWidth.value, maxHeight.value).dp
@@ -638,7 +639,14 @@ internal fun PlayerButtons(nav: Nav, modifier: Modifier = Modifier, playFocus: F
  * again (the server has already looked for other ones). Null for a Surround song or one outside the library.
  */
 internal fun lyricsReport(track: Track, lyrics: LyricsLoad): (() -> Unit)? =
-    if (track.isSurround || track.id <= 0) null else ({ ReportUi.lyrics(track.id, track.title) { lyrics.reload() } })
+    if (track.isSurround || track.id <= 0) null else ({ ReportUi.lyrics(track.id, track.title, { lyrics.reload() }) })
+
+/**
+ * The lyrics pane's "Other timing" for [track]: the report sheet with Lyrics out of sync ticked (this timing goes, and
+ * another time-synced version is looked for); once sent, [lyrics] load again. Null where [lyricsReport] is.
+ */
+internal fun lyricsOtherTiming(track: Track, lyrics: LyricsLoad): (() -> Unit)? =
+    if (track.isSurround || track.id <= 0) null else ({ ReportUi.lyrics(track.id, track.title, { lyrics.reload() }, ReportRules.LYRICS_SYNC) })
 
 /**
  * Like, share, lyrics and "⋯" (the web's `.np-actions`; a Surround song has no like and no playlists).
@@ -702,6 +710,8 @@ internal fun PlayerActions(
                 MenuEntry("Signal path", R.drawable.ic_signal) { actions.signalPath() },
                 // one tap to the report sheet for the song playing now (wrong song, bad audio, wrong lyrics …)
                 if (!track.isSurround && track.id > 0) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(track.id, track.title) } else null,
+                // bring your own music (admins and the "own_files" permission)
+                app.encore.android.features.library.OwnFileUi.entry(app.encore.android.features.library.SongFixUi.me.value, track.id, track.title, track.isSurround),
                 when {
                     group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }

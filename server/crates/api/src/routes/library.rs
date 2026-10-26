@@ -49,6 +49,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/tracks/{id}", get(track))
         .route("/api/library/plays/recent", get(recent_plays))
         .route("/api/library/tracks/{id}/lyrics", get(lyrics))
+        .route("/api/library/tracks/{id}/lyrics/shift", axum::routing::put(lyrics_shift))
         .route("/api/library/tracks/{id}/edges", get(track_edges::edges))
         .route("/api/library/tracks/{id}/share", post(share))
         .route("/api/library/albums/{id}/share", post(share_album))
@@ -977,6 +978,8 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
         return Ok(Json(info));
     }
     info["quality"] = encore_media::quality::for_track(&st, id); // "Fake lossless? cutoff 16 kHz" in the signal path
+    // "Your own file, uploaded by alex" in the signal path (⋯ → Replace with my own file)
+    info["own_file"] = encore_library::own_file::latest(&st, id).unwrap_or(Value::Null);
     if let Some(gain) = encore_library::loudness::info_gain(&st.db, id) {
         info["gain"] = gain;
     }
@@ -993,16 +996,25 @@ struct LyricsQ {
     force: Option<bool>,
 }
 
-/// Lyrics next to the song (.lrc synced, .txt plain), looked up on LRCLIB and saved when missing.
+/// Lyrics next to the song (.lrc synced, .txt plain), looked up on LRCLIB and saved when missing; with
+/// `shift_ms`, how much later the time-synced lines are to be shown (the song's saved nudge).
 async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<LyricsQ>) -> ApiResult<Json<Value>> {
+    let (id, answer) = lyrics_answer(&st, id, q.fetch.unwrap_or(true), q.force.unwrap_or(false)).await?;
+    Ok(Json(encore_library::lyrics::with_shift(&st, id, answer)))
+}
+
+/// The lyrics of song `id` (a Surround song: the .lrc beside it, else its stereo song's), looked up when
+/// missing if `fetch` (again even when there are some if `force`).
+/// → (the id the lyrics and their nudge belong to, {lyrics, synced, source, …})
+async fn lyrics_answer(st: &AppState, id: i64, fetch: bool, force: bool) -> ApiResult<(i64, Value)> {
     if encore_library::surround::is_track(id) {
         // a Surround song: the .lrc beside it (gamdl writes one), else its stereo song's
         let r = encore_library::surround::track(&st.db, id).ok_or_else(|| err(404, "Track not found"))?;
         if let Some((text, synced)) = encore_library::lyrics::sidecar(FsPath::new(&r.s("path"))) {
-            return Ok(Json(json!({ "lyrics": text, "synced": synced, "source": "file" })));
+            return Ok((id, json!({ "lyrics": text, "synced": synced, "source": "file" })));
         }
         if r.i("stereo_track_id") <= 0 {
-            return Ok(Json(json!({ "lyrics": null, "synced": false, "source": null })));
+            return Ok((id, json!({ "lyrics": null, "synced": false, "source": null })));
         }
     }
     let id = if encore_library::surround::is_track(id) {
@@ -1011,13 +1023,36 @@ async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, 
         id
     };
     let t = st.db.one("SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
-    if !q.fetch.unwrap_or(true) {
-        return Ok(Json(match encore_library::lyrics::sidecar(FsPath::new(&t.s("path"))) {
+    if !fetch {
+        return Ok((id, match encore_library::lyrics::sidecar(FsPath::new(&t.s("path"))) {
             Some((text, synced)) => json!({ "lyrics": text, "synced": synced, "source": "file" }),
             None => json!({ "lyrics": null, "synced": false, "source": null }),
         }));
     }
-    encore_library::lyrics::fetch_for_track(&st, &t, q.force.unwrap_or(false)).await.map(Json).map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))
+    let answer = encore_library::lyrics::fetch_for_track(st, &t, force).await.map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))?;
+    Ok((id, answer))
+}
+
+/// `PUT /api/library/tracks/{id}/lyrics/shift` body.
+#[derive(Deserialize)]
+struct ShiftBody {
+    /// how much later every time-synced line is to be shown, ms (negative: earlier; 0: as the lyrics say).
+    /// The total the lyrics view shows: an `[offset:]` tag of the .lrc counts in it and is taken out here.
+    shift_ms: i64,
+}
+
+/// Nudge a song's time-synced lyrics (the lyrics view's Earlier / Later), for every device and listener.
+/// → the lyrics answer with the new `shift_ms`
+async fn lyrics_shift(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Json(b): Json<ShiftBody>) -> ApiResult<Json<Value>> {
+    // the lyrics shown now (the file next to the song; with saving files off, what LRCLIB answers again)
+    let (id, answer) = lyrics_answer(&st, id, true, false).await?;
+    let text = answer["lyrics"].as_str().filter(|_| answer["synced"].as_bool().unwrap_or(false))
+        .ok_or_else(|| err(409, "Only time-synced lyrics can be nudged"))?
+        .to_string();
+    // the file's own [offset:] tag stays in the file; what is saved is the rest
+    let saved = b.shift_ms - encore_library::lyrics::lrc_offset_shift(&text);
+    encore_library::lyrics::set_shift(&st, id, &text, saved).map_err(|e| err(500, e.to_string()))?;
+    Ok(Json(encore_library::lyrics::with_shift(&st, id, answer)))
 }
 
 /// GET /api/library/albums/{id}: an album with its songs.
@@ -2165,6 +2200,10 @@ fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &st
 }
 
 /// Runs ffmpeg: the cover (or a dark square) and the song into `out`.
+/// The picture of a preview video for a link without a cover: the card colour of Encore's own look
+/// (`--panel` of `:root[data-theme="encore"]` in web-rs/static/css/app.css; a test keeps the two in step).
+pub(crate) const SHARE_VIDEO_BLANK: &str = "#222224";
+
 async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>, audio: &str, duration: f64, out: &std::path::Path) -> Option<std::path::PathBuf> {
     let (kbps, secs) = share_video_budget(duration);
     let tmp = dir.join(format!(".{}.tmp.mp4", encore_core::ids::random_token(6)));
@@ -2174,7 +2213,8 @@ async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>
         let cmd = ff.command();
         match cover {
             Some(c) => { cmd.args(["-loop", "1", "-framerate", "1", "-i"]).arg(c); }
-            None => { cmd.args(["-f", "lavfi", "-i", "color=c=0x161622:s=600x600:r=1"]); }
+            // no cover: a plain square in the panel colour of the "encore" theme (`--panel` in web-rs app.css)
+            None => { cmd.args(["-f", "lavfi", "-i", &format!("color=c=0x{}:s=600x600:r=1", SHARE_VIDEO_BLANK.trim_start_matches('#'))]); }
         }
         cmd.arg("-i").arg(audio);
         cmd.args(["-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=600:600:force_original_aspect_ratio=increase,crop=600:600,format=yuv420p", "-r", "1", "-g", "10"]);
@@ -2387,3 +2427,7 @@ mod stream_tests;
 #[cfg(test)]
 #[path = "library_plays_tests.rs"]
 mod library_plays_tests;
+
+#[cfg(test)]
+#[path = "library_lyrics_shift_tests.rs"]
+mod library_lyrics_shift_tests;

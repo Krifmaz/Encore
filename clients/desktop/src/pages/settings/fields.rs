@@ -87,6 +87,7 @@ pub const SECTIONS: &[Card] = &[
     Card { id: "general", title: "General", desc: "Your server's name and address, who can sign up, and how requests are approved.", test: None, test_label: None, fields: &[
         s("app_name", "App name", "text"),
         s("base_url", "Public URL", "text").help("e.g. https://music.example.com – used in links & notifications"),
+        s("local_url", "Local network address", "text").help("e.g. http://192.168.1.10:8080 – the desktop, phone and TV apps use it instead of the public URL while they're on your home network"),
         s("share_preview", "Shared link preview", "select").options(&[("small", "Small card (small cover)"), ("large", "Big picture"), ("playable", "Playable card (play button and seek bar)")]).help("How shared links look in Discord, X and other chat apps"),
         s("signup_mode", "Sign-up mode", "select").options(&[("invite", "Invite only"), ("open", "Open to anyone"), ("closed", "Closed")]),
         s("auto_approve", "Auto-approve all requests", "bool").help("Otherwise only admins and users with auto-approve skip the approval queue"),
@@ -116,6 +117,7 @@ pub const SECTIONS: &[Card] = &[
         s("rename_on_import", "Rename & organise files", "bool"),
         s("naming_template", "Album naming template", "text").full().help("Fields: {albumartist} {artist} {album} {year} {disc} {discprefix} {track:02d} {title} {genre} {label} {type} {format}"),
         s("single_template", "Single-track naming template", "text").full(),
+        s("file_names", "Emoji and symbols in file names", "select").options(&[("keep", "Keep them"), ("words", "Write them as words (♾️ → Infinity)"), ("ascii", "Plain ASCII names only")]).help("Only the file and folder names change; tags and the library keep the real titles. For disks that refuse emoji (exFAT, FAT, some NAS shares)"),
         s("save_cover", "Save cover.jpg in album folders", "bool"),
         s("embed_cover", "Embed cover art in files", "bool"),
     ] },
