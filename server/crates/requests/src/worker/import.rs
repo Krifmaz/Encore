@@ -38,6 +38,9 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
         }
     }
     let (new, note) = if album {
+        // the album's track list (kept on the request; looked up now when no source did): the songs are filed
+        // under the album by it when MusicBrainz can't match the files themselves
+        release_info(st, r).await;
         let mbid = r.opt("mbid");
         let new = tagger::import_album_files(st, files, tagger::AlbumImport {
             artist: &r.s("artist"), album: &r.album_title(), rgid: mbid.as_deref(), source_root: root, reject: true, audio: check,

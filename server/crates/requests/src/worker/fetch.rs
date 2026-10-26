@@ -1098,7 +1098,7 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
             let url = url.filter(|u| !crate::report::url_blocked(st, u));
             let got = match url {
                 Some(u) => match ytdlp::download(st, &u, &out.join(format!("{:02}", i + 1)), false, None).await {
-                    Ok(d) => d.files,
+                    Ok(d) => as_album_song(st, d.files, t, &artist, &r.s("artist"), &album)?,
                     // the staging folder failed: the step waits for the storage (the tracks got so far stay)
                     Err(e) if storage_error(st, &e).is_some() => return Err(e),
                     Err(_) => vec![],
@@ -1126,6 +1126,24 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
             Err(e) => Err(e),
         }
     }
+}
+
+/// The files yt-dlp got for one song of an album fetched song by song, tagged as that song of the album:
+/// its title, artist, disc and number from the track list, the album and album artist asked for. The upload's
+/// own tags name the single (or nothing) the video came out on; tagged as found, the import matched them to no
+/// song of the album and filed them as singles and "Unknown Album". A tag that can't be written is logged and
+/// the file goes on as it is; a storage error stops the download (its step waits for the storage).
+fn as_album_song(st: &impl Ctx, files: Vec<PathBuf>, song: &Value, artist: &str, album_artist: &str, album: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut vals = Row::new();
+    for (k, v) in [("title", song["title"].clone()), ("artist", json!(artist)), ("album", json!(album)), ("albumartist", json!(album_artist))] {
+        vals.insert(k.into(), v);
+    }
+    // (a track list kept on an older request has no numbers: the title alone then tells the song)
+    if let Some(n) = song["track"].as_i64().filter(|n| *n > 0) {
+        vals.insert("tracknumber".into(), json!(n));
+        vals.insert("discnumber".into(), json!(song["disc"].as_i64().unwrap_or(1).max(1)));
+    }
+    files.into_iter().map(|f| Ok(tagger::tag_file(st, &f, &vals, None)?)).collect()
 }
 
 /// A plugin program's source (protocol 1, through the registry: in the sandbox, its settings on stdin): the

@@ -867,6 +867,91 @@ pub fn map_files(files: &[Row], tracks: &[Value]) -> (Vec<Option<usize>>, f64) {
     (assign, (conf * 1000.0).round() / 1000.0)
 }
 
+/// Drop the rows of a tagger preview ([`preview`]) whose file was matched to no song of the release → how
+/// many went. An album import leaves those files out: they are not the album, and [`apply_preview`] would
+/// otherwise hand them back untouched, to be indexed under whatever their own tags say.
+fn left_out(pv: &mut Value) -> usize {
+    let Some(rows) = pv["rows"].as_array_mut() else { return 0 };
+    let before = rows.len();
+    rows.retain(|r| r["values"].is_object());
+    before - rows.len()
+}
+
+/// The ways a downloaded file's title may name its song: as tagged, without the upload's own words
+/// ("(Official Video)", "[HD]": [`crate::video_title::clean_title`]), and either side of an "Artist - Title"
+/// dash (a YouTube upload's title often carries the artist in front, or behind on the artist's own channel).
+fn title_variants(title: &str) -> Vec<String> {
+    let mut out = vec![title.to_string()];
+    let cleaned = crate::video_title::clean_title(title, "");
+    if let Some((a, b)) = cleaned.split_once(" - ").or_else(|| cleaned.split_once(" – ")) {
+        out.push(b.trim().to_string());
+        out.push(a.trim().to_string());
+    }
+    out.push(cleaned);
+    out
+}
+
+/// Assign downloaded files to the songs of the album's track list (its MusicBrainz release, or the store's
+/// listing for an album MusicBrainz lacks) for an import without a confident MusicBrainz match: file index →
+/// track index, one file per song at most.
+///
+/// Unlike [`map_files`], which ranks every pairing for the tagger's preview, a pairing here has to be
+/// believable on its own, because the file is then tagged as that song of the requested album:
+/// - its title (or the song part of an "Artist - Title (Official Video)" upload title) is ≥ 0.8 alike, or
+/// - the files' track numbers are all set and distinct and this one's disc and number are the song's, or
+/// - the file has no title at all, and there are exactly as many files as songs: then the files' order
+///   (they arrive sorted by path, "01 …", "02 …") is the album's.
+///
+/// A length more than 10 s off the song's makes a title or number pairing less likely, never impossible (a
+/// video's intro or outro). A file left as `None` is not on the album.
+pub fn assign_tracklist(files: &[Row], tracks: &[Value]) -> Vec<Option<usize>> {
+    let mut assign: Vec<Option<usize>> = vec![None; files.len()];
+    if tracks.is_empty() {
+        return assign;
+    }
+    // the files' own track numbers count only when every file has one and no two share a disc and number
+    let numbered = files.iter().all(|f| f.i("track") > 0)
+        && files.iter().map(|f| (f.i("disc").max(1), f.i("track"))).collect::<std::collections::HashSet<_>>().len() == files.len();
+    let multi_disc = tracks.iter().map(|t| t["disc"].as_i64().unwrap_or(1)).collect::<std::collections::HashSet<_>>().len() > 1;
+    // every believable pairing with its score: (score, file, track)
+    let mut scores: Vec<(f64, usize, usize)> = vec![];
+    for (i, f) in files.iter().enumerate() {
+        let variants = title_variants(&f.s("title"));
+        for (j, t) in tracks.iter().enumerate() {
+            let want = t["title"].as_str().unwrap_or("");
+            // (a title in another script has no ASCII words for `sim`: written the same, it is the song)
+            let title = variants.iter().map(|v| if !want.trim().is_empty() && v.trim().to_lowercase() == want.trim().to_lowercase() { 1.0 } else { sim(v, want) })
+                .fold(0.0, f64::max);
+            let number = numbered && t["track"].as_i64() == Some(f.i("track"))
+                && (!multi_disc || t["disc"].as_i64().unwrap_or(1) == f.i("disc").max(1));
+            if title < 0.8 && !number {
+                continue;
+            }
+            let (fd, tl) = (f.f("duration"), t["length"].as_f64().unwrap_or(0.0));
+            let off = fd > 0.0 && tl > 0.0 && (fd - tl).abs() > 10.0;
+            scores.push((title + if number { 0.5 } else { 0.0 } - if off { 0.3 } else { 0.0 }, i, j));
+        }
+    }
+    scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut taken = vec![false; tracks.len()];
+    for (_, i, j) in scores {
+        if assign[i].is_none() && !taken[j] {
+            assign[i] = Some(j);
+            taken[j] = true;
+        }
+    }
+    // untitled files in the album's own order, when the count says each file is one song
+    if files.len() == tracks.len() {
+        for (i, f) in files.iter().enumerate() {
+            if assign[i].is_none() && tnorm(&f.s("title")).is_empty() && !taken[i] {
+                assign[i] = Some(i);
+                taken[i] = true;
+            }
+        }
+    }
+    assign
+}
+
 /// The ARTISTS (or ALBUMARTISTS) tag of a MusicBrainz credit (`[{name, mbid}]`, see `encore_http::mb::credit_list`)
 /// and the artists' MusicBrainz ids when every one has one (written one value each, in the same order).
 pub fn credit_tags(credit: &Value) -> Option<(Value, Option<Value>)> {
@@ -1246,10 +1331,12 @@ pub fn check_release(files: &[Row], artist: &str, album: &str, expected_titles: 
     if !expected.is_empty() {
         let titled: Vec<String> = files.iter().map(|f| f.s("title")).filter(|t| !tnorm(t).is_empty()).collect();
         if titled.len() >= half.max(2) {
-            let hits = titled.iter().filter(|t| expected.iter().any(|e| sim(t, e) >= 0.75)).count();
+            // (a title counts by any of its readings: "Artist - Song (Official Video)" is the song "Song")
+            let on_album = |t: &String| title_variants(t).iter().any(|v| expected.iter().any(|e| sim(v, e) >= 0.75));
+            let hits = titled.iter().filter(|t| on_album(t)).count();
             let album_tag_ok = files.iter().any(|f| !tnorm(&f.s("album")).is_empty() && sim(&f.s("album"), album) >= 0.75);
             if hits * 10 < titled.len() * 4 && !album_tag_ok {
-                let odd = titled.iter().find(|t| !expected.iter().any(|e| sim(t, e) >= 0.75)).cloned().unwrap_or_default();
+                let odd = titled.iter().find(|t| !on_album(t)).cloned().unwrap_or_default();
                 return Err(format!("its songs aren't on “{album}” (e.g. “{odd}”)"));
             }
         }
@@ -1328,7 +1415,10 @@ pub struct AlbumImport<'a> {
     /// refuse files the fingerprint says are other songs (off when a person said to take the download:
     /// Keep anyway, Download anyway, "Don't check the audio")
     pub audio: bool,
-    /// the source's own album listing (its track titles count as the album's)
+    /// the album's track list (`{tracks, year, upc}`): the store's for an album MusicBrainz lacks, else the
+    /// MusicBrainz release the request looked up. Its titles count as the album's, and without a confident
+    /// MusicBrainz match each file is filed under the album as the song of it the file matches
+    /// ([`assign_tracklist`]); a file it doesn't list stays out
     pub source_meta: Option<&'a Value>,
     /// a cover image URL the source gave
     pub hint: Option<&'a str>,
@@ -1344,12 +1434,16 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     // what the files say they are, before anything is rewritten
     let originals: Vec<Row> = paths.iter().map(|p| read_tags(&p.to_string_lossy())).collect();
     let mut source_meta = source_meta;
+    // the files are the album asked for, so each one is filed under it (its album and album artist tags
+    // rewritten): off only for a manual pick the release checks say is another album
+    let mut relabel = true;
     if let Err(why) = check_release(&originals, artist, album, &[]) {
         if reject {
             return Err(Rejected::release(format!("Wrong release: {why}")).into());
         }
         // a manual pick: import it as what it is, never relabelled as the request
         source_meta = None;
+        relabel = false;
     }
     let pv = if st.cfg().bool("autotag_on_import") {
         progress::step("looking it up on MusicBrainz");
@@ -1383,13 +1477,21 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
         }
         pv = None;
         source_meta = None;
+        relabel = false;
     }
     // quality checks (encore_media::quality): most of the files fake lossless / upsampled / very quiet → turned away
     let (qreports, qres) = encore_media::quality::gate_album(st, &paths).await;
     if let (Err(why), true) = (qres, reject) {
         return Err(Rejected::quality(format!("Bad quality: {why}")).into());
     }
-    if let Some(pv) = pv {
+    if let Some(mut pv) = pv {
+        // a file the match gave no song of the release (a stray single, a duplicate, an untitled extra) is
+        // not the album: it stays out of the library instead of going in under its own tags, as its own
+        // single or "Unknown Album"
+        let strays = left_out(&mut pv);
+        if strays > 0 {
+            st.db().log("info", &format!("{artist} - {album}: {strays} downloaded file{} not on the album left out", if strays == 1 { "" } else { "s" }));
+        }
         let mut checks = vec![];
         let mut mism = vec![];
         // the first file that is another song: its title and what it sounds like
@@ -1437,57 +1539,80 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
         drop_superseded(st, &new).await;
         return Ok(new);
     }
-    // the requested album's cover only goes on files that are tagged as that album
-    let cover = if source_meta.is_some() || originals.iter().any(|t| sim(&t.s("album"), album) >= 0.75) {
+    // the requested album's cover goes on every file filed under it
+    let cover = if relabel || originals.iter().any(|t| sim(&t.s("album"), album) >= 0.75) {
         progress::step("finding the cover");
         find_art(st, artist, Some(album), None, hint).await.map(|x| x.0)
     } else {
         None
     };
     progress::step("moving into the library");
+    // the album's songs (the store's listing, or the MusicBrainz release the request looked up): each file
+    // is matched to one of them by title, number or order ([`assign_tracklist`])
     let src_tracks: Vec<Value> = source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default();
-    let unique_numbers = src_tracks.iter().map(|x| x["track"].as_i64()).collect::<std::collections::HashSet<_>>().len() == src_tracks.len();
+    let assign = assign_tracklist(&originals, &src_tracks);
+    // with a track list that matched any file at all, a file it doesn't list is not the album (a stray single,
+    // a bonus copy, an untitled extra): it stays out instead of going in as its own single or "Unknown Album".
+    // Matching none, the list says nothing about the files (another script, titles it can't read): all go in.
+    let keep_strays = !relabel || assign.iter().all(Option::is_none);
+    let strays = if keep_strays { 0 } else { assign.iter().filter(|a| a.is_none()).count() };
+    if strays > 0 {
+        st.db().log("info", &format!("{artist} - {album}: {strays} downloaded file{} not on the album left out", if strays == 1 { "" } else { "s" }));
+    }
+    let year = source_meta.and_then(|m| m["year"].as_str().filter(|y| !y.is_empty()).map(String::from));
     let mut out = vec![];
     let mut moves = vec![];
-    for (i, p) in paths.iter().enumerate() {
+    // the download each move starts from, to find its quality report
+    let mut from = vec![];
+    for ((src, t), song) in paths.iter().zip(&originals).zip(&assign) {
+        if !keep_strays && song.is_none() {
+            continue;
+        }
         // the file may be written anew under another name ([`rewrite_copy`])
-        let mut p = p.clone();
-        let t = read_tags(&p.to_string_lossy());
+        let mut p = src.clone();
         let mut vals = t.clone();
-        if t.s("albumartist") == "Unknown Artist" {
-            vals.insert("albumartist".into(), json!(artist));
-        }
-        if t.s("album").is_empty() {
-            vals.insert("album".into(), json!(album));
-        }
-        if let Some(meta) = source_meta {
-            // not in MusicBrainz: tag from the store's metadata (shows under "Needs tagging" until it is)
-            let stt = src_tracks.iter().max_by(|a, b| sim(a["title"].as_str().unwrap_or(""), &t.s("title")).partial_cmp(&sim(b["title"].as_str().unwrap_or(""), &t.s("title"))).unwrap_or(std::cmp::Ordering::Equal))
-                .filter(|b| sim(b["title"].as_str().unwrap_or(""), &t.s("title")) >= 0.8)
-                .or_else(|| (unique_numbers && t.i("track") > 0).then(|| src_tracks.iter().find(|x| x["track"].as_i64() == Some(t.i("track")) && x["disc"].as_i64().unwrap_or(1) == t.i("disc").max(1))).flatten())
-                .or_else(|| (src_tracks.len() == paths.len() && tnorm(&t.s("title")).is_empty()).then(|| &src_tracks[i]))
-                .cloned();
-            let year = meta["year"].as_str().filter(|y| !y.is_empty()).map(String::from).unwrap_or(t.s("year"));
-            vals.insert("album".into(), json!(album));
-            vals.insert("albumartist".into(), json!(artist));
-            vals.insert("year".into(), json!(year));
-            if let Some(s) = &stt {
-                vals.insert("title".into(), s["title"].clone());
-                vals.insert("artist".into(), if s["artist"].as_str().unwrap_or("").is_empty() { json!(artist) } else { s["artist"].clone() });
-                vals.insert("track".into(), s["track"].clone());
-                vals.insert("disc".into(), json!(s["disc"].as_i64().unwrap_or(1)));
-            }
-            let mut w = Row::new();
-            for (k, v) in [("title", vals["title"].clone()), ("artist", vals["artist"].clone()), ("album", json!(album)), ("albumartist", json!(artist)),
-                           ("tracknumber", vals.get("track").cloned().unwrap_or_default()), ("discnumber", vals.get("disc").cloned().unwrap_or_default()),
-                           ("date", json!(year)), ("isrc", stt.as_ref().map(|s| s["isrc"].clone()).unwrap_or_default()), ("barcode", meta["upc"].clone())] {
+        let mut w = Row::new();
+        if relabel {
+            // filed under the album asked for, whatever album the file's own tags name (a YouTube upload names
+            // the single it came out on, a ripped file may name none): never a single or album of its own
+            for (k, v) in [("album", json!(album)), ("albumartist", json!(artist))] {
+                vals.insert(k.into(), v.clone());
                 w.insert(k.into(), v);
             }
+            if let Some(y) = &year {
+                vals.insert("year".into(), json!(y));
+                w.insert("date".into(), json!(y));
+            }
+            if let Some(s) = song.map(|j| &src_tracks[j]) {
+                // the song's own names and numbers from the track list (shows under "Needs tagging" until
+                // MusicBrainz tags it)
+                let song_artist = if s["artist"].as_str().unwrap_or("").is_empty() { json!(artist) } else { s["artist"].clone() };
+                vals.insert("title".into(), s["title"].clone());
+                vals.insert("artist".into(), song_artist.clone());
+                w.insert("title".into(), s["title"].clone());
+                w.insert("artist".into(), song_artist);
+                if let Some(n) = s["track"].as_i64().filter(|n| *n > 0) {
+                    let disc = s["disc"].as_i64().unwrap_or(1).max(1);
+                    vals.insert("track".into(), json!(n));
+                    vals.insert("disc".into(), json!(disc));
+                    w.insert("tracknumber".into(), json!(n));
+                    w.insert("discnumber".into(), json!(disc));
+                }
+                if s["isrc"].as_str().is_some_and(|x| !x.is_empty()) {
+                    w.insert("isrc".into(), s["isrc"].clone());
+                }
+            }
+            if let Some(upc) = source_meta.and_then(|m| m["upc"].as_str()).filter(|x| !x.is_empty()) {
+                w.insert("barcode".into(), json!(upc));
+            }
+        } else if t.s("albumartist") == "Unknown Artist" {
+            vals.insert("albumartist".into(), json!(artist));
+        }
+        if !w.is_empty() || cover.is_some() {
             p = tag_file(st, &p, &w, cover.as_deref())?;
-        } else if cover.is_some() {
-            p = tag_file(st, &p, &Row::new(), cover.as_deref())?;
         }
         let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        from.push(src.clone());
         moves.push((p.clone(), render_path(st, &vals, &ext, false)));
     }
     // all of the album or none of it ([`place_all`])
@@ -1498,8 +1623,10 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     save_cover_file(st, &out, cover.as_deref());
     st.db().log("warning", &format!("No confident MusicBrainz match for {artist} - {album}; imported with existing tags"));
     index_paths(st, &out);
-    for (np, (_, q)) in out.iter().zip(qreports.iter()) {
-        encore_media::quality::store(st, np, q);
+    for (np, old) in out.iter().zip(&from) {
+        if let Some((_, q)) = qreports.iter().find(|(p, _)| p == old) {
+            encore_media::quality::store(st, np, q);
+        }
     }
     drop_superseded(st, &out).await;
     Ok(out)
@@ -1705,6 +1832,75 @@ mod tests {
             beat();
         }
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An album fetched as YouTube uploads (or with tags that name other releases) is matched song by song to
+    /// the album's track list: by the song in an upload title, by track number, by order for untitled files;
+    /// a file the list doesn't have is matched to nothing, so the import leaves it out.
+    #[test]
+    fn downloaded_files_are_matched_to_the_album_tracklist() {
+        use encore_db::Row;
+        let file = |title: &str, track: i64, duration: f64| -> Row {
+            let mut r = Row::new();
+            r.insert("title".into(), serde_json::json!(title));
+            r.insert("track".into(), serde_json::json!(track));
+            r.insert("duration".into(), serde_json::json!(duration));
+            r
+        };
+        let song = |title: &str, track: i64, length: f64| serde_json::json!({ "title": title, "track": track, "disc": 1, "length": length });
+        let tracks = vec![song("One More Time", 1, 320.0), song("Aerodynamic", 2, 212.0), song("Digital Love", 3, 301.0)];
+        // upload titles, out of order, plus a stray upload that isn't on the album
+        let files = vec![
+            file("Daft Punk - Digital Love (Official Video)", 0, 302.0),
+            file("Aerodynamic", 0, 212.0),
+            file("Daft Punk - One More Time [HD]", 0, 321.0),
+            file("Daft Punk - Get Lucky (Official Audio)", 0, 248.0),
+        ];
+        assert_eq!(super::assign_tracklist(&files, &tracks), vec![Some(2), Some(1), Some(0), None]);
+        // "Title - Artist" (the artist's own channel) reads too
+        assert_eq!(super::assign_tracklist(&[file("Aerodynamic - Daft Punk", 0, 0.0)], &tracks), vec![Some(1)]);
+        // numbered files with titles in no matching form go by number
+        let numbered = vec![file("Track 01", 1, 0.0), file("Track 02", 2, 0.0), file("Track 03", 3, 0.0)];
+        assert_eq!(super::assign_tracklist(&numbered, &tracks), vec![Some(0), Some(1), Some(2)]);
+        // untitled files, one per song, in the album's order
+        let untitled = vec![file("", 0, 0.0), file("", 0, 0.0), file("", 0, 0.0)];
+        assert_eq!(super::assign_tracklist(&untitled, &tracks), vec![Some(0), Some(1), Some(2)]);
+        // but untitled files that aren't one per song are not guessed
+        assert_eq!(super::assign_tracklist(&untitled[..2], &tracks), vec![None, None]);
+        // two copies of one song: one is the song, the other is left out
+        let twice = vec![file("Aerodynamic", 0, 212.0), file("Aerodynamic", 0, 212.0)];
+        assert_eq!(super::assign_tracklist(&twice, &tracks).iter().filter(|a| a.is_some()).count(), 1);
+        // a title in another script is matched when written the same
+        let jp = vec![song("夜に駆ける", 1, 261.0)];
+        assert_eq!(super::assign_tracklist(&[file("夜に駆ける", 0, 261.0)], &jp), vec![Some(0)]);
+        // no track list: nothing is matched
+        assert_eq!(super::assign_tracklist(&files, &[]), vec![None; 4]);
+    }
+
+    /// Upload titles count as the album's songs in the release check ("Artist - Song (Official Video)").
+    #[test]
+    fn upload_titles_pass_the_release_check() {
+        use encore_db::Row;
+        let f = |title: &str| -> Row {
+            let mut r = Row::new();
+            r.insert("title".into(), serde_json::json!(title));
+            r.insert("album".into(), serde_json::json!(format!("{title} - Single")));
+            r
+        };
+        let files = vec![f("Daft Punk - One More Time (Official Video)"), f("Daft Punk - Aerodynamic (Official Audio)")];
+        assert!(super::check_release(&files, "Daft Punk", "Discovery", &["One More Time".into(), "Aerodynamic".into()]).is_ok());
+    }
+
+    /// The rows of a preview with no song of the release are dropped before an album import applies it.
+    #[test]
+    fn unmatched_preview_rows_are_left_out() {
+        let mut pv = serde_json::json!({ "rows": [
+            { "path": "/s/01.flac", "values": { "title": "One More Time" } },
+            { "path": "/s/stray.flac" },
+        ] });
+        assert_eq!(super::left_out(&mut pv), 1);
+        assert_eq!(pv["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(pv["rows"][0]["path"], "/s/01.flac");
     }
 
     #[test]
