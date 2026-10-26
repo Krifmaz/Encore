@@ -36,6 +36,17 @@
   --muted: #aaa493;
   --faint: #77725f;
 }
+:root[data-brand] {
+  /* Encore's own look on pages that are not signed in and never run the app's code (the public share page,
+     static/share.html): the "logo" accent of appearance.rs ACCENTS, on top of the "encore" theme above. The app
+     sets these on <html> itself (appearance::apply), so this block is only the fallback; a test in
+     appearance.rs keeps the two in step. */
+  --accent: #f0ead6;
+  --accent-2: #d6c49a;
+  --accent-rgb: 240, 234, 214;
+  --accent-2-rgb: 214, 196, 154;
+  --on-accent: #16161f;
+}
 :root[data-theme="oled"] {
   /* true black: pixels switch off on OLED screens */
   --bg: #000;

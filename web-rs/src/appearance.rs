@@ -160,3 +160,59 @@ pub fn init() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The signed-out pages that never run this code (the public share page) take Encore's look from
+    //! `static/css/app.css`; these tests keep that stylesheet in step with the palette defined here.
+
+    use super::*;
+
+    /// The app's stylesheet, as trunk copies it next to the app.
+    const APP_CSS: &str = include_str!("../static/css/app.css");
+    /// The public share page (served by the server at `/s/<token>`).
+    const SHARE_HTML: &str = include_str!("../static/share.html");
+
+    /// The body of the first CSS rule whose selector is exactly `selector`.
+    fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let start = css.find(&format!("{selector} {{")).unwrap_or_else(|| panic!("{selector} missing from app.css"));
+        let body = &css[start..];
+        &body[..body.find('}').expect("rule closes")]
+    }
+
+    /// The value of `--name` inside a rule body.
+    fn var<'a>(body: &'a str, name: &str) -> &'a str {
+        let at = body.find(&format!("{name}:")).unwrap_or_else(|| panic!("{name} missing"));
+        body[at + name.len() + 1..].split(';').next().unwrap().trim()
+    }
+
+    /// `:root[data-brand]` carries the accent of the brand look (`brand()`), with the same derived values `apply` sets.
+    #[test]
+    fn brand_accent_in_the_stylesheet_matches_the_logo_accent() {
+        assert_eq!(brand().s("theme"), "encore");
+        let logo = ACCENTS.iter().find(|a| a.id == brand().s("accent")).expect("brand accent is a preset");
+        let body = rule(APP_CSS, ":root[data-brand]");
+        assert_eq!(var(body, "--accent"), logo.a);
+        assert_eq!(var(body, "--accent-2"), logo.b);
+        let (r, g, b) = rgb(logo.a);
+        assert_eq!(var(body, "--accent-rgb"), format!("{r}, {g}, {b}"));
+        let (r, g, b) = rgb(logo.b);
+        assert_eq!(var(body, "--accent-2-rgb"), format!("{r}, {g}, {b}"));
+        let on = if (luminance(logo.a) + luminance(logo.b)) / 2.0 > 0.45 { "#16161f" } else { "#fff" };
+        assert_eq!(var(body, "--on-accent"), on);
+    }
+
+    /// The share page wears the brand look through the app's own stylesheet instead of colours of its own.
+    #[test]
+    fn share_page_uses_the_app_theme() {
+        assert!(SHARE_HTML.contains(r#"<html lang="en" data-theme="encore" data-brand data-bg="solid">"#));
+        assert!(SHARE_HTML.contains(r#"<link rel="stylesheet" href="/css/app.css">"#));
+        // the theme-colour meta (browser bar, chat-app embed colour) is the brand accent
+        let logo = ACCENTS.iter().find(|a| a.id == "logo").unwrap();
+        assert!(SHARE_HTML.contains(&format!(r#"<meta name="theme-color" content="{}">"#, logo.a)));
+        // no hard-coded colour in the page's own styles: every colour comes from the theme's variables
+        let style = &SHARE_HTML[SHARE_HTML.find("<style>").unwrap()..SHARE_HTML.find("</style>").unwrap()];
+        assert!(!style.contains('#'), "share.html's <style> has a hard-coded colour: {style}");
+        assert!(!style.contains("rgb("), "share.html's <style> has a hard-coded colour: {style}");
+    }
+}

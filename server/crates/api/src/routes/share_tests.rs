@@ -3,7 +3,7 @@
 //! `share_preview` setting gives, and the preview video (when this machine has ffmpeg). Playlist links
 //! (Liked Songs too) show the playlist as it is now, page long lists, end with Stop sharing, a deleted
 //! playlist or a disabled owner, and can be saved as a copy by a signed-in listener.
-use super::{share_page_html, share_video_budget};
+use super::{share_page_html, share_video_budget, SHARE_VIDEO_BLANK};
 use encore_db::p;
 use crate::state::AppState;
 use axum::body::Body;
@@ -179,6 +179,10 @@ async fn album_and_artist_links_list_and_play_only_their_songs() {
     assert!(html.contains(r#"<meta property="og:title" content="Elephunk – Black Eyed Peas">"#), "{html}");
     assert!(html.contains(r#"<meta property="og:type" content="music.album">"#), "{html}");
     assert!(html.contains("2 songs"), "{html}");
+    // the page wears the app's theme (its stylesheet, the "encore" theme and the brand accent) with the tags filled in
+    assert!(html.contains(r#"<html lang="en" data-theme="encore" data-brand data-bg="solid">"#), "{html}");
+    assert!(html.contains(r#"<link rel="stylesheet" href="/css/app.css">"#), "{html}");
+    assert!(!html.contains("<!--META-->"), "{html}");
 
     // artist: any spelling finds the merged artist; its songs from both spellings, most played first
     e.st.db.execute("INSERT INTO plays (user_id, track_id, seconds, played_at) VALUES (1, ?, 100, 1), (1, ?, 100, 2)", p![b1, b1]).unwrap();
@@ -903,4 +907,15 @@ async fn merge_into_liked_songs_skips_dupes_and_keeps_missing_songs() {
     // the source is gone, Liked Songs is not
     assert_eq!(e.get(&format!("/api/playlists/{src}")).await.status, StatusCode::NOT_FOUND);
     assert_eq!(e.get(&format!("/api/playlists/{liked}")).await.status, StatusCode::OK);
+}
+
+/// A preview video without a cover is the card colour of the "encore" theme: `SHARE_VIDEO_BLANK` is the
+/// `--panel` of `:root[data-theme="encore"]` in the web app's stylesheet.
+#[test]
+fn the_blank_preview_video_is_the_encore_theme_card_colour() {
+    let css = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../web-rs/static/css/app.css")).unwrap();
+    let theme = &css[css.find(r#":root[data-theme="encore"] {"#).expect("encore theme in app.css")..];
+    let theme = &theme[..theme.find('}').unwrap()];
+    let panel = theme.split("--panel:").nth(1).expect("--panel in the encore theme").split(';').next().unwrap().trim();
+    assert_eq!(panel, SHARE_VIDEO_BLANK);
 }

@@ -2167,6 +2167,10 @@ fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &st
 }
 
 /// Runs ffmpeg: the cover (or a dark square) and the song into `out`.
+/// The picture of a preview video for a link without a cover: the card colour of Encore's own look
+/// (`--panel` of `:root[data-theme="encore"]` in web-rs/static/css/app.css; a test keeps the two in step).
+pub(crate) const SHARE_VIDEO_BLANK: &str = "#222224";
+
 async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>, audio: &str, duration: f64, out: &std::path::Path) -> Option<std::path::PathBuf> {
     let (kbps, secs) = share_video_budget(duration);
     let tmp = dir.join(format!(".{}.tmp.mp4", encore_core::ids::random_token(6)));
@@ -2176,7 +2180,8 @@ async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>
         let cmd = ff.command();
         match cover {
             Some(c) => { cmd.args(["-loop", "1", "-framerate", "1", "-i"]).arg(c); }
-            None => { cmd.args(["-f", "lavfi", "-i", "color=c=0x161622:s=600x600:r=1"]); }
+            // no cover: a plain square in the panel colour of the "encore" theme (`--panel` in web-rs app.css)
+            None => { cmd.args(["-f", "lavfi", "-i", &format!("color=c=0x{}:s=600x600:r=1", SHARE_VIDEO_BLANK.trim_start_matches('#'))]); }
         }
         cmd.arg("-i").arg(audio);
         cmd.args(["-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=600:600:force_original_aspect_ratio=increase,crop=600:600,format=yuv420p", "-r", "1", "-g", "10"]);
