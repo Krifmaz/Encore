@@ -390,6 +390,11 @@ pub fn rank_album(st: &impl Ctx, results: &[Value], want: &Want) -> Vec<Value> {
         if a < 0.8 || b < 0.5 {
             continue;
         }
+        // a live recording of an album not asked for live is never picked: the -20 for other versions below
+        // was outweighed by a lossless format, so a FLAC concert beat the studio album's MP3
+        if encore_library::matcher::live_take(album, artist, title) {
+            continue;
+        }
         // the years in the name ("1989" by Taylor Swift is the album's name, not its year)
         let ys: Vec<i32> = years(title).into_iter().filter(|y| !named.iter().any(|w| *w == y.to_string())).collect();
         let year_near = want.year.is_some_and(|y| ys.iter().any(|t| (t - y).abs() <= 1));

@@ -525,3 +525,59 @@ async fn the_types_task_is_listed() {
     assert_eq!((t["enabled"].clone(), t["minutes"].clone()), (json!(true), json!(360)));
     e.done();
 }
+
+/// Library → Live versions: lists the live album (by its title) and a live take filed on another (studio) album, each
+/// with the studio copy; members may not look; Remove moves the ticked live album to the Trash and deletes the
+/// ticked live song, playlist entries moving to the studio copies first; ids that aren't live (the studio album,
+/// a studio song) are left alone; Keep hides an item, and only takes this tool's keys.
+#[tokio::test]
+async fn live_versions_listed_then_removed_on_request() {
+    let mut e = env("live").await;
+    let antidote = e.song("Travis Scott", "Rodeo", "Antidote", 1, 1000);
+    let n90210 = e.song("Travis Scott", "Rodeo", "90210", 2, 1000);
+    let studio = encore_library::album_key("Travis Scott", "Rodeo", "");
+    let live_antidote = e.song("Travis Scott", "Rodeo (Live at Coachella)", "Antidote", 1, 1000);
+    e.song("Travis Scott", "Rodeo (Live at Coachella)", "90210", 2, 1000);
+    e.song("Travis Scott", "Rodeo (Live at Coachella)", "Jam", 3, 1000);
+    let live = encore_library::album_key("Travis Scott", "Rodeo (Live at Coachella)", "");
+    let take = e.song("Travis Scott", "Tour Bits", "Antidote (Live)", 1, 1000);
+    let other = e.song("Travis Scott", "Tour Bits", "Other (Live)", 2, 1000);
+    // (the rest of "Tour Bits" is studio songs: an album of live takes only would be a live album)
+    for (i, t) in ["Bonus", "Outro", "Skit"].iter().enumerate() {
+        e.song("Travis Scott", "Tour Bits", t, 3 + i as i64, 1000);
+    }
+    let pid = e.st().db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?, 'Mix', 'playlist', 'manual', '[]', 1, 1)", p![e.admin]).unwrap();
+    let item = |track: i64, pos: i64| e.st().db.execute("INSERT INTO playlist_items (playlist_id, position, title, track_id, added_at) VALUES (?, ?, 'Antidote', ?, 1)", p![pid, pos, track]).unwrap();
+    let (in_album, on_take) = (item(live_antidote, 0), item(take, 1));
+
+    assert_eq!(e.as_member("GET", "/api/library/live-versions", None).await.status, 403);
+    let v = e.get("/api/library/live-versions").await.json();
+    assert_eq!(v["albums"].as_array().unwrap().len(), 1, "{v}");
+    let a = &v["albums"][0];
+    assert_eq!((a["album_id"].clone(), a["songs"].clone(), a["with_studio"].clone(), a["suggested"].clone()), (json!(live), json!(3), json!(2), json!(true)));
+    assert_eq!(a["tracks"][0]["studio"]["id"], antidote);
+    let songs: Vec<(i64, Value)> = v["songs"].as_array().unwrap().iter().map(|s| (s["id"].as_i64().unwrap(), s["studio"]["id"].clone())).collect();
+    assert_eq!(songs, vec![(take, json!(antidote)), (other, Value::Null)]);
+
+    assert_eq!(e.send("POST", "/api/library/live-versions/remove", Some(json!({}))).await.status, 400);
+    let r = e.send("POST", "/api/library/live-versions/remove", Some(json!({ "albums": [live, studio], "songs": [take, n90210] }))).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = r.json();
+    assert_eq!((r["albums"].clone(), r["songs"].clone(), r["deleted"].clone(), r["failed"].clone()), (json!(1), json!(3), json!(1), json!([])));
+    let count = |sql: &str| e.st().db.one(sql, p![]).unwrap().unwrap().i("n");
+    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE album_id='{live}'")), 0, "the live album is gone");
+    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE album_id='{studio}'")), 2, "the studio album stays");
+    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE id IN ({take}, {other})")), 1, "only the ticked live song went");
+    assert!(!e.lib.join("Travis Scott/Rodeo (Live at Coachella)").exists());
+    let track_of = |id: i64| e.st().db.one("SELECT track_id FROM playlist_items WHERE id=?", p![id]).unwrap().unwrap().i("track_id");
+    assert_eq!((track_of(in_album), track_of(on_take)), (antidote, antidote), "playlists play the studio copy");
+    assert_eq!(e.get("/api/files/trash").await.json().as_array().map(|a| a.len()), Some(1), "the album is in the Trash");
+
+    // Keep: only this tool's keys; a kept song stays off the list
+    assert_eq!(e.send("POST", "/api/library/live-versions/keep", Some(json!({ "key": "1,2" }))).await.status, 400);
+    let key = encore_library::live_copies::song_key(other);
+    assert_eq!(e.send("POST", "/api/library/live-versions/keep", Some(json!({ "key": key }))).await.status, 200);
+    let v = e.get("/api/library/live-versions").await.json();
+    assert_eq!((v["total_albums"].clone(), v["total_songs"].clone()), (json!(0), json!(0)), "{v}");
+    e.done();
+}

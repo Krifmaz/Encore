@@ -177,6 +177,22 @@ static STRONG_TAIL: LazyLock<Regex> = LazyLock::new(|| {
 /// deluxe, "official video" and the like don't count. The song's own words and the artist's are taken out
 /// first, so "Live Forever" or the band Live don't read as live.
 pub fn unwanted_version(title: &str, artist: &str, candidate: &str) -> Option<&'static str> {
+    let (rest, want) = beyond_title(title, artist, candidate);
+    PATS.iter().find(|(re, _, cat)| !IGNORED.contains(cat) && !want.contains(cat) && is_match(re, &rest)).map(|(_, _, cat)| *cat)
+}
+
+/// Whether a download candidate (a release, folder or file name) is a live recording of `title` (a song or an
+/// album) that isn't asked for live: [`unwanted_version`]'s rule for the live mark alone, whatever other mark
+/// comes first ("Album (Live Remixes)" is live too). An album request turns such a release away outright,
+/// however good its format.
+pub fn live_take(title: &str, artist: &str, candidate: &str) -> bool {
+    let (rest, want) = beyond_title(title, artist, candidate);
+    !want.contains("live") && PATS.iter().any(|(re, _, cat)| *cat == "live" && is_match(re, &rest))
+}
+
+/// What a candidate's name says beyond the title's own words and the artist's (folded, trimmed), and the
+/// version marks the title itself carries.
+fn beyond_title(title: &str, artist: &str, candidate: &str) -> (String, BTreeSet<&'static str>) {
     let (base, want, _) = parse_title(title);
     let mut rest = format!(" {} ", fold(candidate));
     let whole = format!(" {base} ");
@@ -192,8 +208,7 @@ pub fn unwanted_version(title: &str, artist: &str, candidate: &str) -> Option<&'
             rest = rest.replacen(&format!(" {w} "), " ", 1);
         }
     }
-    let rest = rest.trim();
-    PATS.iter().find(|(re, _, cat)| !IGNORED.contains(cat) && !want.contains(cat) && is_match(re, rest)).map(|(_, _, cat)| *cat)
+    (rest.trim().to_string(), want)
 }
 
 /// A Soulseek file name from the requested title on ("Hole - Live Through This - 03 - Doll Parts" →
@@ -665,6 +680,12 @@ mod tests {
         assert_eq!(unwanted_version("Live Forever", "Oasis", "Oasis - Live Forever (Remastered)"), None);
         assert_eq!(unwanted_version("Live Forever", "Oasis", "Oasis - Live Forever (Live at Knebworth)"), Some("live"));
         assert_eq!(unwanted_version("Selling the Drama", "Live", "Live - Selling the Drama"), None);
+        // live alone, whatever comes first; an album asked for live, the band Live and "Live Through This" are fine
+        assert!(live_take("Rodeo", "Travis Scott", "Travis Scott - Rodeo (Live Remixes) [FLAC]"));
+        assert!(live_take("Rodeo", "Travis Scott", "Travis.Scott.Rodeo.Live.At.Coachella.2016.FLAC"));
+        assert!(!live_take("Rodeo (Live)", "Travis Scott", "Travis Scott - Rodeo (Live) [FLAC]"));
+        assert!(!live_take("Throwing Copper", "Live", "Live - Throwing Copper (1994) [FLAC]"));
+        assert!(!live_take("Live Through This", "Hole", "Hole - Live Through This [FLAC 24bit]"));
         assert_eq!(unwanted_version("Remix", "X", "X - Remix"), None);
         // an album name before the title is not a mark (Soulseek "Artist - Album - NN - Title")
         let tail = from_title_on("Doll Parts", "Hole - Live Through This - 03 - Doll Parts");

@@ -303,6 +303,11 @@ fn album_result(st: &impl Ctx, req: &Value, al: &Value, sf: &str) -> Option<Valu
     if rel < 0.5 {
         return None;
     }
+    // a live album ("Rodeo (Live)") of an album not asked for live: it shares every word of the title, so it
+    // would pass as the album itself
+    if encore_library::matcher::live_take(want, req["artist"].as_str().unwrap_or(""), title) {
+        return None;
+    }
     let surround = req["surround"] == true;
     if surround && !has_trait(&a["audioTraits"], "atmos") {
         return None; // a Surround request takes Dolby Atmos only

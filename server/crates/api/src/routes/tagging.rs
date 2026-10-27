@@ -1,5 +1,5 @@
 //! /api/library tagging tools: match an album to a release (any provider), cover art, lyrics, fix a song,
-//! organize, bulk auto-tag, verify by audio, duplicates.
+//! organize, bulk auto-tag, verify by audio, duplicates, live versions to clean up.
 use crate::enrich::enrich;
 use crate::auth::{Admin, User};
 use encore_db::{now, RowExt};
@@ -41,6 +41,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/duplicates/resolve", post(resolve))
         .route("/api/library/duplicates/resolve-all", post(resolve_all))
         .route("/api/library/duplicates/ignore", post(ignore))
+        .route("/api/library/live-versions", get(live_versions))
+        .route("/api/library/live-versions/remove", post(live_remove))
+        .route("/api/library/live-versions/keep", post(live_keep))
 }
 
 /// An album's files in disc and track order; 404 when it has none.
@@ -553,5 +556,61 @@ async fn resolve_all(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
 /// POST /api/library/duplicates/ignore: never show this group (`{key}`) again.
 async fn ignore(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     st.db.execute("INSERT OR IGNORE INTO dup_ignore VALUES (?,?)", p![b["key"].as_str().unwrap_or(""), now()])?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /api/library/live-versions: the live albums and live songs of the library, each with its studio copy
+/// when the library has one ([`encore_library::live_copies`]). Lists only; nothing is deleted.
+async fn live_versions(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
+    let s2 = st.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let classes = s2.library.types.get(&s2.db);
+        encore_library::live_copies::find(&s2, &classes).to_value()
+    }).await.map_err(|e| err(500, e.to_string()))?;
+    Ok(Json(found))
+}
+
+/// `POST /api/library/live-versions/remove` body: what the owner ticked on the page.
+#[derive(Deserialize)]
+struct LiveRemove {
+    /// the live albums to remove, every song on them (album ids)
+    #[serde(default)]
+    albums: Vec<String>,
+    /// the live songs filed elsewhere to remove (song ids)
+    #[serde(default)]
+    songs: Vec<i64>,
+}
+
+/// POST /api/library/live-versions/remove: the ticked live albums go to the Trash (restorable from Files →
+/// Trash), their songs' playlist entries moved to the studio copies first; the ticked live songs filed elsewhere
+/// are deleted, replaced by their studio copies. Only what is still listed as live is touched.
+/// → {albums, songs, deleted, failed}: albums moved, their songs, songs deleted, albums that couldn't be moved.
+async fn live_remove(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<LiveRemove>) -> ApiResult<Json<Value>> {
+    if b.albums.is_empty() && b.songs.is_empty() {
+        return Err(err(400, "Tick the live albums or songs to remove"));
+    }
+    st.blocking(move |st| {
+        let classes = st.library.types.get(&st.db);
+        let albums = encore_library::live_copies::repoint_albums(st, &classes, &b.albums).map_err(|e| err(500, e.to_string()))?;
+        let deleted = encore_library::live_copies::remove_songs(st, &classes, &b.songs);
+        let (mut moved, mut moved_songs, mut failed) = (0, 0, vec![]);
+        if !albums.is_empty() {
+            let roots = encore_files::roots::all(&st.cfg, st.data_dir(), &encore_requests::slskd_managed::download_dir(st));
+            // the Trash takes at most MAX_REAL albums a run
+            for chunk in albums.chunks(encore_files::albums::MAX_REAL) {
+                let r = encore_files::albums::trash_albums(st, &encore_files::Who::of(&u), &roots, chunk, false)?;
+                moved += r["albums"].as_u64().unwrap_or(0);
+                moved_songs += r["songs"].as_u64().unwrap_or(0);
+                failed.extend(r["failed"].as_array().cloned().unwrap_or_default());
+            }
+        }
+        st.db.log("info", &format!("{} removed live versions: {moved} album(s) to the Trash ({moved_songs} songs), {deleted} song(s) deleted", u.s("username")));
+        Ok(Json(json!({ "albums": moved, "songs": moved_songs, "deleted": deleted, "failed": failed })))
+    }).await
+}
+
+/// POST /api/library/live-versions/keep: keep this live album or song (`{key}`) and never list it again.
+async fn live_keep(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    encore_library::live_copies::keep(&st, b["key"].as_str().unwrap_or("")).map_err(|e| err(400, e.to_string()))?;
     Ok(Json(json!({ "ok": true })))
 }

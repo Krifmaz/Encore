@@ -18,6 +18,7 @@ pub mod dupes;
 pub mod file_names;
 pub mod folders;
 pub mod lists;
+pub mod live_copies;
 pub mod lookup;
 pub mod loudness;
 pub mod lyrics;

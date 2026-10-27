@@ -155,6 +155,16 @@ fn an_edition_in_the_album_title_does_not_hide_the_release() {
     assert_eq!(titles(&rank_album(&st, &res, &want("Daft Punk", "Random Access Memories (10th Anniversary Edition)"))).len(), 1);
 }
 
+/// A live recording of the album is never picked for a request of the studio album, even in FLAC against an
+/// MP3 studio release; asked for live, it is.
+#[test]
+fn a_live_release_is_not_the_studio_album() {
+    let st = ready("live");
+    let res = [rel("Travis Scott - Rodeo (Live at Coachella 2016) [FLAC]", 700.0, 90), rel("Travis Scott - Rodeo (2015) [MP3 320]", 150.0, 5)];
+    assert_eq!(titles(&rank_album(&st, &res, &want("Travis Scott", "Rodeo"))), ["Travis Scott - Rodeo (2015) [MP3 320]"]);
+    assert_eq!(titles(&rank_album(&st, &res, &want("Travis Scott", "Rodeo (Live at Coachella 2016)")))[0], "Travis Scott - Rodeo (Live at Coachella 2016) [FLAC]");
+}
+
 /// A self-titled album: every release of the artist names it once, so a release must name it twice (or
 /// carry its year), "Led Zeppelin II" is another album unless it is from the year asked for, and the
 /// release of the year asked for comes first (diagnosis item 8).

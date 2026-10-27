@@ -1,5 +1,5 @@
 //! Port of web/js/pages/library.js – see docs/archive/ui-rewrite/CONTRACT.md
-//! The library page (Albums / Singles / Artists / Songs / Duplicates / Wrong audio tabs with sorting, filters and
+//! The library page (Albums / Singles / Artists / Songs / Duplicates / Live versions / Wrong audio tabs with sorting, filters and
 //! shuffle), the album page (play, shuffle, likes, Edit details, Tag / match metadata, artwork, delete) and the
 //! per-song ⋯ menu with the Edit song details modal.
 
@@ -712,10 +712,11 @@ impl Lib {
         if let Some(filt) = dom::qs_in(&self.view, "#lib-filter") { dom::toggle_class(&filt, "hidden", results || !matches!(tab.as_str(), "albums" | "singles")); }
         self.paint_types();
         if let Some(b) = dom::qs_in(&self.view, "#lib-select") { dom::toggle_class(&b, "hidden", results || !matches!(tab.as_str(), "albums" | "singles")); }
-        if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", !results && matches!(tab.as_str(), "duplicates" | "issues")); }
+        if let Some(p) = dom::qs_in(&self.view, "#lib-q").and_then(|q| q.parent_element()) { dom::toggle_class(&p, "hidden", !results && matches!(tab.as_str(), "duplicates" | "issues" | "live")); }
         if !append { self.load_index(); }
         if results { return self.render_results(mine).await; }
         if tab == "duplicates" { return self.clone().render_duplicates().await; }
+        if tab == "live" { return self.clone().render_live().await; }
         if tab == "issues" { return render_issues(&self.body, &self.view, &self.more).await; }
         let (q, sort, dir, filter, offset) = {
             let s = self.st.borrow();
@@ -902,6 +903,80 @@ impl Lib {
         }));
         Ok(())
     }
+
+    /// The Live versions tab (`/library/live-versions`): live albums and live takes of songs, each with the
+    /// studio copy the library has. The ones with a studio copy come ticked; "Remove ticked" asks first, then
+    /// moves the live albums to the Trash and deletes the live songs (playlists move to the studio copy). "Keep"
+    /// hides an item for good.
+    async fn render_live(self: Rc<Self>) -> Result<(), ApiError> {
+        dom::add_class(&self.more, "hidden");
+        dom::set_html(&self.body, r##"<div class="empty"><span class="spinner"></span><p class="muted">Looking for live albums and live versions…</p></div>"##);
+        let v = api::get("/library/live-versions").await?;
+        let (albums, songs) = (v.a("albums"), v.a("songs"));
+        set_sub(&self.view, &format!("{} live album(s) · {} live song(s)", albums.len(), songs.len()));
+        if albums.is_empty() && songs.is_empty() {
+            dom::set_html(&self.body, &empty_state(&icon("check"), "No live versions", "No live albums or live takes of songs are in the library (or you chose to keep them all)."));
+            return Ok(());
+        }
+        // the studio copy a live song gives way to, or why it is unticked
+        let studio = |t: &Value| -> String {
+            let s = t.g("studio");
+            if s.is_null() { r#"<span class="badge warn" title="The library has no studio copy of this song">only copy</span>"#.to_string() }
+            else { format!(r#"<span class="small muted ellipsis">studio: {} · {}</span>"#, esck(&s, "title"), esck(&s, "album")) }
+        };
+        let check = |kind: &str, id: &str, on: bool| format!(r#"<input type="checkbox" data-live="{kind}" value="{}" {}>"#, esc(id), if on { "checked" } else { "" });
+        let album_cards: String = albums.iter().map(|a| format!(r##"<div class="card flat mt" data-key="{key}">
+      <div class="row between" style="padding:12px 16px;border-bottom:1px solid var(--border)">
+        <label class="row" style="cursor:pointer">{check}<b>{artist} – {album}</b> <span class="badge accent">Live album</span> <span class="small muted">{with} of {n} songs have a studio copy</span></label>
+        <button class="btn sm ghost" data-keep>Keep</button>
+      </div>
+      <div class="list">{list}</div></div>"##,
+            key = esck(a, "key"), check = check("album", &a.s("album_id"), a.truthy("suggested")), artist = esck(a, "artist"), album = esck(a, "album"),
+            with = a.s("with_studio"), n = a.s("songs"),
+            list = a.a("tracks").iter().map(|t| format!(r##"<div class="list-item"><div class="grow"><div class="ellipsis">{}</div>{}</div></div>"##, esck(t, "title"), studio(t))).collect::<String>())).collect();
+        let song_list: String = songs.iter().map(|t| format!(r##"<div class="list-item" data-key="{key}">
+        <label class="row grow" style="cursor:pointer">{check}<div class="grow"><div class="ellipsis">{artist} – {title} <span class="muted">· {album}</span></div>{studio}</div></label>
+        <button class="btn sm ghost" data-keep>Keep</button></div>"##,
+            key = esck(t, "key"), check = check("song", &t.s("id"), t.truthy("suggested")), artist = esck(t, "artist"), title = esck(t, "title"),
+            album = esck(t, "album"), studio = studio(t))).collect();
+        let songs_card = if songs.is_empty() { String::new() } else {
+            format!(r##"<div class="card flat mt"><div style="padding:12px 16px;border-bottom:1px solid var(--border)"><b>Live songs on other albums</b></div><div class="list">{song_list}</div></div>"##)
+        };
+        dom::set_html(&self.body, &format!(r##"
+    <div class="card row wrap between" style="margin-bottom:16px">
+      <div class="muted small">Live albums and songs that have a studio copy are ticked. Live albums go to the Trash (Files → Trash can restore them); live songs on other albums are deleted. Playlists move to the studio copy. Nothing is removed until you confirm.</div>
+      <button class="btn danger" id="live-remove">{}Remove ticked</button>
+    </div>
+    {album_cards}{songs_card}"##, icon("trash")));
+        {
+            let (me, body) = (self.clone(), self.body.clone());
+            dom::on_sel(&self.body, "#live-remove", "click", move |_| {
+                let (me, body) = (me.clone(), body.clone());
+                dom::spawn(async move {
+                    let ticked = |kind: &str| -> Vec<String> { dom::qsa_in(&body, &format!(r#"input[data-live="{kind}"]:checked"#)).iter().map(dom::value).collect() };
+                    let (albums, songs) = (ticked("album"), ticked("song"));
+                    let songs: Vec<i64> = songs.iter().filter_map(|s| s.parse().ok()).collect();
+                    if albums.is_empty() && songs.is_empty() { toast("Tick the live albums or songs to remove", "err"); return; }
+                    let what = format!("{} live album(s) and {} live song(s)", albums.len(), songs.len());
+                    if !confirm_dialog("Remove live versions", &format!("Remove {what}? Live albums go to the Trash; live songs on other albums are deleted from disk."), "Remove", true).await { return; }
+                    let Ok(r) = api::post("/library/live-versions/remove", json!({ "albums": albums, "songs": songs })).await else { return };
+                    let failed = r.a("failed").len();
+                    toast(&format!("{} live album(s) moved to the Trash, {} live song(s) deleted{}", r.s("albums"), r.s("deleted"),
+                        if failed > 0 { format!(" – {failed} couldn't be moved") } else { String::new() }), if failed > 0 { "err" } else { "ok" });
+                    me.reload();
+                });
+            });
+        }
+        *self.body_onclick.borrow_mut() = Some(dom::listener(&self.body, "click", move |e| {
+            if dom::closest(e, "[data-keep]").is_none() { return; }
+            let Some(item) = dom::closest(e, "[data-key]") else { return };
+            let key = dom::data(&item, "key");
+            dom::spawn(async move {
+                if api::post("/library/live-versions/keep", json!({ "key": key })).await.is_ok() { item.remove(); }
+            });
+        }));
+        Ok(())
+    }
 }
 
 /// The admin status poll: fills `#bulk`, the Verify / Auto-tag buttons; resolves to "something is running".
@@ -960,7 +1035,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let st = St { tab, q: ctx.q("q").trim().to_string(), sort: ctx.q("sort"), dir: ctx.q("dir"), filter: ctx.q("filter"), artist: ctx.q("artist"), offset: 0, results,
                       album_type: ctx.q("type") };
         let mut tabs: Vec<(&str, &str)> = vec![("albums", "Albums"), ("singles", "Singles & EPs"), ("artists", "Artists"), ("tracks", "Songs"), ("surround", "Surround")];
-        if admin { tabs.extend([("duplicates", "Duplicates"), ("issues", "Wrong audio")]); }
+        if admin { tabs.extend([("duplicates", "Duplicates"), ("live", "Live versions"), ("issues", "Wrong audio")]); }
         let tabs_html: String = tabs.iter().map(|(k, l)| format!(r##"<button data-t="{k}" class="{}">{l}</button>"##, if *k == st.tab { "active" } else { "" })).collect();
         let admin_html = if admin {
             format!(r##"<div class="row wrap">

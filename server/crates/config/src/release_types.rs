@@ -264,6 +264,13 @@ static EXT: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| vec![
     (re(r"\bgreatest hits\b|\bthe best of\b|\bthe essential\b"), "Compilation"),
 ]);
 
+/// Whether a release or file name says it is a live recording ("Rodeo (Live at Coachella)", "Album - Live",
+/// "Live at Wembley", "MTV Unplugged"), by the same rule Deezer / Apple titles are read with ([`EXT`]'s Live).
+/// A name that only contains the word ("Live Through This", "Live Forever") is not.
+pub fn is_live_title(title: &str) -> bool {
+    EXT.iter().any(|(r, m)| *m == "Live" && r.is_match(title.trim()))
+}
+
 /// Every extra a release carries: MusicBrainz secondary types (or, for ext albums, what the record type
 /// and title say) plus Encore's own from the title and disambiguation.
 pub fn marks(rg: &Value) -> Vec<&'static str> {
@@ -348,6 +355,9 @@ mod tests {
         assert!(f.wants(&mb("Some EP", "EP", &[])));
         assert_eq!(f.reason(&mb("90210", "Single", &[])), Some("Single"));
         assert_eq!(f.reason(&mb("Live at Rolling Loud", "Album", &["Live"])), Some("Live"));
+        // a live name, not a name with "live" in it
+        assert!(is_live_title("Rodeo (Live at Coachella)") && is_live_title("Travis Scott - Rodeo - Live 2016 [FLAC]") && is_live_title("MTV Unplugged in New York"));
+        assert!(!is_live_title("Live Through This") && !is_live_title("Live Forever") && !is_live_title("Alive 2007"));
         assert_eq!(f.reason(&mb("Hits", "Album", &["Compilation"])), Some("Compilation"));
         assert_eq!(f.reason(&mb("Rodeo (Instrumentals)", "Album", &[])), Some("Instrumental"));
         assert_eq!(f.reason(&json!({ "title": "Rodeo", "type": "Album", "secondary": [], "disambiguation": "instrumental version" })), Some("Instrumental"));

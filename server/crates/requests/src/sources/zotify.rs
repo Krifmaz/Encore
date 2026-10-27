@@ -382,6 +382,11 @@ pub fn album_result(req: &Value, a: &Value, fmt: &str, rate: i64) -> Option<Valu
     if rel < 0.5 {
         return None;
     }
+    // a live album ("Rodeo (Live)") of an album not asked for live: it shares every word of the title, so it
+    // would pass as the album itself
+    if encore_library::matcher::live_take(want, req["artist"].as_str().unwrap_or(""), title) {
+        return None;
+    }
     let n = a["total_tracks"].as_i64();
     let want_artist = req["artist"].as_str().unwrap_or("");
     let mut score = rel * 50.0 + if want_artist.is_empty() { 10.0 } else { share(&artist, want_artist) * 20.0 } + if rate >= 320 { 10.0 } else { 5.0 };

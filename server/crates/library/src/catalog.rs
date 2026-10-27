@@ -22,15 +22,19 @@ static RE_FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[]\s*(feat\.
 /// An edition note in brackets: "(Deluxe Edition)", "[Remastered 2011]" …
 static RE_EDITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[][^\)\]]*(deluxe|edition|remaster|version|expanded|anniversary|explicit|clean|bonus)[^\)\]]*[\)\]]").unwrap());
 
+/// The word "live" in an edition note.
+static RE_LIVE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\blive\b").unwrap());
+
 /// The key a release title is compared by: without " - Single" / " - EP", featured artists ("(feat. X)") and
-/// edition notes ("(Deluxe Edition)", "\[Remastered\]" …), accents dropped, "&" read as "and", then letters,
+/// edition notes ("(Deluxe Edition)", "\[Remastered\]" …, but not "(Live Version)"), accents dropped, "&" read as "and", then letters,
 /// digits and underscores.
 pub fn title_key(title: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let t: String = title.to_lowercase().nfkd().filter(|c| !unicode_normalization::char::is_combining_mark(*c)).collect();
     let t = RE_SUFFIX.replace(&t, "");
     let t = RE_FEAT.replace_all(&t, "");
-    let t = RE_EDITION.replace_all(&t, "").replace('&', "and");
+    // an edition note that says live ("(Live Version)") is no edition: the live album is another album
+    let t = RE_EDITION.replace_all(&t, |c: &regex::Captures| if RE_LIVE_WORD.is_match(&c[0]) { c[0].to_string() } else { String::new() }).replace('&', "and");
     encore_core::text::norm_keep_underscore(&t)
 }
 
@@ -569,6 +573,8 @@ mod tests {
         assert_eq!(title_key("Café (feat. Someone) [Remastered]"), "cafe");
         assert_eq!(title_key("Song ft. Guest"), "song");
         assert_eq!(title_key("With You"), "withyou");
+        // a live edition is another album
+        assert_ne!(title_key("Rodeo (Live Version)"), title_key("Rodeo"));
         assert!(similar("Rock & Roll", "rock and roll") == 1.0);
         let r = similar("abcd", "bcde");
         assert!((r - 0.75).abs() < 1e-9, "{r}");
