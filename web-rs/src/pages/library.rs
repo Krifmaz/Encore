@@ -922,7 +922,7 @@ impl Lib {
         let studio = |t: &Value| -> String {
             let s = t.g("studio");
             if s.is_null() { r#"<span class="badge warn" title="The library has no studio copy of this song">only copy</span>"#.to_string() }
-            else { format!(r#"<span class="small muted ellipsis">studio: {} · {}</span>"#, esck(&s, "title"), esck(&s, "album")) }
+            else { format!(r#"<span class="small muted ellipsis">studio: {} · {}</span>"#, esck(s, "title"), esck(s, "album")) }
         };
         let check = |kind: &str, id: &str, on: bool| format!(r#"<input type="checkbox" data-live="{kind}" value="{}" {}>"#, esc(id), if on { "checked" } else { "" });
         let album_cards: String = albums.iter().map(|a| format!(r##"<div class="card flat mt" data-key="{key}">
