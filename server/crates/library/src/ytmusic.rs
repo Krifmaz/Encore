@@ -4,12 +4,17 @@ use encore_http::ytmusic::{album, search};
 use encore_http::Ctx;
 use serde_json::{json, Value};
 
-/// Best official YouTube Music song (not a video/cover/remix unless asked for).
+/// Best official YouTube Music song (not a video/cover/remix, nor a song of a live album, unless asked for).
 pub async fn find_song(st: &impl Ctx, artist: &str, title: &str, length: Option<f64>) -> Option<Value> {
     let want = describe(title, artist, length, None, None);
     let mut best: Option<(f64, Value)> = None;
     for x in search(st, &format!("{artist} {title}"), true).await.ok()?.into_iter().take(10) {
         if x["videoId"].is_null() {
+            continue;
+        }
+        // a song of a live album ("Antidote" on "Rodeo (Live at Coachella)") is a live take, whatever its title
+        // says, unless a live song is asked for
+        if crate::live_copies::live_words(title).is_none() && x["album"].as_str().is_some_and(|a| crate::live_copies::live_words(a).is_some()) {
             continue;
         }
         let v = compare(&want, &describe(x["title"].as_str().unwrap_or(""), x["artist"].as_str().unwrap_or(""), x["duration"].as_f64(), None, None), true);

@@ -969,13 +969,13 @@ impl Lib {
       <div class="list">{list}</div></div>"##,
             key = esck(a, "key"), check = check("album", &a.s("album_id"), a.truthy("suggested")), artist = esck(a, "artist"), album = esck(a, "album"),
             with = a.s("with_studio"), n = a.s("songs"), why = esck(a, "reason"),
-            text = text(&[&a.s("artist"), &a.s("album"), &a.a("tracks").iter().map(|t| t.s("title")).collect::<Vec<_>>().join(" ")]),
+            text = text(&[&a.s("artist"), &a.s("album"), &a.s("reason"), &a.a("tracks").iter().map(|t| t.s("title")).collect::<Vec<_>>().join(" ")]),
             list = a.a("tracks").iter().map(|t| format!(r##"<div class="list-item"><div class="grow"><div class="ellipsis">{}</div>{}</div></div>"##, esck(t, "title"), studio(t))).collect::<String>())).collect();
         let song_list: String = songs.iter().map(|t| format!(r##"<div class="list-item" data-key="{key}" data-text="{text}">
         <label class="row grow" style="cursor:pointer">{check}<div class="grow"><div class="ellipsis">{artist} – {title} <span class="muted">· {album}</span> <span class="badge">{why}</span></div>{studio}</div></label>
         <button class="btn sm ghost" data-keep>Keep</button></div>"##,
             key = esck(t, "key"), check = check("song", &t.s("id"), t.truthy("suggested")), artist = esck(t, "artist"), title = esck(t, "title"),
-            album = esck(t, "album"), studio = studio(t), why = esck(t, "reason"), text = text(&[&t.s("artist"), &t.s("title"), &t.s("album")]))).collect();
+            album = esck(t, "album"), studio = studio(t), why = esck(t, "reason"), text = text(&[&t.s("artist"), &t.s("title"), &t.s("album"), &t.s("reason")]))).collect();
         let songs_card = if songs.is_empty() { String::new() } else {
             format!(r##"<div class="card flat mt"><div style="padding:12px 16px;border-bottom:1px solid var(--border)"><b>Live songs on other albums</b></div><div class="list">{song_list}</div></div>"##)
         };
@@ -985,7 +985,7 @@ impl Lib {
       <button class="btn danger" id="live-remove">{}Remove ticked</button>
     </div>
     <div class="row wrap" style="margin-bottom:8px">
-      <input class="input grow" id="live-q" type="search" style="min-width:0" placeholder="Search live albums and songs (artist, album, title)">
+      <input class="input grow" id="live-q" type="search" style="min-width:0" placeholder="Search live albums and songs (artist, album, title, or why: “length”)">
       <button class="btn sm" id="live-all" title="Tick every album and song the search shows, the only copies too">Tick all shown</button>
       <button class="btn sm ghost" id="live-none">Untick all</button>
     </div>

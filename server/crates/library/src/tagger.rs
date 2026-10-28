@@ -904,6 +904,12 @@ fn title_variants(title: &str) -> Vec<String> {
 ///
 /// A length more than 10 s off the song's makes a title or number pairing less likely, never impossible (a
 /// video's intro or outro). A file left as `None` is not on the album.
+///
+/// A live take is never paired with a studio song: its title, the song part of an upload title or its file
+/// name (`path`, when the row has one) saying live ([`crate::matcher::live_take`], [`crate::live_copies::live_words`])
+/// keeps it off a song that isn't live itself, by title, by number and by order alike. Paired, it was tagged
+/// with the studio song's title, which hid that it was live: a live bonus track or a concert upload ended up
+/// as the studio album's song.
 pub fn assign_tracklist(files: &[Row], tracks: &[Value]) -> Vec<Option<usize>> {
     let mut assign: Vec<Option<usize>> = vec![None; files.len()];
     if tracks.is_empty() {
@@ -915,10 +921,22 @@ pub fn assign_tracklist(files: &[Row], tracks: &[Value]) -> Vec<Option<usize>> {
     let multi_disc = tracks.iter().map(|t| t["disc"].as_i64().unwrap_or(1)).collect::<std::collections::HashSet<_>>().len() > 1;
     // every believable pairing with its score: (score, file, track)
     let mut scores: Vec<(f64, usize, usize)> = vec![];
+    // whether a file is a live take of a song that isn't live (by its title's variants or its file name)
+    let live_of = |f: &Row, want: &str| -> bool {
+        let stem = std::path::Path::new(&f.s("path")).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        let wanted_live = crate::live_copies::live_words(want).is_some();
+        title_variants(&f.s("title")).iter().chain(std::iter::once(&stem)).filter(|v| !v.trim().is_empty())
+            // (the song's own title taken out first: a song called "Concert" is no concert)
+            .any(|v| crate::matcher::live_take(want, &f.s("artist"), v) || (!wanted_live && crate::live_copies::live_words(&v.replace(want, " ")).is_some()))
+    };
+    let live: Vec<Vec<bool>> = files.iter().map(|f| tracks.iter().map(|t| live_of(f, t["title"].as_str().unwrap_or(""))).collect()).collect();
     for (i, f) in files.iter().enumerate() {
         let variants = title_variants(&f.s("title"));
         for (j, t) in tracks.iter().enumerate() {
             let want = t["title"].as_str().unwrap_or("");
+            if live[i][j] {
+                continue;
+            }
             // (a title in another script has no ASCII words for `sim`: written the same, it is the song)
             let title = variants.iter().map(|v| if !want.trim().is_empty() && v.trim().to_lowercase() == want.trim().to_lowercase() { 1.0 } else { sim(v, want) })
                 .fold(0.0, f64::max);
@@ -943,7 +961,7 @@ pub fn assign_tracklist(files: &[Row], tracks: &[Value]) -> Vec<Option<usize>> {
     // untitled files in the album's own order, when the count says each file is one song
     if files.len() == tracks.len() {
         for (i, f) in files.iter().enumerate() {
-            if assign[i].is_none() && tnorm(&f.s("title")).is_empty() && !taken[i] {
+            if assign[i].is_none() && tnorm(&f.s("title")).is_empty() && !taken[i] && !live[i][i] {
                 assign[i] = Some(i);
                 taken[i] = true;
             }
@@ -1550,7 +1568,9 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     // the album's songs (the store's listing, or the MusicBrainz release the request looked up): each file
     // is matched to one of them by title, number or order ([`assign_tracklist`])
     let src_tracks: Vec<Value> = source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default();
-    let assign = assign_tracklist(&originals, &src_tracks);
+    // (each file's path goes along: a file name that says live keeps the file off a studio song)
+    let with_paths: Vec<Row> = originals.iter().zip(&paths).map(|(t, p)| { let mut t = t.clone(); t.insert("path".into(), json!(p.to_string_lossy())); t }).collect();
+    let assign = assign_tracklist(&with_paths, &src_tracks);
     // with a track list that matched any file at all, a file it doesn't list is not the album (a stray single,
     // a bonus copy, an untitled extra): it stays out instead of going in as its own single or "Unknown Album".
     // Matching none, the list says nothing about the files (another script, titles it can't read): all go in.
@@ -1875,6 +1895,15 @@ mod tests {
         assert_eq!(super::assign_tracklist(&[file("夜に駆ける", 0, 261.0)], &jp), vec![Some(0)]);
         // no track list: nothing is matched
         assert_eq!(super::assign_tracklist(&files, &[]), vec![None; 4]);
+        // a live take is never a studio song: by title, by number, by its file name; a live song takes it
+        let live = vec![file("Daft Punk - One More Time (Live at Coachella)", 1, 400.0), file("Aerodynamic - Live", 2, 230.0)];
+        assert_eq!(super::assign_tracklist(&live, &tracks), vec![None, None]);
+        let mut named = file("", 3, 301.0);
+        named.insert("path".into(), serde_json::json!("/staging/03 Digital Love (Live 1997).flac"));
+        let numbered = vec![file("", 1, 320.0), file("", 2, 212.0), named];
+        assert_eq!(super::assign_tracklist(&numbered, &tracks), vec![Some(0), Some(1), None]);
+        let alive = vec![song("Something (Live)", 1, 300.0)];
+        assert_eq!(super::assign_tracklist(&[file("Something (Live)", 1, 301.0)], &alive), vec![Some(0)]);
     }
 
     /// Upload titles count as the album's songs in the release check ("Artist - Song (Official Video)").

@@ -37,7 +37,7 @@ use std::sync::LazyLock;
 pub const KEY_PREFIX: &str = "live:";
 
 /// The columns [`find`] reads for each song (what [`quality`] and the listing need).
-const COLUMNS: &str = "id, path, title, artist, album, albumartist, album_id, year, duration, format, bitrate, mb_trackid, verify_status, releasetype";
+const COLUMNS: &str = "id, path, title, artist, album, albumartist, album_id, year, duration, format, bitrate, mb_trackid, verify_status, releasetype, request_id";
 
 /// Why something is listed as live, as the page shows it.
 pub mod reason {
@@ -55,6 +55,23 @@ pub mod reason {
     pub const FILE: &str = "Folder or file name says live";
     /// most of the album's songs are titled live
     pub const SONGS: &str = "Most songs are live";
+    /// a song filed on a studio album whose length is far off that song's (the album's track list, or the
+    /// studio copy elsewhere): a live take tagged as the studio song by an older import
+    pub const LENGTH: &str = "Length doesn't match the studio song";
+}
+
+/// The track lists the songs were imported under: request id → (title, length in seconds) of each song of the
+/// release the request looked up (`requests.detail.release.tracks`).
+pub type Lengths = HashMap<i64, Vec<(String, f64)>>;
+
+/// How far a song's length may be off the studio song's before it reads as another take (seconds, and share of
+/// the studio length): a live take runs longer or shorter by a crowd, an intro, a jam; a remaster or another
+/// pressing by a second or two.
+const LENGTH_OFF: (f64, f64) = (25.0, 0.12);
+
+/// Whether `dur` is so far off `want` that it is another take ([`LENGTH_OFF`]); unknown lengths never are.
+fn length_off(dur: f64, want: f64) -> bool {
+    dur > 0.0 && want > 0.0 && (dur - want).abs() > LENGTH_OFF.0 && (dur - want).abs() > want * LENGTH_OFF.1
 }
 
 /// Words that make a title (or folder, or file name) a live recording, with the reason each gives. The
@@ -195,7 +212,11 @@ impl Found {
 /// A live album is `suggested` (ticked to remove when the page opens) when at least half of its songs have a
 /// studio copy in the library, a live song when it has one; the rest are listed unticked (each says "only
 /// copy"), so they can still be ticked and removed. Every item carries its `reason`.
-pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secondary, kept: &HashSet<String>) -> Found {
+///
+/// A song on a studio album that says nothing live but whose length is far off the studio song's ([`length_off`]:
+/// the track list it was imported under, `lengths`, else its studio copy on another album) is listed too, never
+/// ticked: an older import tagged live takes with the studio song's title.
+pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secondary, lengths: &Lengths, kept: &HashSet<String>) -> Found {
     let descs: Vec<Desc> = rows.iter().map(|r| describe(&r.s("title"), &r.s("artist"), None, None, None)).collect();
     let song_why: Vec<Option<&'static str>> = rows.iter().zip(&descs).map(|(r, d)| song_reason(r, d)).collect();
     // the albums, their songs with each song's own reason
@@ -204,11 +225,11 @@ pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secon
         by_album.entry(r.s("album_id")).or_default().push((r, *why));
     }
     let album_why: HashMap<&str, &'static str> = by_album.iter().filter_map(|(id, songs)| album_reason(id, songs, classes, secondary).map(|w| (id.as_str(), w))).collect();
-    let is_live = |i: usize| song_why[i].is_some() || album_why.contains_key(rows[i].s("album_id").as_str());
+    let live_now: Vec<bool> = (0..rows.len()).map(|i| song_why[i].is_some() || album_why.contains_key(rows[i].s("album_id").as_str())).collect();
     // the best studio copy of each song: not live in any of the ways above
     let mut studio: HashMap<String, &Row> = HashMap::new();
     for (i, (r, d)) in rows.iter().zip(&descs).enumerate() {
-        if is_live(i) {
+        if live_now[i] {
             continue;
         }
         let Some(k) = pair_key(d) else { continue };
@@ -217,6 +238,35 @@ pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secon
             studio.insert(k, r);
         }
     }
+    // songs whose length gives them away: the track list they came in under, else another studio copy
+    let fold = |t: &str| crate::matcher::fold(t);
+    // every studio copy's length by song, to tell a take far off the others (both are listed: which one is
+    // the live take can't be told without a track list)
+    let mut copies: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    for (i, (r, d)) in rows.iter().zip(&descs).enumerate() {
+        if let (false, Some(k)) = (live_now[i], pair_key(d)) {
+            copies.entry(k).or_default().push((r.i("id"), r.f("duration")));
+        }
+    }
+    let mut song_why = song_why;
+    let mut by_length: HashSet<usize> = HashSet::new();
+    for (i, (r, d)) in rows.iter().zip(&descs).enumerate() {
+        if live_now[i] {
+            continue;
+        }
+        let dur = r.f("duration");
+        let listed = lengths.get(&r.i("request_id")).and_then(|ts| ts.iter().find(|(t, _)| fold(t) == fold(&r.s("title"))).map(|(_, l)| *l));
+        let off = match listed {
+            Some(w) => length_off(dur, w),
+            None => pair_key(d).and_then(|k| copies.get(&k)).is_some_and(|c| c.iter().any(|(id, l)| *id != r.i("id") && length_off(dur, *l))),
+        };
+        if off {
+            song_why[i] = Some(reason::LENGTH);
+            by_length.insert(i);
+        }
+    }
+    // (a song found by its length is no studio copy either)
+    studio.retain(|_, s| !by_length.iter().any(|i| rows[*i].i("id") == s.i("id")));
     let studio_of = |d: &Desc| pair_key(d).and_then(|k| studio.get(&k).copied());
     let mut albums: HashMap<String, Vec<(&Row, Option<&Row>)>> = HashMap::new();
     let mut songs: Vec<Value> = vec![];
@@ -228,7 +278,7 @@ pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secon
             let s = studio_of(d);
             songs.push(json!({
                 "key": song_key(r.i("id")), "id": r.i("id"), "title": r.s("title"), "artist": r.s("artist"), "album": r.s("album"),
-                "album_id": album_id, "studio": s.map(studio_json), "suggested": s.is_some(), "reason": why,
+                "album_id": album_id, "studio": s.map(studio_json), "suggested": s.is_some() && why != reason::LENGTH, "reason": why,
             }));
         }
     }
@@ -251,6 +301,18 @@ pub fn find_in(rows: &[Row], classes: &HashMap<String, Class>, secondary: &Secon
     Found { albums: out, songs }
 }
 
+/// The track lists of the album requests the library's songs came in with ([`Lengths`]); requests cleared since
+/// are simply not there.
+fn track_lists(st: &impl Ctx) -> Lengths {
+    let rows = st.db().query("SELECT id, json_extract(detail, '$.release.tracks') AS tracks FROM requests
+                              WHERE kind='album' AND id IN (SELECT DISTINCT request_id FROM tracks WHERE request_id IS NOT NULL)", p![]).unwrap_or_default();
+    rows.into_iter().filter_map(|r| {
+        let tracks: Vec<Value> = serde_json::from_str(&r.s("tracks")).ok()?;
+        let list: Vec<(String, f64)> = tracks.iter().map(|t| (t["title"].as_str().unwrap_or("").to_string(), t["length"].as_f64().unwrap_or(0.0))).collect();
+        (!list.is_empty()).then(|| (r.i("id"), list))
+    }).collect()
+}
+
 /// Every album's secondary types as `album_types` keeps them (MusicBrainz's, or a store's record type).
 fn secondary_types(st: &impl Ctx) -> Secondary {
     st.db().query("SELECT album_id, release_secondary FROM album_types", p![]).unwrap_or_default().into_iter()
@@ -267,7 +329,7 @@ fn kept_keys(st: &impl Ctx) -> HashSet<String> {
 /// The live albums and songs of the whole library, given every album's class (`library.types`).
 pub fn find(st: &impl Ctx, classes: &HashMap<String, Class>) -> Found {
     let rows = st.db().query(&format!("SELECT {COLUMNS} FROM tracks"), p![]).unwrap_or_default();
-    find_in(&rows, classes, &secondary_types(st), &kept_keys(st))
+    find_in(&rows, classes, &secondary_types(st), &track_lists(st), &kept_keys(st))
 }
 
 /// Never list this album or song (`key`, as [`find`] gave it) again. Keys without [`KEY_PREFIX`] are refused,
@@ -351,7 +413,7 @@ mod tests {
     /// title with "Live" in its name is no live take.
     #[test]
     fn live_albums_and_songs_with_their_studio_copies() {
-        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &HashSet::new());
+        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &HashMap::new(), &HashSet::new());
         assert_eq!(f.albums.len(), 1);
         let a = &f.albums[0];
         assert_eq!((a["album_id"].as_str(), a["songs"].as_u64(), a["with_studio"].as_u64(), a["suggested"].as_bool()), (Some("rodeo-live"), Some(3), Some(2), Some(true)));
@@ -367,7 +429,7 @@ mod tests {
     #[test]
     fn a_live_album_of_its_own_songs_is_not_suggested() {
         let rows = vec![row(1, "A", "X", "Studio", "s", "mp3"), row(2, "A", "X", "Live", "l", "mp3"), row(3, "B", "X", "Live", "l", "mp3"), row(4, "C", "X", "Live", "l", "mp3")];
-        let f = find_in(&rows, &classes(&["l"]), &HashMap::new(), &HashSet::new());
+        let f = find_in(&rows, &classes(&["l"]), &HashMap::new(), &HashMap::new(), &HashSet::new());
         assert_eq!((f.albums[0]["with_studio"].as_u64(), f.albums[0]["suggested"].as_bool()), (Some(1), Some(false)));
     }
 
@@ -375,7 +437,7 @@ mod tests {
     #[test]
     fn kept_items_stay_off_the_list() {
         let kept: HashSet<String> = [album_key("rodeo-live"), song_key(6)].into_iter().collect();
-        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &kept);
+        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &HashMap::new(), &kept);
         assert!(f.albums.is_empty());
         assert_eq!(f.songs.iter().map(|s| s["id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![8, 9]);
     }
@@ -384,7 +446,7 @@ mod tests {
     #[test]
     fn the_best_studio_copy_is_the_replacement() {
         let rows = vec![row(1, "Song", "X", "A", "a", "mp3"), row(2, "Song", "X", "A (Deluxe)", "b", "flac"), row(3, "Song (Live)", "X", "Odds", "t", "mp3"), row(4, "Other", "X", "Odds", "t", "mp3")];
-        let f = find_in(&rows, &HashMap::new(), &HashMap::new(), &HashSet::new());
+        let f = find_in(&rows, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashSet::new());
         assert_eq!(f.songs[0]["studio"]["id"], 2);
     }
 
@@ -392,7 +454,7 @@ mod tests {
     /// their studio copies; an id that isn't live (a studio song, an unknown album) is never in it.
     #[test]
     fn the_plan_only_deletes_listed_live_songs() {
-        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &HashSet::new());
+        let f = find_in(&library(), &classes(&["rodeo-live"]), &HashMap::new(), &HashMap::new(), &HashSet::new());
         let plan = f.plan(&["rodeo-live".into(), "rodeo".into()], &[9, 1, 10, 9]);
         assert_eq!(plan, vec![(3, Some(1)), (4, Some(2)), (5, None), (9, None)]);
         assert!(f.plan(&[], &[]).is_empty());
@@ -433,7 +495,7 @@ mod tests {
             file, row(10, "Third", "X", "Mixed", "mixed", "flac"), row(11, "Hit", "X", "Hit (Live at Wembley)", "mbstudio", "flac"),
         ];
         let secondary: Secondary = [("comp".to_string(), vec!["Compilation".to_string(), "Live".to_string()])].into_iter().collect();
-        let f = find_in(&rows, &HashMap::new(), &secondary, &HashSet::new());
+        let f = find_in(&rows, &HashMap::new(), &secondary, &HashMap::new(), &HashSet::new());
         let albums: Vec<(&str, &str, Option<i64>)> = f.albums.iter().map(|a| (a["album_id"].as_str().unwrap(), a["reason"].as_str().unwrap(), a["tracks"][0]["studio"]["id"].as_i64())).collect();
         let mut albums = albums;
         albums.sort();
@@ -441,5 +503,26 @@ mod tests {
                                 ("most", reason::SONGS, Some(1)), ("tagged", reason::TAGGED, Some(1))]);
         let songs: Vec<(i64, &str, Option<i64>)> = f.songs.iter().map(|s| (s["id"].as_i64().unwrap(), s["reason"].as_str().unwrap(), s["studio"]["id"].as_i64())).collect();
         assert_eq!(songs, vec![(9, reason::FILE, Some(2))]);
+    }
+
+    /// A live take an older import filed as the studio album's song, titled like it: found by its length against
+    /// the track list it came in under, or against the song's other copies (both far-apart copies are listed,
+    /// since which is live can't be told); listed unticked, and no one's studio copy. A song within a few seconds
+    /// of its length is left alone.
+    #[test]
+    fn live_takes_filed_as_studio_songs_by_their_length() {
+        let with = |mut r: Row, dur: f64, req: i64| { r.insert("duration".into(), json!(dur)); r.insert("request_id".into(), json!(req)); r };
+        let rows = vec![
+            with(row(1, "Antidote", "Travis Scott", "Rodeo", "rodeo", "flac"), 395.0, 7),
+            with(row(2, "90210", "Travis Scott", "Rodeo", "rodeo", "flac"), 340.0, 7),
+            with(row(3, "Nightcrawler", "Travis Scott", "Rodeo", "rodeo", "flac"), 321.0, 0),
+            with(row(4, "Nightcrawler", "Travis Scott", "Hits", "hits", "mp3"), 260.0, 0),
+            with(row(5, "Pornography", "Travis Scott", "Rodeo", "rodeo", "flac"), 200.0, 0),
+        ];
+        let lengths: Lengths = [(7, vec![("Antidote".to_string(), 262.0), ("90210".to_string(), 339.0)])].into_iter().collect();
+        let f = find_in(&rows, &HashMap::new(), &HashMap::new(), &lengths, &HashSet::new());
+        assert!(f.albums.is_empty());
+        let songs: Vec<(i64, &str, bool)> = f.songs.iter().map(|s| (s["id"].as_i64().unwrap(), s["reason"].as_str().unwrap(), s["suggested"] == true)).collect();
+        assert_eq!(songs, vec![(1, reason::LENGTH, false), (3, reason::LENGTH, false), (4, reason::LENGTH, false)]);
     }
 }
