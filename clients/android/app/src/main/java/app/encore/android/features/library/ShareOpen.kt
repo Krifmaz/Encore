@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
-// Share links opened in the app (0.42.4). A share link (`https://<server>/s/<token>`) opened in an Android browser is
+// Share links opened in the app (0.42.5). A share link (`https://<server>/s/<token>`) opened in an Android browser is
 // handed to the app by the server's share page as `intent://<server>/s/<token>#Intent;scheme=encore;…` (the server's
 // routes/share_open.rs); the manifest's `encore://` filter brings it to MainActivity, and [ShareOpenHost] opens the
 // song's album (playing the song), the album, the artist or the playlist once signed in. When the app can't open it

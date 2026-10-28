@@ -920,7 +920,7 @@ fn the_blank_preview_video_is_the_encore_theme_card_colour() {
     assert_eq!(panel, SHARE_VIDEO_BLANK);
 }
 
-// ---- opening a link where the listener already listens (share_open, 0.42.4) ----------------------------------
+// ---- opening a link where the listener already listens (share_open, 0.42.5) ----------------------------------
 
 /// Chrome on an Android phone.
 const ANDROID_CHROME: &str = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";

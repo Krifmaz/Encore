@@ -1,4 +1,4 @@
-//! Opening a share link where the listener already listens (0.42.4).
+//! Opening a share link where the listener already listens (0.42.5).
 //!
 //! A share link (`/s/<token>`) used to land everyone on the public share page, so a listener with the Encore app,
 //! or one already signed in to this server in the browser, had to find the song again by hand. Now the page first
