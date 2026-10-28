@@ -1,6 +1,6 @@
 //! New requests: the checks (a valid kind and ids, the weekly limit, already requested) and the row – or,
-//! when the same song was asked for before and that request failed or was cancelled, that row again, so
-//! the Requests list has one row per song.
+//! when the same song was asked for before and that request failed or was cancelled, or completed without
+//! its music being in the library now, that row again, so the Requests list has one row per song.
 use crate::Ctx;
 use encore_config::perms::is_admin;
 use encore_core::error::{err, ApiResult};
@@ -73,13 +73,79 @@ pub fn quota(st: &impl Ctx, u: &Row, n: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// 409 when the song is already requested; the body carries the existing request's `id` and `status`, so a
-/// caller (Download missing, say) can link to it instead of skipping the song.
-fn dup(st: &impl Ctx, sql: &str, params: Vec<Value>) -> ApiResult<()> {
-    if let Some(d) = st.db().one(sql, params)? {
-        return Err(err(409, format!("Already requested (#{}, {})", d.i("id"), d.s("status"))).with(json!({ "id": d.i("id"), "status": d.s("status") })));
+/// The 409 for a request that is already there: the body carries the existing request's `id` and `status`,
+/// so a caller (Download missing, say) can link to it instead of skipping the song.
+fn already(id: i64, status: &str) -> encore_core::error::ApiError {
+    err(409, format!("Already requested (#{id}, {status})")).with(json!({ "id": id, "status": status }))
+}
+
+/// Where a finished album or song request's music is now, so a request for it again can be told apart from
+/// one whose music never arrived or has left the library since.
+enum Landed {
+    /// the library has it under the names asked for (what the album and song pages look up)
+    AsAsked,
+    /// only the files the request brought in are there, filed under another album: (album, album artist)
+    Elsewhere(String, String),
+    /// nothing of it is in the library: no file it brought in, and nothing under its names
+    Nowhere,
+}
+
+/// Where a completed album or song request's music is now (any other kind or status counts as
+/// [`Landed::AsAsked`]: only a finished album or song can be "done" without its music in the library).
+///
+/// A request is "completed" when its import ended, "Already in library" when the library had the album
+/// then, or – for a song – when its album brought it in. None of that keeps the music there: the files can
+/// be removed later (a cleanup, a delete, Live versions), an "Already in library" can have been the copy of
+/// a song filed under the album, and an import without a confident MusicBrainz match keeps the files' own
+/// tags. Asking again must then download it, not answer "Already requested (#…, completed)" forever.
+fn landed(st: &impl Ctx, row: &Row) -> anyhow::Result<Landed> {
+    let kind = row.s("kind");
+    if row.s("status") != "completed" || !matches!(kind.as_str(), "album" | "track") {
+        return Ok(Landed::AsAsked);
     }
-    Ok(())
+    let found = if kind == "album" {
+        // the worker's `album_title`: the album, else the title
+        let title = Some(row.s("album")).filter(|a| !a.is_empty()).unwrap_or_else(|| row.s("title"));
+        encore_library::lookup::album_ids_for(st.db(), &[(row.s("mbid"), row.s("artist"), title)]).into_iter().next().flatten().is_some()
+    } else {
+        encore_library::lookup::find_tracks(st.db(), &[(row.s("mbid"), row.s("artist"), row.s("title"))]).into_iter().next().flatten().is_some()
+    };
+    if found {
+        return Ok(Landed::AsAsked);
+    }
+    // the songs the request brought in (`tracks.request_id`, [`crate::worker`]'s record_origin), whatever they are called now
+    Ok(match st.db().one("SELECT album, COALESCE(NULLIF(albumartist,''), artist) a FROM tracks WHERE request_id=? LIMIT 1", p![row.i("id")])? {
+        Some(t) => Landed::Elsewhere(t.s("album"), t.s("a")),
+        None => Landed::Nowhere,
+    })
+}
+
+/// 409 when the request is already there, unless the one there is a completed album or song request whose
+/// music is nowhere in the library ([`landed`]): that one doesn't count, and its id comes back so the new ask
+/// takes over its row (one row per album or song, the old outcome in its log). A completed request whose files
+/// were filed under another album says where they are, since the album asked for shows as missing.
+fn dup_row(st: &impl Ctx, id: i64, status: &str) -> ApiResult<Option<i64>> {
+    if status != "completed" {
+        return Err(already(id, status));
+    }
+    let Some(row) = st.db().one("SELECT * FROM requests WHERE id=?", p![id])? else { return Ok(None) };
+    match landed(st, &row).map_err(|e| err(500, e.to_string()))? {
+        Landed::AsAsked => Err(already(id, status)),
+        Landed::Elsewhere(album, artist) => Err(err(409, format!("Already in library as “{album}” by {artist} (#{id})")).with(json!({ "id": id, "status": status }))),
+        Landed::Nowhere => Ok(Some(id)),
+    }
+}
+
+/// The duplicate check for one query (`SELECT id, status …`): 409 for a request that is already there, else
+/// the completed request with its music gone that the new ask can take over ([`dup_row`]), if any.
+fn dup(st: &impl Ctx, sql: &str, params: Vec<Value>) -> ApiResult<Option<i64>> {
+    let mut stale = None;
+    for d in st.db().query(sql, params)? {
+        if let Some(id) = dup_row(st, d.i("id"), &d.s("status"))? {
+            stale.get_or_insert(id);
+        }
+    }
+    Ok(stale)
 }
 
 /// An album request already there for this album, whichever way it was made: the same release group, the same
@@ -114,25 +180,29 @@ pub fn album_request_for(st: &impl Ctx, mbid: Option<&str>, artist: &str, title:
 /// 409 when a running track request is for the same song by other names or ids ([`encore_library::matcher`]:
 /// "Song (feat. X)" and "Song", "Don't" and "Dont", a MusicBrainz request and a .txt import line, the album and
 /// single recordings of one song) – the same song and version, lengths close when both are known. Other
-/// versions (live, remix, sped up …) are other songs.
-fn same_song_requested(st: &impl Ctx, b: &NewRequest, artist: Option<&str>) -> ApiResult<()> {
+/// versions (live, remix, sped up …) are other songs. A completed one whose song is nowhere in the library
+/// doesn't count ([`dup_row`]): its id comes back for the new ask to take over.
+fn same_song_requested(st: &impl Ctx, b: &NewRequest, artist: Option<&str>) -> ApiResult<Option<i64>> {
     use encore_library::matcher::{compare, describe};
-    let (Some(artist), Some(title)) = (artist, nz(&b.title)) else { return Ok(()) };
+    let (Some(artist), Some(title)) = (artist, nz(&b.title)) else { return Ok(None) };
     let want = describe(title, artist, b.length, nz(&b.isrc), nz(&b.mbid));
     // only the requests whose title has the song's longest word go through the comparison
-    let Some(word) = want.base.split_whitespace().filter(|w| w.chars().all(|c| c.is_alphanumeric())).max_by_key(|w| w.chars().count()) else { return Ok(()) };
+    let Some(word) = want.base.split_whitespace().filter(|w| w.chars().all(|c| c.is_alphanumeric())).max_by_key(|w| w.chars().count()) else { return Ok(None) };
     let rows = st.db().query("SELECT id, status, artist, title, mbid, detail FROM requests WHERE kind='track' AND class='stereo'
                               AND status NOT IN ('failed','denied','cancelled') AND lower(title) LIKE ? ORDER BY id LIMIT 500",
                              p![format!("%{}%", word.to_lowercase())])?;
+    let mut stale = None;
     for r in rows {
         let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
         let mbid = Some(r.s("mbid")).filter(|m| !m.is_empty()).or_else(|| d["recording"].as_str().map(String::from));
         let theirs = describe(&r.s("title"), &r.s("artist"), d["length"].as_f64(), d["isrc"].as_str(), mbid.as_deref());
         if compare(&want, &theirs, true).matched {
-            return Err(err(409, format!("Already requested (#{}, {})", r.i("id"), r.s("status"))).with(json!({ "id": r.i("id"), "status": r.s("status") })));
+            if let Some(id) = dup_row(st, r.i("id"), &r.s("status"))? {
+                stale.get_or_insert(id);
+            }
         }
     }
-    Ok(())
+    Ok(stale)
 }
 
 /// The catalogue ids in a Discover "ext-…" album id ("ext-d302127", "ext-d2-a3": Deezer 2, Apple 3).
@@ -251,6 +321,9 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     let has_extra = extra.is_some();
     let ext_ok = b.ext.as_ref().is_some_and(|e| EXT_SOURCES.iter().any(|k| !e[k].is_null() && e[k] != ""));
     let (artist, title) = (nz(&b.artist), nz(&b.title).or(nz(&b.album)));
+    // a completed request for the same album or song whose music never reached the library, or has left it
+    // since: the new ask takes over its row instead of being refused ([`dup_row`])
+    let mut stale: Option<i64> = None;
     match b.kind.as_str() {
         "url" => {
             if !b.url.as_deref().is_some_and(|u| u.starts_with("http://") || u.starts_with("https://")) {
@@ -265,8 +338,8 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
                 return Err(err(400, "Artist and album title are required"));
             }
             if !has_extra {
-                dup(st, "SELECT id, status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
-                         AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![artist, title])?;
+                stale = stale.or(dup(st, "SELECT id, status FROM requests WHERE kind='album' AND mbid IS NULL AND lower(artist)=lower(?) AND lower(title)=lower(?)
+                         AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![artist, title])?);
             }
         }
         "artist" | "album" if nz(&b.mbid).is_none() => return Err(err(400, "A MusicBrainz id is required")),
@@ -275,22 +348,22 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
         _ => return Err(err(400, "Invalid request kind")),
     }
     if b.kind == "track" && nz(&b.mbid).is_none() && !has_extra {
-        dup(st, "SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND class='stereo' AND status NOT IN ('failed','denied','cancelled')",
-            p![artist, b.title])?;
+        stale = stale.or(dup(st, "SELECT id, status FROM requests WHERE kind='track' AND lower(artist)=lower(?) AND lower(title)=lower(?) AND class='stereo' AND status NOT IN ('failed','denied','cancelled')",
+            p![artist, b.title])?);
     }
     if let (Some(m), false) = (nz(&b.mbid), has_extra) {
-        dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?;
+        stale = stale.or(dup(st, "SELECT id, status FROM requests WHERE mbid=? AND kind=? AND class='stereo' AND status NOT IN ('failed','denied','cancelled')", p![m, b.kind])?);
     }
     // the same song or album asked for another way: by name from a .txt or playlist import and from MusicBrainz,
     // or as a Deezer album and its MusicBrainz release group – one download
     if !has_extra {
         match b.kind.as_str() {
-            "track" => same_song_requested(st, b, artist)?,
+            "track" => stale = stale.or(same_song_requested(st, b, artist)?),
             "album" => {
                 let ext = b.ext.clone().unwrap_or(json!({}));
                 if let (Some(a), Some(t)) = (artist, title) {
                     if let Some(id) = album_request_for(st, nz(&b.mbid), a, t, &ext).map_err(|e| err(500, e.to_string()))? {
-                        dup(st, "SELECT id, status FROM requests WHERE id=?", p![id])?;
+                        stale = stale.or(dup(st, "SELECT id, status FROM requests WHERE id=?", p![id])?);
                     }
                 }
             }
@@ -299,7 +372,14 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     }
     let twin = match reuse {
         Some(id) => st.db().one("SELECT * FROM requests WHERE id=?", p![id])?,
-        None if parent.is_none() => failed_twin(st, b, artist, title)?,
+        None if parent.is_none() => match failed_twin(st, b, artist, title)? {
+            Some(t) => Some(t),
+            // (a top-level one of the same kind: a discography's album stays its discography's)
+            None => match stale {
+                Some(id) => st.db().one("SELECT * FROM requests WHERE id=? AND kind=? AND parent_id IS NULL", p![id, b.kind])?,
+                None => None,
+            },
+        },
         None => None,
     };
     let approved = is_admin(u) || u.b("auto_approve") || st.cfg().bool("auto_approve");
@@ -358,10 +438,12 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
         let old_detail: Value = serde_json::from_str(&old.s("detail")).unwrap_or(json!({}));
         let detail = detail_for_retry(&old_detail, &old.s("status"), &old.s("message"), detail);
         st.db().execute(
-            "UPDATE requests SET user_id=?, status=?, message=?, progress=0, source=NULL, detail=?, artist=COALESCE(?, artist), title=COALESCE(?, title),
+            // (a completed request taken over may have been asked for by another catalogue: the new ask's
+            // MusicBrainz id replaces none)
+            "UPDATE requests SET user_id=?, status=?, message=?, progress=0, source=NULL, detail=?, mbid=COALESCE(?, mbid), artist=COALESCE(?, artist), title=COALESCE(?, title),
              album=COALESCE(?, album), year=COALESCE(?, year), cover_url=COALESCE(?, cover_url), url=COALESCE(?, url), updated_at=? WHERE id=?",
             p![u.i("id"), if approved { "queued" } else { "pending" }, if approved { "Requested again" } else { "Waiting for admin approval" }, detail.to_string(),
-               artist, title, nz(&b.album), nz(&b.year), nz(&b.cover_url), nz(&b.url), t, id])?;
+               nz(&b.mbid), artist, title, nz(&b.album), nz(&b.year), nz(&b.cover_url), nz(&b.url), t, id])?;
         st.db().log("info", &format!("{} requested {} again (#{id}, attempt {}): {what}", u.s("username"), b.kind, detail["attempts"]));
         crate::events::emit(st, id);
         return Ok(id);

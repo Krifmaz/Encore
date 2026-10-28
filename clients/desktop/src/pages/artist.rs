@@ -93,6 +93,8 @@ pub struct State {
     similar: Option<Value>,
     /// `/catalog`: releases MusicBrainz is missing; None while loading.
     ext: Option<Vec<Value>>,
+    /// The discography sections opened with "View all" (a grid instead of the sideways row), by kind.
+    expanded: HashSet<String>,
     dialog: Option<Dialog>,
     /// Request keys being sent.
     sending: HashSet<String>,
@@ -132,6 +134,7 @@ impl Default for State {
             bio_open: false,
             similar: None,
             ext: None,
+            expanded: HashSet::new(),
             dialog: None,
             sending: HashSet::new(),
             busy_kinds: HashSet::new(),
@@ -160,6 +163,8 @@ pub enum Message {
     Catalog(Result<Value, ApiError>),
     Filter(String),
     HideSkipped(bool),
+    /// "View all" / "Show less" of a discography section, by kind.
+    ViewAll(String),
     BioToggle,
     Open(Page),
     OpenUrl(String),
@@ -632,6 +637,11 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             ctx.edit_config(move |c| {
                 c.local.insert(crate::config::HIDE_SKIPPED.into(), Value::String(if on { "1" } else { "0" }.into()));
             });
+        }
+        Message::ViewAll(kind) => {
+            if !state.expanded.remove(&kind) {
+                state.expanded.insert(kind);
+            }
         }
         Message::BioToggle => state.bio_open = !state.bio_open,
         Message::Open(p) => ctx.navigate(p),
@@ -1196,12 +1206,60 @@ fn popular<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, x: &'a Value) -> O
     Some(column![section_head("Popular", None), widgets::card_flat(list)].spacing(14).into())
 }
 
-fn discography<'a>(state: &'a State, ctx: &Ctx<'a>, n_rg: usize) -> El<'a, Message> {
+/// How many tiles a discography row holds before its section offers "View all".
+const RAIL_TILES: usize = 6;
+
+/// One tile of a discography section: a MusicBrainz release group, or a release only another
+/// service lists (with its index in `State::ext`, which its messages carry).
+enum DiscoTile<'a> {
+    /// A MusicBrainz release group.
+    Mb(&'a Value),
+    /// A Deezer / Apple Music / Bandcamp / Discogs release MusicBrainz doesn't have, and its index.
+    Ext(usize, &'a Value),
+}
+
+impl DiscoTile<'_> {
+    /// The release behind the tile.
+    fn release(&self) -> &Value {
+        match self {
+            DiscoTile::Mb(v) | DiscoTile::Ext(_, v) => v,
+        }
+    }
+}
+
+/// A release's year for the newest-first order, as the server sorts MusicBrainz's: no year first.
+fn year_key(v: &Value) -> String {
+    let y: String = catalog::first_truthy(v, &["year", "date"]).chars().take(4).collect();
+    if y.is_empty() { "9999".to_string() } else { y }
+}
+
+/// The section a release MusicBrainz doesn't list goes in: the server's canonical `kind` (Album,
+/// EP, Single, Live, Compilation …; inferred from its track count when the service gave no type),
+/// else its `type`, else Album. Encore's own extras (Acoustic, Covers …) aren't sections of their
+/// own: those go by their type.
+fn ext_section(m: &Value) -> String {
+    let (k, t) = (fmt::s(m, "kind"), fmt::s(m, "type"));
+    if catalog::ORDER.contains(&k.as_str()) {
+        k
+    } else if catalog::ORDER.contains(&t.as_str()) {
+        t
+    } else {
+        "Album".to_string()
+    }
+}
+
+/// The discography: one section per kind (Albums, EPs, Singles, Live …), each a sideways row with
+/// "View all" for the full grid. The releases only Deezer, Apple Music, Bandcamp or Discogs list
+/// sit in their kind's section, tagged "Not in MusicBrainz".
+fn discography<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, n_rg: usize) -> El<'a, Message> {
     let f = state.filter.as_str();
     let hide = state.hide_skipped;
     let shown = |rg: &Value| !(hide && skipped(rg));
     let keep = |rg: &Value| shown(rg) && (f == "all" || (if f == "owned" { owned(rg) } else { !owned(rg) }));
-    let n_skipped: usize = state.groups.iter().map(|g| g.items.iter().filter(|rg| skipped(rg)).count()).sum();
+    let ext: &[Value] = state.ext.as_deref().unwrap_or(&[]);
+    let (aid, aname) = (fmt::s(a, "id"), fmt::s(a, "name"));
+    let n_skipped: usize = state.groups.iter().map(|g| g.items.iter().filter(|rg| skipped(rg)).count()).sum::<usize>()
+        + ext.iter().filter(|m| skipped(m)).count();
     let mut right = row![].spacing(10).align_y(Alignment::Center);
     if n_skipped > 0 {
         right = right.push(skipped_toggle(state, n_skipped));
@@ -1216,76 +1274,104 @@ fn discography<'a>(state: &'a State, ctx: &Ctx<'a>, n_rg: usize) -> El<'a, Messa
     ]
     .align_y(Alignment::Center);
     let mut col = column![head].spacing(16);
+    // MusicBrainz's sections, plus any kind only the other services have
+    let mut kinds: Vec<String> = state.groups.iter().map(|g| g.kind.clone()).collect();
+    for m in ext {
+        let k = ext_section(m);
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    kinds.sort_by_key(|k| catalog::rank(k));
     let mut any = false;
-    for g in &state.groups {
-        let list: Vec<&Value> = g.items.iter().filter(|rg| keep(rg)).collect();
+    for kind in &kinds {
+        let items: &[Value] = state.groups.iter().find(|g| g.kind == *kind).map(|g| g.items.as_slice()).unwrap_or(&[]);
+        // one list, newest first like MusicBrainz's (a stable sort keeps its order within a year)
+        let mut list: Vec<DiscoTile> = items.iter().filter(|rg| keep(rg)).map(DiscoTile::Mb).collect();
+        list.extend(ext.iter().enumerate().filter(|(_, m)| ext_section(m) == *kind && keep(m)).map(|(i, m)| DiscoTile::Ext(i, m)));
         if list.is_empty() {
             continue;
         }
+        list.sort_by_key(|t| std::cmp::Reverse(year_key(t.release())));
         any = true;
-        let missing = g.items.iter().filter(|rg| shown(rg) && !owned(rg) && !requested(rg)).count();
+        let missing = items.iter().filter(|rg| shown(rg) && !owned(rg) && !requested(rg)).count();
         let mut gh = row![
-            row![h3(format!("{}s", g.kind)), small_muted(list.len().to_string()).color(ctx.look.faint)]
+            row![h3(format!("{kind}s")), small_muted(list.len().to_string()).color(ctx.look.faint)]
                 .spacing(8)
                 .align_y(Alignment::Center),
             space().width(Length::Fill)
         ]
+        .spacing(8)
         .align_y(Alignment::Center);
         if missing > 0 {
             gh = gh.push(btn_icon(
                 Icon::Download,
                 format!("Request {missing} missing"),
                 Btn::Default,
-                (!state.busy_kinds.contains(&g.kind)).then(|| Message::RequestMissing(g.kind.clone())),
+                (!state.busy_kinds.contains(kind)).then(|| Message::RequestMissing(kind.clone())),
             ));
         }
-        let tiles = list
+        let open = state.expanded.contains(kind);
+        // "View all" only when the row is longer than a window's worth of tiles
+        if open {
+            gh = gh.push(btn_sm("Show less", Btn::Ghost, Some(Message::ViewAll(kind.clone()))));
+        } else if list.len() > RAIL_TILES {
+            gh = gh.push(btn_sm("View all", Btn::Ghost, Some(Message::ViewAll(kind.clone()))));
+        }
+        let tiles: Vec<El<'a, Message>> = list
             .iter()
-            .map(|rg| {
-                // MusicBrainz's name for one of several albums of one title ("Blue Album") first
-                let sub = catalog::join_truthy(
-                    &[
-                        fmt::s(rg, "disambiguation"),
-                        catalog::first_truthy(rg, &["date", "year"]),
-                        if fmt::items(&rg["secondary"]).is_empty() { String::new() } else { fmt::s(rg, "type") },
-                    ],
-                    " · ",
-                );
-                AlbumTile {
-                    title: fmt::s(rg, "title"),
-                    sub,
-                    cover: fmt::s(rg, "cover"),
-                    corner: catalog::album_badge(rg),
-                    on_open: Message::Open(Page::Album(fmt::s(rg, "id"))),
-                    on_play: fmt::truthy(rg, "library_album_id").then(|| Message::PlayAlbum(fmt::s(rg, "library_album_id"))),
-                    on_request: request_of(state, rg),
-                }
-                .view(ctx)
+            .map(|t| match t {
+                DiscoTile::Mb(rg) => mb_tile(state, ctx, rg),
+                DiscoTile::Ext(i, m) => ext_tile(state, ctx, *i, m, &aid, &aname),
             })
             .collect();
-        col = col.push(column![gh, grid(tiles)].spacing(12));
+        let body = if open { grid(tiles) } else { widgets::rail(tiles) };
+        col = col.push(column![gh, body].spacing(12));
     }
     if !any {
-        let title = if n_rg > 0 {
+        let title = if n_rg > 0 || !ext.is_empty() {
             if f == "owned" { "Nothing from this artist in the library yet" } else { "You have everything" }
         } else {
             "No releases on MusicBrainz"
         };
         col = col.push(empty(Icon::Disc, title, ""));
     }
+    col = col.push(ext_note(state));
     col.into()
 }
 
-fn ext_releases<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value) -> El<'a, Message> {
+/// The tile of a MusicBrainz release group.
+fn mb_tile<'a>(state: &'a State, ctx: &Ctx<'a>, rg: &'a Value) -> El<'a, Message> {
+    // MusicBrainz's name for one of several albums of one title ("Blue Album") first
+    let sub = catalog::join_truthy(
+        &[
+            fmt::s(rg, "disambiguation"),
+            catalog::first_truthy(rg, &["date", "year"]),
+            if fmt::items(&rg["secondary"]).is_empty() { String::new() } else { fmt::s(rg, "type") },
+        ],
+        " · ",
+    );
+    AlbumTile {
+        title: fmt::s(rg, "title"),
+        sub,
+        cover: fmt::s(rg, "cover"),
+        corner: catalog::album_badge(rg),
+        on_open: Message::Open(Page::Album(fmt::s(rg, "id"))),
+        on_play: fmt::truthy(rg, "library_album_id").then(|| Message::PlayAlbum(fmt::s(rg, "library_album_id"))),
+        on_request: request_of(state, rg),
+    }
+    .view(ctx)
+}
+
+/// Under the discography: "Checking …" while `/catalog` loads, then where the releases tagged
+/// "Not in MusicBrainz" came from and what requesting them does. Nothing when there are none.
+fn ext_note<'a>(state: &'a State) -> El<'a, Message> {
     let Some(releases) = &state.ext else {
         return small_muted("Checking Deezer and Apple Music for releases MusicBrainz is missing…").into();
     };
     if releases.is_empty() {
         return column![].into();
     }
-    let hide = state.hide_skipped;
-    let (aid, aname) = (fmt::s(a, "id"), fmt::s(a, "name"));
-    let n_skipped = releases.iter().filter(|m| skipped(m)).count();
     let mut names: Vec<String> = Vec::new();
     for m in releases {
         for s in fmt::items(&m["sources"]) {
@@ -1295,83 +1381,68 @@ fn ext_releases<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value) -> El<'a, Mes
             }
         }
     }
-    let shown = releases.iter().filter(|m| !(hide && skipped(m))).count();
-    let mut head = row![
-        column![
-            row![h3("Not in MusicBrainz"), small_muted(shown.to_string()).color(ctx.look.faint)]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            small_muted(format!(
-                "Found on {}. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data. Add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
-                catalog::and_join(&names)
-            ))
-        ]
+    let n = releases.len();
+    small_muted(format!(
+        "{n} release{} found only on {} are in their sections, tagged Not in MusicBrainz. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
+        if n == 1 { "" } else { "s" },
+        catalog::and_join(&names)
+    ))
+    .into()
+}
+
+/// The tile of a release MusicBrainz doesn't list (`i` in `State::ext`): its "Not in
+/// MusicBrainz" tag (or In library / its request), Request or Play, and links to its services,
+/// the MusicBrainz release editor, Harmony and the download picker under it.
+fn ext_tile<'a>(state: &'a State, ctx: &Ctx<'a>, i: usize, m: &'a Value, aid: &str, aname: &str) -> El<'a, Message> {
+    let corner: El<'a, Message> = if owned(m) {
+        catalog::in_library()
+    } else if requested(m) {
+        catalog::live_badge(&fmt::s(m, "request_status"), &fmt::s(m, "request_label"))
+    } else {
+        badge("Not in MusicBrainz", Badge::Warn)
+    };
+    let sub = catalog::join_truthy(
+        &[
+            catalog::first_truthy(m, &["date", "year"]),
+            fmt::s(m, "type"),
+            if fmt::truthy(m, "tracks") { format!("{} tracks", fmt::s(m, "tracks")) } else { String::new() },
+        ],
+        " · ",
+    );
+    let key = catalog::album_key(m);
+    let on_request = (!owned(m) && !requested(m) && !state.sending.contains(&key))
+        .then(|| Message::Request(key.clone(), Box::new(ext_body(m, aname))));
+    let tile = AlbumTile {
+        title: fmt::s(m, "title"),
+        sub,
+        cover: fmt::s(m, "cover"),
+        corner: Some(corner),
+        on_open: Message::OpenExt(i),
+        on_play: fmt::truthy(m, "library_album_id").then(|| Message::PlayAlbum(fmt::s(m, "library_album_id"))),
+        on_request,
+    }
+    .view(ctx);
+    let mut links: Vec<El<'a, Message>> = fmt::items(&m["sources"])
+        .iter()
+        .map(|s| catalog::muted_link(fmt::s(s, "name"), 12.0, Message::OpenUrl(fmt::s(s, "url"))))
+        .collect();
+    if catalog::mb_seed_body(m, aid, aname).is_some() {
+        links.push(tip(
+            catalog::muted_link("Add to MusicBrainz", 12.0, Message::SeedLink(i)),
+            "Open the MusicBrainz release editor with this album filled in",
+        ));
+    }
+    if fmt::truthy(m, "harmony") {
+        links.push(tip(
+            catalog::muted_link("Harmony", 12.0, Message::OpenUrl(fmt::s(m, "harmony"))),
+            "Import into MusicBrainz with Harmony",
+        ));
+    }
+    links.push(tip(catalog::muted_link("Pick", 12.0, Message::PickExt(i)), "Pick the exact download"));
+    column![tile, iced::widget::row(links).spacing(8).wrap()]
         .spacing(4)
-        .width(Length::Fill)
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
-    if n_skipped > 0 {
-        head = head.push(skipped_toggle(state, n_skipped));
-    }
-    let mut tiles: Vec<El<'a, Message>> = Vec::new();
-    for (i, m) in releases.iter().enumerate() {
-        if hide && skipped(m) {
-            continue;
-        }
-        let corner: El<'a, Message> = if owned(m) {
-            catalog::in_library()
-        } else if requested(m) {
-            catalog::live_badge(&fmt::s(m, "request_status"), &fmt::s(m, "request_label"))
-        } else {
-            badge("Not in MusicBrainz", Badge::Warn)
-        };
-        let sub = catalog::join_truthy(
-            &[
-                catalog::first_truthy(m, &["date", "year"]),
-                fmt::s(m, "type"),
-                if fmt::truthy(m, "tracks") { format!("{} tracks", fmt::s(m, "tracks")) } else { String::new() },
-            ],
-            " · ",
-        );
-        let key = catalog::album_key(m);
-        let on_request = (!owned(m) && !requested(m) && !state.sending.contains(&key))
-            .then(|| Message::Request(key.clone(), Box::new(ext_body(m, &aname))));
-        let tile = AlbumTile {
-            title: fmt::s(m, "title"),
-            sub,
-            cover: fmt::s(m, "cover"),
-            corner: Some(corner),
-            on_open: Message::OpenExt(i),
-            on_play: fmt::truthy(m, "library_album_id").then(|| Message::PlayAlbum(fmt::s(m, "library_album_id"))),
-            on_request,
-        }
-        .view(ctx);
-        let mut links: Vec<El<'a, Message>> = fmt::items(&m["sources"])
-            .iter()
-            .map(|s| catalog::muted_link(fmt::s(s, "name"), 12.0, Message::OpenUrl(fmt::s(s, "url"))))
-            .collect();
-        if catalog::mb_seed_body(m, &aid, &aname).is_some() {
-            links.push(tip(
-                catalog::muted_link("Add to MusicBrainz", 12.0, Message::SeedLink(i)),
-                "Open the MusicBrainz release editor with this album filled in",
-            ));
-        }
-        if fmt::truthy(m, "harmony") {
-            links.push(tip(
-                catalog::muted_link("Harmony", 12.0, Message::OpenUrl(fmt::s(m, "harmony"))),
-                "Import into MusicBrainz with Harmony",
-            ));
-        }
-        links.push(tip(catalog::muted_link("Pick", 12.0, Message::PickExt(i)), "Pick the exact download"));
-        tiles.push(
-            column![tile, iced::widget::row(links).spacing(8).wrap()]
-                .spacing(4)
-                .width(widgets::tile::WIDTH)
-                .into(),
-        );
-    }
-    column![head, grid(tiles)].spacing(14).into()
+        .width(widgets::tile::WIDTH)
+        .into()
 }
 
 /// A control with a tooltip under it (the web's `title`).
@@ -1419,8 +1490,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     ) {
         col = col.push(l);
     }
-    col = col.push(discography(state, ctx, n_rg));
-    col = col.push(ext_releases(state, ctx, a));
+    col = col.push(discography(state, ctx, a, n_rg));
     if let Some(x) = &state.similar {
         let artists = fmt::items(&x["artists"]);
         if !artists.is_empty() {

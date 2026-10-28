@@ -13,7 +13,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -311,6 +314,59 @@ private fun groupKey(rg: CatalogAlbum): String = rg.secondary.firstOrNull() ?: r
 
 private fun groupRank(k: String): Int = GROUP_ORDER.indexOf(k).let { if (it < 0) 99 else it }
 
+/** How many tiles a discography row holds before its section offers "View all" (about two phone screens). */
+private const val RAIL_TILES = 4
+
+/** The width of a tile in a discography row (the Library tab's grid tile). */
+private val RAIL_TILE_WIDTH = 150.dp
+
+/**
+ * The section a release MusicBrainz doesn't list goes in: the server's canonical [ExtRelease.kind] (Album, EP,
+ * Single, Live, Compilation …; inferred from its track count when the service gave no type), else its type, else
+ * Album. Encore's own extras (Acoustic, Covers …) aren't sections of their own: those go by their type.
+ */
+private fun extSection(m: ExtRelease): String = when {
+    m.kind in GROUP_ORDER -> m.kind
+    m.type in GROUP_ORDER -> m.type
+    else -> "Album"
+}
+
+/** One tile of a discography section: a MusicBrainz release group, or a release only another service lists. */
+private sealed interface DiscoTile {
+    /** The release's year for the newest-first order, as the server sorts MusicBrainz's: no year sorts first. */
+    val yearKey: String
+
+    /** A MusicBrainz release group. */
+    data class Mb(val rg: CatalogAlbum) : DiscoTile {
+        override val yearKey get() = yearOf(rg.year, rg.date)
+    }
+
+    /** A Deezer / Apple Music / Bandcamp / Discogs release MusicBrainz doesn't have (tagged "Not in MusicBrainz"). */
+    data class Ext(val m: ExtRelease) : DiscoTile {
+        override val yearKey get() = yearOf(m.year, m.date)
+    }
+}
+
+/** The first four characters of [year], else of [date]; "9999" (newest) when there is neither. */
+private fun yearOf(year: String, date: String): String = year.ifEmpty { date }.take(4).ifEmpty { "9999" }
+
+/** A discography section's title row: "Albums 12", then "Request N missing" and "View all" / "Show less". */
+@Composable
+private fun DiscoSectionHead(title: String, count: Int, missing: Int, onMissing: () -> Unit, viewAll: String?, onViewAll: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, top = 24.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            Text("$count", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.palette.muted)
+        }
+        if (missing > 0) SmallButton("Request $missing missing", onClick = onMissing)
+        if (viewAll != null) SmallButton(viewAll, onClick = onViewAll)
+    }
+}
+
 /** The page of an artist MusicBrainz knows, by its id (artist links, Discover, For you). */
 @Composable
 fun CatalogArtistScreen(nav: Nav, mbid: String) = ArtistPageScreen(nav, mbid = mbid, name = "")
@@ -373,6 +429,8 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
     val statuses = rememberRequestStatuses()
     LiveRequestStatuses(nav, statuses)
     var filter by remember { mutableStateOf(0) }
+    // the discography sections opened with "View all" (a grid of every release instead of the sideways row)
+    var expanded by remember { mutableStateOf(setOf<String>()) }
     var confirmMissing by remember { mutableStateOf<Pair<String, List<CatalogAlbum>>?>(null) }
     var extTracks by remember { mutableStateOf<ExtRelease?>(null) }
     var moreLike by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -698,37 +756,58 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                     // discography with the All / Missing / In library filter (MusicBrainz's)
                     if (!byName) item { SectionHead("Discography", subtitle = "${a.releaseGroups.size}") }
                     if (!byName) item { ChoiceRow(listOf("All", "Missing", "In library"), filter, onSelect = { filter = it }) }
+                    // each kind a sideways row with "View all" for the full grid; the releases only Deezer, Apple Music,
+                    // Bandcamp or Discogs list sit in their kind's section, tagged "Not in MusicBrainz"
+                    val extList = extReleases.orEmpty()
+                    val sectionKeys = (keys + extList.map { extSection(it) }).distinct().sortedBy { groupRank(it) }
+                    val keep = { inLibrary: Boolean -> filter == 0 || (if (filter == 2) inLibrary else !inLibrary) }
                     var any = false
-                    for (k in keys) {
-                        val all = groups[k] ?: continue
-                        val list = all.filter { rg -> filter == 0 || (if (filter == 2) rg.inLibrary else !rg.inLibrary) }
+                    for (k in sectionKeys) {
+                        val all = groups[k].orEmpty()
+                        // one list, newest first like MusicBrainz's (a stable sort keeps its order within a year)
+                        val list: List<DiscoTile> = (all.filter { keep(it.inLibrary) }.map<CatalogAlbum, DiscoTile> { DiscoTile.Mb(it) } +
+                            extList.filter { extSection(it) == k && keep(it.inLibrary) }.map<ExtRelease, DiscoTile> { DiscoTile.Ext(it) })
+                            .sortedByDescending { it.yearKey }
                         if (list.isEmpty()) continue
                         any = true
                         val missing = all.filter { rg -> !rg.inLibrary && statuses.statusOf(albumKeys(rg), rg.requestStatus).isEmpty() }
+                        val open = k in expanded
                         item(key = "group-$k") {
-                            SectionHead(
-                                "${k}s",
-                                subtitle = "${list.size}",
-                                action = if (missing.isNotEmpty()) "Request ${missing.size} missing" else null,
-                                onAction = if (missing.isNotEmpty()) ({ confirmMissing = k to missing }) else null,
+                            DiscoSectionHead(
+                                "${k}s", list.size,
+                                missing = missing.size, onMissing = { confirmMissing = k to missing },
+                                viewAll = if (open) "Show less" else if (list.size > RAIL_TILES) "View all" else null,
+                                onViewAll = { expanded = if (open) expanded - k else expanded + k },
                             )
                         }
-                        tileRows(list, 2, key = "rg-$k") { rg ->
-                            CatalogAlbumTile(
-                                nav, rg, statuses,
-                                subtitle = listOf(rg.disambiguation, rg.date.ifEmpty { rg.year }, if (rg.secondary.isNotEmpty()) rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
-                            )
+                        val tile: @Composable (DiscoTile) -> Unit = { t ->
+                            when (t) {
+                                is DiscoTile.Mb -> CatalogAlbumTile(
+                                    nav, t.rg, statuses,
+                                    subtitle = listOf(t.rg.disambiguation, t.rg.date.ifEmpty { t.rg.year }, if (t.rg.secondary.isNotEmpty()) t.rg.type else "").filter { it.isNotEmpty() }.joinToString(" · "),
+                                )
+                                is DiscoTile.Ext -> ExtReleaseTile(nav, a.name, t.m, statuses, onOpen = { extTracks = t.m })
+                            }
+                        }
+                        if (open) {
+                            tileRows(list, 2, key = "rg-$k", content = tile)
+                        } else {
+                            item(key = "rail-$k") {
+                                LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                    items(list) { t -> Box(Modifier.width(RAIL_TILE_WIDTH)) { tile(t) } }
+                                }
+                            }
                         }
                     }
                     if (!any && !byName) {
                         item {
                             EmptyState(
                                 R.drawable.ic_disc,
-                                if (a.releaseGroups.isNotEmpty()) (if (filter == 2) "Nothing from this artist in the library yet" else "You have everything 🎉") else "No releases on MusicBrainz",
+                                if (a.releaseGroups.isNotEmpty() || extList.isNotEmpty()) (if (filter == 2) "Nothing from this artist in the library yet" else "You have everything 🎉") else "No releases on MusicBrainz",
                             )
                         }
                     }
-                    // releases Deezer / Apple Music / Bandcamp / Discogs know and MusicBrainz doesn't
+                    // where the releases tagged "Not in MusicBrainz" came from (they are in the sections above)
                     if (extLoading) {
                         item {
                             Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -737,18 +816,16 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                                 Text("Checking Deezer and Apple Music for releases MusicBrainz is missing…", style = MaterialTheme.typography.bodySmall, color = p.muted)
                             }
                         }
-                    } else if (!extReleases.isNullOrEmpty()) {
-                        val found = extReleases.flatMap { r -> r.sources.map { it.first } }.distinct()
+                    } else if (extList.isNotEmpty()) {
+                        val found = extList.flatMap { r -> r.sources.map { it.first } }.distinct()
                         val foundText = if (found.size > 1) found.dropLast(1).joinToString(", ") + " and " + found.last() else found.joinToString()
-                        item { SectionHead("Not in MusicBrainz", subtitle = "${extReleases.size}") }
                         item {
                             NoteText(
-                                "Found on $foundText. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data. " +
-                                    "Add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
-                                Modifier.padding(bottom = 6.dp),
+                                "${plural(extList.size, "release")} found only on $foundText are in their sections, tagged Not in MusicBrainz. " +
+                                    "Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; add them to MusicBrainz with Harmony and Encore re-tags them automatically.",
+                                Modifier.padding(top = 8.dp, bottom = 6.dp),
                             )
                         }
-                        tileRows(extReleases, 2, key = "ext") { m -> ExtReleaseTile(nav, a.name, m, statuses, onOpen = { extTracks = m }) }
                     }
                     // similar artists
                     if (sim != null && sim.artists.isNotEmpty()) {

@@ -71,6 +71,17 @@ pub fn kind_of(kind: &str, title: &str) -> &'static str {
     }
 }
 
+/// A release's type refined by its track count, for a service that only marks singles and EPs in the title
+/// (Apple Music): an "Album" of one to three tracks is a single, of four to six an EP (the stores' own rule
+/// of thumb, and Bandcamp's here). Any other type, or no count, stays as it is.
+pub fn infer_kind(kind: &'static str, tracks: Option<i64>) -> &'static str {
+    match (kind, tracks) {
+        ("Album", Some(1..=3)) => "Single",
+        ("Album", Some(4..=6)) => "EP",
+        _ => kind,
+    }
+}
+
 /// A length in seconds from a number, an ISO 8601 duration ("PT3M25S") or "m:ss" / "h:mm:ss"; null when none.
 pub fn dur(v: &Value) -> Value {
     if let Some(n) = v.as_f64() {
@@ -178,7 +189,7 @@ async fn apple_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
         let cover = s(&a["artworkUrl100"]).replace("100x100bb", "600x600bb");
         let id = a["collectionId"].clone();
         let url = a["collectionViewUrl"].as_str().map(String::from).unwrap_or(format!("https://music.apple.com/album/{id}"));
-        json!({ "title": RE_SUFFIX_CASE.replace(&title, "").to_string(), "type": kind_of("", &title), "date": s(&a["releaseDate"]).chars().take(10).collect::<String>(),
+        json!({ "title": RE_SUFFIX_CASE.replace(&title, "").to_string(), "type": infer_kind(kind_of("", &title), a["trackCount"].as_i64()), "date": s(&a["releaseDate"]).chars().take(10).collect::<String>(),
                 "cover": if cover.is_empty() { Value::Null } else { json!(cover) }, "tracks": a["trackCount"],
                 "explicit": a["collectionExplicitness"] == "explicit", "sources": src("Apple Music", id, url) })
     }).collect())
@@ -566,6 +577,18 @@ pub async fn merged(st: &impl Ctx, artist: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_short_album_is_a_single_or_an_ep() {
+        assert_eq!(infer_kind("Album", Some(1)), "Single");
+        assert_eq!(infer_kind("Album", Some(3)), "Single");
+        assert_eq!(infer_kind("Album", Some(5)), "EP");
+        assert_eq!(infer_kind("Album", Some(7)), "Album");
+        assert_eq!(infer_kind("Album", None), "Album");
+        // a type the service gave is kept
+        assert_eq!(infer_kind("Compilation", Some(2)), "Compilation");
+        assert_eq!(infer_kind("EP", Some(2)), "EP");
+    }
+
     #[test]
     fn titles() {
         assert_eq!(title_key("Folklore (Deluxe Edition)"), "folklore");

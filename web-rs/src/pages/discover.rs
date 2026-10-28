@@ -784,6 +784,73 @@ async fn release_types_dialog(a: &Value) -> bool {
     rx.await.unwrap_or(false)
 }
 
+/// How many tiles a discography row holds before its section offers "View all" (about a wide window's row).
+const RAIL_TILES: usize = 6;
+
+/// One tile of a discography section: a MusicBrainz release group, or a release only another service lists
+/// (its index in the page's `/catalog` list, which its buttons carry).
+enum DiscoTile<'a> {
+    /// A MusicBrainz release group.
+    Mb(&'a Value),
+    /// A Deezer / Apple Music / Bandcamp / Discogs release MusicBrainz doesn't have, and its index.
+    Ext(usize, &'a Value),
+}
+
+impl DiscoTile<'_> {
+    /// The release behind the tile.
+    fn release(&self) -> &Value {
+        match self { DiscoTile::Mb(v) | DiscoTile::Ext(_, v) => v }
+    }
+}
+
+/// A release's year for the newest-first order, as the server sorts MusicBrainz's: no year sorts first.
+fn year_key(v: &Value) -> String {
+    let y: String = first_truthy(v, &["year", "date"]).chars().take(4).collect();
+    if y.is_empty() { "9999".to_string() } else { y }
+}
+
+/// Where a section goes on the artist page (`ORDER`, then anything else).
+fn section_rank(k: &str) -> usize {
+    ORDER.iter().position(|o| *o == k).unwrap_or(ORDER.len())
+}
+
+/// The section a release MusicBrainz doesn't list goes in: the server's canonical `kind` (Album, EP, Single,
+/// Live, Compilation …; inferred from its track count when the service gave no type), else its `type`, else
+/// Album. Encore's own extras (Acoustic, Covers …) aren't sections of their own: those go by their type.
+fn ext_section(m: &Value) -> String {
+    let (k, t) = (m.s("kind"), m.s("type"));
+    if ORDER.contains(&k.as_str()) { k } else if ORDER.contains(&t.as_str()) { t } else { "Album".to_string() }
+}
+
+/// The tile of a release MusicBrainz doesn't list: its "Not in MusicBrainz" tag (or In library / its request),
+/// Request or Play, and links to its services, Harmony, the MusicBrainz release editor and the picker. `i` is
+/// its index in the page's `/catalog` list.
+fn ext_tile(i: usize, m: &Value, aid: &str, aname: &str) -> String {
+    let corner = if m.truthy("in_library") { r#"<span class="badge ok">In library</span>"#.to_string() }
+        else if m.truthy("request_status") { live_badge(&m.s("request_status"), &m.s("request_label")) }
+        else { r#"<span class="badge warn">Not in MusicBrainz</span>"#.to_string() };
+    let overlay = if m.truthy("library_album_id") {
+        format!(r#"<button class="fab" data-play-album="{}" title="Play" aria-label="Play">{}</button>"#, esck(m, "library_album_id"), icon("play"))
+    } else if m.truthy("in_library") || m.truthy("request_status") { String::new() }
+    else { format!(r#"<button class="fab" data-ext-req="{i}" data-req-hide="{}" title="Request">{}</button>"#, esc(&album_key(m)), icon("plus")) };
+    let sub = esc(&join_truthy(&[first_truthy(m, &["date", "year"]), m.s("type"), if m.truthy("tracks") { format!("{} tracks", m.s("tracks")) } else { String::new() }], " · "));
+    let sources: String = m.a("sources").iter().map(|s| format!(r#"<a class="muted" target="_blank" rel="noopener" href="{}">{}</a>"#, esck(s, "url"), esck(s, "name"))).collect();
+    let seed = { let u = mb_seed(m, aid, aname); if u.is_empty() { String::new() } else {
+        format!(r#"<a target="_blank" rel="noopener" href="{}" title="Open the MusicBrainz release editor with this album filled in">Add to MusicBrainz</a>"#, esc(&u)) } };
+    format!(r##"<div class="tile" data-ext-open="{i}">
+        <div class="art">{}
+          <div class="corner" data-req-key="{}">{corner}</div>
+          <div class="overlay">{overlay}</div></div>
+        <div class="t ellipsis" title="{title}">{title}</div>
+        <div class="s ellipsis">{sub}</div>
+        <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
+          {sources}
+          {seed}
+          <a target="_blank" rel="noopener" href="{}" title="Import into MusicBrainz with Harmony">Harmony</a>
+          <a href="#" data-ext-pick="{i}" title="Pick the exact download">Pick</a>
+        </div></div>"##, art(&m.s("cover"), &m.s("title"), ""), esc(&album_key(m)), esck(m, "harmony"), title = esck(m, "title"))
+}
+
 const ORDER: [&str; 15] = ["Album", "EP", "Single", "Compilation", "Live", "Soundtrack", "Remix", "DJ-mix", "Mixtape/Street", "Demo", "Other", "Broadcast", "Interview", "Spokenword", "Audiobook"];
 const LINK_KEYS: [&str; 9] = ["official homepage", "bandcamp", "soundcloud", "youtube", "streaming", "free streaming", "wikidata", "discogs", "last.fm"];
 
@@ -917,8 +984,13 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         let groups = Rc::new(RefCell::new(groups));
         let keys = Rc::new(keys);
         let n_rg = release_groups.len();
+        // the releases MusicBrainz doesn't list, once /catalog answers: drawn in the sections with the rest
+        let rel: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
+        // the sections opened with "View all" (a grid of every release instead of the sideways row)
+        let expanded: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let paint: Rc<dyn Fn()> = {
-            let (view, disco, groups, keys, filter, hide_skipped) = (view.clone(), disco.clone(), groups.clone(), keys.clone(), filter.clone(), hide_skipped.clone());
+            let (view, disco, groups, keys, filter, hide_skipped, rel, expanded) = (view.clone(), disco.clone(), groups.clone(), keys.clone(), filter.clone(), hide_skipped.clone(), rel.clone(), expanded.clone());
+            let (aid, aname) = (a.s("id"), a.s("name"));
             Rc::new(move || {
                 let f = filter.borrow().clone();
                 for b in dom::qsa_in(&view, "#disco-filter button") { dom::toggle_class(&b, "active", dom::data(&b, "f") == f); }
@@ -926,36 +998,63 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                 let shown = |rg: &Value| !(hide && rg.truthy("skipped"));
                 let keep = |rg: &Value| shown(rg) && (f == "all" || (if f == "owned" { rg.truthy("in_library") } else { !rg.truthy("in_library") }));
                 let g = groups.borrow();
-                let skipped = g.iter().map(|(_, l)| l.iter().filter(|rg| rg.truthy("skipped")).count()).sum::<usize>();
+                let ext = rel.borrow();
+                let open = expanded.borrow();
+                let skipped = g.iter().map(|(_, l)| l.iter().filter(|rg| rg.truthy("skipped")).count()).sum::<usize>()
+                    + ext.iter().filter(|m| m.truthy("skipped")).count();
                 if let Some(el) = dom::qs_in(&view, "#disco-skipped") { set_html(&el, &if skipped > 0 { skipped_toggle(hide, skipped) } else { String::new() }); }
-                let html: String = keys.iter().map(|k| {
-                    let Some((_, all)) = g.iter().find(|(kk, _)| kk == k) else { return String::new() };
-                    let list: Vec<&Value> = all.iter().filter(|rg| keep(rg)).collect();
+                // MusicBrainz's sections, plus any kind only the other services have
+                let mut sections: Vec<String> = keys.to_vec();
+                for m in ext.iter() { let k = ext_section(m); if !sections.contains(&k) { sections.push(k); } }
+                sections.sort_by_key(|k| section_rank(k));
+                let html: String = sections.iter().map(|k| {
+                    let all: &[Value] = g.iter().find(|(kk, _)| kk == k).map(|(_, l)| l.as_slice()).unwrap_or(&[]);
+                    // one list, newest first like MusicBrainz's (a stable sort keeps its order within a year)
+                    let mut list: Vec<DiscoTile> = all.iter().filter(|rg| keep(rg)).map(DiscoTile::Mb).collect();
+                    list.extend(ext.iter().enumerate().filter(|(_, m)| ext_section(m) == *k && keep(m)).map(|(i, m)| DiscoTile::Ext(i, m)));
                     if list.is_empty() { return String::new(); }
+                    list.sort_by_key(|t| std::cmp::Reverse(year_key(t.release())));
                     let missing = all.iter().filter(|rg| shown(rg) && !rg.truthy("in_library") && !rg.truthy("request_status")).count();
                     let req_missing = if missing > 0 {
                         format!(r#"<button class="btn sm" data-req-missing="{}">{}Request {} missing</button>"#, esc(k), icon("download"), missing)
                     } else { String::new() };
-                    let tiles: String = list.iter().map(|rg| {
-                        // MusicBrainz's name for one of several albums of one title ("Blue Album") first
-                        let sub = esc(&join_truthy(&[rg.s("disambiguation"), first_truthy(rg, &["date", "year"]), if rg.a("secondary").is_empty() { String::new() } else { rg.s("type") }], " · "));
-                        common::album_tile_with(rg, &format!("/album/{}", rg.s("id")), &album_actions(rg), Some(&sub), Some(&album_key(rg)), Some(&album_badge(rg)))
+                    let is_open = open.contains(k);
+                    // "View all" only when the row is longer than a screen's worth of tiles
+                    let view_all = if is_open { format!(r#"<button class="btn sm ghost" data-view-all="{}">Show less</button>"#, esc(k)) }
+                        else if list.len() > RAIL_TILES { format!(r#"<button class="btn sm ghost" data-view-all="{}">View all</button>"#, esc(k)) }
+                        else { String::new() };
+                    let tiles: String = list.iter().map(|t| match t {
+                        DiscoTile::Mb(rg) => {
+                            // MusicBrainz's name for one of several albums of one title ("Blue Album") first
+                            let sub = esc(&join_truthy(&[rg.s("disambiguation"), first_truthy(rg, &["date", "year"]), if rg.a("secondary").is_empty() { String::new() } else { rg.s("type") }], " · "));
+                            common::album_tile_with(rg, &format!("/album/{}", rg.s("id")), &album_actions(rg), Some(&sub), Some(&album_key(rg)), Some(&album_badge(rg)))
+                        }
+                        DiscoTile::Ext(i, m) => ext_tile(*i, m, &aid, &aname),
                     }).collect();
                     format!(r#"<div class="section-head"><h3>{}s <span class="faint small">{}</span></h3>
-          {req_missing}</div>
-        <div class="grid">{tiles}</div>"#, esc(k), list.len())
+          <div class="row" style="gap:8px">{req_missing}{view_all}</div></div>
+        <div class="grid{}">{tiles}</div>"#, esc(k), list.len(), if is_open { "" } else { " rail" })
                 }).collect();
-                let empty_title = if n_rg > 0 { if f == "owned" { "Nothing from this artist in the library yet" } else { "You have everything 🎉" } } else { "No releases on MusicBrainz" };
+                let empty_title = if n_rg > 0 || !ext.is_empty() { if f == "owned" { "Nothing from this artist in the library yet" } else { "You have everything 🎉" } } else { "No releases on MusicBrainz" };
                 set_html(&disco, &if html.is_empty() { empty_state(&icon("disc"), empty_title, "") } else { html });
             })
         };
         paint();
-        // set once the Deezer / Apple list has drawn (see paint_ext below)
-        let paint_ext: Rc<RefCell<Rc<dyn Fn()>>> = Rc::new(RefCell::new(Rc::new(|| {})));
         let repaint_skipped: Rc<dyn Fn(bool)> = {
-            let (hide_skipped, paint, paint_ext) = (hide_skipped.clone(), paint.clone(), paint_ext.clone());
-            Rc::new(move |h: bool| { hide_skipped.set(h); paint(); let pe = paint_ext.borrow().clone(); pe(); })
+            let (hide_skipped, paint) = (hide_skipped.clone(), paint.clone());
+            Rc::new(move |h: bool| { hide_skipped.set(h); paint(); })
         };
+        // "View all" opens a section's full grid in place; "Show less" folds it back into its row
+        {
+            let (expanded, paint) = (expanded.clone(), paint.clone());
+            dom::on(&disco, "click", move |e| {
+                let Some(b) = dom::closest(e, "[data-view-all]") else { return };
+                dom::stop(e);
+                let k = dom::data(&b, "viewAll");
+                { let mut open = expanded.borrow_mut(); if !open.remove(&k) { open.insert(k); } }
+                paint();
+            });
+        }
         if let Some(el) = dom::qs_in(&view, "#disco-skipped") { bind_skipped_toggle(&el, repaint_skipped.clone()); }
         {
             let (filter, paint) = (filter.clone(), paint.clone());
@@ -1009,7 +1108,6 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         // Music releases it is missing once they have loaded), ticked per Settings → Release types; the server
         // requests the ticked ones that aren't owned or requested (title and year dedupe, library check), and
         // each release it queues arrives as a request event and marks its tile
-        let rel: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let (a, view2, groups, rel) = (a.clone(), view.clone(), groups.clone(), rel.clone());
             let first_cover = first_cover.clone();
@@ -1075,12 +1173,12 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
 
-        // releases on Deezer / Apple Music that MusicBrainz doesn't list
+        // releases MusicBrainz doesn't list (Deezer, Apple Music, Bandcamp, Discogs): sorted into the sections
+        // above by their kind, each tagged "Not in MusicBrainz"; `#ext-releases` only says where they came from
         let ext = need(&view, "#ext-releases")?;
-        bind_skipped_toggle(&ext, repaint_skipped.clone());
         set_html(&ext, r#"<div class="small muted mt"><span class="spinner"></span> Checking Deezer and Apple Music for releases MusicBrainz is missing…</div>"#);
         {
-            let (view, ext, a, rel, paint_ext) = (view.clone(), ext.clone(), a.clone(), rel.clone(), paint_ext.clone());
+            let (view, ext, disco, a, rel, paint) = (view.clone(), ext.clone(), disco.clone(), a.clone(), rel.clone(), paint.clone());
             dom::spawn(async move {
                 let x = match api::get(&format!("/discover/artist/{}/catalog", a.s("id"))).await { Ok(x) => x, Err(_) => { set_html(&ext, ""); return; } };
                 if !view.is_connected() { return; }
@@ -1101,52 +1199,13 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                         Value::Object(o)
                     }
                 };
+                let mut names: Vec<String> = Vec::new();
+                for m in releases.iter() { for s in m.a("sources") { let n = s.s("name"); if !names.contains(&n) { names.push(n); } } }
+                set_html(&ext, &format!(r#"<p class="small muted" style="margin:8px 0 0">{n} release{s} found only on {} are in their sections, tagged <span class="badge warn">Not in MusicBrainz</span>. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; add them to MusicBrainz with Harmony and Encore re-tags them automatically.</p>"#,
+                    and_join(&names), n = releases.len(), s = if releases.len() == 1 { "" } else { "s" }));
                 *rel.borrow_mut() = releases;
-                let paint: Rc<dyn Fn()> = {
-                    let (ext, rel, hide_skipped) = (ext.clone(), rel.clone(), hide_skipped.clone());
-                    let (aid, aname) = (a.s("id"), a.s("name"));
-                    Rc::new(move || {
-                        let releases = rel.borrow();
-                        let hide = hide_skipped.get();
-                        let ext_skipped = releases.iter().filter(|m| m.truthy("skipped")).count();
-                        let mut names: Vec<String> = Vec::new();
-                        for m in releases.iter() { for s in m.a("sources") { let n = s.s("name"); if !names.contains(&n) { names.push(n); } } }
-                        let tiles: String = releases.iter().enumerate().map(|(i, m)| {
-                            if hide && m.truthy("skipped") { return String::new(); }
-                            let corner = if m.truthy("in_library") { r#"<span class="badge ok">In library</span>"#.to_string() }
-                                else if m.truthy("request_status") { live_badge(&m.s("request_status"), &m.s("request_label")) }
-                                else { r#"<span class="badge warn">Not in MusicBrainz</span>"#.to_string() };
-                            let overlay = if m.truthy("library_album_id") {
-                                format!(r#"<button class="fab" data-play-album="{}" title="Play" aria-label="Play">{}</button>"#, esck(m, "library_album_id"), icon("play"))
-                            } else if m.truthy("in_library") || m.truthy("request_status") { String::new() }
-                            else { format!(r#"<button class="fab" data-ext-req="{i}" data-req-hide="{}" title="Request">{}</button>"#, esc(&album_key(m)), icon("plus")) };
-                            let sub = esc(&join_truthy(&[first_truthy(m, &["date", "year"]), m.s("type"), if m.truthy("tracks") { format!("{} tracks", m.s("tracks")) } else { String::new() }], " · "));
-                            let sources: String = m.a("sources").iter().map(|s| format!(r#"<a class="muted" target="_blank" rel="noopener" href="{}">{}</a>"#, esck(s, "url"), esck(s, "name"))).collect();
-                            format!(r##"<div class="tile" data-ext-open="{i}">
-        <div class="art">{}
-          <div class="corner" data-req-key="{}">{corner}</div>
-          <div class="overlay">{overlay}</div></div>
-        <div class="t ellipsis" title="{title}">{title}</div>
-        <div class="s ellipsis">{sub}</div>
-        <div class="row small" style="gap:8px;flex-wrap:wrap;margin-top:4px">
-          {sources}
-          {seed}
-          <a target="_blank" rel="noopener" href="{}" title="Import into MusicBrainz with Harmony">Harmony</a>
-          <a href="#" data-ext-pick="{i}" title="Pick the exact download">Pick</a>
-        </div></div>"##, art(&m.s("cover"), &m.s("title"), ""), esc(&album_key(m)), esck(m, "harmony"), title = esck(m, "title"),
-                                seed = { let u = mb_seed(m, &aid, &aname); if u.is_empty() { String::new() } else {
-                                    format!(r#"<a target="_blank" rel="noopener" href="{}" title="Open the MusicBrainz release editor with this album filled in">Add to MusicBrainz</a>"#, esc(&u)) } })
-                        }).collect();
-                        set_html(&ext, &format!(r#"<div class="section-head" style="margin-top:28px"><div><h3>Not in MusicBrainz <span class="faint small">{}</span></h3>
-        <div class="small muted">Found on {}. Requests download from Soulseek, streamrip, YouTube Music or Bandcamp; files are tagged from the source's data.
-        Add them to MusicBrainz with Harmony and Encore re-tags them automatically.</div></div>{}</div>
-      <div class="grid">{tiles}</div>"#, releases.iter().filter(|m| !(hide && m.truthy("skipped"))).count(), and_join(&names),
-                            if ext_skipped > 0 { skipped_toggle(hide, ext_skipped) } else { String::new() }));
-                    })
-                };
-                *paint_ext.borrow_mut() = paint.clone();
                 paint();
-                dom::on(&ext, "click", move |e| {
+                dom::on(&disco, "click", move |e| {
                     if let Some(r) = dom::closest(e, "[data-ext-req]") {
                         dom::stop(e);
                         let Some(i) = idx(&r, "extReq") else { return };

@@ -392,7 +392,23 @@ fn render_linked(el: &Element) {
     if let Some(seek) = qs_in(el, "#seek") { bind_seek(&mut ls, &seek, "t-cur"); }
     set_bar(ls);
     update_linked_time();
+    fit_sides(el);
     measure_titles();
+}
+
+/// Keeps the transport and seek bar centred in the bar: measures the right side's buttons at their
+/// natural width and gives both side columns that as their minimum (`--side`, read by the
+/// `.player` grid in app.css), so the song's side is always as wide as the buttons' side. Without
+/// it a long row of buttons (badges, devices, dislike, ...) pushed the controls off the middle.
+/// Called after each time the bar is drawn; the buttons' natural width does not change with the
+/// window's, so a resize needs no new measurement.
+fn fit_sides(el: &Element) {
+    let Some(right) = qs_in(el, ".right") else { return };
+    // measured unsqueezed: max-content for a moment, then back to the grid's width
+    dom::set_style(&right, "width", "max-content");
+    let w = dom::html_el(&right).map(|h| h.offset_width()).unwrap_or(0);
+    dom::set_style(&right, "width", "");
+    dom::set_style(el, "--side", &format!("{w}px"));
 }
 
 pub(super) fn render() {
@@ -428,6 +444,7 @@ pub(super) fn render() {
         wire_group(&mut ls, &el, "#p-group", "#p-catchup");
         wire(&mut ls, &el, "#vol", "input", |e| { if let Some(v) = dom::target_el(e) { local_volume(num(&dom::value(&v))); } });
         set_bar(ls);
+        fit_sides(&el);
         if st(|s| s.full) { set_full(false); }
         return;
     };
@@ -492,6 +509,7 @@ pub(super) fn render() {
     set_bar(ls);
     update_time();
     if st(|s| s.full) { render_full(); }
+    fit_sides(&el);
     // drawn anew: a title too long for the bar scrolls (marquee.rs) – measured here, never on a tick
     measure_titles();
 }
