@@ -359,7 +359,10 @@ body.has-player { --player: var(--player-h); }
 .player {
   position: fixed; left: 0; right: 0; bottom: 0; height: var(--player-h); z-index: 50;
   background: color-mix(in srgb, var(--bg-2) 90%, transparent); backdrop-filter: blur(16px);
-  border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+  /* The right column never goes narrower than its buttons plus the volume slider (max-content): with a full
+     set of bar buttons a plain 1fr share was too small, the flexible volume slider shrank to nothing and the
+     buttons spilled left over the seek bar. The title and controls columns give up the space instead. */
+  border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(max-content, 1fr);
   align-items: center; gap: 18px; padding: 0 20px;
 }
 .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -379,6 +382,9 @@ body.has-player { --player: var(--player-h); }
 .player #p-signal { cursor: pointer; font: inherit; font-size: 12px; }
 .player .ctrls.idle button:disabled, .player .ctrls.idle input:disabled { opacity: .35; cursor: default; }   /* stays on the far right even when the middle (controls) is empty, e.g. nothing playing */
 .player .right input { max-width: 100px; }
+/* The volume slider keeps a fixed, usable width rather than taking whatever room the buttons leave (flex: 1
+   from the shared range rule above let it collapse to just its knob, which could not be dragged). */
+.player .right #vol { flex: 0 0 96px; width: 96px; }
 .btn.like.on { color: var(--accent); }
 .player .right .btn.mode.on { color: var(--accent); }
 .player .right .btn.mode sup { font-size: 9px; margin-left: -3px; }
