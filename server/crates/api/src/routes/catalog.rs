@@ -181,6 +181,10 @@ async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(m
         Ok(rel)
     }).await?;
     crate::routes::discover::mark_skipped(&filter, &mut rel);
+    // each release's canonical kind, so the artist page can file it in its section (Albums, Singles, Live …)
+    for r in rel.iter_mut() {
+        r["kind"] = json!(encore_config::release_types::group_kind(r));
+    }
     // `releases` flat for the tiles, `groups` by canonical kind (with `allowed` per release) for the dialog
     let groups = grouped(&filter, &rel);
     Ok(json!({ "enabled": true, "releases": rel, "groups": groups }))
