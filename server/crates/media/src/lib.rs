@@ -1,5 +1,5 @@
 //! Audio files and pictures: one ffmpeg command builder ([`ffmpeg::Ffmpeg`]), reading and writing tags
-//! ([`tags`]), what a file holds ([`probe`]), album covers and their thumbnails ([`covers`]), and the
+//! ([`tags`]), what a file holds ([`probe`]), fragmented MP4 files made plain ([`mp4`]), album covers and their thumbnails ([`covers`]), and the
 //! quality and loudness checks ([`quality`], [`loudness`]).
 //!
 //! Functions that need the server's database, settings or caches take a [`Ctx`], which the server's
@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 pub mod covers;
 pub mod ffmpeg;
 pub mod loudness;
+pub mod mp4;
 pub mod probe;
 pub mod quality;
 pub mod tags;

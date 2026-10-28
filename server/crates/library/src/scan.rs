@@ -118,7 +118,22 @@ pub struct FileRow {
 }
 
 /// Reads a file's tags (no database work): `meta` is its metadata when the caller has it already.
+///
+/// A fragmented MP4 is first rewritten as a plain one ([`encore_media::mp4::defragment`]), so the song has a
+/// length and every player can seek in it; when that fails (a read-only folder, no ffmpeg) the file is read as
+/// it is, with ffprobe's length, and the reason goes to the log.
 fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<FileRow> {
+    let mut meta = meta;
+    if encore_media::mp4::has_mp4_ext(path) && encore_media::mp4::is_fragmented(path) {
+        match encore_media::mp4::defragment(path) {
+            // the file is new: its size and modification time are read again below
+            Ok(()) => {
+                tracing::info!("scan: made the fragmented MP4 {path} a plain one (audio copied, tags kept)");
+                meta = None;
+            }
+            Err(e) => tracing::warn!("scan: {path} is a fragmented MP4 and could not be made plain: {e}"),
+        }
+    }
     let meta = match meta {
         Some(m) => m,
         None => std::fs::metadata(path)?,
@@ -130,6 +145,13 @@ fn read_file(path: &str, meta: Option<std::fs::Metadata>) -> std::io::Result<Fil
     let album_id = album_key(&t.s("albumartist"), &t.s("album"), path);
     let vals: Vec<Value> = COLS.iter().map(|c| t.get(*c).cloned().unwrap_or(Value::Null)).collect();
     Ok(FileRow { path: path.to_string(), album_id, mtime, size, vals, gain: facts.gain, duration: t.f("duration") })
+}
+
+/// Whether an unchanged file is read again anyway: its row has no length (`duration` 0) and it is a fragmented
+/// MP4, which [`read_file`] makes plain (or measures with ffprobe), so the player gets a length and can seek.
+/// Other files without a length (empty or broken ones) are left alone, so a scan doesn't read them every time.
+fn needs_length(path: &str, duration: f64) -> bool {
+    duration <= 0.0 && encore_media::mp4::has_mp4_ext(path) && encore_media::mp4::is_fragmented(path)
 }
 
 /// Writes one file's row (a new song, or the new tags of a known one). The albums it touched come back: its
@@ -312,8 +334,10 @@ impl Library {
         let prefix = format!("{}/%", root.trim_end_matches('/'));
         // LIKE ignores the case of ASCII letters and reads `_` as any letter: only the rows really in this folder
         // (another library folder may be named like it)
-        let known: HashMap<String, f64> = db.query("SELECT path, mtime FROM tracks WHERE path LIKE ?", p![prefix]).unwrap_or_default()
-            .into_iter().map(|r| (r.s("path"), r.f("mtime"))).filter(|(path, _)| Path::new(path).starts_with(root)).collect();
+        // path → (mtime, duration): a fragmented MP4 stored without a length (scanned before the scan made them
+        // plain, see read_file) is read again even when its file has not changed ([`needs_length`])
+        let known: HashMap<String, (f64, f64)> = db.query("SELECT path, mtime, duration FROM tracks WHERE path LIKE ?", p![prefix]).unwrap_or_default()
+            .into_iter().map(|r| (r.s("path"), (r.f("mtime"), r.f("duration")))).filter(|(path, _)| Path::new(path).starts_with(root)).collect();
         // what the walk couldn't read (a folder without permission, a link to a disk that is away): the rows
         // under it are not taken for vanished files; an error without a path keeps every row
         let (mut unreadable, mut unread_all): (Vec<PathBuf>, bool) = (vec![], false);
@@ -346,7 +370,7 @@ impl Library {
             seen.insert(path.clone());
             let Ok(meta) = std::fs::metadata(f) else { continue };
             let (mtime, _) = mtime_size(&meta);
-            if !full && known.get(&path).is_some_and(|k| (k - mtime).abs() < 0.001) {
+            if !full && known.get(&path).is_some_and(|(k, dur)| (k - mtime).abs() < 0.001 && !needs_length(&path, *dur)) {
                 continue;
             }
             match read_file(&path, Some(meta)) {
@@ -876,6 +900,58 @@ mod tests {
         assert_eq!(out.albums.len(), 1);
         assert!(index_file(&db, &paths[1]).is_err());
         assert!(index_file(&db, &paths[0]).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fragmented .m4a (no length lofty can read, nothing a player can seek in) is made plain by the scan and
+    /// stored with its length; one already in the library at 0:00 is fixed by the next scan although its file
+    /// has not changed. Skipped where ffmpeg is not installed.
+    #[test]
+    fn a_fragmented_m4a_gets_its_length() {
+        if !encore_media::ffmpeg::available() {
+            return;
+        }
+        let dir = encore_core::tmp::dir("scan-fmp4");
+        let album = dir.join("music/DENONBU/going");
+        std::fs::create_dir_all(&album).unwrap();
+        let song = album.join("01 going.m4a");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=f=440:d=8", "-ac", "2", "-c:a", "alac",
+                   "-metadata", "title=going…", "-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
+            .arg(&song)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let db = Db::open(&dir.join("cfg")).unwrap();
+        let lib = Library::default();
+        let root = dir.join("music").to_string_lossy().into_owned();
+        let path = song.to_string_lossy().into_owned();
+        let length = |db: &Db| db.one("SELECT duration, title FROM tracks", p![]).unwrap().unwrap();
+        lib.scan_sync(&db, &root, false);
+        let row = length(&db);
+        assert!((row.f("duration") - 8.0).abs() < 0.2, "{row:?}");
+        assert_eq!(row.s("title"), "going…");
+        assert!(!encore_media::mp4::is_fragmented(&path), "the file is plain now");
+        // a song an older server stored at 0:00: the file is fragmented again (as it was), its row says the same
+        // modification time, and the next scan still reads it and fixes it
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-i"]).arg(&song)
+            .args(["-c", "copy", "-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
+            .arg(dir.join("frag.m4a"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        std::fs::rename(dir.join("frag.m4a"), &song).unwrap();
+        let (mtime, _) = mtime_size(&std::fs::metadata(&song).unwrap());
+        db.execute("UPDATE tracks SET duration=0, mtime=?", p![mtime]).unwrap();
+        assert!(needs_length(&path, 0.0));
+        let s = lib.scan_sync(&db, &root, false);
+        assert_eq!(s.changed, 1);
+        assert!((length(&db).f("duration") - 8.0).abs() < 0.2);
+        // and once fixed, an unchanged file is not read again
+        assert_eq!(lib.scan_sync(&db, &root, false).changed, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

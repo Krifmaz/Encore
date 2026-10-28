@@ -67,10 +67,15 @@ pub fn read_audio_info(path: &str) -> Value {
         "mpeg" => "mp3", "mp4" => if lossless { "alac" } else { "aac" }, "vorbis" => "ogg vorbis", "wavpack" => "wavpack", "ape" => "ape",
         other => other,
     };
+    // a fragmented MP4 has no length lofty can read (see crate::mp4): ffprobe measures it
+    let mut duration = p.duration().as_secs_f64();
+    if duration <= 0.0 {
+        duration = stream_info(path).map(|s| s.duration).unwrap_or(0.0);
+    }
     json!({
         "codec": codec,
         "sample_rate": p.sample_rate(), "bit_depth": p.bit_depth(), "channels": p.channels(),
-        "bitrate": p.audio_bitrate().or(p.overall_bitrate()), "duration": p.duration().as_secs_f64(), "lossless": lossless,
+        "bitrate": p.audio_bitrate().or(p.overall_bitrate()), "duration": duration, "lossless": lossless,
     })
 }
 

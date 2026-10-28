@@ -83,7 +83,12 @@ fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
         }
     }
     let props = tagged.map(|t| t.properties());
-    let duration = props.map(|p| (p.duration().as_secs_f64() * 100.0).round() / 100.0).unwrap_or(0.0);
+    let mut duration = props.map(|p| (p.duration().as_secs_f64() * 100.0).round() / 100.0).unwrap_or(0.0);
+    // lofty reads no length from some files (a fragmented MP4 that could not be made plain, see crate::mp4):
+    // ffprobe measures it, so the song never sits in the library at 0:00 with a seek bar that can't move
+    if duration <= 0.0 && tagged.is_some() {
+        duration = crate::probe::stream_info(path).map(|s| (s.duration * 100.0).round() / 100.0).unwrap_or(0.0);
+    }
     let bitrate = props.and_then(|p| p.overall_bitrate().or(p.audio_bitrate())).unwrap_or(0);
     let year: String = first(tag, &[ItemKey::RecordingDate, ItemKey::OriginalReleaseDate, ItemKey::Year]).unwrap_or_default().chars().take(4).collect();
     let isrc = first(tag, &[ItemKey::Isrc]).map(|s| s.to_uppercase().replace('-', "")).filter(|s| !s.is_empty());
