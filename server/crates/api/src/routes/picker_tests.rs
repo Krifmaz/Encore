@@ -633,3 +633,37 @@ fn soulseek_rows_follow_typed_words_and_empty_answers_say_why() {
     assert_eq!(n, "1 Soulseek user(s) answered \"Michael Jackson Billie Jean\" with 1 file(s), but none is an audio file named like \"Billie Jean\"");
     assert!(slskd_notice(&opened, "q", "x", &answers, &[json!({})]).is_none());
 }
+
+/// The same for Usenet (SABnzbd): its releases come back through the same Prowlarr searches – retried without
+/// categories, offered loosely, and an empty answer says why (here: no Usenet client set up).
+#[tokio::test]
+async fn usenet_releases_get_the_same_retry_loose_rows_and_reasons() {
+    let (st, dir) = state("usenet");
+    let nzb = |guid: &str, title: &str| json!({ "guid": guid, "title": title, "size": 400e6, "indexer": "NZBIndex", "protocol": "usenet", "downloadUrl": format!("https://nzb.invalid/{guid}") });
+    let queries: Arc<Mutex<Vec<String>>> = Default::default();
+    let q2 = queries.clone();
+    let app = Router::new().route("/api/v1/search", get(move |RawQuery(q): RawQuery| {
+        let queries = q2.clone();
+        async move {
+            let q = q.unwrap_or_default();
+            queries.lock().unwrap().push(q.clone());
+            // the Usenet indexer files music outside the Audio categories
+            let list = if q.contains("categories") { vec![] } else { vec![nzb("n1", "Michael.Jackson.Discography.1972-2014.FLAC")] };
+            axum::Json(json!(list))
+        }
+    }));
+    let url = serve(app).await;
+    st.cfg.set_many(&json!({ "torznab_enabled": true, "prowlarr_url": url, "prowlarr_api_key": "k", "sab_url": "http://sab.invalid", "sab_api_key": "k" }));
+    let song = SearchBody { source: "torznab".into(), kind: "track".into(), artist: "Michael Jackson".into(), title: "Billie Jean".into(), album: Some("Thriller".into()), ..Default::default() };
+    let a = run_search(&st, &song).await.unwrap();
+    assert_eq!(queries.lock().unwrap().len(), 3);
+    assert_eq!(a.items.len(), 1, "{:?}", a.items);
+    assert_eq!((a.items[0]["payload"]["protocol"].as_str(), a.items[0]["info"].as_str()), (Some("usenet"), Some("usenet")));
+    assert!(a.items[0]["warning"].as_str().unwrap().starts_with("Not clearly \"Billie Jean\""));
+    // no Usenet client: nothing to offer, and the answer says which client is missing
+    st.cfg.set_many(&json!({ "sab_url": "", "qbit_url": "http://qbit.invalid" }));
+    let a = run_search(&st, &SearchBody { fresh: true, ..song }).await.unwrap();
+    let n = a.notice.unwrap_or_default();
+    assert!(a.items.is_empty() && n.contains("need a Usenet client"), "{n}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
