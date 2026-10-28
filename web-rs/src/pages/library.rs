@@ -907,7 +907,8 @@ impl Lib {
     /// The Live versions tab (`/library/live-versions`): live albums and live takes of songs, each with the
     /// studio copy the library has. The ones with a studio copy come ticked; "Remove ticked" asks first, then
     /// moves the live albums to the Trash and deletes the live songs (playlists move to the studio copy). "Keep"
-    /// hides an item for good.
+    /// hides an item for good. Each item says why it reads as live; the search box narrows the list, and "Tick all
+    /// shown" ticks what it shows (the only copies too), so a whole artist's live recordings go in one go.
     async fn render_live(self: Rc<Self>) -> Result<(), ApiError> {
         dom::add_class(&self.more, "hidden");
         dom::set_html(&self.body, r##"<div class="empty"><span class="spinner"></span><p class="muted">Looking for live albums and live versions…</p></div>"##);
@@ -925,29 +926,59 @@ impl Lib {
             else { format!(r#"<span class="small muted ellipsis">studio: {} · {}</span>"#, esck(s, "title"), esck(s, "album")) }
         };
         let check = |kind: &str, id: &str, on: bool| format!(r#"<input type="checkbox" data-live="{kind}" value="{}" {}>"#, esc(id), if on { "checked" } else { "" });
-        let album_cards: String = albums.iter().map(|a| format!(r##"<div class="card flat mt" data-key="{key}">
+        // what the search box matches an item by
+        let text = |parts: &[&str]| esc(&parts.join(" ").to_lowercase());
+        let album_cards: String = albums.iter().map(|a| format!(r##"<div class="card flat mt" data-key="{key}" data-text="{text}">
       <div class="row between" style="padding:12px 16px;border-bottom:1px solid var(--border)">
-        <label class="row" style="cursor:pointer">{check}<b>{artist} – {album}</b> <span class="badge accent">Live album</span> <span class="small muted">{with} of {n} songs have a studio copy</span></label>
+        <label class="row" style="cursor:pointer">{check}<b>{artist} – {album}</b> <span class="badge accent">{why}</span> <span class="small muted">{with} of {n} songs have a studio copy</span></label>
         <button class="btn sm ghost" data-keep>Keep</button>
       </div>
       <div class="list">{list}</div></div>"##,
             key = esck(a, "key"), check = check("album", &a.s("album_id"), a.truthy("suggested")), artist = esck(a, "artist"), album = esck(a, "album"),
-            with = a.s("with_studio"), n = a.s("songs"),
+            with = a.s("with_studio"), n = a.s("songs"), why = esck(a, "reason"),
+            text = text(&[&a.s("artist"), &a.s("album"), &a.a("tracks").iter().map(|t| t.s("title")).collect::<Vec<_>>().join(" ")]),
             list = a.a("tracks").iter().map(|t| format!(r##"<div class="list-item"><div class="grow"><div class="ellipsis">{}</div>{}</div></div>"##, esck(t, "title"), studio(t))).collect::<String>())).collect();
-        let song_list: String = songs.iter().map(|t| format!(r##"<div class="list-item" data-key="{key}">
-        <label class="row grow" style="cursor:pointer">{check}<div class="grow"><div class="ellipsis">{artist} – {title} <span class="muted">· {album}</span></div>{studio}</div></label>
+        let song_list: String = songs.iter().map(|t| format!(r##"<div class="list-item" data-key="{key}" data-text="{text}">
+        <label class="row grow" style="cursor:pointer">{check}<div class="grow"><div class="ellipsis">{artist} – {title} <span class="muted">· {album}</span> <span class="badge">{why}</span></div>{studio}</div></label>
         <button class="btn sm ghost" data-keep>Keep</button></div>"##,
             key = esck(t, "key"), check = check("song", &t.s("id"), t.truthy("suggested")), artist = esck(t, "artist"), title = esck(t, "title"),
-            album = esck(t, "album"), studio = studio(t))).collect();
+            album = esck(t, "album"), studio = studio(t), why = esck(t, "reason"), text = text(&[&t.s("artist"), &t.s("title"), &t.s("album")]))).collect();
         let songs_card = if songs.is_empty() { String::new() } else {
             format!(r##"<div class="card flat mt"><div style="padding:12px 16px;border-bottom:1px solid var(--border)"><b>Live songs on other albums</b></div><div class="list">{song_list}</div></div>"##)
         };
         dom::set_html(&self.body, &format!(r##"
     <div class="card row wrap between" style="margin-bottom:16px">
-      <div class="muted small">Live albums and songs that have a studio copy are ticked. Live albums go to the Trash (Files → Trash can restore them); live songs on other albums are deleted. Playlists move to the studio copy. Nothing is removed until you confirm.</div>
+      <div class="muted small">Live albums and songs that have a studio copy are ticked; the only copies are listed too, unticked – tick them (or search and “Tick all shown”) to remove them as well. Live albums go to the Trash (Files → Trash can restore them); live songs on other albums are deleted. Playlists move to the studio copy. Nothing is removed until you confirm.</div>
       <button class="btn danger" id="live-remove">{}Remove ticked</button>
     </div>
+    <div class="row wrap" style="margin-bottom:8px">
+      <input class="input grow" id="live-q" type="search" style="min-width:0" placeholder="Search live albums and songs (artist, album, title)">
+      <button class="btn sm" id="live-all" title="Tick every album and song the search shows, the only copies too">Tick all shown</button>
+      <button class="btn sm ghost" id="live-none">Untick all</button>
+    </div>
     {album_cards}{songs_card}"##, icon("trash")));
+        {
+            // the search box: items whose artist, album and titles don't hold every word are hidden
+            let body = self.body.clone();
+            dom::on_sel(&self.body, "#live-q", "input", move |_| {
+                let Some(q) = dom::qs_in(&body, "#live-q") else { return };
+                let words: Vec<String> = dom::value(&q).to_lowercase().split_whitespace().map(String::from).collect();
+                for item in dom::qsa_in(&body, "[data-text]") {
+                    let hay = dom::data(&item, "text");
+                    dom::toggle_class(&item, "hidden", !words.iter().all(|w| hay.contains(w.as_str())));
+                }
+            });
+        }
+        for (sel, on) in [("#live-all", true), ("#live-none", false)] {
+            let body = self.body.clone();
+            dom::on_sel(&self.body, sel, "click", move |_| {
+                // "Tick all shown" ticks only what the search shows; "Untick all" unticks everything
+                for item in dom::qsa_in(&body, "[data-text]") {
+                    if on && item.class_list().contains("hidden") { continue; }
+                    for i in dom::qsa_in(&item, "input[data-live]") { dom::set_checked(&i, on); }
+                }
+            });
+        }
         {
             let (me, body) = (self.clone(), self.body.clone());
             dom::on_sel(&self.body, "#live-remove", "click", move |_| {
