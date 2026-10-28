@@ -1,0 +1,125 @@
+name: mac-backfill
+
+# Adds the macOS desktop app to a release that was published without it. That happens when the release's Mac job
+# never got a runner (GitHub cancels a job no runner takes within about 15 minutes) or failed: the release goes out
+# with everything else, and its notes say the Mac app is missing.
+#   Start one: Actions → mac-backfill → Run workflow, with the release's version (0.42.5).
+# It builds Encore-<version>-macos-universal.dmg at that release's tag, the same way apps.yml's desktop job does
+# (scripts/desktop-package.sh --stamp --universal, signed when the macOS secrets exist), then uploads it to the
+# release, adds it to SHA256SUMS (the desktop app's updater installs only files listed there with that hash) and
+# fixes the notes' download line. Nothing else in the release changes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The release to complete (MAJOR.MINOR.PATCH, e.g. 0.42.5)"
+        type: string
+        required: true
+      runner:
+        description: "The Mac runner (macos-15-intel by default; macos-latest is arm64, short of machines at times)"
+        type: choice
+        options: [macos-15-intel, macos-latest]
+        default: macos-15-intel
+
+permissions:
+  contents: write
+
+# one backfill per release at a time: a second run for the same version waits instead of racing the upload
+concurrency:
+  group: mac-backfill-${{ inputs.version }}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    env:
+      # the version without a leading v, as the release's files are named
+      V: ${{ inputs.version }}
+      HAS_MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
+    steps:
+      - name: Version
+        run: |
+          V="${V#v}"
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
+          echo "V=$V" >> "$GITHUB_ENV"
+      # the code the release was built from
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ env.V }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop
+      - name: Signing certificate (macOS)
+        # the same keychain apps.yml's desktop job makes
+        if: env.HAS_MACOS_CERT == 'true'
+        env:
+          MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          P12="$RUNNER_TEMP/encore-sign.p12"
+          printf '%s' "$MACOS_CERT" | base64 --decode > "$P12"
+          security create-keychain -p ci encore-build.keychain
+          security default-keychain -s encore-build.keychain
+          security unlock-keychain -p ci encore-build.keychain
+          # a new keychain locks itself after 5 idle minutes, long before the two release builds reach codesign
+          security set-keychain-settings -lut 21600 encore-build.keychain
+          security import "$P12" -k encore-build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci encore-build.keychain
+          rm -f "$P12"
+      - name: Build and package
+        env:
+          MACOS_SIGN_IDENTITY: ${{ env.HAS_MACOS_CERT == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
+          APPLE_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_APP_PASSWORD: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_APP_PASSWORD || '' }}
+        run: |
+          bash scripts/desktop-package.sh --version "$V" --stamp --features "" --universal --out out
+          [ -s "out/Encore-$V-macos-universal.dmg" ] || { echo "::error::out/Encore-$V-macos-universal.dmg was not made"; ls -la out; exit 1; }
+      - name: Remove signing keys
+        if: always()
+        run: security delete-keychain encore-build.keychain 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Encore-desktop-macOS-backfill
+          path: out/Encore-${{ env.V }}-macos-universal.dmg
+          if-no-files-found: error
+
+  attach:
+    # on Linux: the upload and the notes need no Mac minutes
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Encore-desktop-macOS-backfill
+          path: out
+      - name: Upload, SHA256SUMS and notes
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"; V="${V#v}"; DMG="Encore-$V-macos-universal.dmg"
+          # SHA256SUMS of the release, without an older line for this file, plus the new one
+          gh release download "v$V" --pattern SHA256SUMS --dir sums
+          grep -v "  $DMG\$" sums/SHA256SUMS > out/SHA256SUMS || true
+          (cd out && sha256sum -- "$DMG" >> SHA256SUMS && cat SHA256SUMS)
+          gh release upload "v$V" "out/$DMG" out/SHA256SUMS --clobber
+          # the notes: the macOS download in the desktop line, and macOS out of the "Not in this release" line
+          gh release view "v$V" --json body -q .body > notes.md
+          MAC="**macOS** \`$DMG\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) ·"
+          if ! grep -q "\`$DMG\`" notes.md; then
+            if grep -q '^\* \*\*Desktop app\*\*' notes.md; then
+              sed -i "/^\* \*\*Desktop app\*\*/ s/ checksums in/ ${MAC//&/\\&} checksums in/" notes.md
+            else
+              echo "* **Desktop app** (native, with Cadenza playing on this computer; it updates itself): $MAC checksums in \`SHA256SUMS\`" >> notes.md
+            fi
+          fi
+          # "Not in this release: Windows, macOS desktop app – …": macOS leaves the list, the line goes when it empties
+          sed -i -E '/^\* \*\*Not in this release:\*\*/ { s/ macOS,//; s/, macOS / /; s/\*\* macOS desktop/** desktop/; }' notes.md
+          sed -i -E '/^\* \*\*Not in this release:\*\* desktop app/d' notes.md
+          gh release edit "v$V" --notes-file notes.md

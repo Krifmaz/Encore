@@ -201,7 +201,12 @@ jobs:
           - os: windows-latest
             features: cuda
             args: ""
-          - os: macos-latest
+          # Intel, not macos-latest (arm64): GitHub's arm64 Macs ran out of capacity in late October 2026, and a job
+          # no runner takes within about 15 minutes is cancelled ("The job was not acquired by Runner of type hosted
+          # even after multiple attempts"), so 0.42.3 and 0.42.5 shipped without a Mac app. --universal builds
+          # both Mac targets and joins them with lipo, so the runner's own architecture doesn't matter. A release
+          # that still misses the .dmg gets it from mac-backfill.yml.
+          - os: macos-15-intel
             features: ""
             args: --universal
     runs-on: ${{ matrix.os }}

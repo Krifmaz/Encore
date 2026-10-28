@@ -10,7 +10,8 @@ name: release
 #   built on your own machine instead and attached to the release: scripts/release-apps.sh.
 #   Desktop: the native app (apps.yml `desktop`, clients/desktop).
 #   If the macOS desktop job waits for a runner, cancel the run after the server, Docker, Android, Windows and Linux
-#   jobs are done: publish still runs and the notes name what is missing. A cancel after the server and Docker jobs
+#   jobs are done: publish still runs and the notes name what is missing. GitHub itself cancels a job no runner
+#   takes within about 15 minutes; either way, mac-backfill.yml adds the Mac app to the published release later. A cancel after the server and Docker jobs
 #   succeeded does not stop the release; delete it afterwards if that was the point.
 #   Docker: :<version> and :latest.
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
