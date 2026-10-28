@@ -359,10 +359,15 @@ body.has-player { --player: var(--player-h); }
 .player {
   position: fixed; left: 0; right: 0; bottom: 0; height: var(--player-h); z-index: 50;
   background: color-mix(in srgb, var(--bg-2) 90%, transparent); backdrop-filter: blur(16px);
-  /* The right column never goes narrower than its buttons plus the volume slider (max-content): with a full
-     set of bar buttons a plain 1fr share was too small, the flexible volume slider shrank to nothing and the
-     buttons spilled left over the seek bar. The title and controls columns give up the space instead. */
-  border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(max-content, 1fr);
+  /* Both side columns are at least --side wide: the right side's buttons and volume at their natural width,
+     measured after each draw (fit_sides in player/bar.rs). Equal sides keep the transport and seek bar in the
+     middle of the window, and the buttons never get squeezed (a 1fr share was too small for a full set of
+     buttons: the volume slider shrank to just its knob). The controls column gives up the room instead. */
+  border-top: 1px solid var(--border); display: grid;
+  /* --side-l: the song's minimum is --side too, unless that would leave the controls under 260px (a narrow
+     window): then the song gives up the difference first (100vw − the right side − padding 40 − gaps 36 − 260) */
+  --side-l: max(0px, min(var(--side, 0px), calc(100vw - var(--side, 0px) - 336px)));
+  grid-template-columns: minmax(var(--side-l), 1fr) minmax(0, 1.4fr) minmax(var(--side, 0px), 1fr);
   align-items: center; gap: 18px; padding: 0 20px;
 }
 .player .now { display: flex; align-items: center; gap: 12px; min-width: 0; }

@@ -8,6 +8,7 @@ use crate::fmt;
 use crate::pages::library::SURROUND_IDS;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
+use crate::widgets::centered_bar::centered_bar;
 use crate::widgets::marquee::marquee;
 use crate::widgets::{self, badge, icon, icon_btn, list_row, modal, pop_menu, small_muted, t, tip_box, Icon, MenuItem};
 use iced::widget::{button, column, container, image, mouse_area, row, slider, space, text_input, toggler, tooltip};
@@ -370,7 +371,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .into(),
     };
     // a right-click on the song or the transport opens ⋯ at the pointer (the web's #p-more)
-    let left = mouse_area(container(left).width(Length::FillPortion(3)).align_y(Alignment::Center))
+    let left = mouse_area(container(left).width(Length::Fill).align_y(Alignment::Center))
         .on_right_press(Message::Menu);
 
     // centre: transport and seek
@@ -378,7 +379,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         column![transport(state, now.as_ref(), false), seek(state, now.as_ref())]
             .spacing(2)
             .align_x(Alignment::Center)
-            .width(Length::FillPortion(4)),
+            .width(Length::Fill),
     )
     .on_right_press(Message::Menu);
 
@@ -417,7 +418,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         right = right.push(icon_btn(Icon::X, "Close player", Some(Message::ClosePlayer)));
     }
     // the right side takes what its buttons need (the chosen ones, the badge and the volume
-    // never get cut off); the song and the transport share the rest
+    // never get cut off); the song's side is made as wide so the transport stays centred
+    // (see widgets::centered_bar)
     let right = container(right).align_x(Alignment::End);
 
     let mut col = column![widgets::divider()];
@@ -432,10 +434,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
     col.push(
         container(
-            row![left, center, right]
-                .spacing(16)
-                .align_y(Alignment::Center)
-                .height(Length::Fill),
+            centered_bar(left, center, right, 16.0),
         )
         .padding([0, 16])
         .height(theme::PLAYER_H - 1.0)

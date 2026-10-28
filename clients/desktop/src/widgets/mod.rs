@@ -4,6 +4,7 @@
 
 pub mod badge;
 pub mod catalog;
+pub mod centered_bar;
 pub mod choice;
 pub mod cover;
 pub mod details;
