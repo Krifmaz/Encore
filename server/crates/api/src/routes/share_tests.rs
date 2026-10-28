@@ -919,3 +919,154 @@ fn the_blank_preview_video_is_the_encore_theme_card_colour() {
     let panel = theme.split("--panel:").nth(1).expect("--panel in the encore theme").split(';').next().unwrap().trim();
     assert_eq!(panel, SHARE_VIDEO_BLANK);
 }
+
+// ---- opening a link where the listener already listens (share_open, 0.42.4) ----------------------------------
+
+/// Chrome on an Android phone.
+const ANDROID_CHROME: &str = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+/// An app's built-in WebView on Android (`; wv)`), which can't open intent links.
+const ANDROID_WEBVIEW: &str = "Mozilla/5.0 (Linux; Android 14; Pixel 8; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36";
+/// Safari on an iPhone (there is no iOS app).
+const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+/// Firefox on a desktop.
+const DESKTOP: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0";
+
+impl Env {
+    /// GET `uri` with this user agent, as the user whose session `cookie` is ("" for none), and extra `headers`.
+    async fn page_as(&self, uri: &str, ua: &str, cookie: &str, headers: &[(&str, &str)]) -> Resp {
+        let mut h = vec![("user-agent", ua)];
+        h.extend_from_slice(headers);
+        send(&self.app, "GET", uri, cookie, None, &h).await
+    }
+}
+
+#[test]
+fn the_intent_link_opens_the_app_and_falls_back_to_the_page() {
+    use super::share_open::{android_intent, no_app_link};
+    let i = android_intent("https://music.example/", "tok");
+    assert!(i.starts_with("intent://music.example/s/tok#Intent;scheme=encore;"), "{i}");
+    assert!(i.contains("S.link=https%3A%2F%2Fmusic.example%2Fs%2Ftok;"), "{i}");
+    assert!(i.contains("S.browser_fallback_url=https%3A%2F%2Fmusic.example%2Fs%2Ftok%3Fapp%3D0;"), "{i}");
+    assert!(i.ends_with(";end"), "{i}");
+    // no package: the release and debug builds both answer it
+    assert!(!i.contains("package="), "{i}");
+    // a server under a path, on plain http
+    let i = android_intent("http://192.168.1.5:8080/encore", "t2");
+    assert!(i.starts_with("intent://192.168.1.5:8080/encore/s/t2#Intent;"), "{i}");
+    assert!(i.contains("S.link=http%3A%2F%2F192.168.1.5%3A8080%2Fencore%2Fs%2Ft2;"), "{i}");
+    assert_eq!(no_app_link("https://m.example/", "t"), "https://m.example/s/t?app=0");
+}
+
+#[test]
+fn web_paths_for_every_kind() {
+    use super::share_open::web_path;
+    assert_eq!(web_path(&json!({ "kind": "track", "track_id": 7, "album_id": "ab12" })).as_deref(), Some("/library/album/ab12?track=7"));
+    assert_eq!(web_path(&json!({ "kind": "album", "album_id": "ab12" })).as_deref(), Some("/library/album/ab12"));
+    assert_eq!(web_path(&json!({ "kind": "artist", "name": "Simon & Garfunkel" })).as_deref(), Some("/artist-name/Simon%20%26%20Garfunkel"));
+    assert_eq!(web_path(&json!({ "kind": "playlist", "playlist_id": 4 })).as_deref(), Some("/playlists/4"));
+    // someone else's playlist not added: the share page offers to add it
+    assert_eq!(web_path(&json!({ "kind": "playlist", "playlist_id": null })), None);
+    assert_eq!(web_path(&json!({ "kind": "album", "album_id": "" })), None);
+}
+
+#[test]
+fn bots_and_webviews_never_jump() {
+    use super::share_open::{is_android_browser, is_preview_bot};
+    assert!(is_android_browser(ANDROID_CHROME));
+    assert!(is_android_browser("Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0"));
+    assert!(!is_android_browser(ANDROID_WEBVIEW));
+    assert!(!is_android_browser(IPHONE));
+    assert!(!is_android_browser(DESKTOP));
+    // Googlebot's phone crawler says Android and Chrome
+    assert!(!is_android_browser("Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"));
+    for ua in ["Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)", "Twitterbot/1.0", "facebookexternalhit/1.1", "WhatsApp/2.23.20.0 A", "TelegramBot (like TwitterBot)", "Slackbot-LinkExpanding 1.0"] {
+        assert!(is_preview_bot(ua), "{ua}");
+    }
+    assert!(!is_preview_bot(ANDROID_CHROME));
+    assert!(!is_preview_bot(DESKTOP));
+}
+
+#[tokio::test]
+async fn android_browsers_go_to_the_app_and_back_with_app_0() {
+    let mut e = setup("open-android").await;
+    let id = e.add("Hey Mama", "Black Eyed Peas", "Elephunk", "Black Eyed Peas", "2003");
+    let tok = e.post(&format!("/api/library/tracks/{id}/share"), None).await.json()["token"].as_str().unwrap().to_string();
+    let page = format!("/s/{tok}");
+
+    // not signed in, on Android Chrome: the intent link, which the browser follows to the app (or to ?app=0)
+    let r = e.page_as(&page, ANDROID_CHROME, "", &[]).await;
+    assert_eq!(r.status, StatusCode::FOUND, "{}", r.text());
+    assert!(r.h("location").starts_with("intent://"), "{}", r.h("location"));
+    assert!(r.h("location").contains(&format!("/s/{tok}#Intent;scheme=encore;")), "{}", r.h("location"));
+    assert_eq!(r.h("cache-control"), "no-store");
+    assert!(r.h("vary").contains("User-Agent") && r.h("vary").contains("Cookie"));
+    // signed in too: the app comes first
+    let r = e.page_as(&page, ANDROID_CHROME, &e.cookie, &[]).await;
+    assert!(r.h("location").starts_with("intent://"), "{}", r.h("location"));
+
+    // the fallback (no app): the share page, or the web player when signed in
+    let r = e.page_as(&format!("{page}?app=0"), ANDROID_CHROME, "", &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.text().contains("og:title"));
+    let r = e.page_as(&format!("{page}?app=0"), ANDROID_CHROME, &e.cookie, &[]).await;
+    assert_eq!(r.status, StatusCode::FOUND);
+    assert_eq!(r.h("location"), format!("/#/library/album/{}?track={id}", e.album_id(id)));
+
+    // a WebView, a frame (X's player card), a preview bot and a request without a user agent keep the page
+    assert_eq!(e.page_as(&page, ANDROID_WEBVIEW, "", &[]).await.status, StatusCode::OK);
+    assert_eq!(e.page_as(&page, ANDROID_CHROME, "", &[("sec-fetch-dest", "iframe")]).await.status, StatusCode::OK);
+    assert_eq!(e.page_as(&page, "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)", "", &[]).await.status, StatusCode::OK);
+    assert_eq!(e.public(&page).await.status, StatusCode::OK);
+    // a link that doesn't work never jumps: the page says so
+    let r = e.page_as("/s/nope", ANDROID_CHROME, &e.cookie, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn signed_in_browsers_open_the_web_player() {
+    let mut e = setup("open-web").await;
+    let a1 = e.add("Hey Mama", "Black Eyed Peas", "Elephunk", "Black Eyed Peas", "2003");
+    let a2 = e.add("Shut Up", "Black Eyed Peas", "Elephunk", "Black Eyed Peas", "2003");
+    let elephunk = e.album_id(a1);
+    let song = e.post(&format!("/api/library/tracks/{a2}/share"), None).await.json()["token"].as_str().unwrap().to_string();
+    let album = e.post(&format!("/api/library/albums/{elephunk}/share"), None).await.json()["token"].as_str().unwrap().to_string();
+    let artist = e.post("/api/library/artists/share", Some(json!({ "name": "Black Eyed Peas" }))).await.json()["token"].as_str().unwrap().to_string();
+    let pid = e.playlist("Road trip", &[a1, a2]).await;
+    let list = e.share_playlist(pid).await;
+    let other = e.login("listener").await;
+
+    for (ua, cookie) in [(DESKTOP, &e.cookie), (IPHONE, &other)] {
+        let loc = |r: Resp| { assert_eq!(r.status, StatusCode::FOUND, "{}", r.text()); r.h("location") };
+        assert_eq!(loc(e.page_as(&format!("/s/{song}"), ua, cookie, &[]).await), format!("/#/library/album/{elephunk}?track={a2}"));
+        assert_eq!(loc(e.page_as(&format!("/s/{album}"), ua, cookie, &[]).await), format!("/#/library/album/{elephunk}"));
+        assert_eq!(loc(e.page_as(&format!("/s/{artist}"), ua, cookie, &[]).await), "/#/artist-name/Black%20Eyed%20Peas");
+    }
+    // the owner's own playlist opens; someone else's stays on the share page (Add to my playlists) until added
+    assert_eq!(e.page_as(&format!("/s/{list}"), DESKTOP, &e.cookie, &[]).await.h("location"), format!("/#/playlists/{pid}"));
+    assert_eq!(e.page_as(&format!("/s/{list}"), IPHONE, &other, &[]).await.status, StatusCode::OK);
+    // signed out: the share page, as before
+    let r = e.page_as(&format!("/s/{song}"), IPHONE, "", &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.text().contains("og:title"));
+}
+
+#[tokio::test]
+async fn the_app_asks_where_a_link_opens() {
+    let mut e = setup("open-api").await;
+    let a1 = e.add("Hey Mama", "Black Eyed Peas", "Elephunk", "Black Eyed Peas", "2003");
+    let song = e.post(&format!("/api/library/tracks/{a1}/share"), None).await.json()["token"].as_str().unwrap().to_string();
+    let pid = e.playlist("Road trip", &[a1]).await;
+    let list = e.share_playlist(pid).await;
+    let other = e.login("listener").await;
+
+    // only for someone signed in
+    assert_eq!(e.public(&format!("/api/share/{song}/open")).await.status, StatusCode::UNAUTHORIZED);
+    let j = e.get(&format!("/api/share/{song}/open")).await.json();
+    assert_eq!(j, json!({ "kind": "track", "track_id": a1, "album_id": e.album_id(a1) }));
+    let j = e.get(&format!("/api/share/{list}/open")).await.json();
+    assert_eq!(j, json!({ "kind": "playlist", "own": true, "added": false, "playlist_id": pid, "name": "Road trip" }));
+    let j = call(&e.app, "GET", &format!("/api/share/{list}/open"), &other, None).await.json();
+    assert_eq!(j, json!({ "kind": "playlist", "own": false, "added": false, "playlist_id": null, "name": "Road trip" }));
+    // a link that ended
+    assert_eq!(e.get("/api/share/nope/open").await.status, StatusCode::NOT_FOUND);
+}

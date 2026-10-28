@@ -18,11 +18,14 @@ import app.encore.android.AppGraph
 import app.encore.android.data.session.ThemeChoice
 import app.encore.android.features.group.GroupListen
 import app.encore.android.features.library.PlaylistLinkUi
+import app.encore.android.features.library.ShareOpen
+import app.encore.android.features.library.ShareOpenRules
 import app.encore.android.features.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
 import app.encore.android.ui.theme.isDarkTheme
 import androidx.compose.foundation.isSystemInDarkTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var appGraph: AppGraph
@@ -61,9 +64,24 @@ class MainActivity : ComponentActivity() {
     /**
      * `https://<server>/#/group/<code>` (from ShareActivity): the root asks "Join <host>'s group listen?" once signed in.
      * An Encore playlist link (`…/s/<token>`, from ShareActivity): the root offers "Add to my playlists" once signed in.
+     * A share link opened in the browser (`encore://<server>/s/<token>`, the server's share page hands it over): the
+     * root opens its album, artist or playlist once signed in ([ShareOpenHost]); with no account signed in on this
+     * phone it goes straight back to the browser, which shows the share page.
      */
     private fun handleIntent(i: Intent?) {
         if (i == null) return
+        val shared = ShareOpenRules.pendingOf(i.dataString, i.getStringExtra(ShareOpenRules.EXTRA_LINK))
+        if (shared != null) {
+            // handled once: an activity made again with this intent doesn't open it twice
+            i.data = null
+            val app = applicationContext
+            appGraph.scope.launch {
+                // a cold start: the saved sign-in is read first
+                try { appGraph.store.awaitLoaded() } catch (_: Exception) {}
+                if (appGraph.store.current == null) ShareOpen.openInBrowser(app, shared.link) else ShareOpen.pending.value = shared
+            }
+            return
+        }
         val playlist = i.getStringExtra(EXTRA_PLAYLIST_LINK)
         if (playlist != null) {
             i.removeExtra(EXTRA_PLAYLIST_LINK)

@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -176,10 +177,12 @@ private fun loadAlbumPage(nav: Nav, id: String): AlbumPage {
 /**
  * One album of the library. A Surround album (0.35, library.rs: "the stereo library's tools stay off") plays and
  * queues, names its format and links to its stereo album; it has no likes, playlists, sharing or correcting tools.
+ * [playTrack] > 0 (a shared song's link opened in the app, features/library/ShareOpen.kt): that song starts playing
+ * once the page loaded, once.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun AlbumScreen(nav: Nav, albumId: String) {
+fun AlbumScreen(nav: Nav, albumId: String, playTrack: Long = 0L) {
     val api = nav.graph.api
     val surround = SurroundRules.isSurroundAlbum(albumId)
     val liked by nav.graph.likes.liked.collectAsState()
@@ -270,6 +273,14 @@ fun AlbumScreen(nav: Nav, albumId: String) {
             val album = detail.album
             val tracks = detail.tracks
             val multiDisc = tracks.map { it.disc }.distinct().size > 1
+            // a shared song's link: play it once (saveable, so turning the phone doesn't start it again)
+            var sharedPlayed by rememberSaveable(albumId, playTrack) { mutableStateOf(false) }
+            LaunchedEffect(tracks, playTrack) {
+                if (playTrack <= 0L || sharedPlayed) return@LaunchedEffect
+                sharedPlayed = true
+                val i = tracks.indexOfFirst { it.id == playTrack }
+                if (i >= 0) nav.player.play(tracks, i)
+            }
             val formats = if (surround && album.quality.isNotEmpty()) album.quality
                 else tracks.map { it.format.uppercase() }.filter { it.isNotEmpty() }.distinct().joinToString(" / ")
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {

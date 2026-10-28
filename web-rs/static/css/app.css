@@ -405,6 +405,9 @@ button.badge { font: inherit; font-size: 11px; cursor: pointer; }
 .tracklist tbody tr:hover td.num .n, .tracklist tbody tr.playing td.num .n { display: none; }
 .tracklist tbody tr:hover td.num .rowplay, .tracklist tbody tr.playing td.num .rowplay { display: inline-flex; vertical-align: middle; }
 .tracklist tbody tr.playing td.num .rowplay { color: var(--accent); }
+/* the song a share link pointed at (`#/library/album/<id>?track=<id>`): tinted, with the accent stripe on its left */
+.tracklist tbody tr.shared td { background: rgba(var(--accent-rgb), .12); }
+.tracklist tbody tr.shared td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .tile .art .overlay .fab { box-shadow: 0 6px 18px rgba(var(--accent-rgb), .5); }
 
 /* ---------- misc ---------- */

@@ -1473,6 +1473,18 @@ async fn render_issues(body: &Element, view: &Element, more: &Element) -> Result
 
 // ---- the album page ----
 
+/// The album page's row of the shared song (`?track=<id>` of a share link's jump, see the server's share_open):
+/// marks it `shared` (the accent stripe in app.css) and scrolls it into view. `tracks` are the page's rows in
+/// order; an id that isn't one of them (another copy of the song, a stale link) changes nothing.
+fn pick_out_shared(view: &Element, tracks: &[Value], want: &str) {
+    if want.is_empty() { return; }
+    let Some(i) = tracks.iter().position(|t| t.s("id") == want) else { return };
+    if let Some(tr) = dom::qsa_in(view, "tbody tr").get(i) {
+        dom::add_class(tr, "shared");
+        tr.scroll_into_view_with_bool(false);
+    }
+}
+
 pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
@@ -1593,6 +1605,9 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         };
         { let h = highlight.clone(); ctx.on_leave(player::on_change(move |cur| h(cur))); }
         highlight(player::current());
+        // a shared song's link opened by someone signed in (`#/library/album/<id>?track=<id>`, the server's
+        // share_open): its row stands out and scrolls into view, one tap from playing
+        pick_out_shared(&view, &tracks, &ctx.q("track"));
         let liked: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(
             api::get("/likes").await.map_err(|e| e.message)?.items().iter().filter_map(|v| v.as_i64()).collect()));
         let paint_likes: Rc<dyn Fn()> = {

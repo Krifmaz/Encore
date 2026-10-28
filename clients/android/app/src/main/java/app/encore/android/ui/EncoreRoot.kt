@@ -64,6 +64,7 @@ import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
 import app.encore.android.features.library.AlbumTypesRules
 import app.encore.android.features.library.PlaylistLinkHost
+import app.encore.android.features.library.ShareOpenHost
 import app.encore.android.features.library.SongFixHost
 import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.library.SurroundUi
@@ -113,7 +114,8 @@ import app.encore.android.ui.tv.rememberTvLayout
  * artist and album catalog pages and the request picker stack like any other screen.
  */
 sealed interface Screen {
-    data class Album(val id: String) : Screen
+    /** A library album; [playTrack] > 0: that song of it starts playing once the page loaded (a shared song's link). */
+    data class Album(val id: String, val playTrack: Long = 0L) : Screen
     data class Artist(val name: String) : Screen
     data class Playlist(val id: Long, val name: String) : Screen
     data object Settings : Screen
@@ -312,7 +314,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
     // the page on screen: the top of the stack, or the tab's root
     val page: @Composable () -> Unit = {
         when (val top = stack.lastOrNull()) {
-            is Screen.Album -> AlbumScreen(nav, top.id)
+            is Screen.Album -> AlbumScreen(nav, top.id, top.playTrack)
             is Screen.Artist -> ArtistScreen(nav, top.name)
             is Screen.Playlist -> PlaylistScreen(nav, top.id, top.name)
             is Screen.Settings -> SettingsScreen(nav, session)
@@ -435,6 +437,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         GroupDialogs(nav)
         // an Encore playlist link shared to the app: "Add to my playlists?" (kept until signed in, as group links are)
         PlaylistLinkHost(nav, session)
+        // a share link opened in the app (from the browser's share page): its album, artist or playlist
+        ShareOpenHost(nav, session)
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }

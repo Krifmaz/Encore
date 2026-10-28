@@ -60,6 +60,18 @@
                 <!-- shows the app (with its banner) on the Android TV / Google TV home screen -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- Share links opened in a browser (features/library/ShareOpen.kt): the server's share page hands an
+                 Android browser intent://<server>/…/s/<token>#Intent;scheme=encore;…, which arrives here as
+                 encore://<server>/…/s/<token>. Any host: every server is self-hosted under its own name. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="encore"
+                    android:host="*"
+                    android:pathPattern=".*/s/.*" />
+            </intent-filter>
         </activity>
 
         <!-- "Share to Encore": a link from any app becomes a download request (POST /api/requests/link) -->

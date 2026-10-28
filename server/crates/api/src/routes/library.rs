@@ -67,6 +67,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/share/{token}/cover", get(shared_cover))
         .route("/api/share/{token}/video.mp4", get(shared_video))
         .route("/api/share/{token}/copy", post(shared_copy))
+        .route("/api/share/{token}/open", get(share_open::open))
         .route("/s/{token}", get(share_page))
 }
 
@@ -81,6 +82,9 @@ mod library_artist;
 /// GET /api/library/tracks/{id}/edges: where a song's sound starts and stops (Smart overlap transitions).
 #[path = "track_edges.rs"]
 mod track_edges;
+
+#[path = "share_open.rs"]
+mod share_open;
 
 #[cfg(test)]
 #[path = "library_types_tests.rs"]
@@ -2311,21 +2315,20 @@ const SHARE_PAGE_VIDEO_WAIT: u64 = 6;
 /// album, artist or playlist with its cover in the link preview before anyone opens it. The `share_preview`
 /// setting picks the card: "small" (small cover), "large" (big picture) or "playable" (a video with
 /// the cover and the song, falling back to "small" when it can't be made).
-async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
+///
+/// Before that, a listener who can open the thing where they already listen is sent there instead
+/// ([`share_open::jump`]): an Android phone's browser to the app, a browser signed in to this server to the web app.
+async fn share_page(State(st): State<AppState>, Path(token): Path<String>, MaybeUser(me): MaybeUser, req: Request) -> ApiResult<Response> {
+    // absolute URLs for the preview image and audio (and the app's intent link): the public URL from Settings, else
+    // what the browser asked for
+    let base = public_base(&st, req.headers());
+    if let Some(to) = share_open::jump(&st, me.as_ref(), &token, req.method(), req.uri(), req.headers(), &base).await {
+        return Ok(to);
+    }
     let html = tokio::fs::read_to_string(st.static_dir.join("share.html")).await.map_err(|_| err(404, "Not found"))?;
     let meta = match shared_meta(&st, &token, &SharePageQ::default()).await {
         Ok((m, _)) => m,
         Err(_) => return Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html.replace("<!--META-->", "")).into_response()),
-    };
-    // absolute URLs for the preview image and audio: the public URL from Settings, else what the browser asked for
-    let base = {
-        let b = st.cfg.str("base_url");
-        if !b.trim().is_empty() { b.trim_end_matches('/').to_string() } else {
-            let h = req.headers();
-            let host = h.get("x-forwarded-host").or(h.get(header::HOST)).and_then(|v| v.to_str().ok()).unwrap_or("localhost");
-            let proto = h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or(if host.starts_with("localhost") || host.starts_with("127.") { "http" } else { "https" });
-            format!("{proto}://{host}")
-        }
     };
     let mode = st.cfg.str("share_preview");
     // a chat app waits a few seconds for the page: past that, the small card now and the video (still
@@ -2333,8 +2336,20 @@ async fn share_page(State(st): State<AppState>, Path(token): Path<String>, req: 
     let video = mode.trim() == "playable"
         && tokio::time::timeout(std::time::Duration::from_secs(SHARE_PAGE_VIDEO_WAIT), share_video(&st, &token)).await.ok().flatten().is_some();
     let discord = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).is_some_and(is_discord_bot);
-    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache"), (header::VARY, "User-Agent")],
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache"), (header::VARY, "User-Agent, Cookie")],
         share_page_html(&html, &meta, &base, &token, mode.trim(), video, discord)).into_response())
+}
+
+/// The server's public address, without a trailing `/`: the public URL from Settings, else the host (and scheme) the
+/// request came in on, as a reverse proxy passes them on.
+fn public_base(st: &AppState, h: &axum::http::HeaderMap) -> String {
+    let b = st.cfg.str("base_url");
+    if !b.trim().is_empty() {
+        return b.trim().trim_end_matches('/').to_string();
+    }
+    let host = h.get("x-forwarded-host").or(h.get(header::HOST)).and_then(|v| v.to_str().ok()).unwrap_or("localhost");
+    let proto = h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or(if host.starts_with("localhost") || host.starts_with("127.") { "http" } else { "https" });
+    format!("{proto}://{host}")
 }
 
 /// Discord's link-preview crawler. Given `og:audio` or a `music.*` type it builds an "audio" embed that its
