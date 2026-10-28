@@ -176,6 +176,19 @@ class PickerRulesTest {
     }
 
     @Test
+    fun emptyAnswersSayWhy() {
+        val why = "Prowlarr's indexers found nothing for \"x\""
+        // a live empty answer: its reason, in place of a bare "No results."
+        assertEquals(why, PickerRules.emptyNote(PickSearch(notice = why)))
+        assertEquals("No results – $why", PickerRules.noneText(why, kept = false))
+        assertEquals(why, PickerRules.noneText(why, kept = true))
+        assertEquals("No results.", PickerRules.noneText(null, kept = false))
+        // none without a reason, nor where the kept line already shows the notice
+        assertNull(PickerRules.emptyNote(PickSearch()))
+        assertNull(PickerRules.emptyNote(PickSearch(from = "cache", canSearchFlag = false, notice = why)))
+    }
+
+    @Test
     fun searchingWords() {
         assertEquals("Searching Soulseek… (Soulseek takes a few seconds)", PickerRules.searchingText("slskd", "Soulseek"))
         assertEquals("Searching Deezer…", PickerRules.searchingText("deezer", "Deezer"))

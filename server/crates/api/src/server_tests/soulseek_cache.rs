@@ -167,9 +167,12 @@ async fn the_workers_searches_fill_what_the_picker_reads() {
     let (code, kept) = picker(&app, &cookie, illuminate(json!({ "request_id": id }))).await;
     assert_eq!((code, kept["from"].as_str(), kept["query"].as_str()), (StatusCode::OK, Some("cache"), Some("Illuminate EP")), "{kept}");
     assert_eq!(users(&kept), ["dave"]);
-    // without the request (or for words typed by hand) the empty answer of "Duumu Illuminate EP" is what is kept
+    // without the request (or for words typed by hand) only the empty answer of "Duumu Illuminate EP" is kept:
+    // no answer while Soulseek can search – it is searched again, and the empty answer says why
     let (_, plain) = picker(&app, &cookie, illuminate(json!({}))).await;
-    assert_eq!((plain["from"].as_str(), plain["items"].as_array().map(Vec::len)), (Some("cache"), Some(0)), "{plain}");
+    assert_eq!((plain["from"].as_str(), plain["items"].as_array().map(Vec::len)), (Some("live"), Some(0)), "{plain}");
+    assert!(plain["notice"].as_str().unwrap().starts_with("Nobody on Soulseek answered \"Duumu Illuminate EP\""), "{plain}");
+    assert_eq!(posts(&f).len(), 4, "searched again");
     // someone who may not see the request: it is ignored, not an error
     crate::test_support::user(&st, "guest", "member");
     st.db.execute("UPDATE users SET perms=? WHERE username='guest'", p![json!({ "pick": true }).to_string()]).unwrap();
@@ -178,7 +181,8 @@ async fn the_workers_searches_fill_what_the_picker_reads() {
     let guest = guest.split(';').next().unwrap().to_string();
     let (code, theirs) = picker(&app, &guest, illuminate(json!({ "request_id": id }))).await;
     assert_eq!((code, theirs["items"].as_array().map(Vec::len)), (StatusCode::OK, Some(0)), "{theirs}");
-    assert_eq!(posts(&f).len(), 3, "the picker searched nothing");
+    // for them too the empty answer was searched again; the request's kept answer was never theirs
+    assert_eq!(posts(&f).len(), 5, "the picker searched the box's words again, nothing else");
     ts.remove();
 }
 

@@ -96,6 +96,20 @@ object PickerRules {
         s.lowercase().split(Regex("[^\\p{L}\\p{N}']+")).filter { it.isNotEmpty() }.sorted()
 
     /**
+     * The server's reason why an answer has no rows (its `notice`), when it has none and sent one; null otherwise, and for
+     * a kept answer that can't search again, whose [foundLine] already shows the notice.
+     */
+    fun emptyNote(f: PickSearch): String? =
+        f.notice.trim().takeIf { f.items.isEmpty() && it.isNotEmpty() && !(f.kept && !f.canSearch) }
+
+    /** The line of a source without rows: the server's reason ([emptyNote]) – after "No results – " unless a kept answer's line already says it – else "No results.". */
+    fun noneText(note: String?, kept: Boolean): String = when {
+        note == null -> "No results."
+        kept -> note
+        else -> "No results – $note"
+    }
+
+    /**
      * The line for a kept answer, or null for a live one (nothing to say):
      * - "Found at 14:02" + " · Search again"
      * - "No results. · Found at 14:02 · Search again" when the kept answer found nothing

@@ -553,3 +553,83 @@ async fn members_get_no_links_to_server_settings() {
     }
     ts.remove();
 }
+
+/// A search that finds nothing to match never shows a bare "0": Prowlarr is asked again without categories
+/// (some indexers file music elsewhere), releases that only name the artist are offered with a warning (a
+/// song's pick downloads only its file), and when there is still nothing the answer says why.
+#[tokio::test]
+async fn an_empty_indexer_search_is_retried_offered_loosely_and_explained() {
+    let (st, dir) = state("empty");
+    let queries: Arc<Mutex<Vec<String>>> = Default::default();
+    let q2 = queries.clone();
+    let app = Router::new().route("/api/v1/search", get(move |RawQuery(q): RawQuery| {
+        let queries = q2.clone();
+        async move {
+            let q = q.unwrap_or_default();
+            queries.lock().unwrap().push(q.clone());
+            // only the search without categories finds anything, and only for Michael Jackson
+            let list = if q.contains("categories") || !q.contains("Michael") {
+                vec![]
+            } else {
+                vec![rel("d1", "Michael Jackson - Discography 1972-2014 [FLAC]", 9000.0, 20), rel("s1", "Michael Jackson - Billie Jean [FLAC]", 40.0, 3), rel("o", "Other Band - Live [MP3]", 90.0, 4)]
+            };
+            axum::Json(json!(list))
+        }
+    }));
+    let url = serve(app).await;
+    st.cfg.set_many(&json!({ "torznab_enabled": true, "prowlarr_url": url, "prowlarr_api_key": "k", "qbit_url": "http://qbit.invalid" }));
+    let song = SearchBody { source: "torznab".into(), kind: "track".into(), artist: "Michael Jackson".into(), title: "Billie Jean".into(), album: Some("Thriller".into()), ..Default::default() };
+    let a = run_search(&st, &song).await.unwrap();
+    // the song's and the album's searches in the music categories, then the song's once more without them
+    let asked = queries.lock().unwrap().clone();
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    assert!(!asked[2].contains("categories") && asked[2].contains("query=Michael+Jackson+Billie+Jean"), "{asked:?}");
+    let titles: Vec<&str> = a.items.iter().map(|x| x["title"].as_str().unwrap()).collect();
+    // the song's own release first and without a warning, the discography below with one, the other band not at all
+    assert_eq!(titles, ["Michael Jackson - Billie Jean [FLAC]", "Michael Jackson - Discography 1972-2014 [FLAC]"], "{:?}", a.items);
+    assert!(a.items[0]["warning"].is_null() && a.items[1]["warning"].as_str().unwrap().starts_with("Not clearly \"Billie Jean\""), "{:?}", a.items);
+    assert!(a.notice.is_none());
+    // nothing anywhere: the answer says what was searched and where to look
+    let none = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Nobody".into(), title: "Nothing".into(), ..Default::default() };
+    let a = run_search(&st, &none).await.unwrap();
+    assert!(a.items.is_empty());
+    let n = a.json()["notice"].as_str().unwrap().to_string();
+    assert!(n.starts_with("Prowlarr's indexers found nothing for \"Nobody Nothing\"") && n.contains("Prowlarr → History"), "{n}");
+    // found, but none of it names the album: said so, with the count
+    let other = SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Somebody".into(), title: "Else".into(), query: Some("Michael Somebody Else Thing".into()), ..Default::default() };
+    let a = run_search(&st, &other).await.unwrap();
+    let n = a.notice.clone().unwrap_or_default();
+    assert!(a.items.is_empty() && n.starts_with("Prowlarr found 3 release(s) for \"Michael Somebody Else Thing\"") && n.contains("\"Else\" by Somebody"), "{n} {:?}", a.items);
+    // what was found needs a client that isn't set up
+    st.cfg.set_many(&json!({ "qbit_url": "" }));
+    st.cfg.set_many(&json!({ "sab_url": "http://sab.invalid", "sab_api_key": "k" }));
+    let a = run_search(&st, &SearchBody { fresh: true, ..song }).await.unwrap();
+    let n = a.notice.clone().unwrap_or_default();
+    assert!(a.items.is_empty() && n.contains("need a torrent client"), "{n}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Soulseek rows are matched against the words typed in the box when they are other words than the picker
+/// was opened with – a search for another song showed nothing – and an empty answer says why.
+#[test]
+fn soulseek_rows_follow_typed_words_and_empty_answers_say_why() {
+    let resp = |user: &str, files: &[&str]| json!({ "username": user, "hasFreeUploadSlot": true, "queueLength": 0, "uploadSpeed": 1e6,
+        "files": files.iter().map(|f| json!({ "filename": f, "size": 30_000_000, "bitRate": 0, "length": 290 })).collect::<Vec<_>>() });
+    let answers = [resp("u1", &["Music\\Michael Jackson\\Thriller\\05 - Beat It.flac", "Music\\Michael Jackson\\Thriller\\06 - Billie Jean.flac", "Music\\cover.jpg"])];
+    let opened = SearchBody { source: "slskd".into(), kind: "track".into(), artist: "Michael Jackson".into(), title: "Billie Jean".into(), ..Default::default() };
+    let rows = slskd_rows(&opened, "Michael Jackson Billie Jean", &answers);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["title"], "06 - Billie Jean.flac");
+    // another song typed in the box: its file, found by the typed words (the artist only in the folders)
+    let typed_b = SearchBody { query: Some("Michael Jackson Beat It".into()), ..opened };
+    let rows = slskd_rows(&typed_b, "Michael Jackson Beat It", &answers);
+    assert_eq!(rows[0]["title"], "05 - Beat It.flac", "{rows:?}");
+    // nothing shown: why
+    let opened = SearchBody { query: None, ..typed_b };
+    assert_eq!(slskd_notice(&opened, "q", "Michael Jackson Billie Jean", &[], &[]).unwrap(),
+        "Nobody on Soulseek answered \"Michael Jackson Billie Jean\" – fewer words (just the artist and title) often find more");
+    let images = [resp("u2", &["Music\\cover.jpg"])];
+    let n = slskd_notice(&opened, "q", "Michael Jackson Billie Jean", &images, &slskd_rows(&opened, "q", &images)).unwrap();
+    assert_eq!(n, "1 Soulseek user(s) answered \"Michael Jackson Billie Jean\" with 1 file(s), but none is an audio file named like \"Billie Jean\"");
+    assert!(slskd_notice(&opened, "q", "x", &answers, &[json!({})]).is_none());
+}

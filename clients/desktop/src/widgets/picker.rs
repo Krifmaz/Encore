@@ -181,6 +181,9 @@ pub struct State {
     again: HashSet<String>,
     /// … and why one failed (the rows stay, the error shows under the line).
     again_errors: HashMap<String, PickErr>,
+    /// Why a source's answer has no rows, in the server's words ("Prowlarr's indexers found
+    /// nothing for …"): shown instead of a bare "No results." ([`empty_note`]).
+    notes: HashMap<String, String>,
     /// Another Soulseek search held the turn when this one was sent (one runs at a time): say it waits.
     slsk_waiting: bool,
     /// The search generation: answers of an older search are dropped.
@@ -307,6 +310,7 @@ pub fn open(opts: Value, ctx: &Ctx) -> (State, Task<Message>) {
         loading: HashSet::new(),
         again: HashSet::new(),
         again_errors: HashMap::new(),
+        notes: HashMap::new(),
         slsk_waiting: false,
         gen: 0,
         sending: false,
@@ -423,6 +427,7 @@ fn run(state: &mut State, q: &str, ctx: &Ctx) -> Task<Message> {
     state.loading.clear();
     state.again.clear();
     state.again_errors.clear();
+    state.notes.clear();
     state.slsk_waiting = false;
     state.searched = q.to_string();
     let mut tasks = Vec::new();
@@ -449,7 +454,19 @@ fn land(state: &mut State, src: String, v: &Value) {
         state.kept.remove(&src);
     }
     state.errors.remove(&src);
+    match empty_note(v) {
+        Some(n) => state.notes.insert(src.clone(), n),
+        None => state.notes.remove(&src),
+    };
     state.results.insert(src, fmt::items(v));
+}
+
+/// The server's reason why an answer has no rows (its `notice`), when it has none and sent one –
+/// not for a kept answer that can't search again, whose line already shows the notice.
+pub fn empty_note(answer: &Value) -> Option<String> {
+    let note = fmt::s(answer, "notice").trim().to_string();
+    let shown_by_line = is_kept(answer) && !can_search(answer);
+    (fmt::items(answer).is_empty() && !note.is_empty() && !shown_by_line).then_some(note)
 }
 
 /// `download(source, payload, title)`: `POST /api/picker/pick`.
@@ -839,11 +856,18 @@ fn section<'a>(ctx: &Ctx<'a>, state: &State, src: &str) -> El<'a, Message> {
         // "Found at 14:02 · Search again" ("No results. · Found at …" when it found nothing)
         col = col.push(found_row(state, src, &name, answer, list.is_empty()));
         if list.is_empty() {
+            // the line says "No results."; the server's reason under it
+            if let Some(n) = state.notes.get(src) {
+                col = col.push(small_muted(n.clone()));
+            }
             return col.into();
         }
     }
     if list.is_empty() {
-        return col.push(small_muted("No results.")).into();
+        return col.push(small_muted(match state.notes.get(src) {
+            Some(n) => format!("No results – {n}"),
+            None => "No results.".to_string(),
+        })).into();
     }
     let shown = &list[..list.len().min(if state.tab == "all" { 8 } else { 150 })];
     let mut rows = column![];
@@ -1045,6 +1069,7 @@ mod tests {
             loading: HashSet::new(),
             again: HashSet::new(),
             again_errors: HashMap::new(),
+            notes: HashMap::new(),
             slsk_waiting: false,
             gen: 0,
             sending: false,
@@ -1084,6 +1109,11 @@ mod tests {
         // a live answer, an older server's bare list: nothing to say
         assert_eq!(found_line(&json!({ "items": [], "from": "live", "cached_at": null }), typed, false), None);
         assert_eq!(found_line(&json!([]), typed, false), None);
+        // the server's reason for an empty answer; none for a full one, nor where the kept line shows it
+        let why = json!({ "items": [], "from": "live", "notice": "Prowlarr's indexers found nothing for \"x\"" });
+        assert_eq!(empty_note(&why).as_deref(), Some("Prowlarr's indexers found nothing for \"x\""));
+        assert_eq!(empty_note(&json!({ "items": [{}], "notice": "n" })), None);
+        assert_eq!(empty_note(&json!({ "items": [], "from": "cache", "can_search": false, "notice": "n" })), None);
         assert!(can_search(&json!({ "items": [] })));
         // no sentence from the server: the time it was kept, in UTC
         assert_eq!(

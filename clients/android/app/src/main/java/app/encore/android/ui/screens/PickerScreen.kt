@@ -205,6 +205,8 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
     // "Search again" running for a source (its rows stay), and why one failed
     val again = remember { mutableStateMapOf<String, Boolean>() }
     val againErrors = remember { mutableStateMapOf<String, String>() }
+    // why a source's answer has no rows, in the server's words ("Prowlarr's indexers found nothing for …")
+    val notes = remember { mutableStateMapOf<String, String>() }
     // another Soulseek search holds the turn and this one waits for it
     var slskWaiting by remember { mutableStateOf(false) }
     var searchGen by remember { mutableStateOf(0) }
@@ -220,6 +222,8 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
     fun land(id: String, r: PickSearch) {
         results[id] = r.items
         if (r.kept) kept[id] = r else kept.remove(id)
+        val note = PickerRules.emptyNote(r)
+        if (note != null) notes[id] = note else notes.remove(id)
     }
 
     /**
@@ -291,7 +295,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
             val sources = inf.sources
             LaunchedEffect(searchGen) {
                 if (sources.isEmpty()) return@LaunchedEffect
-                results.clear(); errors.clear(); kept.clear(); againErrors.clear()
+                results.clear(); errors.clear(); kept.clear(); againErrors.clear(); notes.clear()
                 val q = query.trim()
                 for (s in sources) {
                     // a ready source; and Soulseek while it is not connected, for the searches a server kept
@@ -416,7 +420,12 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                                     FoundRow(name, line?.text.orEmpty(), line?.again == true, running, againErrors[src]) { source?.let { searchAgain(it) } }
                                 }
                             }
-                            if (list.isEmpty() && line == null) item(key = "none-$src") { Text("No results.", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(horizontal = Gutter, vertical = 6.dp)) }
+                            // the server's reason when it sent one: under a kept answer's line ("No results. · Found at …"), else
+                            // in place of a bare "No results."
+                            val note = notes[src]?.takeIf { list.isEmpty() }
+                            if (list.isEmpty() && (line == null || note != null)) item(key = "none-$src") {
+                                Text(PickerRules.noneText(note, kept = line != null), style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(horizontal = Gutter, vertical = 6.dp))
+                            }
                             val shown = if (current == "all") list.take(8) else list.take(150)
                             items(shown.size, key = { i -> "$src-$i" }) { i -> PickRow(nav, shown[i], busy) { x -> download(x.source, x.payload, x.title) } }
                             if (current == "all" && list.size > shown.size) {

@@ -69,6 +69,9 @@ struct State {
     again: HashSet<String>,
     /// why a "Search again" failed (the kept rows stay)
     again_errors: HashMap<String, PickErr>,
+    /// why a source's answer has no rows, in the server's words ("Prowlarr's indexers found nothing for …"):
+    /// shown instead of a bare "No results."
+    notes: HashMap<String, String>,
     /// one more for every new search: answers of an older one are dropped
     gen: u32,
 }
@@ -106,6 +109,17 @@ fn answer_of(v: &Value) -> (Vec<Value>, Option<Kept>) {
         notice: v.s("notice").trim().to_string(),
     };
     (items, Some(kept))
+}
+
+/// Keep (or drop) the server's reason why source `id`'s answer `r` has no rows: only for an empty answer, and not
+/// for a kept one that can't search again, whose line already shows the notice (the source's hint).
+fn set_note(notes: &mut HashMap<String, String>, id: &str, r: &Value, items: &[Value], kept: Option<&Kept>) {
+    let note = r.s("notice").trim().to_string();
+    if items.is_empty() && !note.is_empty() && kept.is_none_or(|k| k.can_search) {
+        notes.insert(id.to_string(), note);
+    } else {
+        notes.remove(id);
+    }
 }
 
 /// The words of two searches compared without case, punctuation or word order (the phone's `PickerRules.sameQuery`).
@@ -470,7 +484,13 @@ impl Picker {
             None => String::new(),
         };
         if list.is_empty() {
-            let none = if kept.is_none() { r#"<div class="muted small">No results.</div>"# } else { "" };
+            // the server's reason when it sent one (a kept answer's line already says "No results.")
+            let none = match (st.notes.get(src), kept.is_none()) {
+                (Some(n), true) => format!(r#"<div class="muted small">No results – {}</div>"#, esc(n)),
+                (Some(n), false) => format!(r#"<div class="muted small">{}</div>"#, esc(n)),
+                (None, true) => r#"<div class="muted small">No results.</div>"#.to_string(),
+                (None, false) => String::new(),
+            };
             return format!("{head}{line}{failed}{none}");
         }
         let shown = &list[..list.len().min(if st.tab == "all" { 8 } else { 150 })];
@@ -522,6 +542,7 @@ impl Picker {
             st.kept.clear();
             st.again.clear();
             st.again_errors.clear();
+            st.notes.clear();
             st.loading.clear();
             st.slsk_waiting = false;
             st.q = q.to_string();
@@ -546,6 +567,7 @@ impl Picker {
                     match res {
                         Ok(r) => {
                             let (items, kept) = answer_of(&r);
+                            set_note(&mut st.notes, &id, &r, &items, kept.as_ref());
                             st.results.insert(id.clone(), items);
                             if let Some(k) = kept { st.kept.insert(id.clone(), k); }
                         }
@@ -613,6 +635,7 @@ impl Picker {
                 match res {
                     Ok(r) => {
                         let (items, kept) = answer_of(&r);
+                        set_note(&mut st.notes, &id, &r, &items, kept.as_ref());
                         st.results.insert(id.clone(), items);
                         // a live answer has no line; a kept one (another picker's search that just ended) keeps it
                         match kept { Some(k) => { st.kept.insert(id.clone(), k); } None => { st.kept.remove(&id); } }
@@ -709,6 +732,17 @@ mod tests {
         assert!(answer_of(&json!({ "from": "cache" })).1.unwrap().can_search);
         // anything else: no rows
         assert_eq!(answer_of(&json!("oops")).0.len(), 0);
+        // the server's reason for an empty answer is kept for the source, a full answer drops it, and a kept answer
+        // that can't search shows its notice on its own line
+        let mut notes = HashMap::new();
+        let empty = json!({ "items": [], "from": "live", "notice": "Prowlarr's indexers found nothing for \"x\"" });
+        set_note(&mut notes, "torznab", &empty, &[], None);
+        assert_eq!(notes.get("torznab").map(String::as_str), Some("Prowlarr's indexers found nothing for \"x\""));
+        set_note(&mut notes, "torznab", &json!({ "items": [{}] }), &[json!({})], None);
+        assert!(notes.is_empty());
+        let down = Kept { can_search: false, ..Kept::default() };
+        set_note(&mut notes, "slskd", &empty, &[], Some(&down));
+        assert!(notes.is_empty());
         assert_eq!(answer_of(&Value::Null).0.len(), 0);
     }
 

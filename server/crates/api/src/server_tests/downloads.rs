@@ -381,3 +381,25 @@ async fn a_release_waits_for_its_own_clients_folder() {
     assert!(d["wait"].is_null(), "{d}");
     e.done();
 }
+
+/// A torrent folder that throws I/O errors (a failing disk or mount) doesn't hide the indexers from the picker:
+/// they are searched as always, and the answer says that picks would wait and why, instead of a bare "0".
+#[tokio::test]
+async fn the_picker_says_picks_wait_while_the_torrent_folder_fails() {
+    let e = env("picker-io").await;
+    let st = e.st().clone();
+    e.fake();
+    e.fail(&e.torrents, 5);
+    downloads::probe_all(&st);
+    let b = crate::routes::picker::SearchBody { source: "torznab".into(), kind: "album".into(), artist: "Band".into(), title: "Album".into(), ..Default::default() };
+    let a = crate::routes::picker::run_search(&st, &b).await.unwrap();
+    assert!(e.searches() > 0, "the indexers are still searched");
+    let n = a.notice.clone().unwrap_or_default();
+    assert!(n.starts_with("Downloads from here wait: ") && n.contains(&e.torrents.display().to_string()) && n.contains("Prowlarr's indexers found nothing"), "{n}");
+    // once the folder can be written, nothing is said about it
+    e.fix();
+    downloads::probe_all(&st);
+    let a = crate::routes::picker::run_search(&st, &crate::routes::picker::SearchBody { fresh: true, ..b }).await.unwrap();
+    assert!(!a.notice.unwrap_or_default().contains("Downloads from here wait"));
+    e.done();
+}

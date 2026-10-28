@@ -347,7 +347,9 @@ pub struct Answer {
     pub query: String,
     /// "Search again" would run now (false while Soulseek isn't connected)
     pub can_search: bool,
-    /// why it would not: the source's hint ("Soulseek isn't connected – next attempt at 14:20")
+    /// why it would not: the source's hint ("Soulseek isn't connected – next attempt at 14:20"); or, when the
+    /// answer has no rows, why not ("Prowlarr's indexers found nothing for …"), so an empty source never shows
+    /// a bare "0"
     pub notice: Option<String>,
 }
 
@@ -379,9 +381,18 @@ fn kept_for(st: &AppState, kind: &str, key: &str, mine: Option<(i64, f64, Vec<St
     mine.and_then(|(id, since, keys)| cache.get_for_request(dir, kind, Some(id), &keys, since, now)).or(own)
 }
 
+/// What Soulseek rows are matched against: the words typed in the box when they are other words than the picker
+/// was opened with (or it was opened without a title), else the title. `true` with the typed words: they are
+/// looked for in the whole path ("Artist/Album/03 - Song.flac"), since typed words often name the artist, which
+/// a file's own name leaves to its folders.
+fn slskd_want<'a>(b: &'a SearchBody, q: &'a str) -> (&'a str, bool) {
+    if typed(b) || b.title.trim().is_empty() { (q, true) } else { (b.title.as_str(), false) }
+}
+
 /// Picker rows from slskd's answers (live, or kept): per folder for an album, per file for a song, scored
-/// against what the picker was opened for, the best 150.
-fn slskd_rows(b: &SearchBody, responses: &[Value]) -> Vec<Value> {
+/// against what the picker was opened for – or the words typed in the box ([`slskd_want`]) – the best 150.
+fn slskd_rows(b: &SearchBody, q: &str, responses: &[Value]) -> Vec<Value> {
+    let (want, whole_path) = slskd_want(b, q);
     let mut out = vec![];
     for resp in responses {
         let user = resp["username"].as_str().unwrap_or("").to_string();
@@ -398,7 +409,8 @@ fn slskd_rows(b: &SearchBody, responses: &[Value]) -> Vec<Value> {
             let fmt = if exts.len() == 1 { exts.into_iter().next().unwrap() } else { "mixed".into() };
             let parts: Vec<&str> = d.split('/').collect();
             let name = if b.kind == "track" { parts.last().unwrap_or(&"").to_string() } else { parts[parts.len().saturating_sub(2)..].join("/") };
-            let rel = contains(&name, &b.title);
+            // typed words are looked for in the whole path, the title in the folder's or file's own name
+            let rel = contains(if whole_path { &d } else { &name }, want);
             if rel < 0.4 {
                 continue;
             }
@@ -450,12 +462,17 @@ async fn slskd_answer(st: &AppState, b: &SearchBody, q: &str, s: &SourceState, r
     if !b.fresh {
         let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("slskd")));
         let k = key.clone();
-        let kept = st.blocking(move |st| Ok(kept_for(st, "slskd", &k, mine))).await?;
+        // an answer with no results is searched again while Soulseek can search: who is online changes, and a
+        // search made while the session was shaky would otherwise read as "nothing on Soulseek" for an hour
+        let kept = st.blocking(move |st| Ok(kept_for(st, "slskd", &k, mine))).await?.filter(|f| !ready || !f.results.is_empty());
         if let Some(f) = kept {
             // the words after "Found at 14:02 for …": the box's own when the kept search is the one they make
             // (brackets and symbols aside), the other search's when it came from the request's own attempts
-            let query = if f.key == key { q.to_string() } else { f.query };
-            return Ok(Answer { items: slskd_rows(b, &f.results), cached_at: Some(f.searched_at), query, can_search: ready, notice: (!ready).then(|| s.hint.clone()) });
+            let query = if f.key == key { q.to_string() } else { f.query.clone() };
+            let items = slskd_rows(b, q, &f.results);
+            // can't search: why; else, when nothing is shown, why not
+            let notice = if !ready { Some(s.hint.clone()) } else { slskd_notice(b, q, &f.query, &f.results, &items) };
+            return Ok(Answer { items, cached_at: Some(f.searched_at), query, can_search: ready, notice });
         }
     }
     if !ready {
@@ -469,7 +486,23 @@ async fn slskd_answer(st: &AppState, b: &SearchBody, q: &str, s: &SourceState, r
             Err(e) => Err(search_cache::Failure::of(&e)),
         }
     }).await.map_err(|f| search_error(st, "slskd", f.into_error()))?;
-    Ok(Answer::live(slskd_rows(b, &found.results), found.query.clone()))
+    let items = slskd_rows(b, q, &found.results);
+    let notice = slskd_notice(b, q, &found.query, &found.results, &items);
+    Ok(Answer { notice, ..Answer::live(items, found.query.clone()) })
+}
+
+/// Why a Soulseek answer shows no rows (None when it shows some): nobody answered `text`, or those who did
+/// had no audio file named like what is wanted ([`slskd_want`]) – so an empty list never reads as a bare "0".
+fn slskd_notice(b: &SearchBody, q: &str, text: &str, responses: &[Value], items: &[Value]) -> Option<String> {
+    if !items.is_empty() {
+        return None;
+    }
+    if responses.is_empty() {
+        return Some(format!("Nobody on Soulseek answered \"{text}\" – fewer words (just the artist and title) often find more"));
+    }
+    let (want, _) = slskd_want(b, q);
+    let files: usize = responses.iter().map(|r| r["files"].as_array().map_or(0, |f| f.len())).sum();
+    Some(format!("{} Soulseek user(s) answered \"{text}\" with {files} file(s), but none is an audio file named like \"{want}\"", responses.len()))
 }
 
 /// One indexer result as a picker row. `album` marks a release of the album the song is on: only the
@@ -536,13 +569,61 @@ struct Prowlarr<'a> {
     /// (when, words) of the oldest kept answer used; the words only when it is another search than the one
     /// asked for (the request's own album search under other words)
     kept: std::sync::Mutex<Option<(f64, Option<String>)>>,
+    /// what the searches found before Encore's matching ([`Tally`])
+    tally: std::sync::Mutex<Tally>,
+}
+
+/// What the picker's Prowlarr searches found before Encore's matching: every release once, for the rows
+/// offered when nothing matched ([`loose_rows`]) and for the line that says why a search shows none
+/// ([`Tally::notice`]).
+#[derive(Default)]
+struct Tally {
+    /// every release the searches answered, once each
+    releases: Vec<Value>,
+    /// the releases' guids (else titles), to take each once
+    seen: std::collections::HashSet<String>,
+    /// the words of each search made, in order, once each
+    queries: Vec<String>,
+}
+
+impl Tally {
+    /// Note one search's words and answer.
+    fn add(&mut self, q: &str, found: &[Value]) {
+        if !self.queries.iter().any(|x| x == q) {
+            self.queries.push(q.to_string());
+        }
+        for r in found {
+            if self.seen.insert(r["guid"].as_str().or(r["title"].as_str()).unwrap_or("").to_string()) {
+                self.releases.push(r.clone());
+            }
+        }
+    }
+
+    /// Why the searches show no rows: Prowlarr found nothing; or what it found needs a client that isn't set
+    /// up; or none of it names what is wanted.
+    fn notice(&self, st: &AppState, b: &SearchBody) -> String {
+        let words = self.queries.iter().map(|q| if q.is_empty() { "(nothing)".to_string() } else { format!("\"{q}\"") }).collect::<Vec<_>>().join(" or ");
+        let n = self.releases.len();
+        if n == 0 {
+            return format!("Prowlarr's indexers found nothing for {words} – Prowlarr → History shows what each indexer answered (an indexer that is failing, rate limited or without Audio categories finds nothing)");
+        }
+        let usable = self.releases.iter().filter(|r| torznab_usable(st, r)).count();
+        if usable == 0 {
+            // what the releases need: the protocols of the first ones that can't be taken
+            let usenet = self.releases.iter().any(|r| r["protocol"] == "usenet");
+            let client = if usenet && !torznab::sab_ready(st) { "Usenet" } else { "torrent" };
+            return format!("Prowlarr found {n} release(s) for {words}, but none can be downloaded: they need a {client} client, which isn't set up (Settings → Plugins → Torrents & Usenet)");
+        }
+        let what = if b.title.trim().is_empty() { "the words searched".to_string() } else if b.artist.trim().is_empty() { format!("\"{}\"", b.title) } else { format!("\"{}\" by {}", b.title, b.artist) };
+        format!("Prowlarr found {n} release(s) for {words}, but none of them names {what} – try other words, e.g. the album's name")
+    }
 }
 
 impl<'a> Prowlarr<'a> {
     /// The searches for this picker search: kept with `req` when it is one.
     fn of(st: &'a AppState, b: &SearchBody, req: Option<&ForRequest>) -> Prowlarr<'a> {
         let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("torznab")));
-        Prowlarr { st, fresh: b.fresh, request_id: req.map(|r| r.id), mine, kept: Default::default() }
+        Prowlarr { st, fresh: b.fresh, request_id: req.map(|r| r.id), mine, kept: Default::default(), tally: Default::default() }
     }
 
     /// Releases for `q` in `cats`; `own`: the album search the request's own attempts make too.
@@ -557,15 +638,78 @@ impl<'a> Prowlarr<'a> {
             if let Some(f) = found {
                 let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
                 if kept.as_ref().is_none_or(|(at, _)| f.searched_at < *at) {
-                    *kept = Some((f.searched_at, (f.key != key).then_some(f.query)));
+                    *kept = Some((f.searched_at, (f.key != key).then_some(f.query.clone())));
                 }
+                self.note(&f.query, &f.results);
                 return Ok(f.results);
             }
         }
         let res = torznab::search_in(self.st, q, cats).await?;
         search_cache::keep_releases(self.st, q, cats, self.request_id, &res).await;
+        self.note(q, &res);
         Ok(res)
     }
+
+    /// Add one search's words and answer to the [`Tally`].
+    fn note(&self, q: &str, found: &[Value]) {
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).add(q, found);
+    }
+
+    /// The releases found so far, once each.
+    fn found(&self) -> Vec<Value> {
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).releases.clone()
+    }
+
+    /// Why nothing is shown ([`Tally::notice`]).
+    fn notice(&self, b: &SearchBody) -> String {
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).notice(self.st, b)
+    }
+}
+
+/// When nothing matched: every release found that can be downloaded and names the artist or most of the words
+/// searched, as rows – those that do match as their own rows (a search without categories can bring them), the
+/// others ranked below them with a warning that says Encore isn't sure. A song's pick downloads only the song's
+/// file from whatever release it is (the worker looks for it), so an album or a discography is a fair offer.
+/// Indexers name releases their own way, and a list the person can judge beats an empty one.
+fn loose_rows(st: &AppState, b: &SearchBody, q: &str, releases: &[Value]) -> Vec<Value> {
+    let lossless_re = lossless_re();
+    let mut out = vec![];
+    for r in releases {
+        if !torznab_usable(st, r) {
+            continue;
+        }
+        let title = r["title"].as_str().unwrap_or("");
+        let lossless = lossless_re.is_match(title);
+        let seeds = (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
+        // the strict reading first: the one the song's or album's own search uses
+        let strict = if b.kind == "track" {
+            torznab::score_song(title, r["size"].as_f64().unwrap_or(0.0), r["seeders"].as_i64(), r["protocol"].as_str().unwrap_or("torrent"), &b.artist, &b.title).map(|x| x.0)
+        } else {
+            let (a, ar) = (torznab::album_share(title, &b.title), contains(title, &b.artist));
+            (a >= 0.8 && ar >= 0.5).then_some(a * 40.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + seeds)
+        };
+        let row = match strict {
+            Some(sc) => torznab_row(st, r, sc, None),
+            None => {
+                let (words, artist) = (contains(title, q), contains(title, &b.artist));
+                if words < 0.5 && artist < 0.5 {
+                    continue;
+                }
+                // below every match: 30 off what a release naming every word would score
+                let sc = words * 20.0 + artist * 10.0 + if lossless { 10.0 } else { 0.0 } + seeds - 30.0;
+                let mut row = torznab_row(st, r, sc, None);
+                row["warning"] = json!(if b.kind == "track" {
+                    format!("Not clearly \"{}\" – only the song's file downloads, if the release has it", b.title)
+                } else {
+                    "Not clearly this album – check the release's name before picking".to_string()
+                });
+                row
+            }
+        };
+        out.push(row);
+    }
+    by_score(&mut out);
+    out
 }
 
 /// The indexers' rows for `b` (kept answers as the body says), without a request: the tests' way in.
@@ -574,8 +718,24 @@ async fn search_torznab(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
     search_torznab_in(&Prowlarr::of(st, b, None), b, q).await
 }
 
-/// Search the indexers through Prowlarr: a song's own search, else albums ranked by fit and quality.
+/// Search the indexers through Prowlarr ([`search_torznab_matched`]). When nothing matches: Prowlarr found
+/// nothing in the music categories – asked again without categories, since some indexers file music
+/// elsewhere ("Other", "Misc") – and then whatever was found that looks related ([`loose_rows`]). Still
+/// nothing: `p.notice` says why.
 async fn search_torznab_in(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
+    let out = search_torznab_matched(p, b, q).await?;
+    if !out.is_empty() {
+        return Ok(out);
+    }
+    if p.found().is_empty() {
+        // a failure here is no reason to hide what the first searches said ("found nothing")
+        let _ = p.search(q, &[], false).await;
+    }
+    Ok(loose_rows(p.st, b, q, &p.found()))
+}
+
+/// The indexers' releases that match: a song's own search, else albums ranked by fit and quality.
+async fn search_torznab_matched(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let st = p.st;
     if b.kind == "track" {
         return search_torznab_song(p, b, q).await;
@@ -952,7 +1112,7 @@ pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForReque
     let q = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty())
         .unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
     if b.source == "slskd" {
-        return slskd_answer(st, b, &q, &s, req).await;
+        return slskd_answer(st, b, &q, &s, req).await.map(|a| with_folders_warning(st, "slskd", a));
     }
     if s.state != "ready" {
         return Err(state_error(&b.source, &s));
@@ -965,10 +1125,11 @@ pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForReque
         let q = if typed(b) { q } else { Some(slskd::query_text(&[&b.artist, &b.title])).filter(|t| !t.is_empty()).unwrap_or(q) };
         let p = Prowlarr::of(st, b, req);
         let items = search_torznab_in(&p, b, &q).await.map_err(|e| search_error(st, &b.source, e))?;
+        let notice = items.is_empty().then(|| p.notice(b));
         let kept = p.kept.into_inner().unwrap_or_else(|e| e.into_inner());
         // kept: the box's words, unless the rows came from another search (as for Soulseek); live: the words sent
         let query = match &kept { Some((_, Some(other))) => other.clone(), Some(_) => boxed, None => q };
-        return Ok(Answer { items, cached_at: kept.map(|k| k.0), query, can_search: true, notice: None });
+        return Ok(with_folders_warning(st, "torznab", Answer { items, cached_at: kept.map(|k| k.0), query, can_search: true, notice }));
     }
     // the streaming catalogues answer in a second or two: always live
     let res = match b.source.as_str() {
@@ -978,6 +1139,29 @@ pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForReque
         _ => search_ytmusic(st, b, &q).await,
     };
     res.map(|items| Answer::live(items, q)).map_err(|e| search_error(st, &b.source, e))
+}
+
+/// Why picks from `source` ("slskd", "torznab") would wait now although it searches: its download folders can't
+/// be written (the last folder check, as Diagnostics shows it: a read-only or failing disk or mount). None while
+/// they can be.
+fn folders_warning(st: &AppState, source: &str) -> Option<String> {
+    let failing = encore_requests::worker::downloads::failing_for(st, source)?;
+    let first = failing.first()?;
+    Some(format!("Downloads from here wait: {} (Settings → Diagnostics)", first.sentence().unwrap_or_else(|| first.short())))
+}
+
+/// [`folders_warning`] on an answer: on each row (the apps show a row's warning under it) and before the
+/// answer's notice, so searching still works but nobody picks without knowing the pick will wait.
+fn with_folders_warning(st: &AppState, source: &str, mut a: Answer) -> Answer {
+    let Some(w) = folders_warning(st, source) else { return a };
+    for row in a.items.iter_mut().filter(|r| r["warning"].as_str().is_none_or(str::is_empty)) {
+        row["warning"] = json!(w);
+    }
+    a.notice = Some(match a.notice.take() {
+        Some(n) => format!("{w} · {n}"),
+        None => w,
+    });
+    a
 }
 
 /// A plugin program's search (uploaded or installed from a URL): the box's words or the names the picker was
