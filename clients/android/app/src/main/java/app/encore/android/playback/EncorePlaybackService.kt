@@ -1,9 +1,14 @@
 package app.encore.android.playback
 
 import app.encore.android.data.api.ServerRoute
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -300,6 +305,7 @@ class EncorePlaybackService : MediaLibraryService() {
             },
             items = { tracks -> tracks.map { MediaItems.track(graph.api, it) }.also { rememberAll(it) } },
             newQueue = { resolver.forgetAll(); car.queueReplaced() },
+            startAt = { item, ms -> current.startPosition(item, ms) },
             volume = { transitions?.volume() ?: player.volume },
             fading = { transitions?.fading == true },
             // normalization for a device controlling this one: the snapshot's `norm` and the `prefs` command (§5.1)
@@ -342,7 +348,37 @@ class EncorePlaybackService : MediaLibraryService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         if (intent == null) CrashLog.log("playback service restarted by the system")
+        if (intent?.action == ACTION_RESUME_AFTER_UPDATE) watchUpdateStart()
         return START_STICKY
+    }
+
+    /**
+     * Started in the foreground after an update install ([ResumeAfterUpdateReceiver]): crash recovery puts the queue
+     * back and plays on ([Resume.restoreAtStart], [playFromBackground]), and Media3 puts the service in the
+     * foreground with its notification. When that has not happened after [UPDATE_START_GRACE_MS] (signed out, the
+     * queue gone, the restore refused), Android would close the app for a foreground start that never went into the
+     * foreground: a plain notification goes up and comes straight down again, and the service stops unless the music
+     * plays or the app is open.
+     */
+    private fun watchUpdateStart() {
+        main.postDelayed({
+            if (released || isPlaybackOngoing()) return@postDelayed
+            CrashLog.log("update start: nothing to play on, stopping")
+            try {
+                val nm = getSystemService(NotificationManager::class.java)
+                if (nm != null && nm.getNotificationChannel(RESUME_CHANNEL) == null) {
+                    nm.createNotificationChannel(NotificationChannel(RESUME_CHANNEL, "Playback", NotificationManager.IMPORTANCE_LOW))
+                }
+                val n = Notification.Builder(this, RESUME_CHANNEL).setSmallIcon(R.drawable.ic_note).setContentTitle("Encore").build()
+                if (Build.VERSION.SDK_INT >= 29) startForeground(RESUME_NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                else startForeground(RESUME_NOTIFY_ID, n)
+            } catch (e: Exception) {
+                CrashLog.log("update start: no foreground ($e)")
+            }
+            // off the foreground with its notification; a bound app keeps the service alive regardless
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }, UPDATE_START_GRACE_MS)
     }
 
     /**
@@ -910,7 +946,10 @@ class EncorePlaybackService : MediaLibraryService() {
                     // before the new queue is set: Media3 sets it in a later post on the same main thread
                     main.post { if (!released) car.queueReplaced() }
                     rememberAll(list)
-                    f.set(MediaSession.MediaItemsWithStartPosition(list, at, pos))
+                    // a queue that starts part-way into a song (Continue from another device): a song the server
+                    // converts is asked for at its spot (t=) instead of starting at 0:00
+                    val startMs = if (pos > 0L) current.startPosition(list[at], pos) else pos
+                    f.set(MediaSession.MediaItemsWithStartPosition(list, at, startMs))
                 } catch (e: Exception) {
                     CrashLog.log("play request from ${controller.packageName} failed: $e")
                     // never the controller's own items: they have no stream address, and for a car's, a Bluetooth
@@ -933,7 +972,9 @@ class EncorePlaybackService : MediaLibraryService() {
                     if (snap != null) {
                         val items = snap.tracks.map { MediaItems.track(graph.api, it) }
                         rememberAll(items)
-                        f.set(MediaSession.MediaItemsWithStartPosition(items, snap.index, snap.positionMs))
+                        // at its spot, also a song the server converts (asked for at t= instead of from 0:00)
+                        val startMs = items.getOrNull(snap.index)?.let { current.startPosition(it, snap.positionMs) } ?: snap.positionMs
+                        f.set(MediaSession.MediaItemsWithStartPosition(items, snap.index, startMs))
                     } else if (graph.store.current != null) {
                         val items = graph.api.recentPlays(50).map { MediaItems.track(graph.api, it) }
                         rememberAll(items)
@@ -1068,6 +1109,16 @@ class EncorePlaybackService : MediaLibraryService() {
         /** Custom session command: seek in song time (server-made streams restart at `t=`). Args: [ARG_POSITION_MS]. */
         const val CMD_SEEK = "app.encore.android.SEEK"
         const val ARG_POSITION_MS = "position_ms"
+
+        /** [ResumeAfterUpdateReceiver] starts the service with this after an update install found the music playing. */
+        const val ACTION_RESUME_AFTER_UPDATE = "app.encore.android.RESUME_AFTER_UPDATE"
+
+        /** How long a start after an update install waits for the music to play on before it stops ([watchUpdateStart]). */
+        private const val UPDATE_START_GRACE_MS = 8000L
+
+        /** The plain notification [watchUpdateStart] puts up for a moment when there was nothing to play on. */
+        private const val RESUME_CHANNEL = "encore_resume"
+        private const val RESUME_NOTIFY_ID = 7301
 
         /** why a controller's play or add fails in a group listen (only logged by Media3) */
         private const val GROUP_QUEUE = "In a group listen the queue is the group's"

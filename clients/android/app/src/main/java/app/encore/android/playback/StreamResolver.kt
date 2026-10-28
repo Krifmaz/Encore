@@ -274,6 +274,19 @@ class StreamResolver(private val api: EncoreApi, private val estimator: Bandwidt
         )
     }
 
+    /**
+     * A queue starts [positionMs] into the song [t] (a queue put back at start, Resume on the lock screen, another
+     * device's queue at its spot): returns the start position to hand the player. A song that will play as a
+     * server-made stream gets its variant with the spot as `offsetSec` ([force]), so it is asked for at `t=` and the
+     * player starts at 0 ([ResumeRules.startAt]); a whole file returns [positionMs] unchanged. Any thread.
+     */
+    fun startAt(t: StreamTrack, positionMs: Long): Long {
+        val v = chosen[t.id] ?: startVariant(t)
+        val start = ResumeRules.startAt(positionMs, v.serverStream)
+        if (start.offsetSec > 0) force(t.id, v.copy(offsetSec = start.offsetSec))
+        return start.playerMs
+    }
+
     /** The stream URL for a song in a given variant (player.js streamUrl). */
     fun url(id: Long, v: StreamVariant): String {
         if (v.local.isNotEmpty()) return v.local

@@ -105,6 +105,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- An update of Encore installed while it played (Android stops the app to install it): the playback
+             service starts again and plays on from the same spot (playback/ResumeAfterUpdateReceiver.kt) -->
+        <receiver
+            android:name=".playback.ResumeAfterUpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Album covers as content:// URIs for Android Auto and the system media UI (they can't send our auth) -->
         <provider
             android:name=".playback.CoverProvider"

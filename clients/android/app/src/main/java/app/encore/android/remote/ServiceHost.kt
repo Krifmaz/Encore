@@ -40,6 +40,11 @@ class ServiceHost(
     private val items: (List<Track>) -> List<MediaItem>,
     /** a new queue replaces the old one: the service forgets what it knew about the previous streams */
     private val newQueue: () -> Unit,
+    /**
+     * A queue about to start this far (ms) into the given song: the position to hand the player (a server-made
+     * stream is asked for at the spot and starts at 0, CurrentStream.startPosition). Default: unchanged.
+     */
+    private val startAt: (MediaItem, Long) -> Long = { _, ms -> ms },
     /** the volume to report: during a song transition the player's own level ramps, this is the level it ramps to */
     private val volume: () -> Float = { player.volume },
     /** a song transition is running: its volume steps are not news for the other devices */
@@ -267,7 +272,9 @@ class ServiceHost(
                 val at = c.dbl("position")
                 newQueue()
                 val list = items(tracks)
-                player.setMediaItems(list, index, if (at > 1) Math.round(at * 1000) else 0L)
+                // the spot it was sent at; a song the server converts is asked for there (t=) instead of from 0:00
+                val ms = if (at > 1) Math.round(at * 1000) else 0L
+                player.setMediaItems(list, index, list.getOrNull(index)?.takeIf { ms > 0L }?.let { startAt(it, ms) } ?: ms)
                 player.prepare()
                 player.play()
             }

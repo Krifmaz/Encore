@@ -64,6 +64,25 @@ class ResumeStore(context: Context) {
         get() = prefs.getLong(KEY_RECOVERED_AT, 0L)
         set(v) { prefs.edit().putLong(KEY_RECOVERED_AT, v).apply() }
 
+    /**
+     * When an update install found this phone playing ([ResumeAfterUpdateReceiver], epoch ms; 0 = never): the
+     * start that follows is the install's, not a crash ([ResumeRules.updateKillCounts]).
+     */
+    var updateKillAt: Long
+        get() = prefs.getLong(KEY_UPDATE_KILL_AT, 0L)
+        set(v) { prefs.edit().putLong(KEY_UPDATE_KILL_AT, v).apply() }
+
+    /**
+     * What the last process left behind, read without clearing anything (an update install decides with it whether
+     * to start the music again): its "playing" flag, how long ago it last played (ms; [Long.MAX_VALUE] = unknown)
+     * and whether a queue is saved.
+     */
+    fun lastState(): Triple<Boolean, Long, Boolean> {
+        val at = prefs.getLong(KEY_SAVED_AT, 0L)
+        val since = if (at > 0L) (System.currentTimeMillis() - at).coerceAtLeast(0L) else Long.MAX_VALUE
+        return Triple(prefs.getBoolean(KEY_PLAYING, false), since, !prefs.getString(KEY_QUEUE, null).isNullOrEmpty())
+    }
+
     /** The `updated_at` of another device's spot you closed the "Continue …" bar for ("" = none). */
     var dismissedSpot: String
         get() = prefs.getString(KEY_DISMISSED, null) ?: ""
@@ -112,5 +131,6 @@ class ResumeStore(context: Context) {
         const val KEY_DISMISSED = "spot_dismissed"
         const val KEY_PLAYING = "playing"
         const val KEY_RECOVERED_AT = "recovered_at"
+        const val KEY_UPDATE_KILL_AT = "update_kill_at"
     }
 }

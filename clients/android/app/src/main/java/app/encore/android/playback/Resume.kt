@@ -16,7 +16,9 @@ import java.util.concurrent.ExecutorService
  * The queue and spot on this phone ([ResumeStore]): saved while playing (every song change, pause, and every 5 s),
  * put back paused when the service starts (Settings → Playback → "Resume where I left off when the app opens"), and
  * crash recovery: when the process died while playing, the queue comes back at its spot even with the setting off,
- * and plays on when it was playing under 2 minutes ago (once: a song that crashes the app must not loop).
+ * and plays on when it was playing under 2 minutes ago (once: a song that crashes the app must not loop; an update
+ * install is not a crash, see [ResumeRules.playOn]). The song comes back at its spot, also when the server converts
+ * it ([CurrentStream.startPosition]).
  * Main thread only.
  */
 class Resume(
@@ -101,9 +103,12 @@ class Resume(
      */
     fun restoreAtStart() {
         val interruptedMs = store.takeInterrupted()
-        val playOn = interruptedMs != null && interruptedMs < RECOVER_WINDOW_MS &&
-            System.currentTimeMillis() - store.recoveredAt > RECOVER_WINDOW_MS
-        if (interruptedMs != null) CrashLog.log("playback stopped unexpectedly ${interruptedMs / 1000} s ago: ${if (playOn) "playing on" else "restoring paused"}")
+        // an update install stopped the app while it played (ResumeAfterUpdateReceiver marked it): not a crash, so
+        // a second install within the crash-loop window (a release and its hotfix) still plays on. Used once.
+        val afterUpdate = ResumeRules.updateKillCounts(System.currentTimeMillis() - store.updateKillAt)
+        if (store.updateKillAt != 0L) store.updateKillAt = 0L
+        val playOn = ResumeRules.playOn(interruptedMs, System.currentTimeMillis() - store.recoveredAt, afterUpdate)
+        if (interruptedMs != null) CrashLog.log("playback stopped ${if (afterUpdate) "for an update install" else "unexpectedly"} ${interruptedMs / 1000} s ago: ${if (playOn) "playing on" else "restoring paused"}")
         if (!prefs().resume && interruptedMs == null) return
         io.execute {
             try { runBlocking { session.awaitLoaded() } } catch (_: Exception) {}
@@ -113,22 +118,19 @@ class Resume(
             main.post {
                 if (released() || (!prefs().resume && interruptedMs == null) || player.mediaItemCount > 0) return@post
                 remember(items)
+                // the saved spot: a song the server converts is asked for at it (t=) instead of starting at 0:00
+                val startMs = items.getOrNull(snap.index)?.let { current.startPosition(it, snap.positionMs) } ?: snap.positionMs
                 if (playOn) {
                     store.recoveredAt = System.currentTimeMillis()
                     held = false
-                    player.setMediaItems(items, snap.index, snap.positionMs)
+                    player.setMediaItems(items, snap.index, startMs)
                     player.prepare()
                     startPlaying()
                     return@post
                 }
                 held = true
-                player.setMediaItems(items, snap.index, snap.positionMs)
+                player.setMediaItems(items, snap.index, startMs)
             }
         }
-    }
-
-    private companion object {
-        /** Crash recovery: playing this recently when the process died → it plays on by itself. */
-        const val RECOVER_WINDOW_MS = 2 * 60 * 1000L
     }
 }

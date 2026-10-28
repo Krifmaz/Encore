@@ -1,5 +1,6 @@
 package app.encore.android.playback
 
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 
@@ -44,6 +45,18 @@ class CurrentStream(private val player: ExoPlayer, private val resolver: StreamR
         val known = item.mediaMetadata.extras?.getDouble(MediaItems.EXTRA_DURATION) ?: 0.0
         if (v != null && v.serverStream) return known
         return if (player.duration > 0) player.duration / 1000.0 else known
+    }
+
+    /**
+     * A queue about to start [positionMs] into [item]: the position to hand the player ([StreamResolver.startAt]),
+     * so a server-made stream starts at its spot instead of 0:00. Touches only the resolver, so any thread (the
+     * session's callbacks build queues on the io pool). Not a library song (an offline file): [positionMs].
+     */
+    fun startPosition(item: MediaItem, positionMs: Long): Long {
+        val id = MediaItems.trackId(item.mediaId) ?: return positionMs
+        val t = resolver.track(id) ?: MediaItems.toTrack(item)?.let { StreamTrack.of(it) } ?: return positionMs
+        resolver.remember(t)
+        return resolver.startAt(t, positionMs)
     }
 
     /**
