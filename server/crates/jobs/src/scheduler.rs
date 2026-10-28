@@ -8,10 +8,11 @@ use std::future::Future;
 use std::time::Duration;
 
 /// (key, name, description)
-pub const TASKS: [(&str, &str, &str); 16] = [
+pub const TASKS: [(&str, &str, &str); 17] = [
     ("scan", "Scan the library", "Pick up files added, changed or removed outside Encore."),
     ("sync", "Sync likes & playlists", "Two-way liked songs and playlist sync with Jellyfin, Plex, Navidrome, ListenBrainz, Spotify…"),
     ("lossy", "Lossless upgrades", "Re-check albums you only have as MP3/YouTube rips for a lossless copy."),
+    ("hires", "Hi-res upgrades", "Look on Qobuz/Tidal (streamrip) for a 24-bit or higher-sample-rate copy of albums you only have in CD quality (16-bit FLAC). A download that turns out to be CD quality again is not imported."),
     ("discover", "Auto-discover", "Request the top songs of each user's ListenBrainz Weekly Exploration (count set in Auto-download)."),
     ("lyrics", "Fetch missing lyrics", "Download lyrics (.lrc) from LRCLIB for songs that don't have any yet."),
     ("artwork", "Find missing artwork", "Look up and embed cover art for albums without any."),
@@ -58,6 +59,7 @@ fn keys(key: &str) -> (&'static str, &'static str, i64) {
         "scan" => ("", "scan_interval_minutes", 1),
         "sync" => ("", "sync_interval_minutes", 1),
         "lossy" => ("upgrade_lossy", "task_lossy_minutes", 1),
+        "hires" => ("upgrade_hires", "task_hires_minutes", 1),
         "discover" => ("discover_auto_count", "task_discover_minutes", 1),
         "lyrics" => ("task_lyrics_enabled", "task_lyrics_minutes", 1),
         "artwork" => ("task_artwork_enabled", "task_artwork_minutes", 1),

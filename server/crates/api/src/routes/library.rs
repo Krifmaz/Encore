@@ -57,6 +57,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/albums/{id}", get(album).delete(delete_album))
         .route("/api/library/albums/{id}/cover", get(cover))
         .route("/api/library/albums/{id}/download", get(album_zip))
+        .route("/api/library/albums/{id}/upgrade", post(upgrade_album))
         .route("/api/library/verify-manual", post(verify_manual))
         .route("/api/library/mismatches", get(mismatches))
         .route("/api/likes", get(likes))
@@ -1117,6 +1118,8 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         "mb_albumid": f.get("mb_albumid"), "mb_releasegroupid": f.get("mb_releasegroupid"), "mb_albumartistid": f.get("mb_albumartistid"),
         "tracks": tracks, "duration": rows.iter().map(|r| r.f("duration")).sum::<f64>(), "size": size,
         "type": class.json(), "history": history(&tracks_of(&rows)), "other_copies": copies.len(), "added_at": added_at,
+        // how good the album's copy is (its worst song) and what ⋯ → Upgrade quality would ask for
+        "quality_summary": encore_requests::upgrade::album_quality(&rows),
     });
     enrich(&st, Some(&u), &mut v).await;
     // its Surround versions (0.35): the surround albums, the request fetching one, whether Apple has one; and
@@ -1132,6 +1135,26 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         }
     }
     Ok(Json(v))
+}
+
+/// POST /api/library/albums/{id}/upgrade (admins): ⋯ → Upgrade quality. Asks for the next better copy of the
+/// album – lossless when it is lossy, hi-res (Qobuz/Tidal through streamrip) when it is CD quality – and
+/// answers `{request_id, tier, text}`; 409 when it is hi-res already or an upgrade runs, 422 when it can't be
+/// looked for (not matched to MusicBrainz, or hi-res without streamrip).
+async fn upgrade_album(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    use encore_requests::upgrade::{queue_album, Queued, Tier};
+    let done = st.blocking(move |st| queue_album(st, &id).map_err(|e| err(500, e.to_string()))).await?;
+    match done {
+        Queued::Requested(rid, tier) => {
+            let text = if tier == Tier::HiRes { "Looking for a hi-res copy on Qobuz/Tidal" } else { "Looking for a lossless copy" };
+            Ok(Json(json!({ "request_id": rid, "tier": tier.key(), "text": text })))
+        }
+        Queued::Running(rid) => Err(err(409, format!("An upgrade of this album is already under way (request #{rid})"))),
+        Queued::Best => Err(err(409, "This album is already hi-res – there is nothing better to look for")),
+        Queued::Unmatched => Err(err(422, "This album isn't matched to MusicBrainz yet – use Tag / match metadata first")),
+        Queued::NoHiresSource => Err(err(422, "A hi-res copy comes from Qobuz or Tidal – set up streamrip with a Qobuz or Tidal account first")),
+        Queued::NotFound => Err(err(404, "Album not found")),
+    }
 }
 
 /// Is this way of adding a request (a request, a link, a Soulseek-page download)?

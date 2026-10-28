@@ -87,9 +87,42 @@ fn or_str(t: &Value, key: &str, fallback: &str) -> String { if t.truthy(key) { t
 fn join_truthy(t: &Value, keys: &[&str], sep: &str) -> String {
     keys.iter().filter(|k| t.truthy(k)).map(|k| t.s(k)).collect::<Vec<_>>().join(sep)
 }
+/// A song's format cell: "FLAC 24/96" when its bit depth and sample rate are known (lossless files), else
 /// `${esc((t.format || '').toUpperCase())}${t.bitrate ? ' ' + t.bitrate + 'k' : ''}`.
 fn format_text(t: &Value) -> String {
-    format!("{}{}", esc(&t.s("format").to_uppercase()), if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() })
+    let fmt = esc(&t.s("format").to_uppercase());
+    if t.truthy("bit_depth") && t.truthy("sample_rate") {
+        return format!("{fmt} {}/{}", t.s("bit_depth"), khz(t.f("sample_rate")));
+    }
+    format!("{fmt}{}", if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() })
+}
+
+/// Hz as kHz without trailing zeros: 44100 → "44.1", 96000 → "96".
+fn khz(hz: f64) -> String {
+    let s = format!("{:.1}", hz / 1000.0);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The album page's quality badge from the album's `quality_summary` (the server's rating of its worst song):
+/// "Hi-Res · FLAC · 24-bit / 96 kHz" in green, "Lossless · FLAC · 16-bit / 44.1 kHz" plain, "Lossy · MP3 ·
+/// 320 kbps" in amber. None when the server sent no rating (an older server): the page shows the formats then.
+fn quality_badge(a: &Value) -> Option<String> {
+    let q = a.o("quality_summary");
+    if !q.truthy("tier") { return None; }
+    let class = match q.s("tier").as_str() { "hires" => "badge ok", "lossy" => "badge warn", _ => "badge" };
+    let title = "The quality of the album's lowest-quality song. ⋯ → Upgrade quality looks for a better copy.";
+    Some(format!(r##"<span class="{class}" title="{title}">{} · {}</span>"##, esc(&q.s("label")), esc(&q.s("line"))))
+}
+
+/// ⋯ → Upgrade quality: asks the server for a better copy of the album (lossless, or hi-res from Qobuz/Tidal)
+/// and says what it is doing, or why it can't.
+fn upgrade_album(id: String, reload: Rc<dyn Fn()>) {
+    dom::spawn(async move {
+        match api::post_empty(&format!("/library/albums/{id}/upgrade")).await {
+            Ok(r) => { toast(&format!("{} (request #{})", r.s("text"), r.s("request_id")), "ok"); reload(); }
+            Err(e) => toast(&e.message, if e.status == 409 { "warn" } else { "err" }),
+        }
+    });
 }
 /// `${o.total ? o.done / o.total * 100 : 0}` for the progress bars.
 fn pct(o: &Value, done: &str, total: &str) -> String {
@@ -1502,7 +1535,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         {requested}
         <div class="chips mt">
           {type_chip}
-          <span class="badge">{formats}</span>
+          {formats}
           {genre}
           {tagged}
           {versions}
@@ -1526,7 +1559,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
             year = if a.truthy("year") { format!(" · {}", esck(&a, "year")) } else { String::new() },
             n = tracks.len(), dur = ui::fmt::long_dur(a.f("duration")), size = ui::fmt::size(a.f("size")),
             requested = if history.is_empty() { String::new() } else { format!(r##"<div class="small muted" style="margin-top:4px">{history}</div>"##) },
-            formats = esc(&if surround { a.s("quality") } else { formats }),
+            formats = if surround { format!(r##"<span class="badge">{}</span>"##, esc(&a.s("quality"))) } else { quality_badge(&a).unwrap_or_else(|| format!(r##"<span class="badge">{}</span>"##, esc(&formats))) },
             kicker = if surround { "Surround album · In your library" } else { "Album · In your library" },
             versions = album_versions(&a, surround), atmos = if surround { String::new() } else { atmos_button(&a, admin) },
             genre = if a.truthy("genre") { format!(r##"<span class="badge">{}</span>"##, esck(&a, "genre")) } else { String::new() },
@@ -1746,6 +1779,13 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     {
         let (rgid, artist, album) = (a.s("mb_releasegroupid"), if a.truthy("albumartist") { a.s("albumartist") } else { a.s("artist") }, a.s("album"));
         items.push(MenuItem::new("Get the rest of the album", &icon("download"), move || crate::pages::rest_of_album::get_rest(&rgid, &artist, &album)));
+    }
+    // a better copy: lossless for a lossy album, hi-res for a CD-quality one (none once it is hi-res)
+    let up = a.o("quality_summary").s("upgrade");
+    if admin && !up.is_empty() {
+        let label = if up == "hires" { "Upgrade quality (hi-res)" } else { "Upgrade quality (lossless)" };
+        let (id, reload) = (id.to_string(), reload.clone());
+        items.push(MenuItem::new(label, &icon("refresh"), move || upgrade_album(id.clone(), reload.clone())));
     }
     if a.truthy("mb_releasegroupid") { items.push(MenuItem::link("Release info", &icon("disc"), &format!("#/album/{}", a.s("mb_releasegroupid")), false)); }
     { let (id, title) = (id.to_string(), a.s("album")); items.push(MenuItem::new("Report a problem", &icon("shield"), move || crate::pages::report::report_modal("album", json!(id), &title, "", Some(Rc::new(|_| app::navigate("/library")))))); }

@@ -340,7 +340,13 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
         "gamdl" => plugins.iter().any(|p| p.id == "gamdl" && p.enabled && p.kinds.contains(&kind)) && crate::sources::gamdl::signed_in(st),
         other => plugins.iter().any(|p| p.id == other && p.enabled && p.kinds.contains(&kind)),
     };
-    order.into_iter().filter(|s| avail(s)).collect()
+    let mut order: Vec<String> = order.into_iter().filter(|s| avail(s)).collect();
+    // a hi-res upgrade only asks streamrip: Qobuz and Tidal say what resolution they have, and its download is
+    // checked to be hi-res before it replaces anything (Soulseek, torrents and Usenet can't promise one)
+    if crate::upgrade::is_hires(&r.d) {
+        order.retain(|s| s == "streamrip");
+    }
+    order
 }
 
 /// The sources in the order they are tried, before the ones that aren't set up are left out: the

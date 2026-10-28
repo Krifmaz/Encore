@@ -17,6 +17,18 @@ fn sw(s: &Value, k: &str, label: &str, help: &str) -> String {
         checked = if s.truthy(k) { "checked" } else { "" })
 }
 
+/// What Look for upgrades now did, in words: "Looking for lossless copies of 3 album(s) and hi-res copies of 5".
+fn upgrade_text(r: &Value) -> String {
+    // an older server answers only `queued` (lossless upgrades)
+    let (lossless, hires) = if r.g("lossless").is_null() { (r.i("queued"), 0) } else { (r.i("lossless"), r.i("hires")) };
+    match (lossless, hires) {
+        (0, 0) => "Nothing to upgrade right now".to_string(),
+        (l, 0) => format!("Looking for lossless copies of {l} album(s)"),
+        (0, h) => format!("Looking for hi-res copies of {h} album(s)"),
+        (l, h) => format!("Looking for lossless copies of {l} album(s) and hi-res copies of {h}"),
+    }
+}
+
 /// `collect()`: `{ settings: { [data-k]: checked | value }, users: { [data-user]: checked } }`.
 fn collect(view: &Element) -> Value {
     let mut settings = Map::new();
@@ -51,7 +63,8 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
       <div class="stat"><b>{auto_active}</b><span>Auto-downloads in progress</span></div>
       <div class="stat"><b>{album_waiting}</b><span>Songs waiting on their album</span></div>
       <div class="stat"><b>{lossy_albums}</b><span>Albums only in lossy quality</span></div>
-      <div class="stat"><b>{upgrades_done}</b><span>Upgraded to lossless</span></div>
+      <div class="stat"><b>{cd_albums}</b><span>Albums only in CD quality</span></div>
+      <div class="stat"><b>{upgrades_done}</b><span>Quality upgrades done</span></div>
     </div>
     <div class="row wrap gap-lg" style="align-items:flex-start">
       <div class="card stack" style="flex:1;min-width:320px">
@@ -76,6 +89,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
           <small>Uses the official studio release from MusicBrainz – never compilations, live albums or soundtracks. If the album doesn’t contain that exact version (e.g. a remix), the song is fetched on its own.</small></label>
         {sw_quality_first}
         {sw_upgrade_lossy}
+        {sw_upgrade_hires}
         <label class="field"><span>Retry each lossy album every</span>
           <div class="row"><input class="input" type="number" min="1" data-k="upgrade_lossy_days" value="{upgrade_lossy_days}" style="width:110px"><span class="muted">days</span>
           <button class="btn sm" id="upg">{refresh}Look for upgrades now</button></div></label>
@@ -91,6 +105,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             album_waiting = ui::fmt::num(stats.f("album_waiting")),
             lossy_albums = ui::fmt::num(stats.f("lossy_albums")),
             upgrades_done = ui::fmt::num(stats.f("upgrades_done")),
+            cd_albums = ui::fmt::num(stats.f("cd_albums")),
             sw_likes = sw(&s, "auto_request_likes", "Liked songs", "A song liked in Finamp, Plexamp, YouTube Music, Spotify, Tidal, Deezer… that isn’t in the library yet gets downloaded."),
             discover_auto_count = esc(&s.s("discover_auto_count")),
             sw_catalog_merge = sw(&s, "discover_catalog_merge", "Show releases MusicBrainz is missing", "Artist pages also list albums/EPs/singles found on Deezer and Apple Music that aren’t in MusicBrainz, so they can be requested."),
@@ -99,6 +114,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             sync_interval_minutes = esc(&s.s("sync_interval_minutes")),
             sw_quality_first = sw(&s, "quality_first", "Highest quality first", "Try every lossless source (Qobuz/Tidal/Deezer, then FLAC on Soulseek – 24-bit preferred) before torrents/Usenet, MP3s and YouTube Music."),
             sw_upgrade_lossy = sw(&s, "upgrade_lossy", "Keep upgrading lossy albums", "Periodically look for lossless copies of albums you only have as MP3/YouTube rips. Better files replace the old ones; playlists follow automatically."),
+            sw_upgrade_hires = sw(&s, "upgrade_hires", "Keep upgrading CD-quality albums to hi-res", "Periodically look on Qobuz/Tidal (streamrip, at Hi-res max) for 24-bit copies of albums you only have as 16-bit FLAC. A download that is CD quality again is not imported."),
             upgrade_lossy_days = esc(&s.s("upgrade_lossy_days")),
             users = users,
         ));
@@ -136,7 +152,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
                 dom::spawn(async move {
                     if let Err(e) = api::put("/admin/autodownload", collect(&v)).await { dom::console_error(&e.message); return; }
                     match api::post_empty("/admin/autodownload/upgrade-now").await {
-                        Ok(r) => toast(&if r.truthy("queued") { format!("Looking for lossless copies of {} album(s)", r.s("queued")) } else { "Nothing to upgrade right now".to_string() }, "ok"),
+                        Ok(r) => toast(&upgrade_text(&r), "ok"),
                         Err(e) => dom::console_error(&e.message),
                     }
                 });

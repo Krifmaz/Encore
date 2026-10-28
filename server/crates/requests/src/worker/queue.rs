@@ -92,11 +92,11 @@ pub fn recover(st: &impl Ctx) {
 /// said stays as well – which album the song is on (or that it is on none), its recording, the album's track
 /// list – so a restart doesn't ask it all again at once (a few hundred lookups in the line after an
 /// upgrade); a lossless upgrade stays one (without `lossless_only` it found the lossy copy in the library and
-/// ended "Already in library"), and an auto-download stays one.
+/// ended "Already in library"), a hi-res upgrade stays one (`hires_only`), and an auto-download stays one.
 pub(super) fn restart_detail(old: &Value) -> Value {
     let mut d = json!({});
     for k in ["replace", "avoid", "album_mode", "release_filter", "release_ids", "length", "isrc", "ext", "attempts", "log", "pick", "kept",
-              "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "auto", "type"] {
+              "rejected", "rejected_seq", "skip_check", "no_album", "recording", "album_checked_at", "album_lookup", "album_note", "release", "lossless_only", "hires_only", "auto", "type"] {
         if !old[k].is_null() {
             d[k] = old[k].clone();
         }

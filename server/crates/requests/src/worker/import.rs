@@ -156,7 +156,9 @@ pub(super) async fn fail(st: &impl Ctx, r: &mut Req, message: &str) {
         crate::report::replacement_failed(st, &r.d, message);
     }
     if r.d["lossless_only"].as_bool().unwrap_or(false) {
-        upd(st, r, &[("status", json!("failed")), ("message", json!("No lossless copy available yet – will try again later"))]);
+        // an upgrade that found nothing better: the task asks again after the retry interval, no alarm
+        let why = if crate::upgrade::is_hires(&r.d) { "No hi-res copy available yet – will try again later" } else { "No lossless copy available yet – will try again later" };
+        upd(st, r, &[("status", json!("failed")), ("message", json!(why))]);
         return;
     }
     if r.d["auto"].as_bool() == Some(true) {

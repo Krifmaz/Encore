@@ -1656,6 +1656,10 @@ type = "bool"
 default = 360
 help = "How often the Lossless upgrades task runs, in minutes (on/off: upgrade_lossy)."
 
+[keys.task_hires_minutes]
+default = 360
+help = "How often the Hi-res upgrades task runs, in minutes (on/off: upgrade_hires)."
+
 [keys.task_discover_minutes]
 default = 360
 help = "How often the Auto-discover task runs, in minutes (on/off: discover_auto_count above 0)."
@@ -1974,6 +1978,12 @@ env = "ENCORE_UPGRADE_LOSSY"
 default = false
 label = "Keep upgrading lossy albums"
 help = "Periodically look for lossless copies of albums you only have as MP3/YouTube rips. Better files replace the old ones; playlists follow automatically."
+
+[keys.upgrade_hires]
+env = "ENCORE_UPGRADE_HIRES"
+default = false
+label = "Keep upgrading CD-quality albums to hi-res"
+help = "Periodically look on Qobuz/Tidal (streamrip, downloaded at Hi-res max) for 24-bit or higher-sample-rate copies of albums you only have as 16-bit FLAC. A download that is CD quality again is not imported. Uses the same retry interval as lossless upgrades."
 
 [keys.upgrade_lossy_days]
 env = "ENCORE_UPGRADE_LOSSY_DAYS"

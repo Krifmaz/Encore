@@ -928,7 +928,10 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
         let out = staging(st, r).join("streamrip");
         rm(&out);
         upd(st, r, &[("status", json!("downloading")), ("message", json!(format!("streamrip: {url}")))]);
-        let files = match streamrip::download_run(st, &url, &out).await {
+        // a hi-res upgrade downloads at "Hi-res max" whatever the setting says
+        let hires = crate::upgrade::is_hires(&r.d);
+        let quality = hires.then_some(crate::upgrade::HIRES_STREAMRIP_QUALITY);
+        let files = match streamrip::download_run_at(st, &url, &out, quality).await {
             Ok(run) => {
                 // streamrip's own words stay with the request on every outcome (its details show them)
                 storage::keep_output(r, "streamrip", &url, &run.log, true);
@@ -951,6 +954,13 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
                 continue;
             }
         };
+        // the service only had the CD version: nothing better than the library's copy, so it is not imported
+        if hires && !crate::upgrade::files_are_hires(&files) {
+            rm(&out);
+            last = "only a CD-quality (16-bit) version there, no hi-res".into();
+            log_push(r, format!("streamrip: {url} – {last}"));
+            continue;
+        }
         upd(st, r, &[("status", json!("importing")), ("progress", json!(100)), ("message", json!("Verifying, tagging and importing…"))]);
         let svc = if url.contains("deezer") { "Deezer" } else if url.contains("tidal") { "Tidal" } else { "Qobuz" };
         let spec = storage::Spec::new("streamrip", true, json!({ "source": svc, "detail": "via streamrip", "url": url }), format!("Downloaded from {svc} via streamrip"));

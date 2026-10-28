@@ -42,6 +42,7 @@ async fn run(st: &AppState, key: &str) -> anyhow::Result<String> {
             "done".into()
         }
         "lossy" => format!("{} upgrade(s) queued", encore_requests::upkeep::queue_lossy_upgrades(st, 20)?),
+        "hires" => format!("{} hi-res upgrade(s) queued", encore_requests::upgrade::queue_hires_upgrades(st, 20)?),
         "discover" => format!("{} song(s) requested", auto_discover(st).await),
         "lyrics" => {
             let r = lyrics::fetch_missing(st, None, 150).await;

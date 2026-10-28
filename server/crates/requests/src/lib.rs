@@ -4,7 +4,8 @@
 //! and its server session in [`slskd_session`], torrents and Usenet through the download clients,
 //! streamrip, yt-dlp with the YouTube sign-in of [`ytauth`]; the Apple Music [`wrapper`] gamdl decrypts through). Pages follow the requests live through [`events`]; [`report`] handles a song reported as
 //! wrong (its source blocked, a replacement requested); [`missing`] requests what a playlist lacks;
-//! [`upkeep`] queues lossless upgrades and clears old requests; [`notify`] tells the admin's channels.
+//! [`upgrade`] rates an album's quality and asks for a lossless or hi-res copy; [`upkeep`] queues lossless
+//! upgrades and clears old requests; [`notify`] tells the admin's channels.
 //!
 //! Functions that need the server take a [`Ctx`], which the server's state implements.
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub mod slskd_managed;
 pub mod slskd_session;
 pub mod sources;
 pub mod surround;
+pub mod upgrade;
 pub mod upkeep;
 pub mod worker;
 pub mod wrapper;

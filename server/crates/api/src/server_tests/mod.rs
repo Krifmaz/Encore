@@ -9,6 +9,7 @@ mod musicbrainz;
 mod read_only_file;
 mod rest_of_album;
 mod plugins;
+mod quality_upgrade;
 mod rejected;
 mod soulseek;
 mod stall;

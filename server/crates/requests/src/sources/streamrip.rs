@@ -1016,8 +1016,9 @@ pub struct Ripped {
 /// backslashes; no variables, globs or pipes) and each word filled in: `{bin}`, `{config}`, `{folder}`,
 /// `{quality}`, `{url}` – a value goes into its word whole, spaces and quotes included. A command that does not
 /// split (an open quote) runs the default.
-fn command(st: &impl Ctx, bin: &str, config: &Path, folder: &Path, url: &str) -> (String, Vec<String>) {
-    let quality = st.cfg().int("streamrip_quality").to_string();
+/// `quality` overrides Settings → Sources → Max quality for this run (a hi-res upgrade asks for "Hi-res max").
+fn command(st: &impl Ctx, bin: &str, config: &Path, folder: &Path, url: &str, quality: Option<i64>) -> (String, Vec<String>) {
+    let quality = quality.unwrap_or_else(|| st.cfg().int("streamrip_quality")).to_string();
     let (config, folder) = (config.to_string_lossy().to_string(), folder.to_string_lossy().to_string());
     let tpl = st.cfg().str("streamrip_command");
     let words = if tpl.trim().is_empty() || tpl.trim() == DEFAULT_CMD { None } else { split_words(&tpl).filter(|w| !w.is_empty()) };
@@ -1096,6 +1097,12 @@ pub async fn download(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Result
 /// …", errors of [`encore_core::fsx`]). streamrip's output comes back on every outcome of a run: in
 /// [`Ripped::log`], or in the [`RipError`] of a run that produced no files ([`run_log`]).
 pub async fn download_run(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Result<Ripped> {
+    download_run_at(st, url, folder, None).await
+}
+
+/// [`download_run`] at streamrip quality `quality` (1–4) instead of the setting's when it is given: a hi-res
+/// upgrade downloads at "Hi-res max" whatever the setting says.
+pub async fn download_run_at(st: &impl Ctx, url: &str, folder: &Path, quality: Option<i64>) -> anyhow::Result<Ripped> {
     fsx::mkdir_all(folder, Step::Stage)?;
     let Some(bin) = binary(st) else { anyhow::bail!("{NOT_INSTALLED_MSG}") };
     // the config is checked (and mended) and the credentials written before every run, not only the first
@@ -1106,7 +1113,7 @@ pub async fn download_run(st: &impl Ctx, url: &str, folder: &Path) -> anyhow::Re
     if url.contains("deezer.com") && toml_value(&read_config(&check.path)?, "deezer", "arl").is_empty() {
         anyhow::bail!("{ARL_MSG}");
     }
-    let (program, args) = command(st, &bin, &check.path, folder, url);
+    let (program, args) = command(st, &bin, &check.path, folder, url, quality);
     let run = run_quiet(&program, &args, st.data_dir(), RUN_SECS, Step::Download).await?;
     let log = cap_log(run.output.trim(), LOG_CAP);
     let files = match audio_files_checked(folder, &AUDIO) {

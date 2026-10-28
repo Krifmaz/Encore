@@ -441,8 +441,8 @@ fn torznab_on(st: &AppState) -> bool {
 // ---- auto-download (admin) ----------------------------------------------------------------------
 
 /// The settings the auto-download page may change.
-const AUTO_KEYS: [&str; 11] = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first",
-    "upgrade_lossy", "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order", "discover_auto_count", "discover_catalog_merge"];
+const AUTO_KEYS: [&str; 12] = ["auto_request_followed", "auto_request_likes", "album_upgrade", "quality_first",
+    "upgrade_lossy", "upgrade_hires", "upgrade_lossy_days", "sync_interval_minutes", "auto_approve", "source_order", "discover_auto_count", "discover_catalog_merge"];
 
 /// GET /api/admin/autodownload: the auto-download settings and what they did.
 async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
@@ -455,6 +455,8 @@ async fn get_auto(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     let lossy = st.db.one("SELECT COUNT(*) n FROM (SELECT album_id FROM tracks GROUP BY album_id HAVING SUM(CASE WHEN format IN ('flac','wav','alac','aiff','ape','wv') THEN 1 ELSE 0 END) = 0)", p![])?
         .map(|r| r.i("n")).unwrap_or(0);
     stats.insert("lossy_albums".into(), json!(lossy));
+    // albums only in CD quality (16-bit FLAC): what a hi-res upgrade could improve
+    stats.insert("cd_albums".into(), json!(encore_requests::upgrade::cd_quality_albums(&st).map_err(|e| err(500, e.to_string()))?));
     let users = st.db.query("SELECT u.id, u.username, u.auto_download, u.role,
         (SELECT COUNT(*) FROM playlists p WHERE p.user_id=u.id AND p.follow=1) followed,
         (SELECT COUNT(*) FROM connections c WHERE c.user_id=u.id) connections
@@ -483,9 +485,13 @@ async fn put_auto(State(st): State<AppState>, a: Admin, Json(b): Json<AutoBody>)
     get_auto(State(st), a).await
 }
 
-/// POST /api/admin/autodownload/upgrade-now: queue up to 50 lossy upgrades now.
+/// POST /api/admin/autodownload/upgrade-now: queue up to 50 lossless upgrades of lossy albums and up to 50
+/// hi-res upgrades of CD-quality albums now (the hi-res ones only with streamrip set up). → `{queued, hires}`:
+/// how many of each; `queued` counts both, for older apps that only show one number.
 async fn upgrade_now(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "queued": encore_requests::upkeep::queue_lossy_upgrades(&st, 50).map_err(|e| err(500, e.to_string()))? })))
+    let lossless = encore_requests::upkeep::queue_lossy_upgrades(&st, 50).map_err(|e| err(500, e.to_string()))?;
+    let hires = encore_requests::upgrade::queue_hires_upgrades(&st, 50).map_err(|e| err(500, e.to_string()))?;
+    Ok(Json(json!({ "queued": lossless + hires, "lossless": lossless, "hires": hires })))
 }
 
 /// POST /api/admin/autodownload/run-now: sync the followed artists and likes now.
