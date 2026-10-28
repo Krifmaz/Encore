@@ -57,8 +57,8 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
       <div><h1>Diagnostics</h1><div class="small muted">Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.</div></div>
       <div class="row"><button class="btn" id="copy" disabled>{copy}Copy report</button><button class="btn primary" id="run">{refresh}Run checks</button></div>
     </div>
-    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
     <div id="updates"></div>
+    <div id="diag"><div class="empty"><span class="spinner"></span></div></div>
     <div class="section-head" data-dropzone="bk-upload"><h2>Backups</h2>
       <div class="row"><label class="btn sm">{up}Upload a backup…<input type="file" id="bk-upload" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" hidden></label><button class="btn sm primary" id="bk-now">Back up now</button></div>
     </div>
@@ -270,6 +270,8 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
     remember_machine(data.g("machine"));
     if let Some(sv) = settings_view() { show_banner(&sv, data.g("machine").truthy("encore_update_available"), &data.g("machine").s("encore_latest")); }
     if let Some(c) = dom::qs_in(&view, "#copy") { dom::set_disabled(&c, false); }
+    // a Run checks redraws the page: keep "Where settings come from" unfolded when it was
+    let sources_open = dom::qs_in(&diag, ".diag-sources").is_some_and(|d| d.has_attribute("open"));
     let server = server_block(data.g("machine"));
     let checks = data.a("checks");
     let bad = checks.iter().filter(|c| !c.truthy("ok")).count();
@@ -297,10 +299,15 @@ async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> 
       {server}
       {groups}
       {folders}
-      <div class="section-head"><h2>Where settings come from</h2><span class="small muted">Environment variables always win over values saved in Encore</span></div>
-      <div class="card flat"><div class="table-wrap"><table class="table"><thead><tr><th>Setting</th><th>Source</th><th>Value</th></tr></thead><tbody>
+      <details class="card settings-card diag-sources" style="margin-top:22px" {open}>
+        <summary class="row" style="justify-content:space-between"><div><h2 style="margin:0">Where settings come from</h2><div class="small muted">Environment variables always win over values saved in Encore · {count} settings</div></div><span class="chev">{chev}</span></summary>
+        <div class="table-wrap" style="margin-top:12px"><table class="table"><thead><tr><th>Setting</th><th>Source</th><th>Value</th></tr></thead><tbody>
         {rows}
-      </tbody></table></div></div>"#,
+      </tbody></table></div></details>"#,
+        // the settings list is long, so it starts folded (a <details> without `open`), as the What's new cards do
+        count = data.a("settings").len(),
+        open = if sources_open { "open" } else { "" },
+        chev = { let c = icon("chevron"); if c.is_empty() { "▾".to_string() } else { c } },
         badc = if bad > 0 { "err" } else { "ok" },
         badl = if bad > 0 { format!("{bad} problem{}", if bad > 1 { "s" } else { "" }) } else { "All good".to_string() },
         version = esck(&data, "version"),

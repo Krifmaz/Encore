@@ -686,6 +686,8 @@ details.settings-card > summary { list-style: none; cursor: pointer; }
 details.settings-card > summary::-webkit-details-marker { display: none; }
 details.settings-card .chev svg { width: 18px; height: 18px; transition: transform .15s; color: var(--muted); }
 details.settings-card[open] .chev svg { transform: rotate(180deg); }
+/* Diagnostics: the Updates card sits above the checks, with a gap only when it shows (admins) */
+#updates:not(:empty) { margin-bottom: 16px; }
 .settings-nav .nav-label { margin: 12px 12px 4px; }
 .sidebar-foot .btn.icon { padding: 6px; }
 .sidebar-foot { gap: 2px; }

@@ -1,6 +1,6 @@
 //! Settings → Diagnostics. Behaviour reference: web-rs/src/pages/diagnostics.rs: every connection,
 //! folder and tool check from inside the container with the raw answers, the server block, where
-//! settings come from, Backups (back up, upload, download, restore) and App crashes.
+//! settings come from (folded until opened), Backups (back up, upload, download, restore) and App crashes.
 
 use super::help;
 use crate::api::ApiError;
@@ -9,11 +9,14 @@ use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn, btn_icon, btn_sm, modal, small_muted, t, Icon};
-use iced::widget::{column, container, row, space};
+use iced::widget::{column, container, mouse_area, row, space};
 use iced::{Alignment, Length, Task};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+/// The [`State::open`] key of the folded "Where settings come from" list (the checks use `check-N`, crashes their ids).
+const SOURCES: &str = "settings-sources";
 
 const KIND: [(&str, &str); 3] = [("service", "Connections"), ("path", "Folders & permissions"), ("tool", "Tools in the container")];
 
@@ -644,9 +647,25 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 }
                 page = page.push(widgets::card_flat(list).width(Length::Fill));
             }
-            page = page.push(widgets::section_head("Where settings come from", Some(help("Environment variables always win over values saved in Encore").into())));
+            // the settings list is long, so it starts folded: the whole heading toggles it, as on the web and Android
+            let sources = fmt::items(&d["settings"]);
+            let sources_open = state.open.contains(SOURCES);
+            let toggle = format!("{} {}", if sources_open { "▾" } else { "▸" }, if sources_open { "Hide".to_string() } else { format!("Show {} settings", sources.len()) });
+            page = page.push(
+                mouse_area(widgets::section_head(
+                    "Where settings come from",
+                    Some(
+                        row![help("Environment variables always win over values saved in Encore"), super::link_muted(toggle, Message::Toggle(SOURCES.into()))]
+                            .spacing(10)
+                            .align_y(Alignment::Center)
+                            .into(),
+                    ),
+                ))
+                .interaction(iced::mouse::Interaction::Pointer)
+                .on_press(Message::Toggle(SOURCES.into())),
+            );
             let mut rows = column![];
-            for s in fmt::items(&d["settings"]) {
+            for s in sources.iter().filter(|_| sources_open) {
                 let source: El<'a, Message> = if s["source"].as_str() == Some("env") {
                     badge(format!("env {}", fmt::s(&s, "env")), Badge::Info)
                 } else {
@@ -665,7 +684,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .padding([7, 14]),
                 );
             }
-            page = page.push(widgets::card_flat(rows).width(Length::Fill));
+            if sources_open {
+                page = page.push(widgets::card_flat(rows).width(Length::Fill));
+            }
         }
         None => {
             if state.running {

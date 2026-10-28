@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,7 +29,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.AppGraph
@@ -73,10 +76,11 @@ import java.text.DateFormat
 import java.util.Date
 
 /**
- * Settings → Diagnostics (web-rs/src/settings/diagnostics.rs): every connection, folder and tool check with the
- * raw answers, the Server block, where settings come from and Copy report; the server's own update card (admins:
- * Check now, Restart server, Update now, and the wait until the server is back); the database backups (Back up now,
- * Upload a backup…, Download into the phone's Downloads folder, Restore…); and the phone app's crash reports.
+ * Settings → Diagnostics (web-rs/src/settings/diagnostics.rs): the server's own update card first, right under
+ * Copy report / Run checks (admins: Check now, Restart server, Update now, and the wait until the server is back);
+ * then every connection, folder and tool check with the raw answers, the Server block and where settings come from
+ * (folded away until tapped); the database backups (Back up now, Upload a backup…, Download into the phone's
+ * Downloads folder, Restore…); and the phone app's crash reports.
  */
 @Composable
 fun DiagnosticsScreen(nav: Nav, onBack: () -> Unit) {
@@ -118,13 +122,14 @@ fun DiagnosticsScreen(nav: Nav, onBack: () -> Unit) {
             }
             EncoreButton("Run checks", iconRes = R.drawable.ic_refresh, primary = true, enabled = !checking) { run += 1 }
         }
+        // Updates sit at the top: it is the part people come here for most, and it no longer hides under the checks
+        ServerUpdateCard(api, onServerBack = { run += 1 })
         val d = data
         when {
             checking && d == null -> Row(verticalAlignment = Alignment.CenterVertically) { Spinner(18.dp); Spacer(Modifier.width(8.dp)); Muted("Checking…") }
             d == null -> ErrorBox(error) { run += 1 }
             else -> Checks(d)
         }
-        ServerUpdateCard(api, onServerBack = { run += 1 })
         Backups(nav.graph, api)
         Crashes(api)
     }
@@ -135,7 +140,6 @@ private fun dateTime(t: Double): String = if (t <= 0) "—" else DateFormat.getD
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Checks(d: JsonObject) {
-    val p = MaterialTheme.palette
     val checks = d.arr("checks").objectsOf()
     val bad = checks.count { !it.bool("ok") }
     SetCard(Modifier.padding(bottom = 4.dp)) {
@@ -167,9 +171,32 @@ private fun Checks(d: JsonObject) {
         }
     }
     DownloadFolders(d, ::dateTime)
-    PageSection("Where settings come from", "Environment variables always win over values saved in Encore")
+    SettingsSources(d)
+}
+
+/**
+ * "Where settings come from": every setting key with its source badge (env VAR or saved in Encore) and its value.
+ * The list is long, so it starts folded: the heading is a toggle with a chevron, and the rows show once it is tapped.
+ * The open/closed choice lasts while the page is on screen (a Run checks keeps it).
+ */
+@Composable
+private fun SettingsSources(d: JsonObject) {
+    val p = MaterialTheme.palette
+    var open by remember { mutableStateOf(false) }
+    val rows = d.arr("settings").objectsOf()
+    Column(Modifier.fillMaxWidth().clickable { open = !open }) {
+        PageSection("Where settings come from", "Environment variables always win over values saved in Encore") {
+            Icon(
+                painterResource(R.drawable.ic_expand_more),
+                contentDescription = if (open) "Hide settings" else "Show ${rows.size} settings",
+                tint = p.muted,
+                // the chevron points down while folded and flips up once the list is open
+                modifier = Modifier.rotate(if (open) 180f else 0f),
+            )
+        }
+    }
+    if (!open) return
     SetCard(flat = true) {
-        val rows = d.arr("settings").objectsOf()
         rows.forEachIndexed { i, s ->
             if (i > 0) RowDivider(startIndent = 0.dp)
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
