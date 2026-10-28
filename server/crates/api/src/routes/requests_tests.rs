@@ -259,3 +259,55 @@ fn the_same_song_or_album_by_other_names_is_one_request() {
     create_request(&*st, &u, &weezer("cccccccc"), None, None).unwrap();
     create_request(&*st, &u, &weezer("dddddddd"), None, None).expect("the Green Album is another album than the Blue");
 }
+
+/// A completed album request whose music isn't in the library (the owner's "Already requested (#14143,
+/// completed)" on Oct 28, an album with none of its songs there) no longer refuses the album: asking again takes
+/// over its row and queues it. One whose music is there still refuses, and one whose songs were filed under
+/// another album says where they went.
+#[test]
+fn a_completed_request_without_its_music_is_asked_for_again() {
+    let st = state("completed-gone");
+    let u = user(&st, "owner1", "admin");
+    let rg = "aaaaaaaa-1111-2222-3333-444444444444";
+    // the album asked for by name before (a Deezer copy), finished, and nothing of it in the library
+    let by_name = NewRequest { kind: "album".into(), artist: Some("GAME FREAK".into()), title: Some("Super Music Collection".into()),
+        album: Some("Super Music Collection".into()), ext: Some(json!({ "deezer": 42 })), ..Default::default() };
+    let old = create_request(&*st, &u, &by_name, None, None).unwrap();
+    st.db.execute("UPDATE requests SET status='completed', message='Downloaded' WHERE id=?", p![old]).unwrap();
+    // the same album from MusicBrainz: the old row is asked for again, with the release group now
+    let mb = NewRequest { kind: "album".into(), mbid: Some(rg.into()), artist: Some("GAME FREAK".into()), title: Some("Super Music Collection".into()),
+        album: Some("Super Music Collection".into()), ..Default::default() };
+    let again = create_request(&*st, &u, &mb, None, None).expect("asked for again");
+    assert_eq!(again, old, "the old row is taken over");
+    let r = row(&st, again);
+    assert_eq!((r["status"].as_str(), r["mbid"].as_str()), (Some("queued"), Some(rg)));
+    assert_eq!(r["detail"]["attempts"], 2);
+    assert!(r["detail"]["log"].as_array().unwrap().iter().any(|l| l.as_str().is_some_and(|l| l.contains("completed: Downloaded"))));
+    assert_eq!(rows_for(&st, "Super Music Collection"), 1);
+
+    // once it's in the library under its names, a completed request refuses as before
+    st.db.execute("UPDATE requests SET status='completed' WHERE id=?", p![old]).unwrap();
+    st.db.execute("INSERT INTO tracks (id, path, album_id, mtime, size, title, artist, album, albumartist, mb_releasegroupid, added_at, request_id)
+                   VALUES (7, '/m/smc.flac', 'alb7', 0, 1, 'Opening', 'GAME FREAK', 'Super Music Collection', 'GAME FREAK', ?, 0, ?)", p![rg, old]).unwrap();
+    let e = create_request(&*st, &u, &mb, None, None).expect_err("refused");
+    assert_eq!(e.status.as_u16(), 409);
+    assert!(e.detail.starts_with("Already requested (#"), "{}", e.detail);
+
+    // its songs filed under another album: the refusal says where they are
+    st.db.execute("UPDATE tracks SET album='Pokemon Songs', albumartist='Junichi Masuda', artist='Junichi Masuda', mb_releasegroupid=NULL WHERE id=7", p![]).unwrap();
+    let e = create_request(&*st, &u, &mb, None, None).expect_err("refused");
+    assert_eq!(e.status.as_u16(), 409);
+    assert_eq!(e.detail, format!("Already in library as “Pokemon Songs” by Junichi Masuda (#{old})"));
+    assert_eq!(e.extra.as_ref().and_then(|x| x["id"].as_i64()), Some(old));
+}
+
+/// A completed song request whose song has left the library is asked for again, not refused.
+#[test]
+fn a_completed_song_that_left_the_library_is_asked_for_again() {
+    let st = state("completed-song");
+    let u = user(&st, "owner1", "admin");
+    let first = create_request(&*st, &u, &song("Band", "Gone Song"), None, None).unwrap();
+    st.db.execute("UPDATE requests SET status='completed', message='Downloaded' WHERE id=?", p![first]).unwrap();
+    assert_eq!(create_request(&*st, &u, &song("Band", "Gone Song"), None, None).unwrap(), first);
+    assert_eq!(row(&st, first)["status"], "queued");
+}
