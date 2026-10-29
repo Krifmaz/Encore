@@ -1485,6 +1485,21 @@ fn pick_out_shared(view: &Element, tracks: &[Value], want: &str) {
     }
 }
 
+/// Plays the shared song (`?track=<id>` of a share link's jump) from the album's `queue` and opens the full player
+/// on Now playing, as the Android app does for a song link. The `?track=` then leaves the address, so coming back to
+/// the album page (Back, a reload) doesn't start the song again. A browser that blocks sound without a tap first
+/// leaves the song paused in the open player, one tap on play away. An id that isn't one of the album's songs (another
+/// copy, a stale link) changes nothing.
+fn play_shared(queue: &[Value], want: &str) {
+    if want.is_empty() { return; }
+    let Some(i) = queue.iter().position(|t| t.s("id") == want) else { return };
+    // the album page's own address without the query: `#/library/album/<id>?track=<id>` → `#/library/album/<id>`
+    let hash = dom::window().location().hash().unwrap_or_default();
+    if let Some((page, _)) = hash.split_once('?') { replace_hash(page); }
+    player::play_queue(queue.to_vec(), i, "album");
+    player::open_full("now");
+}
+
 pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
@@ -1606,8 +1621,9 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         { let h = highlight.clone(); ctx.on_leave(player::on_change(move |cur| h(cur))); }
         highlight(player::current());
         // a shared song's link opened by someone signed in (`#/library/album/<id>?track=<id>`, the server's
-        // share_open): its row stands out and scrolls into view, one tap from playing
+        // share_open): its row stands out and scrolls into view, and the song starts playing in the full player
         pick_out_shared(&view, &tracks, &ctx.q("track"));
+        play_shared(&queue_tracks, &ctx.q("track"));
         let liked: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(
             api::get("/likes").await.map_err(|e| e.message)?.items().iter().filter_map(|v| v.as_i64()).collect()));
         let paint_likes: Rc<dyn Fn()> = {

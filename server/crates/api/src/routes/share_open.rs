@@ -83,7 +83,7 @@ fn playlist_target(st: &AppState, uid: i64, token: &str, s: &Shared) -> ApiResul
 }
 
 /// The web app's page (its hash route, without the `#`) for a [`target`]: `/library/album/<id>?track=<id>` for a
-/// song (the album page picks the song out), `/library/album/<id>`, `/artist-name/<name>`, `/playlists/<id>`.
+/// song (the album page plays it from the album and opens the full player on Now playing), `/library/album/<id>`, `/artist-name/<name>`, `/playlists/<id>`.
 /// None for a playlist that is neither the listener's own nor added: the share page is where they can add it.
 pub(crate) fn web_path(t: &Value) -> Option<String> {
     let album = || t["album_id"].as_str().filter(|a| !a.is_empty()).map(|a| urlencoding::encode(a).into_owned());

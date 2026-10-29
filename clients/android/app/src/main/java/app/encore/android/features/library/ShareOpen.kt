@@ -27,8 +27,9 @@ import kotlinx.serialization.json.JsonObject
 
 // Share links opened in the app (0.42.5). A share link (`https://<server>/s/<token>`) opened in an Android browser is
 // handed to the app by the server's share page as `intent://<server>/s/<token>#Intent;scheme=encore;…` (the server's
-// routes/share_open.rs); the manifest's `encore://` filter brings it to MainActivity, and [ShareOpenHost] opens the
-// song's album (playing the song), the album, the artist or the playlist once signed in. When the app can't open it
+// routes/share_open.rs); the manifest's `encore://` filter brings it to MainActivity, and [ShareOpenHost] plays the
+// song in the full player (Now playing, its album queued around it; 0.42.8), or opens the album, the artist or the
+// playlist once signed in. When the app can't open it
 // (not signed in, another server's link, a link that ended) the link goes back to the browser with `?app=0`, which
 // the server answers with the share page or the web player instead of the app again.
 
@@ -86,8 +87,10 @@ object ShareOpenRules {
 
     /** Where the server's answer (`GET /api/share/<token>/open`) leads in the app. */
     sealed interface Go {
-        /** An album page; [playTrack] > 0: that song of it starts playing (a song link). */
-        data class Album(val id: String, val playTrack: Long) : Go
+        /** A song link: song [trackId] plays from its album [albumId] (the rest of the album queued), in the full player. */
+        data class Track(val albumId: String, val trackId: Long) : Go
+        /** An album page (an album link). */
+        data class Album(val id: String) : Go
         /** An artist page, by the library's name. */
         data class Artist(val name: String) : Go
         /** The listener's own playlist, or their entry for someone else's. */
@@ -100,12 +103,18 @@ object ShareOpenRules {
 
     /** [Go] for the server's answer `o`. */
     fun goOf(o: JsonObject): Go = when (o.str("kind")) {
-        "track" -> o.str("album_id").takeIf { it.isNotEmpty() }?.let { Go.Album(it, o.long("track_id")) } ?: Go.Browser
-        "album" -> o.str("album_id").takeIf { it.isNotEmpty() }?.let { Go.Album(it, 0L) } ?: Go.Browser
+        "track" -> o.str("album_id").takeIf { it.isNotEmpty() && o.long("track_id") > 0L }?.let { Go.Track(it, o.long("track_id")) } ?: Go.Browser
+        "album" -> o.str("album_id").takeIf { it.isNotEmpty() }?.let { Go.Album(it) } ?: Go.Browser
         "artist" -> o.str("name").takeIf { it.isNotEmpty() }?.let { Go.Artist(it) } ?: Go.Browser
         "playlist" -> o.long("playlist_id").takeIf { it > 0L && (o.bool("own") || o.bool("added")) }?.let { Go.Playlist(it, o.str("name")) } ?: Go.AddPlaylist
         else -> Go.Browser
     }
+
+    /**
+     * Where the shared song [trackId] starts in its album's songs [ids] (the queue it plays from), or -1 when it isn't
+     * one of them (another copy of the song, an album that changed): then it plays on its own.
+     */
+    fun startOf(ids: List<Long>, trackId: Long): Int = ids.indexOf(trackId)
 }
 
 /** The share link the app was opened with, waiting for [ShareOpenHost] (MainActivity sets it). */
@@ -131,10 +140,13 @@ object ShareOpen {
 
 /**
  * Opens the pending share link ([ShareOpen.pending]) once signed in: asks the server where it is in the library and
- * opens that page, or hands the link back to the browser. Drawn once at the root, like [PlaylistLinkHost].
+ * plays the song in the full player, opens that page, or hands the link back to the browser. Drawn once at the root,
+ * like [PlaylistLinkHost].
+ *
+ * @param onOpenPlayer opens the full player (the TV player on a TV) on Now playing, for a song link.
  */
 @Composable
-fun ShareOpenHost(nav: Nav, session: Session) {
+fun ShareOpenHost(nav: Nav, session: Session, onOpenPlayer: () -> Unit) {
     val pending by ShareOpen.pending.collectAsState()
     val context = LocalContext.current
     // the host's own scope: clearing the pending link restarts the effect, which must not cancel the look-up
@@ -142,12 +154,15 @@ fun ShareOpenHost(nav: Nav, session: Session) {
     LaunchedEffect(pending, session) {
         val p = pending ?: return@LaunchedEffect
         ShareOpen.pending.value = null
-        scope.launch { openShared(nav, context, p) }
+        scope.launch { openShared(nav, context, p, onOpenPlayer) }
     }
 }
 
-/** `GET /api/share/<token>/open` on the signed-in server, then the page it names (see [ShareOpenRules.goOf]). */
-private suspend fun openShared(nav: Nav, context: Context, p: ShareOpenRules.Pending) {
+/**
+ * `GET /api/share/<token>/open` on the signed-in server, then what it names (see [ShareOpenRules.goOf]): a song plays
+ * in the full player ([playShared]), anything else opens its page.
+ */
+private suspend fun openShared(nav: Nav, context: Context, p: ShareOpenRules.Pending, onOpenPlayer: () -> Unit) {
     val go = try {
         ShareOpenRules.goOf(withContext(Dispatchers.IO) { nav.graph.api.getObject("/api/share/${EncoreApi.enc(p.token)}/open") })
     } catch (e: CancellationException) {
@@ -157,11 +172,43 @@ private suspend fun openShared(nav: Nav, context: Context, p: ShareOpenRules.Pen
         ShareOpenRules.Go.Browser
     }
     when (go) {
-        is ShareOpenRules.Go.Album -> nav.open(Screen.Album(go.id, playTrack = go.playTrack))
+        is ShareOpenRules.Go.Track -> if (playShared(nav, go)) onOpenPlayer() else ShareOpen.openInBrowser(context, p.link)
+        is ShareOpenRules.Go.Album -> nav.open(Screen.Album(go.id))
         is ShareOpenRules.Go.Artist -> openArtistPage(nav, go.name)
         is ShareOpenRules.Go.Playlist -> nav.open(Screen.Playlist(go.id, go.name))
         // "Add to my playlists?", as for a playlist link shared into the app
         ShareOpenRules.Go.AddPlaylist -> PlaylistLinkUi.pendingLink.value = p.link
         ShareOpenRules.Go.Browser -> ShareOpen.openInBrowser(context, p.link)
     }
+}
+
+/**
+ * Plays the shared song [go]: its album's songs as the queue, starting at it, like a tap on it on the album page; the
+ * song alone when the album can't be loaded or no longer has it. False when neither works (the song left the library,
+ * no connection): the caller hands the link to the browser.
+ */
+private suspend fun playShared(nav: Nav, go: ShareOpenRules.Go.Track): Boolean {
+    val api = nav.graph.api
+    val album = try {
+        withContext(Dispatchers.IO) { api.album(go.albumId).tracks }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        emptyList()
+    }
+    val at = ShareOpenRules.startOf(album.map { it.id }, go.trackId)
+    if (at >= 0) {
+        nav.player.play(album, at)
+        return true
+    }
+    // not on the album as loaded: the song on its own
+    val one = try {
+        withContext(Dispatchers.IO) { api.track(go.trackId) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    } ?: return false
+    nav.player.play(listOf(one))
+    return true
 }

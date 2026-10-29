@@ -438,7 +438,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         // an Encore playlist link shared to the app: "Add to my playlists?" (kept until signed in, as group links are)
         PlaylistLinkHost(nav, session)
         // a share link opened in the app (from the browser's share page): its album, artist or playlist
-        ShareOpenHost(nav, session)
+        // a song link plays the song and opens the full player (the TV player on a TV), the "Now playing" screen
+        ShareOpenHost(nav, session, onOpenPlayer = { showPlayer = true })
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }

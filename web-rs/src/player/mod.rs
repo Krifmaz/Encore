@@ -36,7 +36,7 @@ mod taste;
 mod transitions;
 
 pub use bar::{bar_buttons, customize_bar_modal, set_bar_buttons, BAR_ACTIONS};
-pub use full::set_full;
+pub use full::{open_full, set_full};
 pub use fx::device_rate;
 pub use group::{group_changed, group_resync, pause_for_everyone};
 pub use link::{command, link_state, linked, set_link, snapshot, Link};

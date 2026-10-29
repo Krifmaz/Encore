@@ -64,7 +64,7 @@ pub fn set_full(on: bool) {
 
 /// Open the full-screen player: "lyrics" (lyrics mode, remembered), "queue" (Up next), or "now" – the cover, or the
 /// lyrics when lyrics mode was on last time.
-pub(super) fn open_full(pane: &str) {
+pub fn open_full(pane: &str) {
     let p = match pane {
         "lyrics" => { set_lyrics_mode(true); "lyrics" }
         "queue" => "queue",
