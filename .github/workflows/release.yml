@@ -21,7 +21,7 @@ name: release
 #   SHA256SUMS covers every file of the release; the desktop app checks its updates against it.
 #   Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to the default branch. Version
 #   <newest release>.<run number> (0.35.2.17), the server and Docker image only (no apps, no speed table), image
-#   tags :<version>, :hotfix and :latest, a normal GitHub release tagged hotfix-<version> that becomes "Latest" –
+#   tags :<version>, :hotfix and :latest, a normal GitHub release tagged hotfix-<version> that becomes "Latest" (unless a higher full release came out while it built) –
 #   so :latest and the stable channel get it too. The desktop and Android apps and the version bump above only
 #   look at v<version> releases, so they never pick a hotfix. Only the newest
 #   three hotfixes are kept (their releases, tags and images); a full release counts as newer than all of them.
@@ -302,7 +302,8 @@ jobs:
     # the Android release key lives in repository secrets; a called workflow only sees them when passed on
     secrets: inherit
 
-  # a hotfix: a release (the new Latest) of the server and the image, then only the newest three hotfixes stay
+  # a hotfix: a release (the new Latest, unless a higher full release came out meanwhile) of the server and the
+  # image, then only the newest three hotfixes stay
   hotfix:
     needs: [version, server, docker]
     if: inputs.channel == 'hotfix'
@@ -335,7 +336,17 @@ jobs:
             echo "* The desktop and Android apps are built for full releases only."
           } > notes.md
           gh release delete "hotfix-$V" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" --latest
+          # A full release published while this hotfix was building (v0.42.6 beside hotfix-0.42.5.191) is numbered
+          # above it: then the hotfix must not take "Latest" from it. Servers compare numbers, not the flag, and the
+          # next push makes a hotfix on top of the new release.
+          NEWEST=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
+                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          LATEST=--latest
+          if [ -n "$NEWEST" ] && [ "$(printf '%s\n%s\n' "$NEWEST" "$V" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -1)" = "$NEWEST" ]; then
+            echo "v$NEWEST came out while hotfix $V was building: published without Latest"
+            LATEST=--latest=false
+          fi
+          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" "$LATEST"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

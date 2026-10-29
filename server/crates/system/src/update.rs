@@ -6,7 +6,10 @@
 //! The `update_channel` setting picks what counts: `stable` = the newest full release (GitHub's latest), `hotfix`
 //! = the newest of those and the hotfix prereleases CI publishes on every push to the main branch (tag
 //! `hotfix-<last release>.<run>`, e.g. hotfix-0.35.2.17, image :0.35.2.17); a full release is newer than every
-//! hotfix before it (0.35.3 > 0.35.2.17).
+//! hotfix before it (0.35.3 > 0.35.2.17). Both channels read GitHub's release list and take the highest version
+//! in it, never GitHub's "Latest" flag alone: a hotfix built while a full release was still on its way carries the
+//! older release's number (0.42.5.191 after v0.42.6) yet became "Latest", and a server on it was told it had the
+//! newest version.
 //! The newest release comes from GitHub (`encore_http::github`, ETags and the token setting) and is kept
 //! in the database, so the Diagnostics page and its banner show it without waiting; the scheduler looks once a
 //! day (`check_updates`). "Update now" needs the Docker socket mounted into the container; selfupdate.rs does
@@ -43,8 +46,8 @@ const SCOPE: &str = "encore:update";
 const SCOPE_HOTFIX: &str = "encore:update:hotfix";
 /// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
 pub const HOTFIX_PREFIX: &str = "hotfix-";
-/// How many releases the hotfix channel looks through (newest first).
-const HOTFIX_PAGE: usize = 30;
+/// How many releases a check looks through (newest first; full releases and the three kept hotfixes fit).
+const RELEASE_PAGE: usize = 30;
 
 /// Which builds Update now offers (the `update_channel` setting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,16 +105,22 @@ pub fn parse_release(v: &Value, now: f64) -> Option<Value> {
     }))
 }
 
-/// The hotfix channel's pick from GitHub's release list: the highest version among the full releases and the
-/// hotfix prereleases (drafts and other prereleases don't count).
-pub fn pick_newest(list: &Value, now: f64) -> Option<Value> {
+/// Whether `channel` counts the release `v` (one entry of GitHub's release list): never a draft or a prerelease
+/// that is not a hotfix (a beta); a hotfix published as a normal release (what CI does) on both channels, a hotfix
+/// prerelease on the hotfix channel only.
+fn counts(v: &Value, channel: Channel) -> bool {
+    let hotfix = v["tag_name"].as_str().is_some_and(|t| t.starts_with(HOTFIX_PREFIX));
+    let prerelease = v["prerelease"] == true;
+    v["draft"] != true && (!prerelease || (hotfix && channel == Channel::Hotfix))
+}
+
+/// The channel's pick from GitHub's release list: the highest version among the releases it counts (`counts`),
+/// whichever of them GitHub marks "Latest".
+pub fn pick_newest(list: &Value, channel: Channel, now: f64) -> Option<Value> {
     list.as_array()?.iter()
-        .filter(|v| v["draft"] != true)
-        .filter(|v| {
-            let hotfix = v["tag_name"].as_str().is_some_and(|t| t.starts_with(HOTFIX_PREFIX));
-            if v["prerelease"] == true { hotfix } else { !hotfix }
-        })
+        .filter(|v| counts(v, channel))
         .filter_map(|v| parse_release(v, now))
+        // a tag without a number (a stray name) can't be compared
         .filter(|r| !encore_core::version::parts(r["latest"].as_str().unwrap_or("")).is_empty())
         .max_by(|a, b| encore_core::version::compare(a["latest"].as_str().unwrap_or(""), b["latest"].as_str().unwrap_or("")))
 }
@@ -138,17 +147,12 @@ fn store(st: &impl Ctx, channel: Channel, release: &Value) {
 /// Ask GitHub (the ETag makes an unchanged answer free) and keep the answer.
 pub async fn fetch(st: &impl Ctx) -> anyhow::Result<Value> {
     let channel = Channel::of(st);
-    let path = match channel {
-        Channel::Stable => format!("{}/repos/{REPO}/releases/latest", st.system().github_api),
-        Channel::Hotfix => format!("{}/repos/{REPO}/releases?per_page={HOTFIX_PAGE}", st.system().github_api),
-    };
+    // the list, not /releases/latest: "Latest" can sit on a hotfix numbered below a newer full release
+    let path = format!("{}/repos/{REPO}/releases?per_page={RELEASE_PAGE}", st.system().github_api);
     let (code, v) = encore_http::github::get(st, &path).await?;
     match code {
         200 => {
-            let r = match channel {
-                Channel::Stable => parse_release(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub's answer has no release tag"))?,
-                Channel::Hotfix => pick_newest(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub shows no Encore release or hotfix yet"))?,
-            };
+            let r = pick_newest(&v, channel, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub shows no Encore release yet"))?;
             store(st, channel, &r);
             Ok(r)
         }

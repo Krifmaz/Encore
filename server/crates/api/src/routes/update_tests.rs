@@ -41,7 +41,7 @@ struct Hits {
     conditional: Arc<AtomicUsize>,
 }
 
-/// GitHub's releases API as far as the check uses it: the latest release with an ETag, 304 for a repeat.
+/// GitHub's releases API as far as the check uses it: the release list (one release) with an ETag, 304 for a repeat.
 async fn github_latest(axum::extract::State(h): axum::extract::State<Hits>, headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::response::IntoResponse;
     if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some("\"rel-1\"") {
@@ -49,8 +49,8 @@ async fn github_latest(axum::extract::State(h): axum::extract::State<Hits>, head
         return (StatusCode::NOT_MODIFIED, [("etag", "\"rel-1\"")]).into_response();
     }
     h.full.fetch_add(1, Ordering::SeqCst);
-    let body = json!({ "tag_name": "v99.0.0", "name": "Encore 99.0.0", "html_url": "https://github.com/Krifmaz/Encore/releases/tag/v99.0.0",
-                       "published_at": "2026-11-02T10:00:00Z", "body": format!("## What changed\n\n{}", "x".repeat(6000)) });
+    let body = json!([{ "tag_name": "v99.0.0", "name": "Encore 99.0.0", "html_url": "https://github.com/Krifmaz/Encore/releases/tag/v99.0.0",
+                       "published_at": "2026-11-02T10:00:00Z", "body": format!("## What changed\n\n{}", "x".repeat(6000)) }]);
     (StatusCode::OK, [("etag", "\"rel-1\""), ("content-type", "application/json")], body.to_string()).into_response()
 }
 
@@ -60,7 +60,7 @@ async fn github_latest(axum::extract::State(h): axum::extract::State<Hits>, head
 #[tokio::test]
 async fn the_update_endpoints() {
     let hits = Hits::default();
-    let gh = axum::Router::new().route("/repos/Krifmaz/Encore/releases/latest", axum::routing::get(github_latest)).with_state(hits.clone());
+    let gh = axum::Router::new().route("/repos/Krifmaz/Encore/releases", axum::routing::get(github_latest)).with_state(hits.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, gh).await.unwrap() });
