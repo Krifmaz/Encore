@@ -73,6 +73,7 @@ import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import androidx.compose.foundation.layout.offset
+import app.encore.android.features.library.openAlbum
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -281,7 +282,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(data.recent, key = { it.id }) { a ->
                             AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(150.dp)) {
-                                nav.open(Screen.Album(a.id))
+                                nav.openAlbum(a)
                             }
                         }
                     }

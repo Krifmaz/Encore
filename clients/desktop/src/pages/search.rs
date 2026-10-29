@@ -578,7 +578,8 @@ fn results<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                             sub: album_sub(a),
                             cover: fmt::s(a, "cover"),
                             corner: catalog::album_badge(a),
-                            on_open: Message::Open(catalog::album_page(a)),
+                            // an owned single plays as a song instead of opening the release's page
+                            on_open: catalog::single_of(a).map_or_else(|| Message::Open(catalog::album_page(a)), Message::PlayAlbum),
                             on_play: fmt::truthy(a, "library_album_id").then(|| Message::PlayAlbum(fmt::s(a, "library_album_id"))),
                             on_request: album_request(a).filter(|_| !state.sending.contains(&catalog::album_key(a))),
                         }

@@ -63,6 +63,7 @@ import app.encore.android.R
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.CoverVersions
 import app.encore.android.data.api.Track
+import app.encore.android.features.library.SingleRules
 import app.encore.android.features.library.SurroundRules
 import app.encore.android.features.offline.OfflineMode
 import app.encore.android.ui.theme.EncoreColors
@@ -551,15 +552,16 @@ fun Tile(
 }
 
 /**
- * An album tile (the web's `libraryTile`): cover, title, "artist · year". A Surround album (0.35) names its format in
- * the corner: Dolby Atmos, E-AC-3 5.1 …
+ * An album tile (the web's `libraryTile`): cover, title, "artist · year" ("Song · artist · year" for a single, which
+ * plays as a song: features/library/Singles.kt). A Surround album (0.35) names its format in the corner: Dolby Atmos,
+ * E-AC-3 5.1 …
  */
 @Composable
 fun AlbumCard(album: Album, coverUrl: String, imageLoader: ImageLoader, modifier: Modifier = Modifier, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     val corner = if (album.isSurround) SurroundRules.badge(album.atmos, album.quality) else ""
     Tile(
         title = album.shownTitle(),
-        subtitle = listOf(album.shownArtist(), album.year).filter { it.isNotEmpty() }.joinToString(" · "),
+        subtitle = SingleRules.subtitle(album.shownArtist(), album.year, album.trackCount),
         subtitle2 = album.titleUnder(),
         modifier = modifier,
         onLongClick = onLongClick,

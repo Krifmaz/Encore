@@ -3605,6 +3605,7 @@ fn results_body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     col.into()
 }
 
+/// A tile of the Albums grid: a click opens the album, or plays a single (one song) as a song.
 pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let id = fmt::s(a, "id");
     let title = if fmt::truthy(a, "album") { tr(ctx, a, "album") } else { "Unknown album".to_string() };
@@ -3612,8 +3613,10 @@ pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     if fmt::truthy(a, "year") {
         sub.push_str(&format!(" · {}", fmt::s(a, "year")));
     }
-    let mut tile = Tile::new(title, TileKind::Album, Message::OpenAlbum(id.clone()))
-        .sub(sub)
+    // a single has no album page to open: a click plays its song
+    let open = if widgets::catalog::is_single(a) { Message::PlayAlbum(id.clone()) } else { Message::OpenAlbum(id.clone()) };
+    let mut tile = Tile::new(title, TileKind::Album, open)
+        .sub(widgets::catalog::album_sub(a, sub))
         .cover(ctx.cover(&id, &a["cover_v"], 400))
         .play(Message::PlayAlbum(id));
     // a Surround album names its format in the corner: Dolby Atmos, 5.1, 7.1

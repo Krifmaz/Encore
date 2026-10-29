@@ -78,9 +78,12 @@ pub(crate) fn annotate_albums(st: &AppState, items: &mut [Value]) {
     let keys: Vec<(String, String, String)> = items.iter()
         .map(|i| (i["id"].as_str().unwrap_or("").to_string(), i["artist"].as_str().unwrap_or("").to_string(), i["title"].as_str().unwrap_or("").to_string())).collect();
     let libs = encore_library::lookup::album_ids_for(&st.db, &keys);
+    // the songs each library copy has: one song is a single, which the pages play instead of opening its album page
+    let counts = encore_library::lookup::album_song_counts(&st.db, &libs.iter().flatten().cloned().collect::<Vec<_>>());
     for (i, lib) in items.iter_mut().zip(libs) {
         let id = i["id"].as_str().unwrap_or("").to_string();
         i["in_library"] = json!(lib.is_some());
+        i["library_tracks"] = json!(lib.as_ref().and_then(|l| counts.get(l)).copied().unwrap_or(0));
         i["library_album_id"] = json!(lib);
         i["request_status"] = rs.get(&id).map(|s| json!(s.0)).unwrap_or(Value::Null);
         i["request_label"] = rs.get(&id).map(|s| json!(s.1)).unwrap_or(Value::Null);

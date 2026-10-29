@@ -209,6 +209,8 @@ data class CatalogAlbum(
     val cover: LString = "",
     @SerialName("in_library") val inLibrary: LBool = false,
     @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    /** The songs the library's copy has (0.42.11; 0: not in the library, or an older server): one is a single. */
+    @SerialName("library_tracks") val libraryTracks: LInt = 0,
     @SerialName("request_status") val requestStatus: LString = "",
     /** Deezer / Apple ids of an album only they know (search results): requested without a MusicBrainz id. */
     val ext: LObject = null,
@@ -404,6 +406,8 @@ data class ExtRelease(
     val cover: LString = "",
     @SerialName("in_library") val inLibrary: LBool = false,
     @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    /** The songs the library's copy has (0.42.11; 0: not in the library, or an older server): one is a single. */
+    @SerialName("library_tracks") val libraryTracks: LInt = 0,
     @SerialName("request_status") val requestStatus: LString = "",
     @Serializable(with = SourceLinks::class) val sources: List<Pair<String, String>> = emptyList(),
     val harmony: LString = "",

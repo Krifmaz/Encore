@@ -868,6 +868,10 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let Some(m) = state.ext.as_ref().and_then(|e| e.get(i)).cloned() else {
                 return Task::none();
             };
+            // an owned single plays as a song; any other owned release opens its library album
+            if let Some(id) = catalog::single_of(&m) {
+                return update(state, Message::PlayAlbum(id), ctx);
+            }
             if fmt::truthy(&m, "library_album_id") {
                 ctx.navigate(Page::LibraryAlbum(fmt::s(&m, "library_album_id")));
                 return Task::none();
@@ -1053,6 +1057,7 @@ fn skipped_toggle<'a>(state: &State, n: usize) -> El<'a, Message> {
     r.into()
 }
 
+/// A tile of the artist's library albums (a single plays as a song: [`catalog::library_tile`]).
 fn library_tile<'a>(ctx: &Ctx<'a>, l: &Value) -> El<'a, Message> {
     let id = fmt::s(l, "album_id");
     catalog::library_tile(ctx, &id, l, Message::Open(Page::LibraryAlbum(id.clone())), Message::PlayAlbum(id.clone()))
@@ -1356,7 +1361,8 @@ fn mb_tile<'a>(state: &'a State, ctx: &Ctx<'a>, rg: &'a Value) -> El<'a, Message
         sub,
         cover: fmt::s(rg, "cover"),
         corner: catalog::album_badge(rg),
-        on_open: Message::Open(Page::Album(fmt::s(rg, "id"))),
+        // an owned single plays as a song instead of opening the release's page
+        on_open: catalog::single_of(rg).map_or_else(|| Message::Open(Page::Album(fmt::s(rg, "id"))), Message::PlayAlbum),
         on_play: fmt::truthy(rg, "library_album_id").then(|| Message::PlayAlbum(fmt::s(rg, "library_album_id"))),
         on_request: request_of(state, rg),
     }

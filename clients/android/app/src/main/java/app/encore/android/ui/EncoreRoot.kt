@@ -185,6 +185,10 @@ class Nav(
     val addToPlaylist: (List<Long>) -> Unit,
     /** The "⋯" menu for one song in a list (web/js/pages/library.js `trackMenu`); drawn once at the root. */
     val showTrackMenu: (track: Track, onAlbumPage: Boolean) -> Unit,
+    /** Opens the full player (the TV player on a TV) on Now playing: a single's tile plays its song there. */
+    val openPlayer: () -> Unit = {},
+    /** The signed-in app's scope, for work a tap starts that outlives the tile (loading a single's song). */
+    val scope: CoroutineScope? = null,
 ) {
     /** `onAlbumPage`: true leaves out "Go to album". */
     fun trackMenu(track: Track, onAlbumPage: Boolean = false) = showTrackMenu(track, onAlbumPage)
@@ -287,6 +291,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             showTab = { t -> showPlayer = false; stack.clear(); tab = t },
             addToPlaylist = { ids -> if (ids.isNotEmpty()) addToPlaylistIds = ids },
             showTrackMenu = { t, onAlbum -> trackMenuFor = TrackMenuRequest(t, onAlbum) },
+            openPlayer = { showUpNext = false; showPlayer = true },
+            scope = fixScope,
         )
     }
     // the song menu's "Download for offline": made here, so the storage permission's answer (Android 8–9) still

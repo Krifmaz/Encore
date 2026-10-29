@@ -139,8 +139,11 @@ pub(crate) fn annotate(st: &AppState, items: &mut [Value]) {
     let libs = lookup::album_ids_for(&st.db, &keys);
     let pairs: Vec<(String, String)> = keys.iter().map(|k| (k.1.clone(), k.2.clone())).collect();
     let reqs = lookup::Requests::read(&st.db, "album", &pairs, &[]);
+    // the songs each library copy has: one song is a single, which the pages play instead of opening its album page
+    let counts = lookup::album_song_counts(&st.db, &libs.iter().flatten().cloned().collect::<Vec<_>>());
     for ((m, lib), (_, artist, title)) in items.iter_mut().zip(libs).zip(keys) {
         m["in_library"] = json!(lib.is_some());
+        m["library_tracks"] = json!(lib.as_ref().and_then(|l| counts.get(l)).copied().unwrap_or(0));
         m["library_album_id"] = lib.map(|a| json!(a)).unwrap_or(Value::Null);
         let rq = reqs.by_name(&artist, &title, false, true);
         m["request_status"] = rq.as_ref().map(|r| json!(r.0)).unwrap_or(Value::Null);

@@ -785,8 +785,10 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     if fmt::truthy(a, "year") {
                         sub.push_str(&format!(" · {}", fmt::s(a, "year")));
                     }
-                    let mut tile = Tile::new(title, TileKind::Album, Message::Open(id.clone()))
-                        .sub(sub)
+                    // a single has no album page to open: a click plays its song
+                    let open = if crate::widgets::catalog::is_single(a) { Message::Play(id.clone()) } else { Message::Open(id.clone()) };
+                    let mut tile = Tile::new(title, TileKind::Album, open)
+                        .sub(crate::widgets::catalog::album_sub(a, sub))
                         .cover(ctx.cover(&id, &a["cover_v"], 400))
                         .play(Message::Play(id));
                     if fmt::truthy(a, "untagged") {

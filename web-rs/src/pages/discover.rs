@@ -868,7 +868,7 @@ fn req_body(rg: &Value) -> Value {
 
 /// `libraryTile({ id: l.album_id, album: l.album, albumartist: l.albumartist, year: l.year })`.
 fn lib_tile(l: &Value) -> String {
-    common::library_tile(&json!({ "id": l.g("album_id").clone(), "album": l.g("album").clone(), "albumartist": l.g("albumartist").clone(), "year": l.g("year").clone() }))
+    common::library_tile(&json!({ "id": l.g("album_id").clone(), "album": l.g("album").clone(), "albumartist": l.g("albumartist").clone(), "year": l.g("year").clone(), "tracks": l.g("tracks").clone() }))
 }
 
 pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
@@ -1226,6 +1226,8 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
                     let open = if p.is_none() && dom::closest(e, "a, button").is_none() { dom::closest(e, "[data-ext-open]") } else { None };
                     if let Some(open) = open {
                         let Some(m) = idx(&open, "extOpen").and_then(|i| rel.borrow().get(i).cloned()) else { return };
+                        // an owned single plays as a song; any other owned release opens its library album
+                        if let Some(id) = common::single_of(&m) { crate::pages::library::play_single(&id); return; }
                         if m.truthy("library_album_id") { app::navigate(&format!("/library/album/{}", m.s("library_album_id"))); return; }
                         let name = name.clone();
                         dom::spawn(async move {

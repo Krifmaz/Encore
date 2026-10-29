@@ -166,6 +166,20 @@ pub fn play_album(id: &str, start: usize) {
     });
 }
 
+/// Plays a single (an album with one song, [`common::is_single`]) as a song: its song, with the library shuffle after
+/// it as for any song played on its own, in the full player on Now playing – what a tap on a single's tile does
+/// instead of opening an album page. An album that can't be loaded or has no song changes nothing.
+pub fn play_single(id: &str) {
+    let id = id.to_string();
+    dom::spawn(async move {
+        let Ok(a) = api::get(&format!("/library/albums/{id}")).await else { return };
+        let tracks = with_album_id(&a.a("tracks"), &id);
+        if tracks.is_empty() { return; }
+        player::play_queue(tracks, 0, "single");
+        player::open_full("now");
+    });
+}
+
 fn source_line(t: &Value) -> String {
     if !t.truthy("source") { return String::new(); }
     let when = if t.truthy("downloaded_at") { format!(" · {}", ui::fmt::ago(t.f("downloaded_at"))) } else { String::new() };

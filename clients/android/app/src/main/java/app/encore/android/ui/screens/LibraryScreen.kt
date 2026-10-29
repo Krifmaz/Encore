@@ -79,6 +79,7 @@ import app.encore.android.features.library.PickableAlbumCard
 import app.encore.android.features.library.SongFixUi
 import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.WrongAudioList
+import app.encore.android.features.library.openAlbum
 import app.encore.android.features.offline.DownloadedList
 import app.encore.android.features.offline.shuffleLibrary
 import app.encore.android.features.offline.OfflineMode
@@ -546,7 +547,7 @@ private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "", admin: Boolean = 
                     if (a == null) {
                         Placeholder(paged, i) { AlbumPlaceholder() }
                     } else {
-                        PickableAlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, admin) { nav.open(Screen.Album(a.id)) }
+                        PickableAlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, admin) { nav.openAlbum(a) }
                     }
                 }
                 if (!paged.done) {
@@ -603,7 +604,7 @@ private fun SurroundTab(nav: Nav, q: String = "") {
             if (a == null) {
                 Placeholder(paged, i) { AlbumPlaceholder() }
             } else {
-                AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(a.id)) }
+                AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader) { nav.openAlbum(a) }
             }
         }
         if (!paged.done) {
@@ -828,7 +829,7 @@ private fun LibraryResults(nav: Nav, q: String, onShowAll: (Int) -> Unit) {
                 item(key = "albums") {
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         rowItems(f.albums, key = { "album:" + it.id }) { a ->
-                            AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.open(Screen.Album(a.id)) }
+                            AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.openAlbum(a) }
                         }
                     }
                 }

@@ -34,6 +34,23 @@ pub async fn submit_request(body: Value, btn: Option<Element>) -> Option<Value> 
 /// `a.x || a.y`, as a string.
 fn or(v: &Value, a: &str, b: &str) -> String { if v.truthy(a) { v.s(a) } else { v.s(b) } }
 
+/// Whether a library album row (`tracks`: its song count) is a single: one song, which the pages show and play as a
+/// song instead of opening an album page for it. The album page itself stays (Go to album, Tag this album …).
+pub fn is_single(a: &Value) -> bool {
+    a.i("tracks") == 1
+}
+
+/// The library album a catalogue release tile plays as a song (its `library_album_id` when the library's copy has
+/// exactly one song, `library_tracks`), or None for a release with a page of its own.
+pub fn single_of(a: &Value) -> Option<String> {
+    (a.truthy("library_album_id") && a.i("library_tracks") == 1).then(|| a.s("library_album_id"))
+}
+
+/// The ` data-single="<album id>"` of a tile that plays its one song on a tap ([`bind_tiles`]), or "".
+fn single_attr(id: Option<String>) -> String {
+    id.map(|id| format!(r#" data-single="{}""#, esc(&id))).unwrap_or_default()
+}
+
 /// `albumTile(a, { href, actions, sub })`.
 pub fn album_tile(a: &Value, href: &str, actions: &str, sub: Option<&str>) -> String {
     album_tile_with(a, href, actions, sub, None, None)
@@ -57,7 +74,9 @@ pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, 
             esc(&std::iter::once(artist).filter(|x| !x.is_empty()).chain(rest).collect::<Vec<_>>().join(" · "))
         }
     };
-    format!(r#"<div class="tile" data-href="{href}">
+    // an owned single (one song in the library) plays on a tap instead of opening the release's page
+    let single = single_attr(single_of(a));
+    format!(r#"<div class="tile" data-href="{href}"{single}>
     <div class="art">{art}
       <div class="corner"{key_attr}>{corner}</div>
       <div class="overlay">{actions}</div>
@@ -70,18 +89,22 @@ pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, 
         title = esck(a, "title"), shown = esc(&ui::tr(a, "title")), under = ui::tr_sub(a, "title"))
 }
 
-/// `libraryTile(a)`.
+/// `libraryTile(a)`. A single ([`is_single`]) is shown as a song ("Song · artist · year") and a tap plays it in the
+/// full player instead of opening its album page.
 pub fn library_tile(a: &Value) -> String {
     let id = a.s("id");
-    format!(r#"<div class="tile" data-href="/library/album/{id}">
+    let single = is_single(a);
+    format!(r#"<div class="tile" data-href="/library/album/{id}"{single_attr}>
     <div class="art">{art}
       {untagged}
       <div class="overlay"><button class="fab" data-play-album="{id}" aria-label="Play">{play}</button></div>
     </div>
     <div class="t ellipsis" title="{album}">{album_or}</div>{under}
-    <div class="s ellipsis">{artist}{year}</div>
+    <div class="s ellipsis">{song}{artist}{year}</div>
   </div>"#,
         id = esc(&id),
+        single_attr = single_attr(single.then(|| id.clone())),
+        song = if single { "Song · " } else { "" },
         art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("id"), ui::cover_q(a)), &a.s("album"), ""),
         // a Surround album (0.35) names its format in the corner: Dolby Atmos, 5.1, 7.1
         untagged = if a.s("class") == "surround" { format!(r#"<div class="corner"><span class="badge accent">{}</span></div>"#, esc(&if a.truthy("atmos") { "Dolby Atmos".to_string() } else { a.s("quality") })) }
@@ -116,7 +139,11 @@ pub fn bind_tiles(root: &Element) {
             return;
         }
         if dom::closest(e, "button, a, input").is_some() { return; }
-        if let Some(tile) = dom::closest(e, "[data-href]") { app::navigate(&dom::data(&tile, "href")); }
+        if let Some(tile) = dom::closest(e, "[data-href]") {
+            // a single: its song plays in the full player, there is no album page to open for it
+            if let Some(id) = dom::data_opt(&tile, "single").filter(|id| !id.is_empty()) { pages::library::play_single(&id); return; }
+            app::navigate(&dom::data(&tile, "href"));
+        }
     });
 }
 
@@ -961,6 +988,26 @@ pub fn retry_failed(whose: Whose, reload: Rc<dyn Fn()>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A one-song album is a single: its tile says "Song", carries the album to play and opens no album page; an
+    /// album of two songs or more, and a row without a count, keep their page.
+    #[test]
+    fn a_single_plays_instead_of_opening_an_album_page() {
+        let one = json!({ "id": "a1", "album": ">one (greater than one)", "albumartist": "VALORANT & ericdoa", "year": "2023", "tracks": 1 });
+        let html = library_tile(&one);
+        assert!(html.contains(r#"data-single="a1""#) && html.contains("Song · VALORANT"), "{html}");
+        for a in [json!({ "id": "a2", "album": "Two", "tracks": 2 }), json!({ "id": "a3", "album": "No count" })] {
+            let html = library_tile(&a);
+            assert!(!html.contains("data-single") && !html.contains("Song · "), "{html}");
+        }
+        // a release of the artist's discography: only when the library's copy has one song
+        let rel = |n: i64| json!({ "id": "rg", "title": ">one", "library_album_id": "a1", "library_tracks": n });
+        assert_eq!(single_of(&rel(1)).as_deref(), Some("a1"));
+        assert_eq!(single_of(&rel(3)), None);
+        assert_eq!(single_of(&json!({ "id": "rg", "library_tracks": 1 })), None, "not in the library");
+        assert!(album_tile_with(&rel(1), "/album/rg", "", None, None, None).contains(r#"data-single="a1""#));
+        assert!(!album_tile_with(&rel(2), "/album/rg", "", None, None, None).contains("data-single"));
+    }
 
     /// A row of GET /api/requests whose import waits for the storage (S1's answer, R1).
     fn waiting_row() -> Value {
