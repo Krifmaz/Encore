@@ -256,7 +256,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
     let same = offer.as_ref().is_some_and(|a| a.text.trim() == r.s("message").trim());
     let shown_message = r.truthy("message") && !same;
     format!(r#"<div class="list-item req-row" data-id="{id}">
-    <div class="thumb">{thumb}</div>
+    <div class="thumb"{play}>{thumb}</div>
     <div class="grow req-text" data-act="details" title="Show the whole text">
       <div class="ellipsis" style="font-weight:600">{what}</div>
       <div class="small muted ellipsis"{full}>
@@ -283,6 +283,8 @@ pub fn request_row(r: &Value, admin: bool) -> String {
   </div>"#,
         id = r.s("id"),
         thumb = ui::art(&r.s("cover_url"), &or(r, "title", "artist"), ""),
+        // a finished request's cover plays it (the details' Play); the rest of the row still opens the details
+        play = if can_play(r) { r#" data-act="play" title="Play" role="button""# } else { "" },
         kind = esc(&kind),
         // the dot after attempts and source only when something follows it (a hand pick's reason shows on its own line)
         attempts = { let n = r.f("attempts") as i64; if n > 1 { format!(r#"<span class="faint" title="Requested or retried {n} times">{n} attempts</span>{}"#, if r.truthy("source") || shown_message { " ·" } else { "" }) } else { String::new() } },
@@ -425,8 +427,8 @@ pub fn download_all_now(whose: Whose, reload: Rc<dyn Fn()>) {
 /// The tooltip of Download all now.
 pub const DOWNLOAD_ALL_NOW_TITLE: &str = "Wake every waiting request and move requests up in their lines – never more at once than each source allows";
 
-/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick / Download now and the ⋯ menu of request
-/// rows.
+/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick / Download now, the ⋯ menu of request
+/// rows, and the cover of a finished request, which plays it.
 pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
     dom::on(root, "click", move |e| {
         let Some(b) = dom::closest(e, "[data-act]") else { return };
@@ -437,6 +439,11 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
             // a click that ends a text selection on the row is not a request for the dialog
             if dom::closest(e, "a, button").is_some() || details::selecting() { return; }
             show_request_details(&id, reload.clone());
+            return;
+        }
+        if act == "play" {
+            // the cover of a finished request: play what it brought into the library
+            if let Some(r) = drawn_row(&id) { play_request(&r); }
             return;
         }
         if act == "keep-anyway" || act == "download-anyway" {
@@ -1058,6 +1065,19 @@ mod tests {
         assert_eq!(Whose::default().query(), "");
         assert_eq!(Whose { mine: false, user: Some(12) }.query(), "&user=12");
         assert_eq!(Whose::mine().query(), "&mine=true");
+    }
+
+    /// The cover of a finished request plays it; a request with nothing in the library yet keeps a plain cover, and
+    /// the text beside it opens the details either way.
+    #[test]
+    fn the_cover_of_a_finished_request_plays_it() {
+        let done = json!({ "id": 31, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "completed", "library_album_id": "abc" });
+        let html = request_row(&done, false);
+        assert!(html.contains(r#"<div class="thumb" data-act="play" title="Play" role="button">"#), "{html}");
+        assert!(html.contains(r#"class="grow req-text" data-act="details""#), "{html}");
+        let queued = json!({ "id": 32, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "queued" });
+        let html = request_row(&queued, false);
+        assert!(html.contains(r#"<div class="thumb">"#) && !html.contains(r#"data-act="play""#), "{html}");
     }
 
     #[test]

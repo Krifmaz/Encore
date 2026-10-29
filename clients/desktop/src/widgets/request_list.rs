@@ -965,6 +965,11 @@ pub enum Msg {
     Anywayed(i64, &'static str, Result<Value, ApiError>),
     /// Open a request's details (the whole message, the log, the failed step) with Copy.
     Details(i64),
+    /// A click on a finished request's cover: play what it brought into the library (the
+    /// details' Play, without opening them).
+    Play(i64),
+    /// The song or album [`Msg::Play`] asked the server for.
+    PlayLoaded(Result<Value, ApiError>),
     /// Load the rows now (the details dialog's Keep anyway or Download anyway was sent).
     Reload,
     Storage(Result<Value, ApiError>),
@@ -1302,6 +1307,25 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
                 Err(e) => ctx.toast_err(e.message),
             }
         }
+        Msg::Play(id) => {
+            l.menu = None;
+            // the row as the list has it now; a request no longer in the library plays nothing
+            let Some(path) = l.row(id).and_then(play_path) else { return Task::none() };
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.get(&path).await }, Msg::PlayLoaded);
+        }
+        Msg::PlayLoaded(r) => match r {
+            Ok(v) => {
+                // the song, or the album from its first song
+                let tracks = playable(&v);
+                if tracks.is_empty() {
+                    ctx.toast_err("Nothing to play");
+                } else {
+                    ctx.play(tracks, 0);
+                }
+            }
+            Err(e) => ctx.toast_err(e.message),
+        },
         Msg::Details(id) => {
             l.menu = None;
             if let Some(r) = l.row(id) {
@@ -1393,7 +1417,8 @@ pub fn update(l: &mut List, msg: Msg, ctx: &mut Ctx) -> Task<Msg> {
 
 // ----- view -------------------------------------------------------------------------------
 
-/// `requestRow(r, { admin })`: the thumb, what was asked, the status line, the buttons.
+/// `requestRow(r, { admin })`: the thumb, what was asked, the status line, the buttons. The thumb
+/// of a finished request plays it; the words open the details.
 pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
     let p = ctx.look;
     let id = fmt::i(r, "id");
@@ -1550,6 +1575,18 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
     let words = iced::widget::mouse_area(lines.width(Length::Fill))
         .on_press(Msg::Details(id))
         .interaction(iced::mouse::Interaction::Pointer);
+    // a click on a finished request's cover plays it; the words beside it still open the details
+    let thumb: El<'a, Msg> = if play_path(r).is_some() {
+        tooltip(
+            iced::widget::mouse_area(thumb).on_press(Msg::Play(id)).interaction(iced::mouse::Interaction::Pointer),
+            tip_box("Play"),
+            tooltip::Position::Bottom,
+        )
+        .gap(4)
+        .into()
+    } else {
+        thumb
+    };
     let body = container(row![thumb, words, right].spacing(14).align_y(Alignment::Center)).padding([11, 16]);
     // a right-click opens the row's ⋯ menu at the pointer
     let body = iced::widget::mouse_area(body).on_right_press(Msg::Menu(id, status.clone()));

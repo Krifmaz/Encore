@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
@@ -391,6 +393,10 @@ private fun coverOf(nav: Nav, store: OfflineStore, albumId: String, size: Int): 
     return if (albumId.isNotEmpty()) nav.graph.api.coverUrl(albumId, size) else null
 }
 
+/**
+ * The head of one saved album in the downloaded list: cover, album, artist · songs · size, Play and ⋯. A tap on the
+ * cover plays the album; a tap on the rest opens the album page (plays it when offline).
+ */
 @Composable
 private fun AlbumHead(nav: Nav, store: OfflineStore, menu: OfflineMenu, a: OfflineAlbum, offline: Boolean) {
     val p = MaterialTheme.palette
@@ -403,7 +409,12 @@ private fun AlbumHead(nav: Nav, store: OfflineStore, menu: OfflineMenu, a: Offli
             .padding(start = Gutter, end = 4.dp, top = 16.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Cover(cover, nav.graph.imageLoader, size = 56.dp, corner = 8.dp, label = a.album.ifEmpty { "?" })
+        // the cover plays the saved album; the rest of the row opens the album page (or plays, when offline)
+        Cover(
+            cover, nav.graph.imageLoader,
+            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClickLabel = "Play") { nav.player.play(tracks) },
+            size = 56.dp, corner = 8.dp, label = a.album.ifEmpty { "?" },
+        )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(a.album.ifEmpty { "Unknown album" }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
