@@ -171,6 +171,13 @@ enum class Tab(val label: String, val icon: Int) {
     DISCOVER("Discover", R.drawable.ic_search),
     LIBRARY("Library", R.drawable.ic_library),
     PLAYLISTS("Playlists", R.drawable.ic_queue_music),
+
+    /**
+     * Downloads: the Requests page ([RequestsScreen], the web's `#/requests`) as a tab of its own, so the download
+     * queue, Retry failed, Download all now, Clear finished and Clear waiting are one tap away instead of behind the
+     * Home avatar menu.
+     */
+    DOWNLOADS("Downloads", R.drawable.ic_download),
 }
 
 /** Everything a screen needs to move around and play. */
@@ -345,6 +352,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                 Tab.LIBRARY -> LibraryScreen(nav)
                 Tab.PLAYLISTS -> PlaylistsScreen(nav)
                 Tab.DISCOVER -> DiscoverScreen(nav)
+                // the tab's root: no back arrow (the bottom tabs and Back to Home take you away)
+                Tab.DOWNLOADS -> RequestsScreen(nav, asTab = true)
             }
         }
     }
@@ -373,6 +382,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                         RailItem.HOME -> nav.showTab(Tab.HOME)
                         RailItem.LIBRARY -> nav.showTab(Tab.LIBRARY)
                         RailItem.PLAYLISTS -> nav.showTab(Tab.PLAYLISTS)
+                        RailItem.DOWNLOADS -> nav.showTab(Tab.DOWNLOADS)
                         // For you and Settings are pages of the stack on a phone; on the TV they are places of their own
                         RailItem.FOR_YOU -> { showPlayer = false; stack.clear(); stack.add(Screen.ForYou) }
                         RailItem.SETTINGS -> { showPlayer = false; stack.clear(); stack.add(Screen.Settings) }

@@ -25,8 +25,11 @@ object TvNav {
             Tab.DISCOVER -> RailItem.SEARCH
             Tab.LIBRARY -> RailItem.LIBRARY
             Tab.PLAYLISTS -> RailItem.PLAYLISTS
+            Tab.DOWNLOADS -> RailItem.DOWNLOADS
         }
         top is Screen.ForYou -> RailItem.FOR_YOU
+        // the Requests page opened from elsewhere (Home's "All requests") is the Downloads tab's page
+        top is Screen.Requests -> RailItem.DOWNLOADS
         top is Screen.Settings || top is Screen.SettingsAt -> RailItem.SETTINGS
         else -> null
     }

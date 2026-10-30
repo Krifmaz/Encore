@@ -74,6 +74,13 @@ class TvRulesTest {
         assertEquals(RailItem.SEARCH, TvRules.railItems(playing = false).first())
     }
 
+    /** Downloads (the Requests page) has its own side menu entry, right after Playlists, like the phone's tab. */
+    @Test
+    fun railHasDownloadsAfterPlaylists() {
+        val items = TvRules.railItems(playing = false)
+        assertEquals(items.indexOf(RailItem.PLAYLISTS) + 1, items.indexOf(RailItem.DOWNLOADS))
+    }
+
     /** The entry marked follows the player, the page on top and the tab underneath. */
     @Test
     fun markedEntryFollowsTheScreen() {
@@ -82,6 +89,9 @@ class TvRulesTest {
         assertEquals(RailItem.SEARCH, TvNav.selected(false, null, Tab.DISCOVER))
         assertEquals(RailItem.LIBRARY, TvNav.selected(false, null, Tab.LIBRARY))
         assertEquals(RailItem.PLAYLISTS, TvNav.selected(false, null, Tab.PLAYLISTS))
+        assertEquals(RailItem.DOWNLOADS, TvNav.selected(false, null, Tab.DOWNLOADS))
+        // the Requests page opened on top of another page is still the Downloads entry
+        assertEquals(RailItem.DOWNLOADS, TvNav.selected(false, Screen.Requests, Tab.HOME))
         assertEquals(RailItem.FOR_YOU, TvNav.selected(false, Screen.ForYou, Tab.HOME))
         assertEquals(RailItem.SETTINGS, TvNav.selected(false, Screen.Settings, Tab.LIBRARY))
         assertEquals(RailItem.SETTINGS, TvNav.selected(false, Screen.SettingsAt("soulseek"), Tab.HOME))

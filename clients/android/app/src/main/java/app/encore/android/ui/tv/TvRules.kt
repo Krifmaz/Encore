@@ -120,6 +120,9 @@ enum class RailItem(val label: String) {
     /** The Playlists tab. */
     PLAYLISTS("Playlists"),
 
+    /** The Downloads tab (the Requests page: the download queue and its buttons). */
+    DOWNLOADS("Downloads"),
+
     /** For you (ListenBrainz picks), from the phone's Home menu. */
     FOR_YOU("For you"),
 
@@ -198,6 +201,7 @@ object TvRules {
         add(RailItem.HOME)
         add(RailItem.LIBRARY)
         add(RailItem.PLAYLISTS)
+        add(RailItem.DOWNLOADS)
         add(RailItem.FOR_YOU)
         if (playing) add(RailItem.NOW_PLAYING)
     }

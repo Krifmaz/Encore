@@ -94,14 +94,21 @@ private object AlbumModePref {
 /**
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
- * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear… and Clear waiting beside the
+ * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear finished and Clear waiting beside the
  * admin's User list ("All users", then each person with their requests: "Caz (612)"; the buttons take the person
  * picked) as the web shows them, the admin's Download all now (servers with Download now), the storage banner while imports are
  * paused, and for admins Activity in ⋯.
+ *
+ * The page is laid out in the web's order: the title, the badges ("3715 remaining", "3 failed"), the buttons (User,
+ * Retry failed, Download all now, Clear finished, Clear waiting), then the link box, the tabs and the list.
+ *
+ * @param nav the app's navigation.
+ * @param asTab true when the page is the Downloads tab's root ([Tab.DOWNLOADS]): no back arrow then, since there is no
+ *   page underneath to go back to; false when it was opened on top of another page (Surround's request badge).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun RequestsScreen(nav: Nav) {
+fun RequestsScreen(nav: Nav, asTab: Boolean = false) {
     val features = nav.features
     val p = MaterialTheme.palette
     val context = LocalContext.current
@@ -334,7 +341,7 @@ fun RequestsScreen(nav: Nav) {
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            EncoreTopBar("Requests", scrollBehavior = scrollBehavior, onBack = nav.back, actions = {
+            EncoreTopBar("Requests", scrollBehavior = scrollBehavior, onBack = if (asTab) null else nav.back, actions = {
                 if (admin) {
                     // the web's Activity (Soulseek transfers, torrents, the log), under its Downloader
                     MoreButton(entries = listOf(MenuEntry("Activity", R.drawable.ic_signal) { nav.open(Screen.Activity) }))
@@ -345,6 +352,15 @@ fun RequestsScreen(nav: Nav) {
         val list = rows
         val err = error
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            // "12 remaining", "3 awaiting approval", "2 failed": right under the title, where the web shows them
+            val badges = counts?.let { RequestRules.countBadges(it) }.orEmpty()
+            if (badges.isNotEmpty()) {
+                item {
+                    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        badges.forEach { (text, kind) -> Badge(text, kind) }
+                    }
+                }
+            }
             // quota, the admin's User list, and the web's Retry failed and Clear buttons (members' Clear entries
             // only clear the list; the admin's also delete files, after a confirm)
             item {
@@ -384,7 +400,9 @@ fun RequestsScreen(nav: Nav) {
                                 SmallButton("Download all now", iconRes = R.drawable.ic_download, enabled = !downloadingAll, modifier = Modifier.align(Alignment.CenterVertically)) { downloadAllNow() }
                             }
                             Box(Modifier.align(Alignment.CenterVertically)) {
-                                SmallButton("Clear…", iconRes = R.drawable.ic_delete) { clearMenu = true }
+                                // the web's "Clear finished": a menu of what to clear (completed, failed & cancelled, and
+                                // for admins the same with the files deleted)
+                                SmallButton("Clear finished", iconRes = R.drawable.ic_delete) { clearMenu = true }
                                 PopMenu(
                                     clearMenu, { clearMenu = false },
                                     listOf(
@@ -467,15 +485,6 @@ fun RequestsScreen(nav: Nav) {
                 item {
                     Row(Modifier.padding(horizontal = Gutter, vertical = 2.dp)) {
                         SmallButton("Search Discover to request music", iconRes = R.drawable.ic_search) { nav.showTab(Tab.DISCOVER) }
-                    }
-                }
-            }
-            // "12 remaining", "3 awaiting approval", "2 failed"
-            val badges = counts?.let { RequestRules.countBadges(it) }.orEmpty()
-            if (badges.isNotEmpty()) {
-                item {
-                    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        badges.forEach { (text, kind) -> Badge(text, kind) }
                     }
                 }
             }
