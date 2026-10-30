@@ -694,7 +694,8 @@ async fn album_on_musicbrainz(st: &impl Ctx, r: &Req, allow_ep: bool) -> Lookup 
     let (mbid, artist, title, length, isrc) = (r.opt("mbid"), r.s("artist"), r.s("title"), r.length(), r.d["isrc"].as_str().map(String::from));
     let lookup = async {
         let rid = match mbid {
-            Some(m) => Some(m),
+            // a live take asked for by id: the studio recording of the song instead (its album is the one to get)
+            Some(m) => Some(encore_library::matcher::original_recording(st, &m, &artist, &title, length).await),
             None => encore_library::matcher::resolve_recording(st, &artist, &title, length, isrc.as_deref()).await?,
         };
         let alb = match &rid {

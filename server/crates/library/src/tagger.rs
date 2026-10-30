@@ -1250,12 +1250,18 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
     progress::step("looking it up on MusicBrainz");
     let lookup = async {
         match recording_id.filter(|r| !r.is_empty()) {
-            Some(r) => mb::recording(st, r).await.ok(),
+            // a live take (or another version) asked for by id is swapped for the studio recording, so the
+            // song is filed under its album rather than a one-song live release
+            Some(r) => mb::recording(st, &crate::matcher::original_recording(st, r, artist, title, length).await).await.ok(),
             None => match mb::search_recordings(st, title, 5, Some(artist)).await {
-                Ok(res) => match res.iter().find(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6) {
-                    Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
-                    None => None,
-                },
+                Ok(res) => {
+                    let close: Vec<&Value> = res.iter().filter(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6).collect();
+                    // of the close ones, the studio recording (not a live take named just like it)
+                    match crate::matcher::most_original(&close, title) {
+                        Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
+                        None => None,
+                    }
+                }
                 Err(e) => {
                     st.db().log("warning", &format!("MusicBrainz lookup failed for {artist} - {title}: {e}"));
                     None

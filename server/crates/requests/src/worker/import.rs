@@ -51,7 +51,8 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
         let f = files.first().ok_or_else(|| anyhow::anyhow!("no audio file"))?;
         // the recording the album lookup found (the right version of the song): the import asks MusicBrainz
         // for it alone (one lookup, and one the cache may already hold) instead of searching first
-        let mbid = r.opt("mbid").or_else(|| r.d["recording"].as_str().filter(|x| !x.is_empty()).map(String::from));
+        // (the lookup's recording first: for a live take asked for by id it is the studio recording instead)
+        let mbid = r.d["recording"].as_str().filter(|x| !x.is_empty()).map(String::from).or_else(|| r.opt("mbid"));
         let (p, note) = tagger::import_single(st, f, &r.s("artist"), &r.s("title"), mbid.as_deref(), root, r.length(), true, check, hint.as_deref()).await?;
         (vec![p], note)
     };
