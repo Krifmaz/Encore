@@ -456,7 +456,7 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         val o = getObject("/api/playlists/$id")
         val pl = (Playlist.from(o) ?: Playlist(id, o.str("name"), o.str("kind"), 0, 0, "")).withFullCover()
         val rows = (o.arr("items") ?: o.arr("tracks")).objectsOf().map { r ->
-            PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r), r.str("request_status"), r.str("album"))
+            PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r), r.str("request_status"), r.str("album"), r.dbl("added_at"), r.dbl("duration"))
         }
         return PlaylistDetail(pl, rows)
     }

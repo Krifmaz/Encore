@@ -394,8 +394,18 @@ data class PlaylistDetail(val playlist: Playlist, val rows: List<PlaylistRow>) {
 /**
  * `requestStatus` is the linked request's status ("" when never requested or the request is gone). [album] is the
  * playlist's own album text, so the playlist search finds rows that aren't in the library by their album too.
+ * [addedAt] (Unix seconds, 0 unknown) and [durationSec] (the playlist's own length, 0 unknown) are what the Sort
+ * chip's Date added and Duration order by (features/library/PlaylistSortRules.kt).
  */
-data class PlaylistRow(val title: String, val artist: String, val track: Track?, val requestStatus: String = "", val album: String = "")
+data class PlaylistRow(
+    val title: String,
+    val artist: String,
+    val track: Track?,
+    val requestStatus: String = "",
+    val album: String = "",
+    val addedAt: Double = 0.0,
+    val durationSec: Double = 0.0,
+)
 
 /** GET /api/auth/info – what this server can do. */
 data class AuthInfo(val appName: String, val version: String, val signupMode: String, val features: List<String>) {

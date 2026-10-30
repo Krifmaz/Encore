@@ -372,7 +372,7 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
     }
     let items = pl.a("items");
     let has = !items.is_empty();
-    let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-q="{q}">
+    let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-idx="{i}" data-q="{q}">
         <td class="num">{n}</td>
         <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div></td>
         <td class="hide-sm muted">{album}</td>
@@ -397,10 +397,12 @@ fn linked_page_html(pl: &Value, downloads: bool) -> String {
     let list = if has {
         format!(r#"
     {search}
+    {sortbar}
     <div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th></th></tr></thead>
       <tbody>{rows}
-      </tbody></table></div></div>"#, search = search_box_html("pl", SONG_SEARCH_PLACEHOLDER, true))
+      </tbody></table></div></div>"#, search = search_box_html("pl", SONG_SEARCH_PLACEHOLDER, true),
+            sortbar = if items.len() > 1 { super::playlist_sort::bar_html() } else { String::new() })
     } else {
         empty_state(&icon("music"), LINKED_EMPTY, "")
     };
@@ -413,10 +415,11 @@ fn render_linked(view: &Element, id: &str, pl: &Value) {
     wire_search_toggle(view);
     wire_search(view, "pl", "tbody tr[data-q]", ("song", "songs"), true);
     let items = pl.a("items");
-    let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect();
+    let playable = sorted_playable(view, id, &items);
     {
         let playable = playable.clone();
         dom::on_sel(view, "#pl-menu", "click", move |e| {
+            let playable = playable.borrow().clone();
             let Some(anchor) = dom::closest(e, "#pl-menu") else { return };
             let mut menu: Vec<Option<crate::ui::MenuItem>> = vec![];
             { let p = playable.clone(); menu.push(crate::ui::MenuItem::new("Play next", &icon("next"), move || { player::play_next(p.clone()); toast("Plays next", "ok"); })); }
@@ -433,8 +436,8 @@ fn render_linked(view: &Element, id: &str, pl: &Value) {
             crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
         });
     }
-    { let p = playable.clone(); dom::on_sel(view, "#pl-shuffle", "click", move |_| shuffle_play(&p)); }
-    dom::on_sel(view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
+    { let p = playable.clone(); dom::on_sel(view, "#pl-shuffle", "click", move |_| shuffle_play(&p.borrow())); }
+    dom::on_sel(view, "#pl-play", "click", move |_| player::play_queue(playable.borrow().clone(), 0, "list"));
     {
         let id2 = id.to_string();
         dom::on_sel(view, "#pl-save-copy", "click", move |e| {
@@ -824,6 +827,19 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
 }
 
 /// The page's `act(fn, msg)`: run the request, toast the message and re-render; toast the error otherwise.
+/// The playlist's songs that are in the library, as the player's tracks, in the order the page shows them: wires
+/// the Sort bar ([`super::playlist_sort::wire`]), which applies the playlist's saved sort at once and refills the
+/// list on every change, so Play, Shuffle and ⋯ → Play next / Add to queue follow the rows on screen.
+fn sorted_playable(view: &Element, id: &str, items: &[Value]) -> Rc<RefCell<Vec<Value>>> {
+    let playable: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect()));
+    let rows = Rc::new(items.to_vec());
+    let (p, r) = (playable.clone(), rows.clone());
+    super::playlist_sort::wire(view, id, rows, Rc::new(move |ord: &[usize]| {
+        *p.borrow_mut() = ord.iter().map(|&i| &r[i]).filter(|i| i.truthy("track_id")).map(as_track).collect();
+    }));
+    playable
+}
+
 async fn act(f: impl Future<Output = ApiResult>, msg: impl Fn(&Value) -> String) {
     match f.await {
         Ok(r) => { toast(&msg(&r), "ok"); reload(); }
@@ -849,7 +865,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let source = pl.s("source");
         let (total, matched) = (pl.f("total"), pl.f("matched"));
         let sync_targets = pl.a("sync_targets");
-        let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-q="{q}">
+        let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-idx="{i}" data-q="{q}">
         <td class="num">{n}</td>
         <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div>{was}</td>
         <td class="hide-sm muted">{album}</td>
@@ -913,6 +929,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
       </div>
     </div>
     {search}
+    {sortbar}
     <div class="card flat"><div class="table-wrap"><table class="table">
       <thead><tr><th class="num">#</th><th>Title</th><th class="hide-sm">Album</th><th>Status</th><th></th></tr></thead>
       <tbody>{rows}
@@ -930,6 +947,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             // the 🔍 and its box only when there are songs to search
             find = if items.is_empty() { String::new() } else { find_button() },
             search = if items.is_empty() { String::new() } else { search_box_html("pl", SONG_SEARCH_PLACEHOLDER, true) },
+            // Sort: and ↑/↓ once there are two songs to order
+            sortbar = if items.len() > 1 { super::playlist_sort::bar_html() } else { String::new() },
             pct = if pl.truthy("total") { js_string(&json!(matched / total * 100.0)) } else { "0".to_string() },
             play = if pl.truthy("matched") { format!(r#"<button class="btn primary" id="pl-play">{}Play</button><button class="btn" id="pl-shuffle">{}Shuffle</button>"#, icon("play"), icon("shuffle")) } else { String::new() },
             shared = share_line(&pl),
@@ -962,10 +981,11 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 dom::spawn(async move { super::collab::leave(&id3, &n).await; });
             });
         }
-        let playable: Vec<Value> = items.iter().filter(|i| i.truthy("track_id")).map(as_track).collect();
+        let playable = sorted_playable(&view, &id, &items);
         {
             let playable = playable.clone();
             dom::on_sel(&view, "#pl-menu", "click", move |e| {
+                let playable = playable.borrow().clone();
                 let Some(anchor) = dom::closest(e, "#pl-menu") else { return };
                 let mut menu: Vec<Option<crate::ui::MenuItem>> = vec![];
                 { let p = playable.clone(); menu.push(crate::ui::MenuItem::new("Play next", &icon("next"), move || { player::play_next(p.clone()); toast("Plays next", "ok"); })); }
@@ -982,8 +1002,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
                 crate::pages::library::track_menu(&b, &as_track(it), app::is_admin(), Some(Rc::new(reload)));
             });
         }
-        { let p = playable.clone(); dom::on_sel(&view, "#pl-shuffle", "click", move |_| shuffle_play(&p)); }
-        dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.clone(), 0, "list"));
+        { let p = playable.clone(); dom::on_sel(&view, "#pl-shuffle", "click", move |_| shuffle_play(&p.borrow())); }
+        dom::on_sel(&view, "#pl-play", "click", move |_| player::play_queue(playable.borrow().clone(), 0, "list"));
         // Share: the system share sheet (or the clipboard), then the Shared line
         {
             let (id2, name) = (id.clone(), pl.s("name"));
