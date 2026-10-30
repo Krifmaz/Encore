@@ -667,14 +667,14 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             let mut rows = column![];
             for s in sources.iter().filter(|_| sources_open) {
                 let source: El<'a, Message> = if s["source"].as_str() == Some("env") {
-                    badge(format!("env {}", fmt::s(&s, "env")), Badge::Info)
+                    badge(format!("env {}", fmt::s(s, "env")), Badge::Info)
                 } else {
                     badge("saved in Encore", Badge::Plain)
                 };
                 rows = rows.push(
                     container(
                         row![
-                            container(t(fmt::s(&s, "key")).size(12.5).font(theme::mono())).width(Length::FillPortion(2)),
+                            container(t(fmt::s(s, "key")).size(12.5).font(theme::mono())).width(Length::FillPortion(2)),
                             container(source).width(Length::FillPortion(1)),
                             container(t(super::vs(&s["value"])).size(12.5).font(theme::mono()).color(p.muted)).width(Length::FillPortion(3)),
                         ]

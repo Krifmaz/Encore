@@ -81,12 +81,6 @@ pub fn cached_me() -> Option<Value> {
 /// keeps the play buttons off.
 pub fn last_user() -> Option<Value> { stored().map(|(u, _)| u) }
 
-/// Days of grace left: None when nobody was remembered, Some(0) once it has ended.
-pub fn grace_left_days() -> Option<i64> {
-    let (_, at) = stored()?;
-    Some(grace_left(at, dom::now_s()))
-}
-
 // ---- a sign-out the server has not confirmed yet ----------------------------------------------------------
 
 /// localStorage: "1" while a sign-out has not reached the server. The browser still holds the session cookie

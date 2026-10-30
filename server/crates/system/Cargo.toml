@@ -8,16 +8,13 @@ license.workspace = true
 [dependencies]
 encore-core = { workspace = true }
 encore-db = { workspace = true }
-encore-config = { workspace = true }
 encore-http = { workspace = true }
 encore-jobs = { workspace = true }
 encore-playback = { workspace = true }
 encore-plugins = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
-flate2 = { workspace = true }
 futures-util = { workspace = true }
-hex = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

@@ -69,7 +69,7 @@ pub struct Song {
 impl Song {
     /// A copy the server converted, not the original file: "Download again in original quality"
     /// applies to it. Only the tests call it so far (the offline page has no such button yet).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn converted(&self) -> bool {
         self.quality.trim_end().ends_with("(converted)")
     }

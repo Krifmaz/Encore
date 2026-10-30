@@ -40,11 +40,6 @@ pub fn root(cfg: &encore_config::Config) -> Option<PathBuf> {
     (!lib.is_empty()).then(|| Path::new(lib).join("Surround"))
 }
 
-/// Whether a path is in the Surround folder.
-pub fn in_root(cfg: &encore_config::Config, path: &Path) -> bool {
-    root(cfg).is_some_and(|r| path.starts_with(&r))
-}
-
 /// A surround album's id: `s` + 15 hex characters of sha1("surround|albumartist|album") (of its folder without
 /// an album name), never equal to a stereo album's id.
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {

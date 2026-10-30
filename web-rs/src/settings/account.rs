@@ -43,22 +43,6 @@ pub(crate) fn address_line(origin: &str, v: &Value) -> String {
     )
 }
 
-#[cfg(test)]
-mod address_tests {
-    use super::address_line;
-    use serde_json::json;
-
-    #[test]
-    fn says_which_address_and_links_the_local_one() {
-        let v = json!({ "public": "https://encore.example.uk", "local": "http://10.0.1.7:8080" });
-        assert_eq!(address_line("http://10.0.1.7:8080", &v), "This browser uses the server's <b>local network address</b> (http://10.0.1.7:8080).");
-        let away = address_line("https://encore.example.uk", &v);
-        assert!(away.starts_with("This browser uses the server's <b>public address</b>. On your home network <a href=\"http://10.0.1.7:8080\""), "{away}");
-        assert!(address_line("http://localhost:8080", &v).starts_with("This browser uses this address."));
-        assert_eq!(address_line("https://encore.example.uk", &json!({ "public": "https://encore.example.uk", "local": "" })), "");
-    }
-}
-
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let me = api::get("/auth/me").await.map_err(|e| e.message)?;
@@ -350,4 +334,20 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
 /// The JS `render(view, ctx)` called again from a handler (not awaited; a failure only reaches the console).
 fn rerender(view: Element, ctx: Ctx) {
     dom::spawn(async move { if let Err(e) = render(view, ctx).await { dom::console_error(&e); } });
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::address_line;
+    use serde_json::json;
+
+    #[test]
+    fn says_which_address_and_links_the_local_one() {
+        let v = json!({ "public": "https://encore.example.uk", "local": "http://10.0.1.7:8080" });
+        assert_eq!(address_line("http://10.0.1.7:8080", &v), "This browser uses the server's <b>local network address</b> (http://10.0.1.7:8080).");
+        let away = address_line("https://encore.example.uk", &v);
+        assert!(away.starts_with("This browser uses the server's <b>public address</b>. On your home network <a href=\"http://10.0.1.7:8080\""), "{away}");
+        assert!(address_line("http://localhost:8080", &v).starts_with("This browser uses this address."));
+        assert_eq!(address_line("https://encore.example.uk", &json!({ "public": "https://encore.example.uk", "local": "" })), "");
+    }
 }

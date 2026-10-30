@@ -47,11 +47,6 @@ pub fn kind_word(k: &str) -> &'static str {
     KINDS.iter().find(|x| x.0 == k).map(|x| x.1).unwrap_or("")
 }
 
-/// The label of a filter key ("Studio albums", "Singles & EPs" …).
-pub fn type_label(key: &str) -> &'static str {
-    TYPES.iter().find(|x| x.0 == key).map(|x| x.1).unwrap_or("Other")
-}
-
 /// The album page's chip: the kind's word, with the format after it when that isn't Album ("Live · EP",
 /// "Compilation · One-off"); for a studio album the format alone ("Album", "EP").
 pub fn chip_label(format: &str, kind: &str) -> String {

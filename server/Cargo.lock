@@ -848,7 +848,6 @@ dependencies = [
  "encore-media",
  "encore-plugins",
  "fancy-regex",
- "flate2",
  "futures-util",
  "hex",
  "image",
@@ -866,7 +865,6 @@ dependencies = [
  "unicode-normalization",
  "urlencoding",
  "walkdir",
- "zip",
 ]
 
 [[package]]
@@ -1008,16 +1006,13 @@ version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
- "encore-config",
  "encore-core",
  "encore-db",
  "encore-http",
  "encore-jobs",
  "encore-playback",
  "encore-plugins",
- "flate2",
  "futures-util",
- "hex",
  "http-body-util",
  "hyper",
  "hyper-util",

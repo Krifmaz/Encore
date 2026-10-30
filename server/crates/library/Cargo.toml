@@ -15,7 +15,6 @@ encore-media = { workspace = true }
 encore-plugins = { workspace = true }
 anyhow = { workspace = true }
 deunicode = { workspace = true }
-flate2 = { workspace = true }
 futures-util = { workspace = true }
 fancy-regex = { workspace = true }
 hex = { workspace = true }
@@ -34,7 +33,6 @@ tracing = { workspace = true }
 unicode-normalization = { workspace = true }
 urlencoding = { workspace = true }
 walkdir = { workspace = true }
-zip = { workspace = true }
 
 [features]
 # helpers the server's tests use (setting artist aliases directly)

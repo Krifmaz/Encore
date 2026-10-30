@@ -82,10 +82,6 @@ fn and_join(names: &[String]) -> String {
     }
 }
 
-/// The JS `reqBtn` helper (declared by discover.js but never used there; kept for parity).
-#[allow(dead_code)]
-fn req_btn(attrs: &str, label: &str) -> String { format!(r#"<button class="btn sm primary" {attrs}>{}{label}</button>"#, icon("plus")) }
-
 // ---- live request labels: requested → searching → downloading → importing → in library ----------------
 
 /// `liveBadge(status, label)`: the badge of a request – the server's label when it sent one (Not found, Discography requested…).

@@ -276,11 +276,6 @@ impl Registry {
         ids
     }
 
-    /// Drop every registered adapter (a test server going away: its adapters hold a handle to it).
-    pub fn unregister_all(&self) {
-        self.0.builtins.write().unwrap().clear();
-    }
-
     /// The database.
     pub fn db(&self) -> &Db {
         &self.0.db
@@ -334,11 +329,6 @@ impl Registry {
                 })
             })
             .collect()
-    }
-
-    /// A source is ready to be asked: its plugin is installed and switched on.
-    pub fn source_enabled(&self, source: &str) -> bool {
-        self.source_plugin(source).is_some_and(|p| self.enabled(&p))
     }
 
     // ---- where things are -------------------------------------------------------------------------------
