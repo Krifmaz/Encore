@@ -102,6 +102,9 @@ struct State {
     full: bool,
     pane: String,
     logged: bool,
+    /// the song whose play counted (its id) and the furthest it got (seconds): told to the server when the next
+    /// song starts (taste::report_heard), so a song heard to its end counts for more than one left at half
+    heard: Option<(i64, f64)>,
     announced: Option<Rc<Value>>,
     stalls: Vec<f64>,
     stall_at: f64,
@@ -125,7 +128,7 @@ struct State {
 }
 impl Default for State {
     fn default() -> Self {
-        Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), shuffle: false, order: None, full: false, pane: "now".into(), logged: false, announced: None,
+        Self { queue: vec![], index: -1, transcoded: false, lossy: false, rung: 0, dsp: false, dsp_rate: 0.0, offset: 0.0, dragging: false, context: "list".into(), repeat: "off".into(), shuffle: false, order: None, full: false, pane: "now".into(), logged: false, heard: None, announced: None,
             stalls: vec![], stall_at: 0.0, seek_at: 0.0, step_at: 0.0, switched_at: 0.0, last_preload_check: 0.0, slow_start: None,
             want: false, at: 0.0, src_at: 0.0, floor: playback::AUTO_FLOOR, low_stalls: vec![], local_copy: false }
     }

@@ -152,7 +152,7 @@
 <!-- ============================== 2 -->
 <section>
   <h2><span class="n">2</span>What Encore pays attention to</h2>
-  <p class="lead">Six kinds of signal. Each has a weight (how much it says about your taste) and a lifetime.</p>
+  <p class="lead">Seven kinds of signal. Each has a weight (how much it says about your taste) and a lifetime.</p>
   <table>
     <tr><th>Signal</th><th class="num">Weight</th><th>Lifetime</th><th>Details</th></tr>
     {{SIGNAL_ROWS}}
@@ -175,7 +175,8 @@
   </svg>
   <ul>
     <li>A song counts as <b>played</b> once you've heard half of it or 4 minutes, whichever comes first (the same rule Last.fm uses). Songs under 30 seconds count at the end.</li>
-    <li>Pressing <b>Next</b> after the first 2 seconds but before the play counted is a <b>skip</b>. Songs ending on their own are never skips, and Next on a disliked song isn't sent as a skip (the dislike already says more).</li>
+    <li>When a counted song ends or you move on, the app tells Encore how far it got: a song heard to the end counts half again as much as one left right after the halfway mark.</li>
+    <li>Pressing <b>Next</b> after the first 2 seconds but before the play counted is a <b>skip</b>. The later in the song, the less it counts: a skip just before the halfway mark is a fifth of one in the first seconds. Songs ending on their own are never skips, and Next on a disliked song isn't sent as a skip (the dislike already says more).</li>
     <li>Encore reads your plays of the last 400 days (up to 20,000 of the newest) and your skips of the last 90 days. Older skips are deleted.</li>
   </ul>
   <h3>Dislikes and likes cancel each other</h3>

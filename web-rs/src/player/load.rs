@@ -263,6 +263,8 @@ pub(super) fn load_opts(o: LoadOpts) {
         s.dragging = false;
     });
     if start {
+        // the song before this one: how much of it was heard, now that it is over
+        report_heard();
         st_mut(|s| { s.logged = false; s.stalls.clear(); s.step_at = 0.0; });
         if !o.hold { announce(&t); }
     }
@@ -563,13 +565,19 @@ fn blocked() {
 
 pub(super) fn log_play() {
     let Some(t) = cur() else { return };
-    if t.truthy("preview") || st(|s| s.logged) || !t.g("id").is_number() { return; }
+    if t.truthy("preview") || !t.g("id").is_number() { return; }
     let p = position();
+    if st(|s| s.logged) {
+        // counted already: keep the furthest point it reached, for taste::report_heard
+        let id = t.i("id");
+        if p.is_finite() { st_mut(|s| if let Some((h, at)) = s.heard.as_mut() { if *h == id && p > *at { *at = p; } }); }
+        return;
+    }
     let d = duration();
     // counts (and scrobbles) like Last.fm: half the song or 4 minutes, whichever comes first; very short songs at the end
     let hit = if truthy_num(d) { if d < 30.0 { p >= d - 1.0 } else { p >= (d / 2.0).min(240.0) } } else { p >= 30.0 };
     if hit {
-        st_mut(|s| s.logged = true);
+        st_mut(|s| { s.logged = true; s.heard = Some((t.i("id"), p)); });
         // without the server the play waits in the outbox, with the time it was played
         if no_server() { play_later(t.i("id"), p); return; }
         let (id, tid) = (t.g("id").clone(), t.i("id"));

@@ -14,7 +14,9 @@ import java.util.concurrent.ExecutorService
  * transition) counts with its full length. The server passes them on (ListenBrainz, Last.fm). A play the server
  * can't take (offline) waits in the outbox (features/offline) and goes when it answers again. A move to a later song
  * before the play counted (and after the first two seconds) is a skip (`POST /api/taste/skip`), which the
- * recommendations take as a mild "not now". Main thread only.
+ * recommendations take as a mild "not now". When a song whose play counted is over, how far it got goes to the
+ * server too (`POST /api/taste/listened`): a song heard to its end counts for more than one left soon after half.
+ * Main thread only.
  */
 class Scrobbler(
     private val player: ExoPlayer,
@@ -48,13 +50,17 @@ class Scrobbler(
      * a repeat) counts with its full length; the new one starts unplayed.
      */
     fun songChanged(reason: Int) {
-        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
-            val prev = lastId
-            if (!logged && prev != null && lastDurationSec > 0) logPlay(prev, lastDurationSec)
-        }
-        // Next (a seek to a later song) before the play counted: a skip
         val prev = lastId
-        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK && !logged && prev != null && lastPositionSec >= 2.0 &&
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+            // logPlay sets `logged`: the report below must only follow a play that counted before this moment
+            if (!logged && prev != null && lastDurationSec > 0) { logPlay(prev, lastDurationSec); logged = false }
+        }
+        // a counted play is over: how much of it was heard (all of it when it ran to its end)
+        val ranToEnd = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+        val wasLogged = logged
+        if (wasLogged && prev != null) reportHeard(prev, if (ranToEnd && lastDurationSec > 0) lastDurationSec else lastPositionSec)
+        // Next (a seek to a later song) before the play counted: a skip
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK && !wasLogged && prev != null && lastPositionSec >= 2.0 &&
             player.currentMediaItemIndex > lastIndex && !inGroup() && !OfflineMode.active.value) {
             val secs = lastPositionSec
             io.execute { try { api.skip(prev, secs) } catch (_: Exception) {} }
@@ -69,6 +75,8 @@ class Scrobbler(
     /** The queue ended: the last song ran to its end. */
     fun ended() {
         val id = lastId
+        // counted earlier: it was heard to the end
+        if (logged && id != null && lastDurationSec > 0) reportHeard(id, lastDurationSec)
         if (!logged && id != null && lastDurationSec > 0) logPlay(id, lastDurationSec)
         logged = true
     }
@@ -97,6 +105,15 @@ class Scrobbler(
         // half the song or 4 minutes, whichever comes first; songs under 30 s at their end
         val hit = if (d > 0) (if (d < 30) p >= d - 1 else p >= minOf(d / 2, 240.0)) else p >= 30
         if (hit) logPlay(id, p)
+    }
+
+    /**
+     * How far into song `id` the listener got (`seconds`) once its counted play is over, for the recommendations.
+     * Offline it is dropped: the play itself waits in the outbox and counts as an ordinary play.
+     */
+    private fun reportHeard(id: Long, seconds: Double) {
+        if (seconds <= 0 || OfflineMode.active.value) return
+        io.execute { try { api.listened(id, seconds) } catch (_: Exception) {} }
     }
 
     private fun logPlay(id: Long, seconds: Double) {

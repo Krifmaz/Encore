@@ -10,9 +10,11 @@
 //!   listening session (plays less than [`SESSION_GAP`] apart, a few songs from each other) are neighbours; the
 //!   counts become a cosine similarity. With one listener it still learns their own sessions; with many it is a
 //!   small collaborative filter.
-//! - [`Profile`]: one listener's taste, from their [`Signals`]: plays (fading with age), Liked Songs (a strong
-//!   "yes"), songs on their own playlists, skips (a mild "not now") and dislikes (a hard "no"). Each signal adds to
-//!   the song itself, to its artists, its genres and its decade.
+//! - [`Profile`]: one listener's taste, from their [`Signals`]: plays (fading with age, and weighed by how much of
+//!   the song was heard, see [`play_weight`]), Liked Songs (a strong "yes"), share links they made (a strong "yes"
+//!   that fades), songs on their own playlists, skips (a mild "not now", milder the later in the song it came, see
+//!   [`skip_weight`]) and dislikes (a hard "no"). Each signal adds to the song itself, to its artists, its genres
+//!   and its decade.
 //!
 //! A song's score ([`Profile::score`]) mixes how much the listener likes its artists, genres and era, how close
 //! its artists are to the ones they play (co-listening), and the song's own history, less a penalty for songs
@@ -37,13 +39,30 @@ pub const SKIP_WINDOW: f64 = 90.0 * 86400.0;
 /// This many recent skips of one song (weighted by age, see [`SKIP_HALF_LIFE`]) and it is left out like a
 /// disliked one until they fade.
 const SKIPS_TO_DROP: f64 = 2.5;
-/// What one play adds (before fading).
+/// What one play adds (before fading) when the player didn't say how much of the song was heard (older plays,
+/// players that don't tell): the same as a play heard to three quarters (see [`play_weight`]).
 const W_PLAY: f64 = 1.0;
+/// What a play heard only to the point where it counts adds (half the song, or 4 minutes of a long one), as a
+/// share of [`W_PLAY`]: the listener stayed, but maybe moved on soon after.
+const PLAY_AT_LEAST: f64 = 0.4;
+/// What a play heard to the end adds on top of [`PLAY_AT_LEAST`], as a share of [`W_PLAY`]: a song heard to its
+/// end counts 1.2 plays, three times one heard only up to where it counts would at the very start.
+const PLAY_HEARD_BONUS: f64 = 0.8;
+/// The last tenth of a song counts as heard to the end: outros, silence, a fade into the next song.
+const HEARD_TO_END: f64 = 0.9;
+/// What a share link the listener made adds (before fading): a little more than a like, since sending a song to
+/// someone says "this is good" out loud, and shares are rare enough not to swamp plays.
+const W_SHARE: f64 = 5.0;
+/// A share counts half as much after this long (seconds): slower than a play, a share is a considered choice.
+const SHARE_HALF_LIFE: f64 = 180.0 * 86400.0;
+/// A skip late in a song (just before its play would have counted) takes away only this share of what a skip in
+/// the first seconds does: the listener heard a good part of it before moving on.
+const LATE_SKIP: f64 = 0.2;
 /// What a liked song adds: a like says more than a play.
 const W_LIKE: f64 = 4.0;
 /// What a song on one of the listener's own playlists adds.
 const W_PLAYLIST: f64 = 0.75;
-/// What a skip takes away (before fading).
+/// What a skip in the first seconds takes away (before fading; later skips less, see [`skip_weight`]).
 const W_SKIP: f64 = -0.6;
 /// What a disliked song takes from its artists, genres and decade (the song itself is left out anyway).
 const W_DISLIKE: f64 = -3.0;
@@ -66,6 +85,8 @@ pub struct SongIn {
     pub genre: String,
     /// the year or date tag ("1997", "1997-05-21"; empty when none)
     pub year: String,
+    /// the song's length (seconds; 0 when unknown)
+    pub duration: f64,
 }
 
 /// One song as the model keeps it.
@@ -73,6 +94,8 @@ pub struct SongIn {
 pub struct Song {
     /// the song's id
     pub id: i64,
+    /// its length (seconds; 0 when unknown)
+    pub duration: f64,
     /// its artists (indexes into [`Catalog::artists`]), the main one first; never empty
     pub artists: Vec<u32>,
     /// its genres (indexes into [`Catalog::genres`]): the song's own tags, else its main artist's usual ones
@@ -156,7 +179,7 @@ impl Catalog {
             let album = *album_by_key.entry(s.album_id).or_insert(next);
             c.by_id.insert(s.id, c.songs.len());
             own.push(genres.clone());
-            c.songs.push(Song { id: s.id, artists, genres, decade: decade_of(&s.year), album });
+            c.songs.push(Song { id: s.id, duration: s.duration, artists, genres, decade: decade_of(&s.year), album });
         }
         // each artist's usual genres: the two its tagged songs name most
         let mut counts: HashMap<u32, HashMap<u16, u32>> = HashMap::new();
@@ -302,14 +325,18 @@ impl CoListen {
 /// What one listener told the server, read from the database: the input of [`Profile::build`].
 #[derive(Clone, Debug, Default)]
 pub struct Signals {
-    /// their plays: (song id, played_at)
-    pub plays: Vec<(i64, f64)>,
+    /// their plays: (song id, played_at, how much of it they heard in seconds – `None` when the player didn't say)
+    pub plays: Vec<(i64, f64, Option<f64>)>,
     /// their Liked Songs (song ids)
     pub likes: Vec<i64>,
     /// the songs on their own playlists (song ids, each once)
     pub playlisted: Vec<i64>,
-    /// their skips: (song id, skipped_at)
-    pub skips: Vec<(i64, f64)>,
+    /// the share links they made: (song id, created_at, portion). A song's link has portion 1; an album's link
+    /// lists each of its songs with portion 1 / the album's song count, so the album as a whole counts like one
+    /// shared song (its artists and genres get the full weight, each song a little)
+    pub shares: Vec<(i64, f64, f64)>,
+    /// their skips: (song id, skipped_at, how far into the song in seconds)
+    pub skips: Vec<(i64, f64, f64)>,
     /// the songs they disliked
     pub disliked_songs: HashSet<i64>,
     /// the artists they disliked (lower-cased names, see [`artist_key`])
@@ -351,6 +378,33 @@ fn fade(at: f64, now: f64, half_life: f64) -> f64 {
     0.5f64.powf(((now - at).max(0.0)) / half_life)
 }
 
+/// What one play of a song `duration` seconds long counts for (before fading), from how much of it was heard
+/// (`listened` seconds). Unknown (`None`, or a song of unknown length) is [`W_PLAY`]. Otherwise the share heard
+/// (the last tenth counts as the end, see [`HEARD_TO_END`]) moves it from [`PLAY_AT_LEAST`] × [`W_PLAY`] for
+/// nothing heard (never sent: a play counts at half the song) to ([`PLAY_AT_LEAST`] + [`PLAY_HEARD_BONUS`]) ×
+/// [`W_PLAY`] for the whole song – 0.8 at the halfway mark where a play counts, 1.2 at the end.
+pub fn play_weight(listened: Option<f64>, duration: f64) -> f64 {
+    match listened {
+        Some(l) if l.is_finite() && duration > 0.0 => {
+            let heard = (l / (duration * HEARD_TO_END)).clamp(0.0, 1.0);
+            W_PLAY * (PLAY_AT_LEAST + PLAY_HEARD_BONUS * heard)
+        }
+        _ => W_PLAY,
+    }
+}
+
+/// How much of a full skip a skip `seconds` into a song `duration` seconds long is, [`LATE_SKIP`]..=1: 1 in the
+/// first seconds, falling in a straight line to [`LATE_SKIP`] at the point where the play would have counted
+/// (half the song, at most 4 minutes in – the players' rule). A song of unknown length counts every skip in full.
+pub fn skip_weight(seconds: f64, duration: f64) -> f64 {
+    if duration <= 0.0 || !seconds.is_finite() {
+        return 1.0;
+    }
+    let counts_at = (duration / 2.0).min(240.0);
+    let into = (seconds / counts_at).clamp(0.0, 1.0);
+    1.0 - (1.0 - LATE_SKIP) * into
+}
+
 /// Raw affinities squeezed into -1..=1: divided by a "typical strong" value (the mean of the ten largest, at
 /// least 1) and passed through tanh, so one artist with thousands of plays doesn't flatten everyone else.
 fn squash<K: std::hash::Hash + Eq + Copy>(raw: HashMap<K, f64>) -> HashMap<K, f64> {
@@ -385,10 +439,10 @@ impl Profile {
             }
         };
         let mut any = false;
-        for (id, at) in &sig.plays {
+        for (id, at, listened) in &sig.plays {
             let Some(i) = cat.index(*id) else { continue };
             any = true;
-            add(i, W_PLAY * fade(*at, now, PLAY_HALF_LIFE));
+            add(i, play_weight(*listened, cat.songs[i].duration) * fade(*at, now, PLAY_HALF_LIFE));
             let last = p.last_played.entry(i).or_insert(*at);
             *last = last.max(*at);
             *p.play_count.entry(i).or_default() += 1;
@@ -399,18 +453,24 @@ impl Profile {
             add(i, W_LIKE);
             p.liked.insert(i);
         }
+        for (id, at, portion) in &sig.shares {
+            let Some(i) = cat.index(*id) else { continue };
+            any = true;
+            add(i, W_SHARE * portion.clamp(0.0, 1.0) * fade(*at, now, SHARE_HALF_LIFE));
+        }
         for id in &sig.playlisted {
             let Some(i) = cat.index(*id) else { continue };
             any = true;
             add(i, W_PLAYLIST);
         }
-        for (id, at) in &sig.skips {
+        for (id, at, seconds) in &sig.skips {
             let Some(i) = cat.index(*id) else { continue };
             if now - at > SKIP_WINDOW {
                 continue;
             }
             any = true;
-            let w = fade(*at, now, SKIP_HALF_LIFE);
+            // a late skip counts less, both against the song's taste and towards leaving it out (SKIPS_TO_DROP)
+            let w = fade(*at, now, SKIP_HALF_LIFE) * skip_weight(*seconds, cat.songs[i].duration);
             add(i, W_SKIP * w);
             *p.skipped.entry(i).or_default() += w;
         }
@@ -776,7 +836,7 @@ mod tests {
 
     /// A song for the tests.
     fn song(id: i64, artist: &str, genre: &str, year: &str) -> SongIn {
-        SongIn { id, artists: vec![artist.into()], album_id: format!("{artist}-{}", id / 10), genre: genre.into(), year: year.into() }
+        SongIn { id, artists: vec![artist.into()], album_id: format!("{artist}-{}", id / 10), genre: genre.into(), year: year.into(), duration: 0.0 }
     }
 
     /// A library of 4 artists × 20 songs: two rock artists, one jazz, one hip hop (whose songs have no genre tag
@@ -849,7 +909,7 @@ mod tests {
         let c = Catalog::build(v);
         let now = 1e9;
         // a week-old history of three rock artists, and a like for one more rock song
-        let sig = Signals { plays: (0..3).flat_map(|k| (0..5).map(move |j| (1000 + 10 * k + j, now - 7.0 * 86400.0))).collect(), likes: vec![1050], ..Default::default() };
+        let sig = Signals { plays: (0..3).flat_map(|k| (0..5).map(move |j| (1000 + 10 * k + j, now - 7.0 * 86400.0, None))).collect(), likes: vec![1050], ..Default::default() };
         let p = Profile::build(&c, &CoListen::default(), &sig, now);
         let (mut rock, mut rap) = (0, 0);
         for seed in 0..20 {
@@ -882,7 +942,7 @@ mod tests {
         let c = library();
         let now = 1e9;
         // three skips in the last minutes: out
-        let skips = vec![(105, now - 100.0), (105, now - 200.0), (105, now - 300.0)];
+        let skips = vec![(105, now - 100.0, 5.0), (105, now - 200.0, 5.0), (105, now - 300.0, 5.0)];
         let p = Profile::build(&c, &CoListen::default(), &Signals { skips: skips.clone(), ..Default::default() }, now);
         assert!(!p.allowed(c.index(105).unwrap()));
         let p = Profile::build(&c, &CoListen::default(), &Signals { skips, likes: vec![105], ..Default::default() }, now);
@@ -893,7 +953,7 @@ mod tests {
     fn just_played_songs_wait() {
         let c = library();
         let now = 1e9;
-        let sig = Signals { plays: vec![(100, now - 60.0), (101, now - 30.0 * 86400.0)], ..Default::default() };
+        let sig = Signals { plays: vec![(100, now - 60.0, None), (101, now - 30.0 * 86400.0, None)], ..Default::default() };
         let p = Profile::build(&c, &CoListen::default(), &sig, now);
         assert!(p.score(&c, c.index(100).unwrap()) < p.score(&c, c.index(101).unwrap()));
     }
@@ -941,12 +1001,93 @@ mod tests {
         assert_eq!(p.shuffle(&c, &Scope::Songs(one), 10, &HashSet::new(), &mut Rng::new(2)).len(), 10);
     }
 
+    /// [`library`] with every song 200 seconds long, for the signals that look at how much of a song was heard.
+    fn timed_library() -> Catalog {
+        let mut v = vec![];
+        for i in 0..20 {
+            for (base, artist, genre, year) in [(100, "Rocker", "Rock", "1997"), (200, "Other Rocker", "rock", "2003"), (300, "Jazzer", "Jazz", "1962")] {
+                v.push(SongIn { duration: 200.0, ..song(base + i, artist, genre, year) });
+            }
+        }
+        Catalog::build(v)
+    }
+
+    #[test]
+    fn play_and_skip_weights() {
+        // unknown: an ordinary play; at the halfway mark 0.8; heard to the end (or its last tenth) 1.2
+        assert_eq!(play_weight(None, 200.0), W_PLAY);
+        assert_eq!(play_weight(Some(100.0), 0.0), W_PLAY);
+        assert!((play_weight(Some(90.0), 200.0) - 0.8).abs() < 1e-9);
+        assert!((play_weight(Some(180.0), 200.0) - 1.2).abs() < 1e-9);
+        assert!((play_weight(Some(500.0), 200.0) - 1.2).abs() < 1e-9);
+        // a skip in the first seconds is (almost) whole, one just before the play counts a fifth
+        assert!(skip_weight(3.0, 200.0) > 0.97);
+        assert!((skip_weight(100.0, 200.0) - LATE_SKIP).abs() < 1e-9);
+        assert!((skip_weight(50.0, 200.0) - 0.6).abs() < 1e-9);
+        // a long song's play counts at 4 minutes, so that is the late end of its skips
+        assert!((skip_weight(240.0, 1200.0) - LATE_SKIP).abs() < 1e-9);
+        assert_eq!(skip_weight(30.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn songs_heard_to_the_end_count_more() {
+        let c = timed_library();
+        let now = 1e9;
+        // Rocker's songs heard to the end, Other Rocker's left soon after they counted: same number of plays
+        let mut plays = vec![];
+        for i in 0..10 {
+            plays.push((100 + i, now - 5.0 * 86400.0, Some(200.0)));
+            plays.push((200 + i, now - 5.0 * 86400.0, Some(100.0)));
+        }
+        let p = Profile::build(&c, &CoListen::default(), &Signals { plays, ..Default::default() }, now);
+        let (full, half) = (c.artist_index("rocker").unwrap(), c.artist_index("other rocker").unwrap());
+        assert!(p.artist[&full] > p.artist[&half], "{} vs {}", p.artist[&full], p.artist[&half]);
+        assert!(p.score(&c, c.index(110).unwrap()) > p.score(&c, c.index(210).unwrap()));
+    }
+
+    #[test]
+    fn shares_lift_a_song_and_its_artist() {
+        let c = timed_library();
+        let now = 1e9;
+        // one shared Jazzer song outweighs a like of a Rocker song
+        let sig = Signals { shares: vec![(300, now - 86400.0, 1.0)], likes: vec![100], ..Default::default() };
+        let p = Profile::build(&c, &CoListen::default(), &sig, now);
+        assert!(!p.cold);
+        let (jazz, rock) = (c.artist_index("jazzer").unwrap(), c.artist_index("rocker").unwrap());
+        assert!(p.artist[&jazz] > p.artist[&rock]);
+        assert!(p.song[&c.index(300).unwrap()] > p.song[&c.index(100).unwrap()]);
+        // an album link spreads over its songs: the artist gets about what one shared song gives, each song a part
+        let album: Vec<(i64, f64, f64)> = (300..310).map(|id| (id, now - 86400.0, 0.1)).collect();
+        let a = Profile::build(&c, &CoListen::default(), &Signals { shares: album, ..Default::default() }, now);
+        let one = Profile::build(&c, &CoListen::default(), &Signals { shares: vec![(300, now - 86400.0, 1.0)], ..Default::default() }, now);
+        assert!((a.artist[&jazz] - one.artist[&jazz]).abs() < 1e-9);
+        assert!(a.song[&c.index(300).unwrap()] < one.song[&c.index(300).unwrap()]);
+        // shares fade: one from two years ago says less than one from yesterday
+        let old = Profile::build(&c, &CoListen::default(), &Signals { shares: vec![(300, now - 730.0 * 86400.0, 1.0)], ..Default::default() }, now);
+        assert!(old.song[&c.index(300).unwrap()] < one.song[&c.index(300).unwrap()]);
+    }
+
+    #[test]
+    fn late_skips_count_less() {
+        let c = timed_library();
+        let now = 1e9;
+        // three skips in the first seconds leave a song out; three just before it counted only pull it down a bit
+        let early: Vec<(i64, f64, f64)> = (1..=3).map(|k| (105, now - 100.0 * k as f64, 3.0)).collect();
+        let late: Vec<(i64, f64, f64)> = (1..=3).map(|k| (105, now - 100.0 * k as f64, 95.0)).collect();
+        let e = Profile::build(&c, &CoListen::default(), &Signals { skips: early, ..Default::default() }, now);
+        let l = Profile::build(&c, &CoListen::default(), &Signals { skips: late, ..Default::default() }, now);
+        let i = c.index(105).unwrap();
+        assert!(!e.allowed(i));
+        assert!(l.allowed(i));
+        assert!(l.song[&i] > e.song[&i]);
+    }
+
     #[test]
     fn mixes_cover_the_taste() {
         let c = library();
         let now = 1e9;
         let sig = Signals {
-            plays: (0..20).map(|i| (100 + i, now - 40.0 * 86400.0)).chain((0..5).map(|i| (100 + i, now - 41.0 * 86400.0))).collect(),
+            plays: (0..20).map(|i| (100 + i, now - 40.0 * 86400.0, None)).chain((0..5).map(|i| (100 + i, now - 41.0 * 86400.0, None))).collect(),
             likes: vec![300, 301],
             ..Default::default()
         };
