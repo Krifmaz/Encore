@@ -54,6 +54,8 @@ import app.encore.android.features.library.CollabInvites
 import app.encore.android.features.library.LinkedPlaylistMenu
 import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
+import app.encore.android.features.library.PlaylistMissingRules
+import app.encore.android.features.settings.copyToClipboard
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
 import app.encore.android.data.api.Playlist
@@ -341,6 +343,11 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
             val tracks = detail.tracks
             val rows = detail.rows
             val missing = rows.size - tracks.size
+            // the missing songs "Download missing" can't ask for: badged, and copied as a list from the head
+            val cant = remember(rows) { PlaylistMissingRules.cantRequest(rows) }
+            // Liked Songs lists the liked songs: the hearts follow what it says (a song found in the library since
+            // the last refresh of the likes showed an empty heart here)
+            if (pl.isLiked) LaunchedEffect(detail) { nav.graph.likes.adopt(tracks.map { it.id }.toSet()) }
             val covers = rows.mapNotNull { it.track?.albumId?.takeIf { a -> a.isNotEmpty() } }.distinct().take(4).map { api.coverUrl(it, 400) }
             // every row's position in the playlist, in the order the Sort chip shows them
             val ordered = remember(rows, sort) { PlaylistSortRules.order(rows, sort) }
@@ -392,6 +399,13 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Text("${rows.size} tracks · ", style = MaterialTheme.typography.bodyMedium, color = p.muted)
                                 Text("${tracks.size}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = EncoreColors.Ok)
                                 Text(" in library · $missing missing", style = MaterialTheme.typography.bodyMedium, color = p.muted)
+                            }
+                            // the songs that can't be requested, copied as an "Artist - Title" list to fix by hand
+                            if (cant.isNotEmpty() && !pl.isMember) {
+                                Badge(
+                                    PlaylistMissingRules.buttonText(cant.size), "err", Modifier.padding(top = 8.dp),
+                                    onClick = { copyToClipboard(context, PlaylistMissingRules.listText(cant)) },
+                                )
                             }
                             // the web's Shared mark: anyone with the link can play these songs; how many added it, never who
                             if (pl.isShared) {
@@ -487,7 +501,11 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Text(row.title, fontWeight = FontWeight.SemiBold, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(row.artist, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            if (row.requestStatus.isNotEmpty()) StatusBadge(row.requestStatus) else Badge("missing")
+                            when {
+                                row.requestStatus.isNotEmpty() -> StatusBadge(row.requestStatus)
+                                row.cantRequest.isNotEmpty() -> Badge(PlaylistMissingRules.BADGE, "err")
+                                else -> Badge("missing")
+                            }
                         }
                     }
                 }

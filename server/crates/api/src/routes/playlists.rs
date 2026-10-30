@@ -278,9 +278,17 @@ async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
             return Ok(Json(playlist_links::linked_detail(st, &u, &pl)?));
         }
         let mut v = playlists::summary(st, &pl);
-        v["items"] = json!(st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status, r.message AS request_message
+        let mut items = st.db.query("SELECT i.*, t.album_id, t.format, t.bitrate, t.verify_status, r.status AS request_status, r.message AS request_message
             FROM playlist_items i LEFT JOIN tracks t ON t.id=i.track_id LEFT JOIN requests r ON r.id=i.request_id
-            WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?);
+            WHERE i.playlist_id=? ORDER BY i.position, i.id", p![pid])?;
+        // a missing song "Download missing" can't ask for (no MusicBrainz id, no artist and title) says why,
+        // so the page can show and list those songs instead of only counting them in a toast
+        for it in items.iter_mut().filter(|it| it.i("track_id") <= 0) {
+            if let Some(why) = encore_requests::missing::cant_request(it) {
+                it.insert("cant_request".into(), json!(why));
+            }
+        }
+        v["items"] = json!(items);
         v.as_object_mut().map(|o| o.remove("invite_token"));
         if role == Role::Owner {
             v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));

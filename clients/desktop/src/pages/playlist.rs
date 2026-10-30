@@ -54,6 +54,38 @@ pub fn requestable(it: &Value) -> bool {
         )
 }
 
+/// Why a missing row can't be requested (the server's `cant_request`: no MusicBrainz id and no
+/// artist and title to search by), or `None` when it can be, or it is in the library. The web's
+/// `cant_request` in web-rs/src/pages/playlists.rs.
+pub fn cant_request(it: &Value) -> Option<&str> {
+    if fmt::truthy(it, "track_id") {
+        return None;
+    }
+    it["cant_request"].as_str().filter(|w| !w.is_empty())
+}
+
+/// The "can't be requested" list (the web's `cant_request_list`): one "Artist - Title" line per
+/// song, the title (or the artist) alone when the other is empty, the album in brackets when known.
+pub fn cant_request_list(rows: &[&Value]) -> String {
+    rows.iter()
+        .map(|r| {
+            let (artist, title, album) = (fmt::s(r, "artist"), fmt::s(r, "title"), fmt::s(r, "album"));
+            let mut line = if artist.is_empty() {
+                title
+            } else if title.is_empty() {
+                artist
+            } else {
+                format!("{artist} - {title}")
+            };
+            if !album.is_empty() {
+                line += &format!(" ({album})");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The "Download missing" toast from the route's `{requested, in_progress, failed: [{title, reason}]}`:
 /// "Requested 120 · 600 already in progress · 64 couldn't be requested (why)".
 pub fn missing_report_text(r: &Value) -> String {
@@ -250,6 +282,8 @@ pub enum Message {
     /// everyone).
     Shuffle,
     DownloadMissing,
+    /// "N can't be requested": the songs "Download missing" skips, as a list to copy.
+    CantRequest,
     AlbumChoice(Option<String>),
     Dedupe,
     Rematch,
@@ -594,6 +628,12 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load(state, ctx);
         }
         Message::ShareGot(Err(e)) => ctx.toast_err(e.message),
+        Message::CantRequest => {
+            if let Some(p) = state.playlist() {
+                let rows: Vec<&Value> = p["items"].as_array().map(|a| a.iter().filter(|i| cant_request(i).is_some()).collect()).unwrap_or_default();
+                ctx.details(format!("{} songs can't be requested", rows.len()), cant_request_list(&rows));
+            }
+        }
         Message::CopyLink => {
             if let Some(path) = state.playlist().and_then(shared_path) {
                 ctx.copy_text(format!("{}{path}", ctx.base()));
@@ -954,6 +994,9 @@ fn status_badges<'a>(it: &Value) -> Vec<El<'a, Message>> {
         b
     } else if let Some(s) = it["request_status"].as_str() {
         vec![catalog::status_badge(s)]
+    } else if let Some(why) = cant_request(it) {
+        // "Download missing" skips it: say so, with the reason on hover
+        vec![iced::widget::tooltip(badge("can't request", Badge::Err), crate::widgets::tip_box(why.to_string()), iced::widget::tooltip::Position::Top).gap(4).into()]
     } else {
         vec![badge("missing", Badge::Plain)]
     }
@@ -1047,6 +1090,11 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
             if has_matched { Btn::Default } else { Btn::Primary },
             (!state.busy).then_some(Message::DownloadMissing),
         ));
+    }
+    // the songs "Download missing" can't ask for, listed to copy and fix by hand
+    let cant = items.iter().filter(|i| cant_request(i).is_some()).count();
+    if cant > 0 && !member {
+        actions = actions.push(btn_icon(Icon::List, format!("{cant} can't be requested"), Btn::Default, Some(Message::CantRequest)));
     }
     actions = actions.push(btn_icon(Icon::Plus, "Add from link", Btn::Default, Some(Message::AddFromLink)));
     if !liked && !member && !items.is_empty() {
@@ -1502,5 +1550,18 @@ mod tests {
         assert_eq!(STOP_TITLE, "Stop sharing");
         assert_eq!(STOP_TEXT, "The link stops working for everyone who has it. Sharing again makes a new link.");
         assert_eq!(STOPPED, "Sharing stopped");
+    }
+
+    /// The rows the server marks `cant_request` are the ones listed (in the library: never), as
+    /// "Artist - Title (Album)", the title alone when there's no artist.
+    #[test]
+    fn the_songs_that_cant_be_requested_are_listed() {
+        let why = "Track needs a MusicBrainz id or artist + title";
+        assert_eq!(cant_request(&json!({ "title": "Song", "cant_request": why })), Some(why));
+        assert_eq!(cant_request(&json!({ "title": "Song", "track_id": 4, "cant_request": why })), None);
+        assert_eq!(cant_request(&json!({ "title": "Song", "artist": "A" })), None);
+        let rows = [json!({ "title": "Lonely" }), json!({ "title": "Song", "artist": "Band", "album": "LP" }), json!({ "artist": "Only artist" })];
+        let refs: Vec<&Value> = rows.iter().collect();
+        assert_eq!(cant_request_list(&refs), "Lonely\nBand - Song (LP)\nOnly artist");
     }
 }

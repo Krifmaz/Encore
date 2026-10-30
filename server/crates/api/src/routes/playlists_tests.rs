@@ -143,3 +143,36 @@ async fn the_auto_download_waits_longer_after_each_failed_attempt() {
     assert_eq!(rep.requested, 1, "{rep:?}");
     assert_eq!(linked(&st, iid), (rid, "queued".to_string()));
 }
+
+/// A row with no artist is asked for by the names its own text holds ("Artist - Song" in the title, or the
+/// video title it came from); a bare title can't be requested, is reported, and is the one row the
+/// playlist page marks `cant_request`.
+#[tokio::test]
+async fn rows_without_an_artist_are_asked_for_by_their_own_text() {
+    let st = state("names");
+    let u = user(&st, "owner1", "admin");
+    let pid = playlist(&st, &u);
+    let dashed = item(&st, pid, 0, "Avicii - Levels", "", None);
+    let video = item(&st, pid, 1, "Levels (Lyrics)", "", None);
+    st.db.execute("UPDATE playlist_items SET title='Clocks', source_title='Coldplay - Clocks (Official Video)' WHERE id=?", p![video]).unwrap();
+    let bare = item(&st, pid, 2, "Lonely", "", None);
+    let with_mbid = item(&st, pid, 3, "Untitled", "", None);
+    st.db.execute("UPDATE playlist_items SET mbid='2f0a9a53-0000-4000-8000-000000000001' WHERE id=?", p![with_mbid]).unwrap();
+
+    // what the page is told: only the bare title can't be requested
+    let rows = st.db.query("SELECT * FROM playlist_items WHERE playlist_id=? ORDER BY position", p![pid]).unwrap();
+    let cant: Vec<Option<&str>> = rows.iter().map(encore_requests::missing::cant_request).collect();
+    assert_eq!(cant, vec![None, None, Some(encore_requests::missing::NO_NAMES), None]);
+
+    let rep = encore_requests::missing::request_missing(&*st, &u, pid, false, None).unwrap();
+    assert_eq!((rep.requested, rep.in_progress), (3, 0), "{rep:?}");
+    assert_eq!(rep.failed, vec![MissingFailure { title: "Lonely".into(), reason: encore_requests::missing::NO_NAMES.into() }]);
+    // the requests carry the recovered names
+    let asked = |iid: i64| {
+        let r = st.db.one("SELECT r.artist, r.title FROM requests r JOIN playlist_items i ON i.request_id=r.id WHERE i.id=?", p![iid]).unwrap().unwrap();
+        (r.s("artist"), r.s("title"))
+    };
+    assert_eq!(asked(dashed), ("Avicii".into(), "Levels".into()));
+    assert_eq!(asked(video), ("Coldplay".into(), "Clocks".into()));
+    assert_eq!(linked(&st, bare).0, 0);
+}

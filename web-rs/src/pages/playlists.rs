@@ -850,6 +850,8 @@ async fn act(f: impl Future<Output = ApiResult>, msg: impl Fn(&Value) -> String)
 pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let id = ctx.param(0);
+        // something to see while a long playlist loads (its answer can take a while), not an empty page
+        dom::set_html(&view, r#"<div class="empty"><span class="spinner"></span><p class="muted">Loading playlist…</p></div>"#);
         let pl_path = format!("/playlists/{id}");
         let (pl, conns) = futures::try_join!(api::get(&pl_path), api::get("/connections")).map_err(|e| e.message)?;
         if is_linked(&pl) {
@@ -865,33 +867,14 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         let source = pl.s("source");
         let (total, matched) = (pl.f("total"), pl.f("matched"));
         let sync_targets = pl.a("sync_targets");
-        let rows: String = items.iter().enumerate().map(|(i, it)| format!(r##"<tr data-item="{item}" data-idx="{i}" data-q="{q}">
-        <td class="num">{n}</td>
-        <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div>{was}</td>
-        <td class="hide-sm muted">{album}</td>
-        <td>{status}</td>
-        <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost icon" data-match="{i}" aria-label="{match_label}" title="{match_label}">{link}</button><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
-            item = it.s("id"), q = esc(&item_haystack(it)), n = i + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
-            album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
-            status = if it.truthy("track_id") {
-                format!(r#"<span class="badge ok" title="{}">✓ in library</span>{}"#, esc(&it.s("match_reason")), match it.s("verify_status").as_str() {
-                    "verified" => r#" <span class="badge ok" title="Audio fingerprint confirmed">verified</span>"#,
-                    "mismatch" => r#" <span class="badge err">wrong audio</span>"#,
-                    _ => "",
-                })
-            } else if let Some(s) = it.st("request_status") {
-                match it.st("request_message") {
-                    // the request's whole message on a click, with Copy (R1)
-                    Some(m) => format!(r#"<span title="{}"{}>{}</span>"#, esc(m), crate::details::attrs(&it.s("title"), m), status_badge(s)),
-                    None => status_badge(s),
-                }
-            } else { r#"<span class="badge">missing</span>"#.to_string() },
-            x = icon("x"), link = icon("link"),
-            was = was_line(it),
-            match_label = if it.truthy("track_id") { "Match to another library song" } else { "Match to a library song" },
-            // the song's ⋯ (Play next, Add to queue, Download for offline …) for rows in the library
-            tmenu = if it.truthy("track_id") { format!(r#"<button class="btn sm ghost icon" data-ptmenu="{i}" aria-label="More" title="More">{}</button>"#, icon("more")) } else { String::new() },
-        )).collect();
+        // the first rows go in with the page, the rest are added a chunk at a time after it shows
+        // ([`append_rows`]): a Liked Songs of thousands of songs used to leave the page blank while it built
+        // in the order the playlist's saved sort shows them, so the rows added later land in their places
+        let ord = super::playlist_sort::saved_order(&id, &items);
+        let first = ord.len().min(FIRST_ROWS);
+        let rows: String = ord[..first].iter().enumerate().map(|(n, &i)| row_html(i, n, &items[i])).collect();
+        // the missing songs "Download missing" can't ask for: listed by the "can't be requested" button
+        let cant: Vec<Value> = items.iter().filter(|i| cant_request(i).is_some()).cloned().collect();
         dom::set_html(&view, &format!(r##"
     <div class="detail-head">
       <div class="cover">{cover}</div>
@@ -908,6 +891,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
           {pl_menu}
           {share_btn}
           {req}
+          {cant_btn}
           <button class="btn" id="add">{plus}Add from link</button>
           {merge_into}
           <button class="btn" id="dedupe">{check}Remove duplicates</button>
@@ -954,6 +938,9 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
             shared = share_line(&pl),
             pl_menu = if pl.truthy("matched") && crate::pages::downloads::enabled() { format!(r#"<button class="btn icon" id="pl-menu" aria-label="More options" title="More options">{}</button>"#, icon("more")) } else { String::new() },
             req = if missing > 0 && !member { format!(r#"<button class="btn {}" id="req">{}Download {missing} missing</button>"#, if pl.truthy("matched") { "" } else { "primary" }, icon("download")) } else { String::new() },
+            cant_btn = if cant.is_empty() || member { String::new() } else {
+                format!(r#"<button class="btn" id="pl-cant" title="Songs “Download missing” can't ask for">{}{} can't be requested</button>"#, icon("list"), cant.len())
+            },
             plus = icon("plus"), check = icon("check"), refresh = icon("refresh"),
             merge_into = if !liked && !member && !items.is_empty() { format!(r#"<button class="btn" id="merge-into" title="Add these songs to another playlist or Liked Songs">{}Merge into…</button>"#, icon("list")) } else { String::new() },
             pull = if pl.truthy("source_url") && !member { format!(r#"<button class="btn" id="refresh">{}Pull from {}</button>"#, icon("refresh"), esc(src_name(&source).unwrap_or("source"))) } else { String::new() },
@@ -973,6 +960,8 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         ));
         wire_search_toggle(&view);
         wire_search(&view, "pl", "tbody tr[data-q]", ("song", "songs"), true);
+        if ord.len() > FIRST_ROWS { dom::spawn(append_rows(view.clone(), id.clone(), items.clone(), ord)); }
+        dom::on_sel(&view, "#pl-cant", "click", move |_| cant_request_modal(&cant));
         super::collab::bind(&view, &id, reload);
         {
             let (id2, pl_name) = (id.clone(), pl.s("name"));
@@ -1151,6 +1140,102 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         }
         Ok(())
     })
+}
+
+/// How many of a playlist's rows the page is first drawn with; the rest follow in [`ROW_CHUNK`]s.
+const FIRST_ROWS: usize = 200;
+/// How many rows each later step of [`append_rows`] adds before it lets the browser draw again.
+const ROW_CHUNK: usize = 400;
+
+/// Why a missing row can't be requested (the server's `cant_request`: no MusicBrainz id and no artist and
+/// title), or `None` when it can be, or it is in the library.
+fn cant_request(it: &Value) -> Option<String> {
+    (!it.truthy("track_id")).then(|| it.s("cant_request")).filter(|w| !w.is_empty())
+}
+
+/// One playlist row: number, title and artist, album, status and its buttons. `i` is its index in the
+/// playlist's `items` (the Match and ⋯ buttons and the sort bar find the item by it), `n` its place on the
+/// page (counted from 0; the # shows `n + 1`).
+fn row_html(i: usize, n: usize, it: &Value) -> String {
+    format!(r##"<tr data-item="{item}" data-idx="{i}" data-q="{q}">
+    <td class="num">{n}</td>
+    <td><div style="font-weight:600">{title}</div>{title_sub}<div class="small muted">{artist}</div>{was}</td>
+    <td class="hide-sm muted">{album}</td>
+    <td>{status}</td>
+    <td style="text-align:right;white-space:nowrap">{tmenu}<button class="btn sm ghost icon" data-match="{i}" aria-label="{match_label}" title="{match_label}">{link}</button><button class="btn sm ghost" data-rm title="Remove">{x}</button></td></tr>"##,
+        item = it.s("id"), q = esc(&item_haystack(it)), n = n + 1, title = esc(&crate::ui::tr(it, "title")), title_sub = crate::ui::tr_sub(it, "title"), artist = crate::ui::artist_links(it),
+        album = if it.truthy("album_id") { format!(r##"<a href="#/library/album/{}">{}</a>"##, esc(&it.s("album_id")), esc(&it.s("album"))) } else { esc(&it.s("album")) },
+        status = if it.truthy("track_id") {
+            format!(r#"<span class="badge ok" title="{}">✓ in library</span>{}"#, esc(&it.s("match_reason")), match it.s("verify_status").as_str() {
+                "verified" => r#" <span class="badge ok" title="Audio fingerprint confirmed">verified</span>"#,
+                "mismatch" => r#" <span class="badge err">wrong audio</span>"#,
+                _ => "",
+            })
+        } else if let Some(s) = it.st("request_status") {
+            match it.st("request_message") {
+                // the request's whole message on a click, with Copy (R1)
+                Some(m) => format!(r#"<span title="{}"{}>{}</span>"#, esc(m), crate::details::attrs(&it.s("title"), m), status_badge(s)),
+                None => status_badge(s),
+            }
+        } else if let Some(why) = cant_request(it) {
+            // "Download missing" skips it: say so on the row, with the reason on hover
+            format!(r#"<span class="badge err" title="{}">can't request</span>"#, esc(&why))
+        } else { r#"<span class="badge">missing</span>"#.to_string() },
+        x = icon("x"), link = icon("link"),
+        was = was_line(it),
+        match_label = if it.truthy("track_id") { "Match to another library song" } else { "Match to a library song" },
+        // the song's ⋯ (Play next, Add to queue, Download for offline …) for rows in the library
+        tmenu = if it.truthy("track_id") { format!(r#"<button class="btn sm ghost icon" data-ptmenu="{i}" aria-label="More" title="More">{}</button>"#, icon("more")) } else { String::new() },
+    )
+}
+
+/// Adds the playlist rows past the first [`FIRST_ROWS`] to the page's table, [`ROW_CHUNK`] at a time with
+/// a pause between, so the page shows (and scrolls) at once while a long playlist fills in. `ord` is the
+/// order they are added in (positions in `items`: the saved sort's, see [`super::playlist_sort::saved_order`]).
+/// Stops when the page is left. Once the last rows are in, a sort picked meanwhile is applied again (it only
+/// moved the rows there were) and so is a search typed meanwhile.
+async fn append_rows(view: Element, id: String, items: Vec<Value>, ord: Vec<usize>) {
+    let mut n = FIRST_ROWS;
+    while n < ord.len() {
+        dom::sleep(0).await;
+        if !view.is_connected() { return; }
+        let Some(tbody) = dom::qs_in(&view, "tbody") else { return };
+        let end = (n + ROW_CHUNK).min(ord.len());
+        let html: String = ord[n..end].iter().enumerate().map(|(k, &i)| row_html(i, n + k, &items[i])).collect();
+        let _ = tbody.insert_adjacent_html("beforeend", &html);
+        n = end;
+    }
+    if super::playlist_sort::saved_order(&id, &items) != ord {
+        super::playlist_sort::reapply(&view);
+    }
+    // the search box filters the rows present when it is typed in: run it once more over the full list
+    if let Some(q) = dom::qs_in(&view, "#pl-q").filter(|q| !dom::value(q).is_empty()) {
+        if let Ok(ev) = web_sys::Event::new("input") { let _ = q.dispatch_event(&ev); }
+    }
+}
+
+/// The text of the "can't be requested" list: one "Artist - Title" line per song (the title alone when
+/// there is no artist, the album after it when known), ready to copy.
+pub fn cant_request_list(rows: &[Value]) -> String {
+    rows.iter().map(|r| {
+        let (artist, title, album) = (r.s("artist"), r.s("title"), r.s("album"));
+        let mut line = if artist.is_empty() { title } else if title.is_empty() { artist } else { format!("{artist} - {title}") };
+        if !album.is_empty() { line += &format!(" ({album})"); }
+        line
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// The modal behind the "can't be requested" button: why, what to do, and the songs as a list to copy.
+fn cant_request_modal(rows: &[Value]) {
+    let list = cant_request_list(rows);
+    let m = modal(ModalOpts {
+        title: &format!("{} songs can't be requested", rows.len()),
+        body: &format!(r#"<p class="muted">These songs have no MusicBrainz id and no artist or title to search by, so “Download missing” skips them. Match one to a library song with its link button, or add it again from a link or a pasted “Artist - Title” list.</p>
+          <textarea class="input mt" id="cant-list" rows="12" readonly style="width:100%;font-family:inherit">{}</textarea>"#, esc(&list)),
+        footer: r#"<button class="btn primary" id="cant-copy">Copy list</button>"#,
+        wide: true,
+    });
+    dom::on_sel(&m.el, "#cant-copy", "click", move |_| crate::ui::copy_text(&list));
 }
 
 /// The line under a row that says what the item was called at its source (a YouTube video's own title)
@@ -1365,6 +1450,20 @@ mod missing_report_tests {
         assert_eq!(missing_report_text(&json!({ "requested": 0, "failed": failed })), "Requested 0 · 5 couldn't be requested (reason 0; reason 1; reason 2; 2 more)");
         // an old server that only sends the count
         assert_eq!(missing_report_text(&json!({ "requested": 3 })), "Requested 3");
+    }
+
+    /// The rows the server marks `cant_request` are the ones listed (in the library: never), and the list
+    /// reads "Artist - Title (Album)", the title alone when there's no artist.
+    #[test]
+    fn the_songs_that_cant_be_requested_are_listed() {
+        let why = "Track needs a MusicBrainz id or artist + title";
+        assert_eq!(cant_request(&json!({ "title": "Song", "cant_request": why })).as_deref(), Some(why));
+        assert_eq!(cant_request(&json!({ "title": "Song", "track_id": 4, "cant_request": why })), None);
+        assert_eq!(cant_request(&json!({ "title": "Song", "artist": "A" })), None);
+        let rows = vec![json!({ "title": "Lonely" }), json!({ "title": "Song", "artist": "Band", "album": "LP" }), json!({ "artist": "Only artist" })];
+        assert_eq!(cant_request_list(&rows), "Lonely\nBand - Song (LP)\nOnly artist");
+        let row = row_html(7, 4, &json!({ "id": 9, "title": "Lonely", "cant_request": why }));
+        assert!(row.contains("can't request") && row.contains(why) && row.contains(r#"<td class="num">5</td>"#), "{row}");
     }
 
     #[test]

@@ -396,6 +396,8 @@ data class PlaylistDetail(val playlist: Playlist, val rows: List<PlaylistRow>) {
  * playlist's own album text, so the playlist search finds rows that aren't in the library by their album too.
  * [addedAt] (Unix seconds, 0 unknown) and [durationSec] (the playlist's own length, 0 unknown) are what the Sort
  * chip's Date added and Duration order by (features/library/PlaylistSortRules.kt).
+ * [cantRequest] is why "Download missing" can't ask for the song (the server's `cant_request`; "" when it can, and
+ * on older servers): see PlaylistMissingRules.
  */
 data class PlaylistRow(
     val title: String,
@@ -405,6 +407,7 @@ data class PlaylistRow(
     val album: String = "",
     val addedAt: Double = 0.0,
     val durationSec: Double = 0.0,
+    val cantRequest: String = "",
 )
 
 /** GET /api/auth/info – what this server can do. */

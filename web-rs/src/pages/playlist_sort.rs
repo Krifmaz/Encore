@@ -80,6 +80,25 @@ impl PlSort {
     }
 }
 
+/// The sort this browser keeps for each playlist (the whole `encore.plSort` object; `{}` when none).
+fn load_saved() -> Value {
+    dom::ls_get(STORE_KEY).and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({}))
+}
+
+/// The positions of `items` in the order playlist `pid`'s saved sort shows them: the page draws its rows in
+/// this order from the start, so a long playlist whose rows are added a chunk at a time needs no moving.
+pub fn saved_order(pid: &str, items: &[Value]) -> Vec<usize> { order(items, &saved_sort(&load_saved(), pid)) }
+
+/// The event the sort bar's select listens to for "put every row in the current order again" ([`reapply`]).
+const REAPPLY: &str = "encore-resort";
+
+/// Puts the rows of `view` in the sort bar's current order again: rows added after the sort was picked (a long
+/// playlist fills in after it shows) take their places. Nothing when the page has no sort bar.
+pub fn reapply(view: &Element) {
+    let Some(sel) = dom::qs_in(view, "#pl-sort") else { return };
+    if let Ok(ev) = web_sys::Event::new(REAPPLY) { let _ = sel.dispatch_event(&ev); }
+}
+
 /// The sort kept for playlist `pid` in `saved` (the whole `encore.plSort` object), or the default.
 pub fn saved_sort(saved: &Value, pid: &str) -> PlSort { PlSort::from_json(saved.g(pid)) }
 
@@ -158,7 +177,7 @@ pub fn bar_html() -> String {
 /// order of positions, so Play and the queue follow it. The playlist's saved sort is applied at once.
 pub fn wire(view: &Element, pid: &str, items: Rc<Vec<Value>>, on_order: Rc<dyn Fn(&[usize])>) {
     let (Some(sel), Some(dir)) = (dom::qs_in(view, "#pl-sort"), dom::qs_in(view, "#pl-dir")) else { return };
-    let load = || dom::ls_get(STORE_KEY).and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_else(|| json!({}));
+    let load = load_saved;
     let current = Rc::new(std::cell::RefCell::new(saved_sort(&load(), pid)));
     // put the rows in `sort`'s order, show it on the select and the button, and keep it for this playlist
     let apply: Rc<dyn Fn(PlSort)> = {
@@ -166,11 +185,15 @@ pub fn wire(view: &Element, pid: &str, items: Rc<Vec<Value>>, on_order: Rc<dyn F
         Rc::new(move |sort: PlSort| {
             let ord = order(&items, &sort);
             if let Some(body) = dom::qs_in(&view, "tbody") {
+                // the rows by their position, found in one pass (a look-up per row was quadratic: seconds on a
+                // phone for a 4500-song Liked Songs)
+                let by_idx: std::collections::HashMap<usize, Element> = dom::qsa_in(&body, "tr[data-idx]").into_iter()
+                    .filter_map(|tr| dom::data(&tr, "idx").parse().ok().map(|i| (i, tr))).collect();
                 for (n, &i) in ord.iter().enumerate() {
                     // a row removed meanwhile (× on a song) is simply skipped
-                    let Some(tr) = dom::qs_in(&body, &format!(r#"tr[data-idx="{i}"]"#)) else { continue };
-                    if let Some(num) = dom::qs_in(&tr, "td.num") { dom::set_text(&num, &(n + 1).to_string()); }
-                    let _ = body.append_child(&tr);
+                    let Some(tr) = by_idx.get(&i) else { continue };
+                    if let Some(num) = dom::qs_in(tr, "td.num") { dom::set_text(&num, &(n + 1).to_string()); }
+                    let _ = body.append_child(tr);
                 }
             }
             dom::set_value(&sel, &sort.key);
@@ -189,6 +212,11 @@ pub fn wire(view: &Element, pid: &str, items: Rc<Vec<Value>>, on_order: Rc<dyn F
     {
         let (a, c) = (apply.clone(), current.clone());
         dom::on(&dir, "click", move |_| { let s = c.borrow().reversed(); a(s); });
+    }
+    {
+        // [`reapply`]: the same sort again, over the rows there are now
+        let (a, c) = (apply.clone(), current.clone());
+        dom::on(&sel, REAPPLY, move |_| { let s = c.borrow().clone(); a(s); });
     }
     let first = current.borrow().clone();
     apply(first);

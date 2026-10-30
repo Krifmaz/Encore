@@ -15,6 +15,45 @@ pub fn auto_retry_after(attempts: u64) -> f64 {
     (900.0 * 2f64.powi(attempts.saturating_sub(1).min(16) as i32)).min(86_400.0)
 }
 
+/// The reason a playlist row with neither a MusicBrainz id nor an artist and title can't be requested (the
+/// words the request itself is refused with, so the toast and the row read the same).
+pub const NO_NAMES: &str = "Track needs a MusicBrainz id or artist + title";
+
+/// Why playlist row `r` can't be requested ([`NO_NAMES`]), or `None` when it can: a song is asked for by
+/// its MusicBrainz id, or by artist and title ([`request_names`] reads them out of the row's own text when
+/// a field is empty). The playlist page shows it on the row, so the songs "Download missing" skips can be
+/// found and fixed.
+pub fn cant_request(r: &Row) -> Option<&'static str> {
+    if opt(r, "mbid").is_some() {
+        return None;
+    }
+    match request_names(r) {
+        (Some(_), Some(_)) => None,
+        _ => Some(NO_NAMES),
+    }
+}
+
+/// The artist and title a request for playlist row `r` asks with. The row's own fields first; when the
+/// artist (or the title) is empty, the names its text holds: a title like "Artist - Song" or
+/// "Artist 「Song」", the video title it was imported from (`source_title`), or an artist field that holds
+/// both ("Artist - Song" pasted into one column). Read with [`encore_library::video_title::parse`], the
+/// rules a YouTube import already uses; a split is taken only when it names an artist.
+pub fn request_names(r: &Row) -> (Option<String>, Option<String>) {
+    let (artist, title) = (opt(r, "artist"), opt(r, "title"));
+    if artist.is_some() && title.is_some() {
+        return (artist, title);
+    }
+    // the texts that may hold both names, best first; each must split into an artist and a title
+    let texts = [title.clone(), opt(r, "source_title"), artist.clone()];
+    for text in texts.into_iter().flatten() {
+        let song = encore_library::video_title::parse(&text, "", "", "");
+        if !song.artist.trim().is_empty() && !song.title.trim().is_empty() {
+            return (Some(song.artist.trim().to_string()), Some(song.title.trim().to_string()));
+        }
+    }
+    (artist, title)
+}
+
 /// Request every item that's not in the library yet. auto=true (auto-download rules) skips approval.
 /// An item whose request is gone, failed, cancelled or denied is requested again; one whose request is
 /// pending, running or done counts as in progress; when someone already asked for the song (409) the item
@@ -47,7 +86,10 @@ pub fn request_missing(st: &impl Ctx, u: &Row, pid: i64, auto: bool, album_mode:
             rep.failed.push(MissingFailure { title: what(), reason: why.clone() });
             continue;
         }
-        let b = NewRequest { kind: "track".into(), mbid: opt(&r, "mbid"), artist: opt(&r, "artist"), title: opt(&r, "title"), album: opt(&r, "album"),
+        // a row with no artist (a bare title from a pasted list, a video named "Artist - Song") gets the
+        // names its own text holds ([`request_names`]); a row with nothing to go on is reported as before
+        let (artist, title) = request_names(&r);
+        let b = NewRequest { kind: "track".into(), mbid: opt(&r, "mbid"), artist, title, album: opt(&r, "album"),
             cover_url: opt(&r, "cover_url"), length: Some(r.f("duration")).filter(|d| *d > 0.0), isrc: opt(&r, "isrc"), album_mode: album_mode.clone(), ..Default::default() };
         let extra = if auto { Some(json!({ "auto": true })) } else { None };
         let rid = match create_request(st, u, &b, None, None) {
