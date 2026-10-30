@@ -141,7 +141,7 @@ fn generate(text: &str) -> Result<String, String> {
                 return Err(format!("sections.{id}: unknown attribute {attr}"));
             }
         }
-        s(t, "title", id)?.ok_or(format!("sections.{id}: title is missing"))?;
+        s(t, "title", id)?.ok_or_else(|| format!("sections.{id}: title is missing"))?;
     }
     for (id, t) in &groups {
         for attr in t.keys() {
@@ -149,11 +149,11 @@ fn generate(text: &str) -> Result<String, String> {
                 return Err(format!("groups.{id}: unknown attribute {attr}"));
             }
         }
-        let sec = s(t, "section", id)?.ok_or(format!("groups.{id}: section is missing"))?;
+        let sec = s(t, "section", id)?.ok_or_else(|| format!("groups.{id}: section is missing"))?;
         if !section_ids.contains(sec) {
             return Err(format!("groups.{id}: no section {sec}"));
         }
-        s(t, "title", id)?.ok_or(format!("groups.{id}: title is missing"))?;
+        s(t, "title", id)?.ok_or_else(|| format!("groups.{id}: title is missing"))?;
         if s(t, "test", id)?.is_some() != s(t, "test_label", id)?.is_some() {
             return Err(format!("groups.{id}: test and test_label go together"));
         }
@@ -190,7 +190,7 @@ fn generate(text: &str) -> Result<String, String> {
                 return Err(format!("{at}: unknown attribute {attr}"));
             }
         }
-        let default = t.get("default").ok_or(format!("{at}: default is missing"))?;
+        let default = t.get("default").ok_or_else(|| format!("{at}: default is missing"))?;
         let secret = flag(t, "secret", &at)?;
         let derived = match default {
             Value::Boolean(_) => "bool",
@@ -227,7 +227,7 @@ fn generate(text: &str) -> Result<String, String> {
         match s(t, "group", &at)? {
             Some(g) if !group_ids.contains(g) => return Err(format!("{at}: no group {g}")),
             Some(_) => {
-                s(t, "label", &at)?.ok_or(format!("{at}: a field on a card needs a label"))?;
+                s(t, "label", &at)?.ok_or_else(|| format!("{at}: a field on a card needs a label"))?;
                 if secret && !matches!(kind.as_str(), "password" | "textarea") {
                     return Err(format!("{at}: a secret on a card is a password or textarea field"));
                 }
@@ -276,7 +276,7 @@ fn generate(text: &str) -> Result<String, String> {
     // TABLE order: A to Z, then listed_last in its order
     let last: Vec<&str> = match root.get("listed_last") {
         None => vec![],
-        Some(Value::Array(a)) => a.iter().map(|v| v.as_str().ok_or("listed_last holds key names".to_string())).collect::<Result<_, _>>()?,
+        Some(Value::Array(a)) => a.iter().map(|v| v.as_str().ok_or_else(|| "listed_last holds key names".to_string())).collect::<Result<_, _>>()?,
         Some(_) => return Err("listed_last must be a list of key names".into()),
     };
     let mut seen = HashSet::new();
@@ -341,7 +341,7 @@ fn generate(text: &str) -> Result<String, String> {
         let aliases: Vec<String> = match st.get("aliases") {
             None => vec![],
             Some(Value::Array(a)) => {
-                a.iter().map(|v| v.as_str().map(lit).ok_or(format!("sections.{sid}: aliases are strings"))).collect::<Result<_, _>>()?
+                a.iter().map(|v| v.as_str().map(lit).ok_or_else(|| format!("sections.{sid}: aliases are strings"))).collect::<Result<_, _>>()?
             }
             Some(_) => return Err(format!("sections.{sid}: aliases must be a list")),
         };

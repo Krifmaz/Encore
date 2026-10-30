@@ -107,7 +107,7 @@ fn all() -> String {
 async fn deezer_guesses(st: &AppState, q: &str) -> Vec<(String, String)> {
     let Ok(r) = encore_http::deezer::search(st, "track", q, 6).send().await else { return vec![] };
     let v: Value = r.json().await.unwrap_or_default();
-    v["data"].as_array().cloned().unwrap_or_default().iter()
+    v["data"].as_array().into_iter().flatten()
         .filter_map(|t| Some((t["title"].as_str()?.to_string(), t["artist"]["name"].as_str().unwrap_or("").to_string()))).collect()
 }
 
@@ -116,7 +116,7 @@ async fn lyric_guesses(st: &AppState, words: &str) -> Vec<(String, String)> {
     let Ok(r) = encore_http::lrclib::search(st, words).send().await else { return vec![] };
     let v: Value = r.json().await.unwrap_or_default();
     let mut seen = HashSet::new();
-    v.as_array().cloned().unwrap_or_default().iter().take(20).filter_map(|t| {
+    v.as_array().into_iter().flatten().take(20).filter_map(|t| {
         let (n, a) = (t["trackName"].as_str()?.to_string(), t["artistName"].as_str().unwrap_or("").to_string());
         seen.insert((n.to_lowercase(), a.to_lowercase())).then_some((n, a))
     }).take(5).collect()
@@ -396,7 +396,7 @@ async fn album_lookup(State(st): State<AppState>, User(viewer): User, Query(q): 
                 vec![]
             }
         };
-        let fallback = Some(s_of(&found["artist"])).filter(|a| !a.is_empty()).unwrap_or(artist.clone());
+        let fallback = Some(s_of(&found["artist"])).filter(|a| !a.is_empty()).unwrap_or_else(|| artist.clone());
         let tracks = st.blocking(move |st| {
             crate::routes::catalog::annotate_tracks(st, &mut tracks, &fallback);
             Ok(tracks)

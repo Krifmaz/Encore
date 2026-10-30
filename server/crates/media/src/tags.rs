@@ -73,13 +73,13 @@ fn tags_of(tagged: Option<&TaggedFile>, path: &str) -> Row {
     let title = first(tag, &[ItemKey::TrackTitle]).unwrap_or(stem);
     let mut artist = first(tag, &[ItemKey::TrackArtist]);
     let mut album = first(tag, &[ItemKey::AlbumTitle]);
-    let mut albumartist = first(tag, &[ItemKey::AlbumArtist]).or(artist.clone());
+    let mut albumartist = first(tag, &[ItemKey::AlbumArtist]).or_else(|| artist.clone());
     if artist.is_none() {
         let parts: Vec<String> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
         if parts.len() >= 3 {
             artist = Some(parts[parts.len() - 3].clone());
             albumartist = artist.clone();
-            album = album.or(Some(parts[parts.len() - 2].clone()));
+            album = album.or_else(|| Some(parts[parts.len() - 2].clone()));
         }
     }
     let props = tagged.map(|t| t.properties());

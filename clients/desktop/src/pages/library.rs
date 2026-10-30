@@ -1336,7 +1336,7 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
             let api = ctx.api.clone();
             return Task::perform(
                 async move { api.get(&format!("/library/tracks/{id}/info")).await },
-                move |r| Act::QualityInfo(t.clone(), r),
+                move |r| Act::QualityInfo(t, r),
             );
         }
         Act::QualityInfo(t, r) => {
@@ -2254,7 +2254,7 @@ fn search(state: &mut State, ctx: &Ctx) -> Task<Message> {
     state.found_for = q.clone();
     let api = ctx.api.clone();
     let url = format!("/library/search?q={}&limit={RESULTS_LIMIT}", urlencode(&q));
-    Task::perform(async move { api.get(&url).await }, move |r| Message::Found(q.clone(), r))
+    Task::perform(async move { api.get(&url).await }, move |r| Message::Found(q, r))
 }
 
 /// Keep the query (and the tab) in the route, so Back comes back to it.
@@ -2775,7 +2775,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::PlayAlbum(id) => {
             let api = ctx.api.clone();
             let path = format!("/library/albums/{id}");
-            return Task::perform(async move { api.get(&path).await }, move |r| Message::AlbumTracks(id.clone(), r));
+            return Task::perform(async move { api.get(&path).await }, move |r| Message::AlbumTracks(id, r));
         }
         Message::AlbumTracks(id, Ok(a)) => {
             let tracks = with_album_id(&fmt::items(&a["tracks"]), &id);
@@ -2895,7 +2895,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let k = key.clone();
             return Task::perform(
                 async move { api.post("/library/duplicates/ignore", json!({ "key": k })).await },
-                move |r| Message::DupDone(key.clone(), None, r),
+                move |r| Message::DupDone(key, None, r),
             );
         }
         Message::DupResolve(key) => {
@@ -3704,7 +3704,7 @@ fn dup_card<'a>(g: &'a Value, state: &State, p: theme::Palette) -> El<'a, Messag
         let id = fmt::i(&c, "id");
         let k = key.clone();
         let mut r = row![
-            radio("", id, Some(keep), move |v| Message::DupKeep(k.clone(), v))
+            radio("", id, Some(keep), move |v| Message::DupKeep(k, v))
                 .size(16)
                 .spacing(0),
             column![

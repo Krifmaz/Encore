@@ -95,7 +95,7 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
     let mut reason = reason.to_string();
     loop {
         if !reason.is_empty() {
-            let src = r.opt("source").unwrap_or("start".into());
+            let src = r.opt("source").unwrap_or_else(|| "start".into());
             storage::log_failure(st, r, &src, &reason);
             log_push(r, format!("{src}: {reason}"));
         }
@@ -551,7 +551,7 @@ pub(super) async fn track_in_library(st: &impl Ctx, r: &Req) -> bool {
     let (mbid, title) = if r.s("kind") == "album" {
         (r.d["recording"].as_str().map(String::from), song_of_single(&r.album_title()))
     } else {
-        (r.opt("mbid").or(r.d["recording"].as_str().map(String::from)), r.s("title"))
+        (r.opt("mbid").or_else(|| r.d["recording"].as_str().map(String::from)), r.s("title"))
     };
     let want = encore_library::matcher::describe(&title, &r.s("artist"), r.length(), r.d["isrc"].as_str(), mbid.as_deref());
     st.library().songs.load(st.db()).await.find(&want).is_some()
@@ -792,7 +792,7 @@ fn follow_album(st: &impl Ctx, r: &mut Req, alb: &Value) -> anyhow::Result<Optio
         }
     };
     r.d["album_request"] = json!(aid);
-    let cover = r.opt("cover_url").map(|c| json!(c)).unwrap_or(alb["cover"].clone());
+    let cover = r.opt("cover_url").map(|c| json!(c)).unwrap_or_else(|| alb["cover"].clone());
     upd(st, r, &[("status", json!("monitoring")), ("source", json!("album")), ("cover_url", cover),
                  ("message", json!(format!("Getting the whole {typ} “{title}”")))]);
     Ok(Some(aid))
@@ -938,7 +938,7 @@ pub(super) async fn poll_album(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()>
         None => "the album couldn't be downloaded",
         Some(a) if ["failed", "denied", "cancelled"].contains(&a.s("status").as_str()) => "the album couldn't be downloaded",
         Some(a) => {
-            let msg = a.opt("message").unwrap_or(a.s("status"));
+            let msg = a.opt("message").unwrap_or_else(|| a.s("status"));
             if a.row.f("progress") != r.row.f("progress") || r.d["last_msg"].as_str() != Some(&msg) {
                 r.d["last_msg"] = json!(msg);
                 upd(st, r, &[("progress", json!(a.row.f("progress"))), ("message", json!(format!("Album “{}”: {msg}", a.s("title"))))]);

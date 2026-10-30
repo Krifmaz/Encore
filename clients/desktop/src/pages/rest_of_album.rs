@@ -100,7 +100,7 @@ pub fn update<M: Send + 'static>(state: &mut State, msg: Message, ctx: &mut Ctx,
             let mut j = song_body(&tr, &state.album_artist(), &state.found);
             j.insert("kind".into(), json!("track"));
             let body = Value::Object(j);
-            (Task::perform(async move { api.post("/requests", body).await }, move |r| wrap(Message::OneDone(key.clone(), r))), After::Keep)
+            (Task::perform(async move { api.post("/requests", body).await }, move |r| wrap(Message::OneDone(key, r))), After::Keep)
         }
         Message::RequestAll => {
             let missing = state.missing();

@@ -506,7 +506,7 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
                     });
                 })
             };
-            let (id2, reload2) = (id.clone(), reload.clone());
+            let (id2, reload2) = (id, reload.clone());
             let mut items = vec![
                 MenuItem::new("Details", &icon("list"), move || show_request_details(&id2, reload2.clone())),
                 MenuItem::new("Remove from list", &icon("x"), { let del = del.clone(); move || del(false) }),
@@ -745,7 +745,7 @@ pub fn request_text(r: &Value, version: &str, date: &dyn Fn(f64) -> String) -> S
     add("Artist", r.s("artist"));
     if kind == "track" && r.s("album") != r.s("title") { add("Album", r.s("album")); }
     add("Link", r.s("url"));
-    add("Kind", kind.clone());
+    add("Kind", kind);
     let status = r.s("status");
     let label = ui::status_info(&status).1;
     let why = if status == "waiting" { wait_words(&r.s("wait_reason")) } else { "" };
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(drawn_row("12").map(|v| v.s("title")), Some("Illuminate EP".to_string()));
 
         // a failed import whose files are kept: Import again too
-        let mut f = r.clone();
+        let mut f = r;
         f["status"] = json!("failed");
         f["wait_reason"] = Value::Null;
         let html = request_row(&f, false);
@@ -1338,7 +1338,7 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         old.as_object_mut().unwrap().retain(|k, _| !["can_download_now", "download_now", "line", "remote_queue", "stalled_since", "pressed"].contains(&k.as_str()));
         assert!(!request_row(&old, true).contains("download-now"));
         // the title is the server's (it says what pressing does)
-        let mut sw = r.clone();
+        let mut sw = r;
         sw["download_now"] = json!({ "act": "switch", "title": "Switch to a user with a free upload slot – it is 12th in alice's queue" });
         assert!(request_row(&sw, true).contains(r#"title="Switch to a user with a free upload slot – it is 12th in alice&#39;s queue""#));
         // the toast: ok when something changed or started, warn when nothing could be sooner

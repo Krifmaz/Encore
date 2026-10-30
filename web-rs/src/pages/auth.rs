@@ -112,7 +112,7 @@ fn magic_page(root: &Element, query: &HashMap<String, String>, app: &str) {
     let form = dom::qs_in(root, "#magic-code").expect("#magic-code");
     let token = query.get("token").cloned().unwrap_or_default();
     let go: Rc<dyn Fn(Option<String>)> = {
-        let (root, err, form) = (root.clone(), err.clone(), form.clone());
+        let (root, err, form) = (root.clone(), err, form.clone());
         Rc::new(move |code: Option<String>| {
             dom::add_class(&err, "hidden");
             let (root, err, form, token) = (root.clone(), err.clone(), form.clone(), token.clone());

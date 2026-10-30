@@ -104,7 +104,7 @@ async fn sweep_start(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<(
         return Err(err(409, "A Dolby Atmos sweep is running already"));
     }
     let uid = encore_db::RowExt::i(&u, "id");
-    let bg = st.clone();
+    let bg = st;
     tokio::spawn(async move {
         if let Err(e) = encore_requests::surround::sweep(&bg, Some(uid), usize::MAX).await {
             tracing::info!("surround sweep: {e}");

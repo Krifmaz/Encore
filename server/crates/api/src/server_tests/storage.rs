@@ -80,7 +80,7 @@ fn soulseek_album(e: &Env, artist: &str, album: &str, attempts: u64) -> Option<(
 
 fn row(st: &AppState, id: i64) -> (String, String, String, Value) {
     let r = st.db.one("SELECT status, message, source, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
-    (r.s("status"), r.s("message"), r.s("source"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
+    (r.s("status"), r.s("message"), r.s("source"), serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({})))
 }
 
 /// The next try of a waiting request is due now (its 10 minutes are up).

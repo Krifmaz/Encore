@@ -31,7 +31,7 @@ impl StandIn {
                     let r = routes.lock().unwrap();
                     r.get(&key).cloned().or_else(|| r.get(uri.path()).cloned())
                 };
-                let (code, body, headers) = found.unwrap_or((404, b"{\"message\":\"Not Found\"}".to_vec(), vec![]));
+                let (code, body, headers) = found.unwrap_or_else(|| (404, b"{\"message\":\"Not Found\"}".to_vec(), vec![]));
                 let mut resp = axum::response::Response::builder().status(code);
                 for (k, v) in headers {
                     resp = resp.header(k, v);

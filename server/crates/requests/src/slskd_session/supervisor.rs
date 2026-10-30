@@ -293,12 +293,12 @@ impl Session {
                 let seen = self.door_seen();
                 let through = started.and_then(|t| self.passed_since(t)).is_some();
                 if through && seen.live == 0 && seen.closed_at.is_some_and(|t| t.elapsed() >= REASON_GRACE) {
-                    let (reason, msg) = last.unwrap_or((Reason::Network, "the connection attempt failed".into()));
+                    let (reason, msg) = last.unwrap_or_else(|| (Reason::Network, "the connection attempt failed".into()));
                     self.fail(st, reason, &msg, false, round).await;
                 }
             }
             _ if state == State::LoggedIn || lost => {
-                let (reason, msg) = last.unwrap_or((Reason::Network, "the connection to the Soulseek server was lost".into()));
+                let (reason, msg) = last.unwrap_or_else(|| (Reason::Network, "the connection to the Soulseek server was lost".into()));
                 self.fail(st, reason, &msg, false, round).await;
             }
             _ => {

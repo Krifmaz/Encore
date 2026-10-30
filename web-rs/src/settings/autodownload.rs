@@ -122,7 +122,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
         // `let d` in the JS: the save handler keeps the server's answer
         let d = Rc::new(RefCell::new(d));
         {
-            let (v, d) = (view.clone(), d.clone());
+            let (v, d) = (view.clone(), d);
             dom::on_sel(&view, "#save", "click", move |_| {
                 let (v, d) = (v.clone(), d.clone());
                 dom::spawn(async move {

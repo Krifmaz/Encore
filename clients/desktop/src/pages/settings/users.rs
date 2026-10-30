@@ -387,7 +387,7 @@ fn user_row<'a>(state: &'a State, u: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message
     actions = actions.push(icon_btn(Icon::Shield, "Reset password", Some(Message::OpenPassword(id.clone(), name.clone()))));
     if !is_me {
         actions = actions.push(btn_sm(if disabled { "Enable" } else { "Disable" }, Btn::Default, Some(Message::Disabled(id.clone(), !disabled))));
-        actions = actions.push(icon_btn(Icon::Trash, "Delete", Some(Message::AskDelete(id.clone(), name.clone()))));
+        actions = actions.push(icon_btn(Icon::Trash, "Delete", Some(Message::AskDelete(id, name))));
     }
     let r = row![
         user_cell,

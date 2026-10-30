@@ -220,7 +220,7 @@ fn album_json(st: &impl Ctx, f: &Folder, artist: &str, album: &str, pv: Option<&
     let lib = PathBuf::from(st.cfg().str("library_path"));
     let rows: Vec<Value> = match (mode, pv) {
         (Mode::InPlace, _) => vec![],
-        (Mode::Move, Some(pv)) => pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| json!({
+        (Mode::Move, Some(pv)) => pv["rows"].as_array().into_iter().flatten().map(|r| json!({
             "path": rel_to(r["path"].as_str().unwrap_or(""), &root), "old_title": r["old_title"], "new_title": r["new_title"],
             "new_track": r["new_track"], "new_disc": r["new_disc"], "new_path": rel_to(r["new_path"].as_str().unwrap_or(""), &lib),
         })).collect(),

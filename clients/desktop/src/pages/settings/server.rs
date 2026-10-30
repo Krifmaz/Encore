@@ -358,7 +358,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let key = k.clone();
             return Task::perform(
                 async move { api.get(&format!("/admin/settings/secret/{}", crate::pages::urlencode(&key))).await },
-                move |r| Message::Revealed(k.clone(), r),
+                move |r| Message::Revealed(k, r),
             );
         }
         Message::Revealed(k, Ok(r)) => {
@@ -578,7 +578,7 @@ fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal
     match f.kind {
         "bool" => {
             let on = state.bools.get(f.key).copied().unwrap_or_else(|| super::truthy(v));
-            let k = key.clone();
+            let k = key;
             lines.push(switch_maybe(on, f.label, (!locked).then_some(move |x| Message::Bool(k.clone(), x))));
         }
         "checks" => {
@@ -594,7 +594,7 @@ fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal
         }
         "select" => {
             let cur = current(state, values, f.key);
-            let k = key.clone();
+            let k = key;
             let picker: El<'a, Message> = if locked {
                 help(f.options.iter().find(|(x, _)| *x == cur).map(|(_, l)| *l).unwrap_or(cur.as_str()).to_string()).into()
             } else {
@@ -614,7 +614,7 @@ fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal
                 lines.push(
                     row![
                         btn_sm(if shown { "Hide" } else { "Show saved" }, Btn::Default, Some(if shown { Message::Hide(key.clone()) } else { Message::Reveal(key.clone()) })),
-                        btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Message::Copy(key.clone()))),
+                        btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Message::Copy(key))),
                     ]
                     .spacing(8)
                     .into(),
@@ -640,13 +640,13 @@ fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal
             }
             if reveal && super::truthy(v) {
                 r = r.push(icon_btn(if shown { Icon::X } else { Icon::Search }, if shown { "Hide" } else { "Show" }, Some(if shown { Message::Hide(key.clone()) } else { Message::Reveal(key.clone()) })));
-                r = r.push(icon_btn(Icon::Copy, "Copy", Some(Message::Copy(key.clone()))));
+                r = r.push(icon_btn(Icon::Copy, "Copy", Some(Message::Copy(key))));
             }
             lines.push(widgets::field(f.label, r));
         }
         _ => {
             let text = current(state, values, f.key);
-            let k = key.clone();
+            let k = key;
             let b: El<'a, Message> = if locked {
                 input_locked::<Message>(&text).width(Length::Fill).into()
             } else {
@@ -915,7 +915,7 @@ mod tests {
         st.typed.insert("library_extra_roots".into());
         take_values(&mut st, newer.clone());
         assert_eq!(save_body(&st, &newer, card)["library_extra_roots"], "/x");
-        st.values = Some(newer.clone());
+        st.values = Some(newer);
         settle(&mut st, card);
         assert_eq!(st.areas["library_extra_roots"].text().trim(), "/mnt/a\n/mnt/b\n/mnt/c");
         // a secret one still starts empty and is left out until something is pasted

@@ -167,7 +167,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
             state.sending.insert(key.clone());
             let api = ctx.api.clone();
-            return Task::perform(async move { api.post("/requests", *body).await }, move |r| Message::Requested(key.clone(), r));
+            return Task::perform(async move { api.post("/requests", *body).await }, move |r| Message::Requested(key, r));
         }
         Message::Requested(key, r) => {
             state.sending.remove(&key);

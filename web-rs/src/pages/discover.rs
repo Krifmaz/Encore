@@ -985,7 +985,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         // the sections opened with "View all" (a grid of every release instead of the sideways row)
         let expanded: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
         let paint: Rc<dyn Fn()> = {
-            let (view, disco, groups, keys, filter, hide_skipped, rel, expanded) = (view.clone(), disco.clone(), groups.clone(), keys.clone(), filter.clone(), hide_skipped.clone(), rel.clone(), expanded.clone());
+            let (view, disco, groups, keys, filter, hide_skipped, rel, expanded) = (view.clone(), disco.clone(), groups.clone(), keys, filter.clone(), hide_skipped.clone(), rel.clone(), expanded.clone());
             let (aid, aname) = (a.s("id"), a.s("name"));
             Rc::new(move || {
                 let f = filter.borrow().clone();
@@ -1042,7 +1042,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         };
         // "View all" opens a section's full grid in place; "Show less" folds it back into its row
         {
-            let (expanded, paint) = (expanded.clone(), paint.clone());
+            let (expanded, paint) = (expanded, paint.clone());
             dom::on(&disco, "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-view-all]") else { return };
                 dom::stop(e);
@@ -1053,7 +1053,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         }
         if let Some(el) = dom::qs_in(&view, "#disco-skipped") { bind_skipped_toggle(&el, repaint_skipped.clone()); }
         {
-            let (filter, paint) = (filter.clone(), paint.clone());
+            let (filter, paint) = (filter, paint.clone());
             dom::on_sel(&view, "#disco-filter", "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-f]") else { return };
                 *filter.borrow_mut() = dom::data(&b, "f");
@@ -1062,7 +1062,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         {
-            let (groups, paint, hide_skipped) = (groups.clone(), paint.clone(), hide_skipped.clone());
+            let (groups, paint, hide_skipped) = (groups.clone(), paint.clone(), hide_skipped);
             dom::on(&disco, "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-req-missing]") else { return };
                 let key = dom::data(&b, "reqMissing");
@@ -1105,8 +1105,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         // requests the ticked ones that aren't owned or requested (title and year dedupe, library check), and
         // each release it queues arrives as a request event and marks its tile
         {
-            let (a, view2, groups, rel) = (a.clone(), view.clone(), groups.clone(), rel.clone());
-            let first_cover = first_cover.clone();
+            let (a, view2, groups, rel) = (a.clone(), view.clone(), groups, rel.clone());
             dom::on_sel(&view, "#req-disco", "click", move |_| {
                 let Some(b) = dom::qs_in(&view2, "#req-disco") else { return };
                 let mut body = Map::new();
@@ -1149,10 +1148,10 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
             }
         };
         { let p = play_all.clone(); dom::on_sel(&view, "#play-artist", "click", move |_| p(false)); }
-        { let p = play_all.clone(); dom::on_sel(&view, "#shuffle-artist", "click", move |_| p(true)); }
+        { let p = play_all; dom::on_sel(&view, "#shuffle-artist", "click", move |_| p(true)); }
         // the liked songs and the library's songs of the artist, asked only when the library has some (an older
         // server's 404 leaves both out)
-        if a.truthy("library_tracks") { lib_songs.clone().start(&view); }
+        if a.truthy("library_tracks") { lib_songs.start(&view); }
         { let name = a.s("name"); dom::on_sel(&view, "#share-artist", "click", move |_| dom::spawn(ui::share_artist(name.clone()))); }
 
         // similar artists (Last.fm → ListenBrainz → Deezer)
@@ -1174,7 +1173,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
         let ext = need(&view, "#ext-releases")?;
         set_html(&ext, r#"<div class="small muted mt"><span class="spinner"></span> Checking Deezer and Apple Music for releases MusicBrainz is missing…</div>"#);
         {
-            let (view, ext, disco, a, rel, paint) = (view.clone(), ext.clone(), disco.clone(), a.clone(), rel.clone(), paint.clone());
+            let (view, ext, disco, a, rel, paint) = (view.clone(), ext, disco, a.clone(), rel, paint.clone());
             dom::spawn(async move {
                 let x = match api::get(&format!("/discover/artist/{}/catalog", a.s("id"))).await { Ok(x) => x, Err(_) => { set_html(&ext, ""); return; } };
                 if !view.is_connected() { return; }
@@ -1259,7 +1258,7 @@ pub fn render_artist(view: Element, ctx: Ctx) -> PageFuture {
 
         // photo, bio and popular tracks load after the page (Deezer + Wikipedia, best-effort)
         {
-            let (view, a) = (view.clone(), a.clone());
+            let (view, a) = (view.clone(), a);
             dom::spawn(async move {
                 let Ok(x) = api::get(&format!("/discover/artist/{}/extras", a.s("id"))).await else { return };
                 if !view.is_connected() { return; }
@@ -1768,7 +1767,6 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         let owned: Rc<Vec<Value>> = Rc::new(tracks.iter().filter(|t| t.truthy("library")).cloned().collect());
         let queue: Rc<Vec<Value>> = Rc::new(owned.iter().map(|t| t.g("library").clone()).collect());
         let play_owned = {
-            let queue = queue.clone();
             move |i: usize, shuffle: bool| {
                 if queue.is_empty() { toast("None of these songs are in your library yet", "err"); return; }
                 if shuffle && player::group_shuffle(&queue) { return; }
@@ -1779,7 +1777,7 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         { let p = play_owned.clone(); dom::on_sel(&view, "#play-owned", "click", move |_| p(0, false)); }
         { let p = play_owned.clone(); dom::on_sel(&view, "#shuffle-owned", "click", move |_| p(0, true)); }
         {
-            let (a, tracks, owned, p) = (a.clone(), Rc::new(tracks), owned.clone(), play_owned.clone());
+            let (a, tracks, owned, p) = (a, Rc::new(tracks), owned, play_owned);
             dom::on(&view, "click", move |e| {
                 if let Some(pr) = dom::closest(e, "[data-play-row]") {
                     dom::prevent(e);

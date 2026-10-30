@@ -81,11 +81,11 @@ struct MatchQ {
 
 /// GET /api/library/albums/{id}/match: releases from a metadata source that may be the album.
 async fn match_album(State(st): State<AppState>, Admin(viewer): Admin, Path(id): Path<String>, Query(q): Query<MatchQ>) -> ApiResult<Json<Value>> {
-    let provider = q.provider.unwrap_or("musicbrainz".into());
+    let provider = q.provider.unwrap_or_else(|| "musicbrainz".into());
     let name = meta::PROVIDERS.iter().find(|(k, _)| *k == provider).map(|x| x.1).ok_or_else(|| err(400, "Unknown metadata source"))?;
     let tracks = st.db.query("SELECT path, albumartist, album FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![id])?;
     let first = tracks.first().ok_or_else(|| err(404, "Album not found"))?;
-    let artist = q.artist.unwrap_or(first.s("albumartist"));
+    let artist = q.artist.unwrap_or_else(|| first.s("albumartist"));
     let album = q.album.unwrap_or_else(|| { let a = first.s("album"); if a.is_empty() { PathBuf::from(first.s("path")).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into()).unwrap_or_default() } else { a } });
     let paths: Vec<PathBuf> = tracks.iter().map(|t| PathBuf::from(t.s("path"))).collect();
     let n = paths.len();
@@ -261,8 +261,8 @@ pub async fn find_missing_artwork(st: AppState) -> String {
     }
     // every album and whether it has a cover (a file look per album): on the blocking pool
     let missing: Vec<String> = st.blocking(|st| {
-        let ids: Vec<String> = st.db.query("SELECT DISTINCT album_id FROM tracks", p![]).unwrap_or_default().iter().map(|r| r.s("album_id")).collect();
-        Ok(ids.into_iter().filter(|a| st.library.find_cover(&st.db, a).is_none()).collect())
+        let rows = st.db.query("SELECT DISTINCT album_id FROM tracks", p![]).unwrap_or_default();
+        Ok(rows.iter().map(|r| r.s("album_id")).filter(|a| st.library.find_cover(&st.db, a).is_none()).collect())
     }).await.unwrap_or_default();
     st.jobs.set("artwork", json!({ "total": missing.len() }));
     for a in &missing {
@@ -383,7 +383,7 @@ async fn run_bulk(st: AppState) {
             let Some(pv) = tagger::auto_match(&st, &paths, &artist, &a.s("album"), None).await? else { return Ok(false) };
             let ids: Vec<i64> = st.db.query("SELECT id FROM tracks WHERE album_id=?", p![a.s("album_id")])?.iter().map(|r| r.i("id")).collect();
             let new = tagger::apply_preview(&st, &pv, st.cfg.bool("rename_on_import"), None, None).await?;
-            let old: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
+            let old: Vec<PathBuf> = pv["rows"].as_array().into_iter().flatten().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
             tagger::relink(&st, &old, &new);
             tagger::index_paths(&st, &new);
             // the owner's type choice follows the album to its new id; the facts are the release's
@@ -457,7 +457,7 @@ async fn identify_answer(State(st): State<AppState>, Admin(_): Admin, Path(id): 
         for rec in r["recordings"].as_array().cloned().unwrap_or_default() {
             let (title, artist) = (rec["title"].as_str().unwrap_or("").to_string(), rec["artist"].as_str().unwrap_or("").to_string());
             if !title.is_empty() && seen.insert((title.clone(), artist.clone())) {
-                out.push(json!({ "title": title, "artist": artist, "album": rec["release_groups"].get(0).cloned().unwrap_or(json!("")),
+                out.push(json!({ "title": title, "artist": artist, "album": rec["release_groups"].get(0).cloned().unwrap_or_else(|| json!("")),
                     "score": (r["score"].as_f64().unwrap_or(0.0) * 100.0).round(), "mbid": rec["id"] }));
             }
         }
@@ -546,7 +546,7 @@ async fn resolve_all(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
     let mut n = 0;
     for g in &groups {
         let keep = g["keep"].as_i64().unwrap_or(0);
-        let del: Vec<i64> = g["tracks"].as_array().cloned().unwrap_or_default().iter().filter_map(|t| t["id"].as_i64()).filter(|i| *i != keep).collect();
+        let del: Vec<i64> = g["tracks"].as_array().into_iter().flatten().filter_map(|t| t["id"].as_i64()).filter(|i| *i != keep).collect();
         n += encore_library::delete_tracks(&st, &del, Some(keep));
     }
     st.db.log("info", &format!("{} auto-resolved {} duplicate groups ({n} files removed)", u.s("username"), groups.len()));

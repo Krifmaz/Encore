@@ -219,7 +219,7 @@ fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<V
             json!({ "id": pid, "added": added, "duplicates_skipped": dupes })
         }
         None => {
-            let name = b.name.clone().filter(|n| !n.trim().is_empty()).or(data["name"].as_str().map(String::from)).unwrap_or("Imported playlist".into());
+            let name = b.name.clone().filter(|n| !n.trim().is_empty()).or_else(|| data["name"].as_str().map(String::from)).unwrap_or_else(|| "Imported playlist".into());
             playlists::create(st, u.i("id"), &name, &tracks, &source, b.url.as_deref(), data["description"].as_str().unwrap_or(""), data["cover"].as_str(),
                 b.follow && b.url.is_some()).map_err(bad)?
         }
@@ -257,7 +257,7 @@ struct Patch {
 
 /// POST /api/playlists: make a playlist ("New playlist" unless named).
 async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
-    let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or("New playlist".into());
+    let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "New playlist".into());
     st.blocking(move |st| {
         let mut res = playlists::create(st, u.i("id"), &name, &[], "manual", None, b.description.as_deref().unwrap_or(""), None, false).map_err(bad)?;
         // New playlist's Collaborative box: on from the start, with its invite link to hand out
@@ -291,7 +291,7 @@ async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
         v["items"] = json!(items);
         v.as_object_mut().map(|o| o.remove("invite_token"));
         if role == Role::Owner {
-            v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or(json!({}));
+            v["remote_ids"] = serde_json::from_str(&pl.s("remote_ids")).unwrap_or_else(|_| json!({}));
             v["share"] = share_of(st, pid, u.i("id"))?;
         } else {
             // a member sees the songs, not the owner's links, services or imports
@@ -659,7 +659,7 @@ async fn patch_connection(State(st): State<AppState>, User(u): User, Path(servic
         st.db.execute("UPDATE connections SET sync_likes=? WHERE id=?", p![v as i64, c.i("id")])?;
     }
     if let Some(v) = b.scrobble {
-        let mut d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+        let mut d: Value = serde_json::from_str(&c.s("data")).unwrap_or_else(|_| json!({}));
         d["scrobble"] = json!(v);
         connections::update_data(&st, c.i("id"), &d);
     }

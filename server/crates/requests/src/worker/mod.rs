@@ -131,7 +131,7 @@ impl Req {
 /// The request `id`, its detail parsed.
 pub fn get(st: &impl Ctx, id: i64) -> Option<Req> {
     let row = st.db().one("SELECT * FROM requests WHERE id=?", p![id]).ok()??;
-    let d = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+    let d = serde_json::from_str(&row.s("detail")).unwrap_or_else(|_| json!({}));
     let d = if d.is_object() { d } else { json!({}) };
     Some(Req { id, row, d })
 }

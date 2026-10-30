@@ -30,11 +30,11 @@ fn the_album_aggregate() {
     // every song has the album tags: each song's own album gain and peak
     let a = song("x", Some(-7.21), Some(0.988), Some(-6.84), Some(1.0), Some(-10.79));
     let b = song("x", Some(-6.5), Some(0.9), Some(-6.84), Some(1.0), Some(-11.5));
-    let ag = agg(&[a.clone(), b.clone()]);
+    let ag = agg(&[a.clone(), b]);
     assert_eq!(ag.for_song(&a), (Some(-6.84), Some(1.0)));
     // one song without an album peak tag: the loudest track peak instead
     let b2 = song("x", Some(-6.5), Some(0.9), Some(-6.84), None, Some(-11.5));
-    assert_eq!(agg(&[a.clone(), b2.clone()]).for_song(&a), (Some(-6.84), Some(0.988)));
+    assert_eq!(agg(&[a.clone(), b2]).for_song(&a), (Some(-6.84), Some(0.988)));
     // one song without the album gain tag: the energy mean of the loudness, tagged and measured alike:
     // -18 - 10·log10((10^-1 + 10^-2) / 2)
     let c = song("x", Some(-8.0), Some(0.5), None, None, Some(-10.0));
@@ -46,7 +46,7 @@ fn the_album_aggregate() {
     assert_eq!(pk, Some(0.5), "the album peak is the loudest track peak known");
     // tags on some songs only: the energy mean, not the tags
     let e = song("x", Some(-8.0), None, Some(-3.0), None, Some(-10.0));
-    let (g, _) = agg(&[e.clone(), d.clone()]).for_song(&e);
+    let (g, _) = agg(&[e.clone(), d]).for_song(&e);
     assert!(close(g, want));
     // a song not measured yet: no album gain; the gain object keeps the track's own
     let f = song("x", None, None, None, None, None);

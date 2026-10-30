@@ -160,7 +160,7 @@ pub fn open() {
         })
     };
     {
-        let (zones, refresh_zones) = (zones.clone(), refresh_zones.clone());
+        let (zones, refresh_zones) = (zones, refresh_zones.clone());
         dom::on(&list, "click", move |e| {
             let Some(b) = dom::closest(e, "[data-z]") else { return };
             let id = dom::closest_of(&b, "[data-zone]").map(|c| dom::data(&c, "zone")).unwrap_or_default();
@@ -211,7 +211,7 @@ pub fn open() {
     type PaintMe = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
     let paint_me_cell: PaintMe = Rc::new(RefCell::new(None));
     let paint_me: Rc<dyn Fn()> = {
-        let (me_box, paint, cell) = (me_box.clone(), paint.clone(), paint_me_cell.clone());
+        let (me_box, paint, cell) = (me_box, paint.clone(), paint_me_cell.clone());
         Rc::new(move || {
             let l = player::linked();
             dom::set_html(&me_box, &format!(r##"<div class="row wrap between" style="gap:8px"><div class="small muted">This device: <b style="color:var(--text)">{}</b> <a href="#" id="dev-rename" class="small">rename</a></div>
@@ -241,7 +241,7 @@ pub fn open() {
     *paint_me_cell.borrow_mut() = Some(paint_me.clone());
 
     {
-        let (send, paint_me, paint, m) = (send.clone(), paint_me.clone(), paint.clone(), m.clone());
+        let (send, paint_me, paint, m) = (send.clone(), paint_me.clone(), paint.clone(), m);
         dom::on(&list, "click", move |e| {
             let Some(b) = dom::closest(e, "[data-a]") else { return };
             let id = dom::closest_of(&b, "[data-id]").map(|c| dom::data(&c, "id")).unwrap_or_default();

@@ -79,7 +79,7 @@ pub fn recover(st: &impl Ctx) {
             let _ = st.db().execute("UPDATE requests SET status='downloading', message='Importing again after a server restart', updated_at=? WHERE id=?", p![now(), r.i("id")]);
             continue;
         }
-        let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let old: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
         let _ = st.db().execute("UPDATE requests SET status='queued', message='Restarted after server restart', detail=?, updated_at=? WHERE id=?",
             p![restart_detail(&old).to_string(), now(), r.i("id")]);
     }

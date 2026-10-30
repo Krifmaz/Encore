@@ -240,7 +240,7 @@ impl Mb {
     /// Marks a look-up answered from disk past its hour as due to be asked again.
     fn due(&self, key: String, path: &str, params: &[(&str, String)]) {
         let ps = params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        self.stale.due.lock().unwrap_or_else(|p| p.into_inner()).entry(key).or_insert((path.to_string(), ps));
+        self.stale.due.lock().unwrap_or_else(|p| p.into_inner()).entry(key).or_insert_with(|| (path.to_string(), ps));
         self.stale.bell.notify_one();
     }
 
@@ -431,7 +431,7 @@ pub fn rg(v: &Value) -> Value {
         "id": id, "title": s(&v["title"]), "artist": credit(&v["artist-credit"]), "artist_id": credit_id(&v["artist-credit"]),
         "type": s(&v["primary-type"]), "secondary": v.get("secondary-types").cloned().unwrap_or(json!([])),
         "disambiguation": s(&v["disambiguation"]),
-        "year": date.chars().take(4).collect::<String>(), "date": date, "score": v.get("score").cloned().unwrap_or(json!(0)),
+        "year": date.chars().take(4).collect::<String>(), "date": date, "score": v.get("score").cloned().unwrap_or_else(|| json!(0)),
         "cover": cover_rg(&id, 250),
     })
 }
@@ -439,16 +439,16 @@ pub fn rg(v: &Value) -> Value {
 /// Search artists: `{id, name, disambiguation, type, country, score}` each.
 pub async fn search_artists(st: &impl Ctx, q: &str, limit: usize) -> anyhow::Result<Vec<Value>> {
     let d = st.mb().get(st, "artist", &[("query", q.into()), ("limit", limit.to_string())]).await?;
-    Ok(d["artists"].as_array().cloned().unwrap_or_default().iter().map(|a| json!({
+    Ok(d["artists"].as_array().into_iter().flatten().map(|a| json!({
         "id": s(&a["id"]), "name": s(&a["name"]), "disambiguation": s(&a["disambiguation"]), "type": s(&a["type"]), "country": s(&a["country"]),
-        "score": a.get("score").cloned().unwrap_or(json!(0)), "begin": s(&a["life-span"]["begin"]), "tags": top_tags(&a["tags"], 4),
+        "score": a.get("score").cloned().unwrap_or_else(|| json!(0)), "begin": s(&a["life-span"]["begin"]), "tags": top_tags(&a["tags"], 4),
     })).collect())
 }
 
 /// Search release groups (see [`rg`]).
 pub async fn search_albums(st: &impl Ctx, q: &str, limit: usize) -> anyhow::Result<Vec<Value>> {
     let d = st.mb().get(st, "release-group", &[("query", q.into()), ("limit", limit.to_string())]).await?;
-    Ok(d["release-groups"].as_array().cloned().unwrap_or_default().iter().map(rg).collect())
+    Ok(d["release-groups"].as_array().into_iter().flatten().map(rg).collect())
 }
 
 /// Search recordings, by `artist` too when given: `{id, title, artist, length, album, release_id,
@@ -459,7 +459,7 @@ pub async fn search_recordings(st: &impl Ctx, q: &str, limit: usize, artist: Opt
         None => q.to_string(),
     };
     let d = st.mb().get(st, "recording", &[("query", query), ("limit", limit.to_string())]).await?;
-    let mut out: Vec<Value> = d["recordings"].as_array().cloned().unwrap_or_default().iter().map(|r| {
+    let mut out: Vec<Value> = d["recordings"].as_array().into_iter().flatten().map(|r| {
         // the release the song is best known from (its studio album before a best-of or a live album), not
         // MusicBrainz's first, which is in no useful order
         let rel = album_release(r);
@@ -471,7 +471,7 @@ pub async fn search_recordings(st: &impl Ctx, q: &str, limit: usize, artist: Opt
             "id": s(&r["id"]), "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "artist_id": credit_id(&r["artist-credit"]),
             "length": r["length"].as_f64().unwrap_or(0.0) / 1000.0, "album": s(&rel["title"]), "release_id": rel.get("id").cloned().unwrap_or(Value::Null),
             "release_group_id": rgv, "year": year,
-            "score": r.get("score").cloned().unwrap_or(json!(0)), "cover": cover,
+            "score": r.get("score").cloned().unwrap_or_else(|| json!(0)), "cover": cover,
             // how original this recording is ([`recording_rank`]): 0 on a studio album … 3 a live or demo take
             "rank": recording_rank(r),
         })
@@ -584,7 +584,7 @@ pub async fn release(st: &impl Ctx, rid: &str) -> anyhow::Result<Value> {
     let mut genres: Vec<(i64, String)> = [r["genres"].as_array(), g["genres"].as_array()].into_iter().flatten().flatten()
         .map(|x| (x["count"].as_i64().unwrap_or(0), s(&x["name"]))).collect();
     genres.sort_by_key(|x| std::cmp::Reverse(x.0));
-    let labels: Vec<String> = r["label-info"].as_array().cloned().unwrap_or_default().iter().filter_map(|li| li["label"]["name"].as_str().map(String::from)).collect();
+    let labels: Vec<String> = r["label-info"].as_array().into_iter().flatten().filter_map(|li| li["label"]["name"].as_str().map(String::from)).collect();
     let date = { let d = s(&r["date"]); if d.is_empty() { s(&g["first-release-date"]) } else { d } };
     let year: String = { let d = s(&g["first-release-date"]); if d.is_empty() { s(&r["date"]) } else { d } }.chars().take(4).collect();
     let genre = genres.first().map(|x| { let mut c = x.1.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).unwrap_or_default();
@@ -624,7 +624,7 @@ pub async fn artist_barcodes(st: &impl Ctx, mbid: &str) -> anyhow::Result<HashMa
 pub async fn release_groups_for_isrc(st: &impl Ctx, isrc: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let Ok(d) = st.mb().get(st, &format!("isrc/{isrc}"), &[]).await else { return out };
-    for r in d["recordings"].as_array().cloned().unwrap_or_default().iter().take(2) {
+    for r in d["recordings"].as_array().into_iter().flatten().take(2) {
         let Some(rid) = r["id"].as_str() else { continue };
         if let Ok(d) = st.mb().get(st, &format!("recording/{rid}"), &[("inc", "releases+release-groups".into())]).await {
             for rel in d["releases"].as_array().cloned().unwrap_or_default() {
@@ -645,7 +645,7 @@ pub async fn search_releases(st: &impl Ctx, artist: &str, album: &str, limit: us
         q += &format!(" AND artist:\"{}\"", esc(artist));
     }
     let d = st.mb().get(st, "release", &[("query", q), ("limit", limit.to_string())]).await?;
-    Ok(d["releases"].as_array().cloned().unwrap_or_default().iter().map(|r| {
+    Ok(d["releases"].as_array().into_iter().flatten().map(|r| {
         let id = s(&r["id"]);
         json!({ "id": id, "title": s(&r["title"]), "artist": credit(&r["artist-credit"]), "date": s(&r["date"]), "country": s(&r["country"]),
             "status": s(&r["status"]), "track_count": r["track-count"].as_i64().unwrap_or(0), "release_group_id": r["release-group"]["id"],
@@ -777,7 +777,7 @@ pub async fn recording_releases(st: &impl Ctx, rid: &str) -> anyhow::Result<Vec<
 /// The ids of the recordings with this ISRC.
 pub async fn recordings_for_isrc(st: &impl Ctx, isrc: &str) -> Vec<String> {
     let Ok(d) = st.mb().get(st, &format!("isrc/{isrc}"), &[]).await else { return vec![] };
-    d["recordings"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["id"].as_str().map(String::from)).collect()
+    d["recordings"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_str().map(String::from)).collect()
 }
 
 /// The official studio album (or EP) a recording first appeared on. Compilations, live albums, soundtracks,

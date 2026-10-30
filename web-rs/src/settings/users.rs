@@ -237,7 +237,7 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
                                 }).collect::<String>()))
                                 .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Save</button>"#));
                             if let Some(ok) = m.qs("#ok") {
-                                let (m2, id, ld, lb) = (m.clone(), id.clone(), ld.clone(), lb.clone());
+                                let (m2, id, ld, lb) = (m, id.clone(), ld.clone(), lb.clone());
                                 dom::on(&ok, "click", move |_| {
                                     let mut perms = Map::new();
                                     for x in m2.qsa("[data-p]") { perms.insert(dom::data(&x, "p"), Value::Bool(dom::checked(&x))); }
@@ -256,7 +256,7 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
                                 r#"<label class="field"><span>New password</span><input class="input" type="password" id="np" minlength="8" autocomplete="new-password"></label><p class="small muted">All of their sessions will be signed out.</p>"#)
                                 .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Set password</button>"#));
                             if let Some(ok) = m.qs("#ok") {
-                                let (m2, id, ld) = (m.clone(), id.clone(), ld.clone());
+                                let (m2, id, ld) = (m, id.clone(), ld.clone());
                                 dom::on(&ok, "click", move |_| {
                                     let (m2, id, ld) = (m2.clone(), id.clone(), ld.clone());
                                     dom::spawn(async move { patch(&id, json!({ "password": dom::value_of(&m2.el, "#np") }), &ld).await; m2.close(); });
@@ -278,7 +278,7 @@ pub fn render_users(view: Element, ctx: Ctx) -> PageFuture {
         <label class="field"><span>Role</span><select class="input" name="role"><option value="user">User</option><option value="admin">Admin</option></select></label>
       </form>"#).footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Create</button>"#));
                 if let Some(ok) = m.qs("#ok") {
-                    let (m2, ld) = (m.clone(), ld.clone());
+                    let (m2, ld) = (m, ld.clone());
                     dom::on(&ok, "click", move |_| {
                         let Some(f) = m2.qs("#nu") else { return };
                         if !report_validity(&f) { return; }

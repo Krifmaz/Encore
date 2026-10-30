@@ -807,8 +807,8 @@ pub async fn retag_album(st: &impl Ctx, album_id: &str, release_id: &str, rename
     let old: Vec<PathBuf> = found.iter().map(|r| PathBuf::from(r.s("path"))).collect();
     let ids: Vec<i64> = found.iter().map(|r| r.i("id")).collect();
     let pv = preview(st, &old, release_id, false).await?;
-    let new = apply_preview(st, &pv, rename.unwrap_or(st.cfg().bool("rename_on_import")), None, None).await?;
-    let rows: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
+    let new = apply_preview(st, &pv, rename.unwrap_or_else(|| st.cfg().bool("rename_on_import")), None, None).await?;
+    let rows: Vec<PathBuf> = pv["rows"].as_array().into_iter().flatten().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
     relink(st, &rows, &new);
     index_paths(st, &new);
     // the owner's type choice follows the album to its new id; the release's facts are the new release's
@@ -1090,7 +1090,7 @@ pub async fn preview(st: &impl Ctx, paths: &[PathBuf], release_id: &str, single:
         }
         row
     }).collect();
-    let mut r = rel.clone();
+    let mut r = rel;
     r.as_object_mut().unwrap().remove("tracks");
     Ok(json!({ "release": r, "tracks": tracks, "rows": rows, "confidence": conf }))
 }
@@ -1515,7 +1515,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     };
     // the songs must belong to the album we're about to label them as
     let expected: Vec<String> = match &pv {
-        Some(pv) => pv["rows"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["values"]["title"].as_str().map(String::from)).collect(),
+        Some(pv) => pv["rows"].as_array().into_iter().flatten().filter_map(|r| r["values"]["title"].as_str().map(String::from)).collect(),
         None => source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["title"].as_str().map(String::from)).collect(),
     };
     let mut pv = pv;

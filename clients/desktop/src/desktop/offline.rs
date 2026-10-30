@@ -1056,7 +1056,7 @@ mod tests {
         assert_eq!(kept(true, "opus", &json!({}), &json!({ "codec": "opus", "bitrate": 160 })).1, "Opus 160k");
         let (format, quality) = kept(false, "flac", &json!({ "format": "ape" }), &Value::Null);
         assert_eq!((format.as_str(), quality.as_str()), ("flac", "FLAC (converted)"));
-        let s = Song { quality: quality.clone(), ..Song::default() };
+        let s = Song { quality, ..Song::default() };
         assert!(s.converted());
         assert_eq!(quality_label("flac", true, 0, 44100.0, 0.0), "FLAC 44.1 kHz");
         assert_eq!(quality_label("alac", false, 24, 0.0, 0.0), "ALAC 24-bit");

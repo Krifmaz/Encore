@@ -195,8 +195,7 @@ async fn artist_sections() {
             let list = e.get(&format!("/api/library/artists?sort={sort}&dir={dir}")).await.as_array().unwrap().clone();
             let secs = e.labels(&format!("kind=artists&sort={sort}&dir={dir}")).await;
             assert_eq!(secs[0].1, 0, "{sort} {dir}");
-            let names: Vec<&str> = list.iter().map(|a| a["name"].as_str().unwrap()).collect();
-            let letters = super::letters(names.into_iter());
+            let letters = super::letters(list.iter().map(|a| a["name"].as_str().unwrap()));
             for (label, off) in &secs {
                 let a = &list[*off];
                 let got = match sort {

@@ -155,7 +155,7 @@ pub fn bind(root: &web_sys::Element, bands: Vec<Value>, on: bool, commit: impl F
         });
     }
     {
-        let (live, commit) = (live.clone(), commit.clone());
+        let (live, commit) = (live, commit);
         dom::on(&svg, "wheel", move |e| {
             let Some(we) = e.dyn_ref::<web_sys::WheelEvent>() else { return };
             let Some(i) = e.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()).and_then(|t| dom::closest_of(&t, "[data-band]"))

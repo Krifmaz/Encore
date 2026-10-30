@@ -57,7 +57,7 @@ fn found_elsewhere(r: &Value, artist: &str) {
     let _ = row.set_attribute("style", "gap:8px;margin-bottom:12px;align-items:center");
     dom::set_html(&row, &format!(r#"<span class="small muted grow">{note}</span>{req}{pick}"#));
     let _ = body.prepend_with_node_1(&row);
-    let (r, album_artist) = (r.clone(), album_artist.clone());
+    let (r, album_artist) = (r.clone(), album_artist);
     dom::on(&row, "click", move |e| {
         if let Some(b) = dom::closest(e, "[data-rest-all]") {
             let mut o = Map::new();

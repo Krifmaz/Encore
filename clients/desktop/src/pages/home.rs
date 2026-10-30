@@ -262,7 +262,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Play(id) => {
             let api = ctx.api.clone();
             let path = format!("/library/albums/{id}");
-            return Task::perform(async move { api.get(&path).await }, move |r| Message::Album(id.clone(), r));
+            return Task::perform(async move { api.get(&path).await }, move |r| Message::Album(id, r));
         }
         Message::Album(id, Ok(album)) => {
             let tracks = library::with_album_id(&fmt::items(&album["tracks"]), &id);

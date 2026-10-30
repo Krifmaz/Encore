@@ -52,7 +52,7 @@ fn bubblewrap_gets_namespaces_binds_and_no_network_unless_asked() {
     assert!(has(&["--chdir", "/p/data"]), "{a:?}");
     assert!(has(&["--", "/usr/bin/python3", "/p/1.0.0/plugin.py", "search"]), "the program and its argv come last: {a:?}");
     assert!(a.iter().any(|x| x == "/usr") && !a.iter().any(|x| x == "/home" || x == "/root"), "{a:?}");
-    let netted = spawn.clone().network(true).argv().1;
+    let netted = spawn.network(true).argv().1;
     assert!(netted.contains(&OsString::from("--share-net")));
     let noproc = Sandbox { level: Level::Full { bwrap: PathBuf::from("/usr/bin/bwrap"), proc: false }, reason: None };
     let (_, a2) = Spawn::new(&noproc, Path::new("/bin/true")).argv();

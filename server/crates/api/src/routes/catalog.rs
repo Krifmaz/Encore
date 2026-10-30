@@ -40,7 +40,7 @@ async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Js
 /// requests (encore_library::lookup).
 pub(crate) fn annotate_tracks(st: &AppState, tracks: &mut [Value], fallback: &str) {
     let keys: Vec<(String, String, String, Option<f64>)> = tracks.iter().map(|t| {
-        let artist = Some(s(&t["artist"])).filter(|a| !a.is_empty()).unwrap_or(fallback.to_string());
+        let artist = Some(s(&t["artist"])).filter(|a| !a.is_empty()).unwrap_or_else(|| fallback.to_string());
         (s(&t["isrc"]), artist, s(&t["title"]), t["length"].as_f64())
     }).collect();
     let libs = encore_library::lookup::library_tracks_for(&st.db, &keys);
@@ -116,7 +116,7 @@ async fn request_rest(State(st): State<AppState>, User(u): User, Json(b): Json<R
                 continue;
             }
             let req = NewRequest {
-                kind: "track".into(), artist: nz(&t["artist"]).or(Some(artist.clone())), title: nz(&t["title"]), album: Some(album.clone()),
+                kind: "track".into(), artist: nz(&t["artist"]).or_else(|| Some(artist.clone())), title: nz(&t["title"]), album: Some(album.clone()),
                 year: b.year.clone().filter(|y| !y.is_empty()), cover_url: b.cover.clone().filter(|c| !c.is_empty()),
                 length: t["length"].as_f64().filter(|l| *l > 0.0), isrc: nz(&t["isrc"]), album_mode: Some("song".into()), ..Default::default()
             };

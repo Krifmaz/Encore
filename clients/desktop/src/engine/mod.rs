@@ -85,7 +85,7 @@ pub fn start() -> Result<Engine, String> {
     *slot = Some(Arc::new(player));
     drop(slot);
     if !first_run && fallback_file(&dir).exists() {
-        let (engine, dir) = (engine.clone(), dir.clone());
+        let (engine, dir) = (engine.clone(), dir);
         let _ = std::thread::Builder::new()
             .name("encore-output-check".into())
             .spawn(move || restore_output(&engine, &dir));

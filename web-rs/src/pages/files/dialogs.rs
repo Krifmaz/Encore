@@ -40,12 +40,11 @@ pub fn name_dialog(title: &str, initial: &str, ok_label: &str, is_dir: bool, sub
     };
     check();
     {
-        let check = check.clone();
         dom::on(&input, "input", move |_| check());
     }
     let busy = Rc::new(Cell::new(false));
     let go: Rc<dyn Fn()> = {
-        let (m, input, err, ok, busy) = (m.clone(), input.clone(), err.clone(), ok.clone(), busy.clone());
+        let (m, input, err, ok, busy) = (m.clone(), input.clone(), err, ok.clone(), busy);
         Rc::new(move || {
             let name = dom::value(&input).trim().to_string();
             if busy.get() || logic::name_problem(&name).is_some() || (!initial.is_empty() && name == initial) { return; }
@@ -98,7 +97,7 @@ pub fn folder_picker(roots: Vec<Root>, start_root: &str, start_path: &str, title
     let roots = Rc::new(roots);
     let exclude = Rc::new(exclude);
     let load: Rc<dyn Fn()> = {
-        let (m, list, at, seq, exclude) = (m.clone(), list.clone(), at.clone(), seq.clone(), exclude.clone());
+        let (m, list, at, seq, exclude) = (m.clone(), list.clone(), at.clone(), seq, exclude);
         Rc::new(move || {
             let (root, path) = at.borrow().clone();
             for b in m.qsa("#fp-roots [data-r]") { dom::toggle_class(&b, "active", dom::data(&b, "r") == root.id); }
@@ -132,7 +131,7 @@ pub fn folder_picker(roots: Vec<Root>, start_root: &str, start_path: &str, title
         })
     };
     {
-        let (at, roots, load) = (at.clone(), roots.clone(), load.clone());
+        let (at, roots, load) = (at.clone(), roots, load.clone());
         dom::on_sel(&m.el, "#fp-roots", "click", move |e| {
             let Some(b) = dom::closest(e, "[data-r]") else { return };
             let id = dom::data(&b, "r");
@@ -157,7 +156,7 @@ pub fn folder_picker(roots: Vec<Root>, start_root: &str, start_path: &str, title
         });
     }
     {
-        let (m2, at) = (m.clone(), at.clone());
+        let (m2, at) = (m.clone(), at);
         dom::on_sel(&m.el, "#fp-ok", "click", move |_| {
             let (root, path) = at.borrow().clone();
             m2.close();

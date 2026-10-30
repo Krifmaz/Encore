@@ -1643,7 +1643,7 @@ mod tests {
         assert_eq!(local(&m), None, "nothing under the configured folder");
         m.set_status(|s| s.downloads = Some(fallback.to_string_lossy().to_string()));
         assert_eq!(m.download_dir(&cfg), fallback);
-        assert_eq!(local(&m), Some(file.clone()), "found where slskd put it");
+        assert_eq!(local(&m), Some(file), "found where slskd put it");
         m.set_status(|s| s.downloads = None);
 
         // the probe: reused while slskd runs, again after poke() and before a start

@@ -97,7 +97,7 @@ pub fn toast(msg: &str, kind: &str) {
     el.set_text_content(Some(msg));
     if let Some(t) = by_id("toasts") { let _ = t.append_child(&el); }
     let e1 = el.clone();
-    let e2 = el.clone();
+    let e2 = el;
     keep_app(gloo_timers::callback::Timeout::new(3800, move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
     keep_app(gloo_timers::callback::Timeout::new(4200, move || e2.remove()));
 }
@@ -725,7 +725,7 @@ pub fn set_secret_text(el: &Element, value: &str) {
         let _ = el.after_with_node_1(&eye_button(move |shown| {
             dom::set_data(&e2, "shown", if shown { "1" } else { "" });
             let v = dom::data(&e2, "value");
-            e2.set_text_content(Some(&if shown { v.clone() } else { dots(v.len()) }));
+            e2.set_text_content(Some(&if shown { v } else { dots(v.len()) }));
         }));
     }
 }

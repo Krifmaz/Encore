@@ -153,7 +153,7 @@ fn a_client_card_is_shown_whole_with_the_choice_that_uses_it() {
     let body = body_html(&c, Some(&answer), &values, false, &schema, &list);
     assert!(body.contains("In use: Torrent client is set to qBittorrent on the Torrents &amp; Usenet card."), "{body}");
     // a rule between two fields of the same card stays
-    let mut a2 = answer.clone();
+    let mut a2 = answer;
     a2["fields"][1]["when"] = json!("qbit_category=x");
     let g = group_of(&a2, "qBittorrent");
     assert!(g.fields[1].when.is_some() && g.fields[0].when.is_none());
@@ -279,7 +279,7 @@ fn settings_elsewhere_and_a_plugins_own_settings() {
     assert!(body.contains("Unknown plugin") && body.contains("copy-btn"));
     // a built-in plugin: Encore's values and their _meta (an env lock stays a lock)
     let answer = builtin_answer("ytdlp", &[("ytdlp_enabled", None)]);
-    let mut settings = values.clone();
+    let mut settings = values;
     settings["_meta"]["ytdlp_enabled"] = json!({ "source": "env", "env": "YTDLP_ENABLED" });
     let html = form_body_html(&answer, &card_values(&answer, &settings), false, &schema);
     assert!(html.contains("Set by <span class=\"mono\">YTDLP_ENABLED</span>"), "{html}");

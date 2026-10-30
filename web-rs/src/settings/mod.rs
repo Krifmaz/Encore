@@ -165,7 +165,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     </div>"##));
         if admin { diagnostics::update_banner(&view); }
         let panel = dom::qs_in(&view, "#panel").ok_or_else(|| "Settings: no panel".to_string())?;
-        let focus = if !s.is_empty() && current != s { Some(s.clone()) } else { None };
+        let focus = if !s.is_empty() && current != s { Some(s) } else { None };
         let hub = Rc::new(Hub {
             view: view.clone(), panel, ctx: ctx.clone(), values: RefCell::new(values), schema: schema.clone(),
             reveal: app::has_feature("reveal"), focus: RefCell::new(focus),

@@ -147,7 +147,7 @@ pub fn download_request(source: &str, ask: &Ask, chosen: &Value) -> Value {
 pub fn matches(ask: &Ask, r: &Value) -> bool {
     let (title, artist) = (text(&r["title"]), text(&r["artist"]));
     if ask.kind == "album" {
-        let name = [text(&r["album"]), title.clone()].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+        let name = [text(&r["album"]), title].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
         let words = format!("{name} {artist} {}", text(&r["subtitle"]));
         let album_ok = crate::sources::torznab::album_share(&name, if ask.album.is_empty() { &ask.title } else { &ask.album }) >= 0.8;
         let artist_ok = ask.artist.is_empty() || crate::sources::torznab::share(&words, &ask.artist) >= 0.5;

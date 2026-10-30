@@ -20,7 +20,7 @@ pub(super) async fn release_info(st: &impl Ctx, r: &mut Req) -> Option<Value> {
             let lookup = async {
                 let Some(rid) = mb::best_release_for_group(st, &mbid, None).await? else { return Ok(Value::Null) };
                 let rel = mb::release(st, &rid).await?;
-                let tracks: Vec<Value> = rel["tracks"].as_array().cloned().unwrap_or_default().iter()
+                let tracks: Vec<Value> = rel["tracks"].as_array().into_iter().flatten()
                     // (its disc and number too: an import without a confident MusicBrainz match files each song
                     // at its place on the album from them, [`source_meta`])
                     .map(|t| json!({ "title": t["title"], "artist": t["artist"], "length": t["length"], "recording_id": t["recording_id"], "isrc": t["isrc"],

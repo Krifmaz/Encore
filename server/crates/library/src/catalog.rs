@@ -173,7 +173,7 @@ fn src(name: &str, id: Value, url: String) -> Value {
 /// The artist's albums on Deezer, as catalogue entries.
 async fn deezer_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     let d = getj(deezer::artist_albums(st, aid, 300)).await?;
-    Ok(d["data"].as_array().cloned().unwrap_or_default().iter().map(|a| {
+    Ok(d["data"].as_array().into_iter().flatten().map(|a| {
         let title = s(&a["title"]);
         json!({ "title": title, "type": kind_of(&s(&a["record_type"]), &title), "date": s(&a["release_date"]),
                 "cover": a.get("cover_xl").filter(|c| !c.is_null()).or(a.get("cover_medium")), "tracks": a["nb_tracks"], "explicit": a["explicit_lyrics"],
@@ -184,11 +184,11 @@ async fn deezer_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
 /// The artist's albums on Apple Music, as catalogue entries.
 async fn apple_albums(st: &impl Ctx, aid: &str) -> anyhow::Result<Vec<Value>> {
     let d = getj(apple::lookup(st, aid, "album", Some(200))).await?;
-    Ok(d["results"].as_array().cloned().unwrap_or_default().iter().filter(|a| a["wrapperType"] == "collection").map(|a| {
+    Ok(d["results"].as_array().into_iter().flatten().filter(|a| a["wrapperType"] == "collection").map(|a| {
         let title = s(&a["collectionName"]);
         let cover = s(&a["artworkUrl100"]).replace("100x100bb", "600x600bb");
         let id = a["collectionId"].clone();
-        let url = a["collectionViewUrl"].as_str().map(String::from).unwrap_or(format!("https://music.apple.com/album/{id}"));
+        let url = a["collectionViewUrl"].as_str().map(String::from).unwrap_or_else(|| format!("https://music.apple.com/album/{id}"));
         json!({ "title": RE_SUFFIX_CASE.replace(&title, "").to_string(), "type": infer_kind(kind_of("", &title), a["trackCount"].as_i64()), "date": s(&a["releaseDate"]).chars().take(10).collect::<String>(),
                 "cover": if cover.is_empty() { Value::Null } else { json!(cover) }, "tracks": a["trackCount"],
                 "explicit": a["collectionExplicitness"] == "explicit", "sources": src("Apple Music", id, url) })
@@ -268,7 +268,7 @@ fn bc_album(url: &str, ld: &Value, fallback_title: &str, cover: Option<String>) 
     let n = ld["numTracks"].as_i64()
         .or_else(|| ld["track"]["itemListElement"].as_array().map(|a| a.len() as i64).filter(|n| *n > 0))
         .or(if ld["@type"] == "MusicRecording" { Some(1) } else { None });
-    let title = ld["name"].as_str().map(String::from).unwrap_or(fallback_title.into());
+    let title = ld["name"].as_str().map(String::from).unwrap_or_else(|| fallback_title.into());
     let img = match &ld["image"] { Value::Array(a) => a.first().and_then(|v| v.as_str()).map(String::from), Value::String(s) => Some(s.clone()), _ => None };
     let typ = if url.contains("/track/") || n == Some(1) { "Single" } else if n.is_some_and(|n| n <= 6) { "EP" } else { "Album" };
     json!({ "title": title, "type": typ, "date": bc_date(ld["datePublished"].as_str().unwrap_or("")), "cover": img.or(cover),
@@ -312,17 +312,17 @@ pub async fn tracklist(st: &impl Ctx, ext: &Value) -> anyhow::Result<Vec<Value>>
     if !ext["deezer"].is_null() {
         let id = ext["deezer"].to_string().trim_matches('"').to_string();
         let d = getj(deezer::album_tracks(st, &id, 500)).await?;
-        return Ok(d["data"].as_array().cloned().unwrap_or_default().iter().enumerate().map(|(i, x)| t(json!(s(&x["title"])), json!(s(&x["artist"]["name"])),
-            x["duration"].clone(), x["isrc"].clone(), x.get("track_position").filter(|v| !v.is_null()).cloned().unwrap_or(json!(i + 1)),
-            x.get("disk_number").filter(|v| !v.is_null()).cloned().unwrap_or(json!(1)))).collect());
+        return Ok(d["data"].as_array().into_iter().flatten().enumerate().map(|(i, x)| t(json!(s(&x["title"])), json!(s(&x["artist"]["name"])),
+            x["duration"].clone(), x["isrc"].clone(), x.get("track_position").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!(i + 1)),
+            x.get("disk_number").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!(1)))).collect());
     }
     if !ext["apple"].is_null() {
         let id = ext["apple"].to_string().trim_matches('"').to_string();
         let d = getj(apple::lookup(st, &id, "song", Some(300))).await?;
-        return Ok(d["results"].as_array().cloned().unwrap_or_default().iter().filter(|x| x["wrapperType"] == "track").map(|x| {
+        return Ok(d["results"].as_array().into_iter().flatten().filter(|x| x["wrapperType"] == "track").map(|x| {
             let ms = x["trackTimeMillis"].as_f64().unwrap_or(0.0);
             t(json!(s(&x["trackName"])), json!(s(&x["artistName"])), if ms > 0.0 { json!(ms / 1000.0) } else { Value::Null }, Value::Null,
-              x["trackNumber"].clone(), x.get("discNumber").filter(|v| !v.is_null()).cloned().unwrap_or(json!(1)))
+              x["trackNumber"].clone(), x.get("discNumber").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!(1)))
         }).collect());
     }
     if let Some(url) = ext["bandcamp"].as_str() {
@@ -330,12 +330,12 @@ pub async fn tracklist(st: &impl Ctx, ext: &Value) -> anyhow::Result<Vec<Value>>
         let items = d["track"]["itemListElement"].as_array().cloned()
             .unwrap_or_else(|| if d["@type"] == "MusicRecording" { vec![json!({ "position": 1, "item": d })] } else { vec![] });
         return Ok(items.iter().enumerate().map(|(i, x)| t(json!(s(&x["item"]["name"])), json!(""), dur(&x["item"]["duration"]), Value::Null,
-            x.get("position").filter(|v| !v.is_null()).cloned().unwrap_or(json!(i + 1)), json!(1))).collect());
+            x.get("position").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!(i + 1)), json!(1))).collect());
     }
     if let Some(id) = ext["discogs"].as_str() {
         let kind = if id.starts_with('m') { "masters" } else { "releases" };
         let d: Value = discogs::get(st, &format!("{kind}/{}", &id[1..])).send().await?.json().await?;
-        return Ok(d["tracklist"].as_array().cloned().unwrap_or_default().iter().filter(|x| x["type_"].as_str().unwrap_or("track") == "track").enumerate()
+        return Ok(d["tracklist"].as_array().into_iter().flatten().filter(|x| x["type_"].as_str().unwrap_or("track") == "track").enumerate()
             .map(|(i, x)| t(json!(s(&x["title"])), json!(x["artists"].as_array().map(|a| a.iter().map(|a| s(&a["name"])).collect::<Vec<_>>().join(", ")).unwrap_or_default()),
                 dur(&x["duration"]), Value::Null, json!(i + 1), json!(1))).collect());
     }
@@ -499,7 +499,7 @@ pub async fn merged(st: &impl Ctx, artist: &Value) -> Vec<Value> {
         return v.as_array().cloned().unwrap_or_default();
     }
     let rgs = artist["release_groups"].as_array().cloned().unwrap_or_default();
-    let urls: Vec<String> = artist["urls"].as_array().cloned().unwrap_or_default().iter().map(s).collect();
+    let urls: Vec<String> = artist["urls"].as_array().into_iter().flatten().map(s).collect();
     let name = s(&artist["name"]);
     let (dz, ap, bc, dc) = tokio::join!(deezer_artist(st, &name, &urls), apple_artist(st, &name, &urls), bandcamp_artist(st, &name, &urls), discogs_artist(st, &name, &urls));
     let ids = [dz.ok().flatten(), ap.ok().flatten(), bc.ok().flatten(), dc.ok().flatten()];
@@ -529,7 +529,7 @@ pub async fn merged(st: &impl Ctx, artist: &Value) -> Vec<Value> {
             continue;
         }
         // same release from another service → one entry with both sources
-        let names = |v: &Value| v["sources"].as_array().cloned().unwrap_or_default().iter().map(|x| s(&x["name"])).collect::<Vec<_>>();
+        let names = |v: &Value| v["sources"].as_array().into_iter().flatten().map(|x| s(&x["name"])).collect::<Vec<_>>();
         let twin = missing.iter_mut().find(|m| similar(&s(&m["title"]), &s(&ext["title"])) >= 0.92
             && (m["type"] == ext["type"] || names(m).iter().chain(names(&ext).iter()).any(|n| n == "Discogs")));
         if let Some(t) = twin {
@@ -549,7 +549,7 @@ pub async fn merged(st: &impl Ctx, artist: &Value) -> Vec<Value> {
     }
     for m in missing.iter_mut() {
         let srcs = m["sources"].as_array().cloned().unwrap_or_default();
-        let id_of = |x: &Value| x["id"].as_str().map(String::from).unwrap_or(x["id"].to_string());
+        let id_of = |x: &Value| x["id"].as_str().map(String::from).unwrap_or_else(|| x["id"].to_string());
         m["id"] = json!(format!("ext-{}", srcs.iter().map(|x| format!("{}{}", s(&x["name"]).chars().next().unwrap_or('x').to_lowercase(), id_of(x))).collect::<Vec<_>>().join("-")));
         m["year"] = json!(s(&m["date"]).chars().take(4).collect::<String>());
         m["artist"] = json!(name);

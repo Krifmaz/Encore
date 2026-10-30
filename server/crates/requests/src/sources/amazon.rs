@@ -292,7 +292,7 @@ fn link_of(x: &Value) -> String {
 /// A Skyfire answer: {methods: [{template: {headerText, headerPrimaryText, headerImage, widgets: [{items: [row…]}]}}]}.
 /// Song rows are the items with a primaryText whose link names a track (…?trackAsin= or /tracks/…).
 pub fn api_rows(d: &Value) -> (Header, Vec<Cell>) {
-    let tpl = find(d, &|x| x.get("headerText").is_some() || x.get("widgets").is_some()).cloned().unwrap_or(json!({}));
+    let tpl = find(d, &|x| x.get("headerText").is_some() || x.get("widgets").is_some()).cloned().unwrap_or_else(|| json!({}));
     let h = Header {
         name: txt(&tpl["headerText"]),
         artist: [txt(&tpl["headerPrimaryText"]), txt(&tpl["headerSecondaryText"])].into_iter().find(|s| !s.is_empty() && clock(s).is_none()).unwrap_or_default(),
@@ -339,9 +339,9 @@ pub fn rows_to_tracks(link: &Link, h: &Header, cells: &[Cell]) -> Vec<Value> {
         let words: Vec<&String> = c.texts.iter().filter(|t| clock(t).is_none() && !t.eq_ignore_ascii_case("explicit")).collect();
         let (artist, album) = if album_page {
             // a row's own artist (compilations, features) wins over the album's
-            (words.first().map(|s| s.to_string()).unwrap_or_else(|| h.artist.clone()), Some(h.name.clone()).filter(|n| !n.is_empty()))
+            (words.first().map(|s| (*s).clone()).unwrap_or_else(|| h.artist.clone()), Some(h.name.clone()).filter(|n| !n.is_empty()))
         } else {
-            (words.first().map(|s| s.to_string()).unwrap_or_default(), words.get(1).map(|s| s.to_string()))
+            (words.first().map(|s| (*s).clone()).unwrap_or_default(), words.get(1).map(|s| (*s).clone()))
         };
         let isrc = c.isrc.as_ref().map(|i| i.to_uppercase().replace('-', "")).filter(|i| !i.is_empty());
         out.push(json!({ "title": c.title.trim(), "artist": artist.trim(), "album": album, "duration": duration.filter(|d| *d > 0.0), "isrc": isrc,

@@ -81,7 +81,7 @@ pub fn keys(kind: &str, mbid: &str, artist: &str, title: &str, detail: &Value) -
             if name == "upc" {
                 continue;
             }
-            let id = id.as_str().map(String::from).unwrap_or(id.to_string());
+            let id = id.as_str().map(String::from).unwrap_or_else(|| id.to_string());
             if !id.is_empty() && id != "null" {
                 k.push(format!("ext:{name}:{id}"));
             }
@@ -100,9 +100,9 @@ pub fn keys(kind: &str, mbid: &str, artist: &str, title: &str, detail: &Value) -
 
 /// The event for one request row.
 pub fn event_for(r: &Row) -> Value {
-    let detail: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+    let detail: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
     let kind = r.s("kind");
-    let title = if kind == "album" { Some(r.s("album")).filter(|a| !a.is_empty()).unwrap_or(r.s("title")) } else { r.s("title") };
+    let title = if kind == "album" { Some(r.s("album")).filter(|a| !a.is_empty()).unwrap_or_else(|| r.s("title")) } else { r.s("title") };
     let ks = keys(&kind, &r.s("mbid"), &r.s("artist"), &title, &detail);
     let ext_key = ks.iter().find(|k| k.starts_with("ext:")).cloned();
     let status = r.s("status");

@@ -119,7 +119,7 @@ fn bind_card(hub: &Rc<Hub>, g: Rc<Group>, card: &Element, page: &str) {
     bind_clear(hub, card, page);
     bind_secret_buttons(card);
     if let Some(t) = dom::qs_in(card, "[data-test]") {
-        let (hub2, g2, card2, out2, t2, paint2) = (hub.clone(), g.clone(), card.clone(), out.clone(), t.clone(), paint.clone());
+        let (hub2, g2, card2, out2, t2, paint2) = (hub.clone(), g, card.clone(), out, t.clone(), paint.clone());
         dom::on(&t, "click", move |ev| {
             dom::prevent(ev);
             let _ = card2.set_attribute("open", "");

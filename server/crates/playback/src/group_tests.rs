@@ -289,8 +289,8 @@ fn who_may_do_what() {
     let stranger = Caller::Account { user: 9, device: "x".into() };
     assert_eq!(g.you(&alex), You { member: "m1".into(), host: true, can_control: true, guest: false });
     assert_eq!(g.you(&alex_phone), You { member: String::new(), host: true, can_control: true, guest: false }, "the host's account on another device");
-    assert_eq!(g.you(&sam_c), You { member: sam.clone(), host: false, can_control: false, guest: false });
-    assert_eq!(g.you(&kim_c), You { member: kim.clone(), host: false, can_control: false, guest: true });
+    assert_eq!(g.you(&sam_c), You { member: sam, host: false, can_control: false, guest: false });
+    assert_eq!(g.you(&kim_c), You { member: kim, host: false, can_control: false, guest: true });
     assert!(!g.you(&stranger).can_control);
     g.everyone_controls = true;
     assert!(g.you(&sam_c).can_control);

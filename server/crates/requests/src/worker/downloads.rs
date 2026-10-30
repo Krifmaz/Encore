@@ -991,7 +991,7 @@ mod tests {
         assert!(s.current().iter().all(|p| !p.blocks));
         s.on = Some((ok.root.clone(), now() - 5.0));
         assert!(s.current().iter().all(|p| !p.blocks), "a pass that runs is not hung yet");
-        s.on = Some((ok.root.clone(), now() - HUNG_SECS - 1.0));
+        s.on = Some((ok.root, now() - HUNG_SECS - 1.0));
         let cur = s.current();
         let hung = cur.iter().find(|p| p.root.path == Path::new("/mnt/nfs")).unwrap();
         assert!(hung.blocks && hung.found == Found::Failed && hung.since.is_some(), "{hung:?}");
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(judge(&client, Ok(())), (Found::Ok, Value::Null, false, None));
         // SABnzbd's or NZBGet's folder is only where Encore looks: missing in Encore's container is fine, read-only
         // over a read-only disk is not
-        let sab = Root { key: "sab_download_path", label: "Usenet downloads (SABnzbd)".into(), protos: vec!["usenet"], mapped: true, ..gone.clone() };
+        let sab = Root { key: "sab_download_path", label: "Usenet downloads (SABnzbd)".into(), protos: vec!["usenet"], mapped: true, ..gone };
         let missing = Err(StepError::new(Step::Download, "stat", &sab.path, None, std::io::Error::from_raw_os_error(2)));
         let (found, _, blocks, note) = judge(&sab, missing);
         assert_eq!((found, blocks, note), (Found::Missing, false, Some(NOTE_MAPPED)));

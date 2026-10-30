@@ -118,7 +118,7 @@ async fn answer(res: gloo_net::http::Response, path: &str) -> ApiResult {
     let proxy = proxy_answer(status, res.headers().get("x-encore").is_some(), &text);
     dom::dispatch(if proxy || (502..=504).contains(&status) { "encore:server-down" } else { "encore:server-up" }, None);
     if proxy { return Err(not_connected()); }
-    let data: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text.clone())) };
+    let data: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone())) };
     if res.ok() && text.contains("\"cover_color\"") { note_cover_colors(&data); }
     if !res.ok() {
         if status == 401 && !path.starts_with("/auth/") {

@@ -183,7 +183,7 @@ impl TempState {
     /// A state on a new folder named after `name`.
     pub fn new(name: &str) -> TempState {
         let ts = TestServer::new(name);
-        TempState { st: ts.st.clone(), dir: ts.dir.clone() }
+        TempState { st: ts.st.clone(), dir: ts.dir }
     }
 }
 

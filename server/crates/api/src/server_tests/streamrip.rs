@@ -326,7 +326,7 @@ fn picked_album(st: &AppState, cover: &str) -> i64 {
 
 pub(super) fn request_row(st: &AppState, id: i64) -> (String, String, Value) {
     let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
-    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
+    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({})))
 }
 
 pub(super) fn log_text(d: &Value) -> String {

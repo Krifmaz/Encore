@@ -613,7 +613,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             });
             let api = ctx.api.clone();
             let url = format!("/soulseek/browse/{}", urlencode(&username));
-            return Task::perform(async move { api.get(&url).await }, move |r| Message::Browsed(username.clone(), r));
+            return Task::perform(async move { api.get(&url).await }, move |r| Message::Browsed(username, r));
         }
         Message::Browsed(username, r) => {
             if let Some(b) = state.browse.as_mut().filter(|b| b.username == username) {
@@ -694,7 +694,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 urlencode(&fmt::s(&x, "username")),
                 urlencode(&id)
             );
-            return Task::perform(async move { api.del(&url).await }, move |r| Message::Cancelled(id.clone(), r));
+            return Task::perform(async move { api.del(&url).await }, move |r| Message::Cancelled(id, r));
         }
         Message::Cancelled(id, r) => {
             state.cancelling.remove(&id);

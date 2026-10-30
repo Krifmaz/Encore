@@ -197,7 +197,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 "oauth" => {
                     let api = ctx.api.clone();
                     let s = svc.clone();
-                    return Task::perform(async move { api.post(&format!("/connections/{s}"), json!({})).await }, move |r| Message::OauthStarted(svc.clone(), r));
+                    return Task::perform(async move { api.post(&format!("/connections/{s}"), json!({})).await }, move |r| Message::OauthStarted(svc, r));
                 }
                 "ytmusic" => {
                     let oauth = state.data.as_ref().is_some_and(|d| fmt::truthy(&d["available_oauth"], "ytmusic"));
@@ -456,7 +456,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 });
                 let api = ctx.api.clone();
                 let path = format!("/connections/{svc}/playlists/{}/import", crate::pages::urlencode(&rid));
-                return Task::perform(async move { api.post(&path, body).await }, move |r| Message::Imported(rid.clone(), name.clone(), r));
+                return Task::perform(async move { api.post(&path, body).await }, move |r| Message::Imported(rid.clone(), name, r));
             }
         }
         Message::Imported(rid, name, r) => {

@@ -330,9 +330,9 @@ async fn download(State(st): State<AppState>, User(u): User, Json(b): Json<Downl
     };
     let (g_artist, g_album, g_title) = guess(&directory, first);
     // the import tags from the files themselves, so a guess only has to be a label, never a blocker
-    let artist = given(&b.artist).unwrap_or(if g_artist.is_empty() { "Unknown artist".into() } else { g_artist });
+    let artist = given(&b.artist).unwrap_or_else(|| if g_artist.is_empty() { "Unknown artist".into() } else { g_artist });
     let album = given(&b.album).unwrap_or(g_album);
-    let mut title = given(&b.title).unwrap_or(if kind == "album" { album.clone() } else { g_title });
+    let mut title = given(&b.title).unwrap_or_else(|| if kind == "album" { album.clone() } else { g_title });
     if title.is_empty() {
         title = first.rsplit('\\').next().unwrap_or(first).rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| first.to_string());
     }

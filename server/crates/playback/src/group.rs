@@ -924,7 +924,7 @@ pub fn load(db: &Db, now_ms: i64, avatar: impl Fn(i64) -> String) -> Vec<Group> 
     let mut stale = vec![];
     for r in saved {
         let id = r.s("id");
-        let data: Value = serde_json::from_str(&r.s("data")).unwrap_or(json!({}));
+        let data: Value = serde_json::from_str(&r.s("data")).unwrap_or_else(|_| json!({}));
         let active_at = data["active_at"].as_f64().unwrap_or(r.f("updated_at"));
         if now - active_at > IDLE_SECS {
             stale.push(id);

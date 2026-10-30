@@ -510,7 +510,7 @@ mod tests {
         assert!(!reached_end(&prev, &failed), "an error is not the end of the queue");
         let mid = Status {
             index: Some(1),
-            ..now.clone()
+            ..now
         };
         assert!(!reached_end(&prev, &mid), "stopping in the middle is a Stop");
         let s = slim(&q[0]).unwrap();

@@ -24,7 +24,7 @@ fn title_case(x: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn rel(id: &str, title: &str, artist: &str, date: &str, tracks: Vec<Value>, provider: &str, extra: Value) -> Value {
     let discs: std::collections::HashSet<i64> = tracks.iter().map(|t| t["disc"].as_i64().unwrap_or(1)).collect();
-    let g = |k: &str| extra.get(k).cloned().unwrap_or(json!(""));
+    let g = |k: &str| extra.get(k).cloned().unwrap_or_else(|| json!(""));
     json!({ "id": id, "title": title, "artist": artist, "artist_id": null, "date": date, "year": date.chars().take(4).collect::<String>(),
         "country": g("country"), "status": "Official", "release_group_id": null, "type": g("type"), "label": g("label"), "catalog": g("catalog"),
         "barcode": g("barcode"), "disc_count": discs.len().max(1), "genre": g("genre"), "tracks": tracks, "cover": extra.get("cover").cloned().unwrap_or(Value::Null),
@@ -51,7 +51,7 @@ pub async fn search(st: &impl Ctx, provider: &str, artist: &str, album: &str, n:
         }
         "apple" => {
             let d = getj(apple::search(st, &format!("{artist} {album}"), "album", 20)).await?;
-            Ok(d["results"].as_array().cloned().unwrap_or_default().iter().filter(|a| !a["collectionId"].is_null()).map(|a| json!({
+            Ok(d["results"].as_array().into_iter().flatten().filter(|a| !a["collectionId"].is_null()).map(|a| json!({
                 "id": format!("apple:{}", a["collectionId"]), "title": s(&a["collectionName"]), "artist": s(&a["artistName"]),
                 "date": s(&a["releaseDate"]).chars().take(10).collect::<String>(), "country": s(&a["country"]), "track_count": a["trackCount"].as_i64().unwrap_or(0),
                 "formats": "Digital", "type": "", "label": s(&a["copyright"]).chars().take(60).collect::<String>(), "score": 90,
@@ -62,7 +62,7 @@ pub async fn search(st: &impl Ctx, provider: &str, artist: &str, album: &str, n:
                 anyhow::bail!("Add a Discogs token in Settings to search Discogs");
             }
             let d: Value = discogs::search(st, &[("artist", artist), ("release_title", album), ("type", "release"), ("per_page", "20")]).send().await?.json().await?;
-            Ok(d["results"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+            Ok(d["results"].as_array().into_iter().flatten().map(|x| {
                 let join = |v: &Value, n: usize| v.as_array().map(|a| a.iter().take(n).map(s).collect::<Vec<_>>().join(", ")).unwrap_or_default();
                 json!({ "id": format!("discogs:r{}", x["id"]), "title": s(&x["title"]), "artist": "", "date": s(&x["year"]), "country": s(&x["country"]),
                     "track_count": 0, "formats": join(&x["format"], 9), "type": "", "label": join(&x["label"], 2), "score": 80, "cover": x["thumb"], "provider": "Discogs" })
@@ -92,7 +92,7 @@ async fn by_fingerprint(st: &impl Ctx, paths: &[PathBuf], n: usize) -> anyhow::R
         let Some((d, fp)) = acoustid::fingerprint(p).await else { continue };
         let Ok(res) = encore_http::acoustid::lookup(st, d, &fp).await else { continue };
         let Some(best) = res.first().filter(|b| b["score"].as_f64().unwrap_or(0.0) >= 0.7) else { continue };
-        let rgs: std::collections::HashSet<String> = best["recordings"].as_array().cloned().unwrap_or_default().iter()
+        let rgs: std::collections::HashSet<String> = best["recordings"].as_array().into_iter().flatten()
             .flat_map(|r| r["release_group_ids"].as_array().cloned().unwrap_or_default()).filter_map(|g| g.as_str().map(String::from)).collect();
         for g in rgs {
             *votes.entry(g).or_default() += 1;
@@ -159,12 +159,12 @@ pub async fn release(st: &impl Ctx, id: &str) -> anyhow::Result<Value> {
             let d: Value = discogs::get(st, &path).send().await?.json().await?;
             let names = |v: &Value| v.as_array().map(|a| a.iter().map(|x| s(&x["name"])).collect::<Vec<_>>().join(", ")).unwrap_or_default();
             let artist = names(&d["artists"]);
-            let tracks = d["tracklist"].as_array().cloned().unwrap_or_default().iter().filter(|t| t["type_"].as_str().unwrap_or("track") == "track").enumerate()
+            let tracks = d["tracklist"].as_array().into_iter().flatten().filter(|t| t["type_"].as_str().unwrap_or("track") == "track").enumerate()
                 .map(|(i, t)| { let a = names(&t["artists"]); trk(&s(&t["title"]), if a.is_empty() { &artist } else { &a }, i as i64 + 1, 1, dur(&t["duration"]).as_f64().unwrap_or(0.0), Value::Null) }).collect();
             let imgs = d["images"].as_array().cloned().unwrap_or_default();
             let img = imgs.iter().find(|i| i["type"] == "primary").or(imgs.first()).map(|i| i["uri"].clone()).unwrap_or(Value::Null);
             let labels = d["labels"].as_array().cloned().unwrap_or_default();
-            let barcode = d["identifiers"].as_array().cloned().unwrap_or_default().iter().find(|i| i["type"] == "Barcode").map(|i| s(&i["value"])).unwrap_or_default();
+            let barcode = d["identifiers"].as_array().into_iter().flatten().find(|i| i["type"] == "Barcode").map(|i| s(&i["value"])).unwrap_or_default();
             let date = if d["released"].is_null() { s(&d["year"]) } else { s(&d["released"]) };
             Ok(rel(id, &s(&d["title"]), &artist, &date, tracks, "Discogs", json!({
                 "label": labels.iter().take(2).map(|l| s(&l["name"])).collect::<Vec<_>>().join(", "), "catalog": labels.iter().take(2).map(|l| s(&l["catno"])).collect::<Vec<_>>().join(", "),
@@ -197,7 +197,7 @@ pub async fn art_candidates(st: &impl Ctx, artist: &str, album: &str, rgid: Opti
         let mut out = vec![];
         for (kind, i) in ids.into_iter().take(4) {
             let Ok(d) = getj(coverartarchive::images(st, kind, &i)).await else { continue };
-            for img in d["images"].as_array().cloned().unwrap_or_default().iter().take(6) {
+            for img in d["images"].as_array().into_iter().flatten().take(6) {
                 if img["front"].as_bool().unwrap_or(false) || img["types"].as_array().is_some_and(|t| t.iter().any(|x| x == "Front")) {
                     let thumb = if img["thumbnails"]["500"].is_string() { img["thumbnails"]["500"].clone() } else { img["image"].clone() };
                     out.push(json!({ "url": img["image"], "thumb": thumb, "source": "Cover Art Archive", "label": kind.replace('-', " ") }));
@@ -213,7 +213,7 @@ pub async fn art_candidates(st: &impl Ctx, artist: &str, album: &str, rgid: Opti
     };
     let apple = async {
         getj(apple::search(st, &format!("{artist} {album}"), "album", 8)).await
-            .map(|d| d["results"].as_array().cloned().unwrap_or_default().iter().filter(|a| a["artworkUrl100"].is_string()).map(|a| {
+            .map(|d| d["results"].as_array().into_iter().flatten().filter(|a| a["artworkUrl100"].is_string()).map(|a| {
                 let u = s(&a["artworkUrl100"]);
                 json!({ "url": u.replace("100x100bb", "3000x3000bb"), "thumb": u.replace("100x100bb", "300x300bb"), "source": "Apple Music",
                     "label": format!("{} – {}", s(&a["artistName"]), s(&a["collectionName"])), "size": "up to 3000×3000" })
@@ -231,7 +231,7 @@ pub async fn art_candidates(st: &impl Ctx, artist: &str, album: &str, rgid: Opti
             return vec![];
         }
         let Ok(r) = discogs::search(st, &[("artist", artist), ("release_title", album), ("type", "release"), ("per_page", "6")]).send().await else { return vec![] };
-        r.json::<Value>().await.map(|d| d["results"].as_array().cloned().unwrap_or_default().iter()
+        r.json::<Value>().await.map(|d| d["results"].as_array().into_iter().flatten()
             .filter(|x| x["cover_image"].as_str().is_some_and(|c| !c.contains("spacer.gif")))
             .map(|x| json!({ "url": x["cover_image"], "thumb": if x["thumb"].is_string() { x["thumb"].clone() } else { x["cover_image"].clone() }, "source": "Discogs", "label": x["title"] }))
             .collect()).unwrap_or_default()

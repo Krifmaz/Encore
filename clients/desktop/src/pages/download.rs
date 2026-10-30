@@ -817,7 +817,7 @@ fn slskd_row<'a>(f: &Value, _ctx: &Ctx<'a>) -> El<'a, Message> {
                 .spacing(2)
                 .width(Length::Fill),
                 small_muted(fmt::s(f, "username")).width(120),
-                badge(state.clone(), kind),
+                badge(state, kind),
                 column![
                     progress_bar(0.0..=100.0, pct as f32).girth(5).style(theme::progress).length(160),
                     widgets::faint(format!("{}%{speed}", pct.round() as i64)).size(12),

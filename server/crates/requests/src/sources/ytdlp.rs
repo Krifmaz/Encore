@@ -285,8 +285,8 @@ async fn json_out(st: &impl Ctx, args: &[&str]) -> anyhow::Result<Value> {
 /// Search YouTube: the first `n` results as `{url, title, …}`.
 pub async fn search(st: &impl Ctx, query: &str, n: usize) -> anyhow::Result<Vec<Value>> {
     let info = json_out(st, &["-J", "--flat-playlist", "--no-warnings", &format!("ytsearch{n}:{query}")]).await?;
-    Ok(info["entries"].as_array().cloned().unwrap_or_default().iter().map(|e| json!({
-        "url": e["url"].as_str().map(String::from).unwrap_or(format!("https://www.youtube.com/watch?v={}", e["id"].as_str().unwrap_or(""))),
+    Ok(info["entries"].as_array().into_iter().flatten().map(|e| json!({
+        "url": e["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://www.youtube.com/watch?v={}", e["id"].as_str().unwrap_or(""))),
         "title": e["title"], "duration": e["duration"], "channel": e["channel"].as_str().or(e["uploader"].as_str()) })).collect())
 }
 

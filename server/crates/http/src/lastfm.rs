@@ -11,7 +11,12 @@ pub const API: &str = "https://ws.audioscrobbler.com/2.0/";
 pub fn sig(params: &[(&str, String)], secret: &str) -> String {
     let mut p: Vec<&(&str, String)> = params.iter().filter(|(k, _)| *k != "format" && *k != "callback").collect();
     p.sort_by_key(|(k, _)| *k);
-    let s: String = p.iter().map(|(k, v)| format!("{k}{v}")).collect::<String>() + secret;
+    let mut s = String::new();
+    for (k, v) in p {
+        s.push_str(k);
+        s.push_str(v);
+    }
+    s.push_str(secret);
     format!("{:x}", md5::compute(s.as_bytes()))
 }
 
@@ -63,7 +68,7 @@ pub async fn get(st: &impl Ctx, method: &str, params: &[(&str, String)]) -> anyh
     }
     let d: Value = request(st, &key, method, params).send().await?.json().await?;
     if !d["error"].is_null() {
-        anyhow::bail!("{}", d["message"].as_str().map(String::from).unwrap_or(format!("Last.fm error {}", d["error"])));
+        anyhow::bail!("{}", d["message"].as_str().map(String::from).unwrap_or_else(|| format!("Last.fm error {}", d["error"])));
     }
     Ok(d)
 }

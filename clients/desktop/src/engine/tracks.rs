@@ -234,7 +234,7 @@ mod tests {
         // a group listen's entry is the same library song
         let live = Track { source: Source::Live { live: format!("{GROUP_LIVE}q7") }, ..t.clone() };
         assert_eq!(encore_id(&live), Some(12));
-        let other = Track { source: Source::Live { live: "airplay".into() }, ..t.clone() };
+        let other = Track { source: Source::Live { live: "airplay".into() }, ..t };
         assert_eq!(encore_id(&other), None);
         assert!(from_encore("http://e", &auth, &serde_json::json!({ "title": "no id" })).is_none());
         assert_eq!(cookie("abc").1, "encore_session=abc");

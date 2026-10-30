@@ -157,6 +157,13 @@ jobs:
       - name: Cadenza is pinned to the same rev everywhere
         continue-on-error: true
         run: bash scripts/check-cadenza-pins.sh
+      # Dependencies a Cargo.toml lists but no code uses (every Rust project of the repo: the server's crates,
+      # the web app, the desktop app and the phone's engine): they only cost build time, so the check fails.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - name: No unused dependencies
+        run: cargo machete
       - name: Server tests (every crate of the workspace)
         working-directory: server
         run: cargo test --workspace --locked

@@ -293,7 +293,7 @@ fn paint_norm(b: &Element) {
         clip = if p.clip { "checked" } else { "" },
         disabled = if on { "" } else { "disabled" }));
     let save: Rc<dyn Fn(NormPrefs)> = {
-        let (b, link) = (b.clone(), link.clone());
+        let (b, link) = (b.clone(), link);
         Rc::new(move |n: NormPrefs| {
             match &link {
                 Some(l) => {
@@ -318,7 +318,7 @@ fn paint_norm(b: &Element) {
         dom::on(&r, "change", move |_| save(NormPrefs { target: num(&dom::value(&r2)) as i64, ..p.clone() }));
     }
     if let Some(c) = qs_in(b, "#pb-norm-clip") {
-        let (save, p, c2) = (save.clone(), p.clone(), c.clone());
+        let (save, p, c2) = (save.clone(), p, c.clone());
         dom::on(&c, "change", move |_| save(NormPrefs { clip: dom::checked(&c2), ..p.clone() }));
     }
 }

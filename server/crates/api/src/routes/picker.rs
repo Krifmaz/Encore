@@ -864,7 +864,7 @@ async fn search_torznab_song(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyho
 async fn search_deezer(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let kind = if b.kind == "album" { "album" } else { "track" };
     let d: Value = deezer::search(st, kind, q, 25).send().await?.json().await?;
-    let mut out: Vec<Value> = d["data"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+    let mut out: Vec<Value> = d["data"].as_array().into_iter().flatten().map(|x| {
         let a = x["artist"]["name"].as_str().unwrap_or("");
         let explicit = if x["explicit_lyrics"].as_bool().unwrap_or(false) { "explicit" } else { "" };
         if kind == "album" {
@@ -976,7 +976,7 @@ fn tidal_rows(b: &SearchBody, d: &Value, order: &[String]) -> Vec<Value> {
         let Some(x) = items.iter().find(|x| x["id"].as_str() == Some(id)) else { continue };
         let a = &x["attributes"];
         let rel = |name: &str, typ: &str| -> Vec<Value> {
-            x["relationships"][name]["data"].as_array().cloned().unwrap_or_default().iter()
+            x["relationships"][name]["data"].as_array().into_iter().flatten()
                 .filter_map(|r| inc.get(&(typ.to_string(), r["id"].as_str().unwrap_or("").to_string())).cloned()).collect()
         };
         let artists = rel("artists", "artists").iter().filter_map(|v| v["name"].as_str().map(String::from)).collect::<Vec<_>>().join(", ");
@@ -1291,7 +1291,7 @@ async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickB
     } else {
         return Err(err(400, "Nothing to download"));
     };
-    let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
+    let label = b.title.clone().or_else(|| b.payload["title"].as_str().map(String::from)).unwrap_or_default();
     let skip = b.no_check.then(|| json!({ "by": u.s("username"), "why": "pick", "at": encore_db::now() }));
     let (id, status) = create_pick_checked(&st, &u, &req, &b.source, b.payload, &label, b.request_id, skip)?;
     drop(hold);
@@ -1328,7 +1328,7 @@ fn create_pick_checked(st: &AppState, u: &encore_db::Row, req: &NewRequest, sour
         let msg: String = if label.is_empty() { "Manual pick".into() } else { format!("Manual pick: {label}").chars().take(200).collect() };
         st.db.execute("UPDATE requests SET message=? WHERE id=?", p![msg, id])?;
     }
-    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}{}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default(),
+    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}{}", u.s("username"), req.title.clone().or_else(|| req.album.clone()).unwrap_or_default(),
         if unchecked { " (without the audio check)" } else { "" }));
     Ok((id, status))
 }

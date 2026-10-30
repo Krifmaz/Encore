@@ -195,7 +195,7 @@ fn precedence_handoff_extension_pasted() {
     assert_eq!(choose(&c, NOW), Some(Kind::Extension));
     // nothing signed in: the freshest cookies still go to yt-dlp
     let stale = signed_in_jar(NOW - 10);
-    let c = vec![cand(Kind::Handoff, stale.clone(), Some(100.0), None), cand(Kind::Pasted, stale.clone(), Some(500.0), None), cand(Kind::Extension, Jar::default(), Some(900.0), None)];
+    let c = vec![cand(Kind::Handoff, stale.clone(), Some(100.0), None), cand(Kind::Pasted, stale, Some(500.0), None), cand(Kind::Extension, Jar::default(), Some(900.0), None)];
     assert_eq!(choose(&c, NOW), Some(Kind::Pasted));
     assert_eq!(choose(&[cand(Kind::Pasted, Jar::default(), None, None)], NOW), None);
 }

@@ -425,7 +425,7 @@ fn paint_playback(st: &Rc<Look>) {
             dom::on(&c, "change", move |_| {
                 let v = dom::value(&c2);
                 // the rate is stored as a number when it is one
-                let v = if key == "dsp_rate" && !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) { v.parse::<f64>().map(|n| json!(n as i64)).unwrap_or(json!(v)) } else { json!(v) };
+                let v = if key == "dsp_rate" && !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) { v.parse::<f64>().map(|n| json!(n as i64)).unwrap_or_else(|_| json!(v)) } else { json!(v) };
                 set_playback(&st2, json!({ key: v }));
             });
         }
@@ -451,7 +451,7 @@ fn paint_playback(st: &Rc<Look>) {
                 let ty = c.get_attribute("type").unwrap_or_default();
                 let raw = dom::value(c);
                 let v = if ty == "checkbox" { json!(dom::checked(c)) }
-                    else if ty == "range" { eng_num(&raw).unwrap_or(json!(0)) }
+                    else if ty == "range" { eng_num(&raw).unwrap_or_else(|| json!(0)) }
                     else if k == "rate" || k == "bits" { eng_num(&raw).unwrap_or_else(|| json!(raw)) }
                     else { json!(raw) };
                 send_eng(json!({ k: v }));

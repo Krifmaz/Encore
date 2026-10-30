@@ -455,7 +455,7 @@ pub fn write_ignore_files(cfg: &encore_config::Config) {
     if rel.is_empty() {
         return;
     }
-    for (file, line) in [(".plexignore", format!("{rel}/*")), (".ndignore", rel.clone())] {
+    for (file, line) in [(".plexignore", format!("{rel}/*")), (".ndignore", rel)] {
         let path = lib.join(file);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         if text.lines().any(|l| l.trim() == line) {

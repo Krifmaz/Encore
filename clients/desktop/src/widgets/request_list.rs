@@ -573,7 +573,7 @@ pub fn request_text(r: &Value, server_version: &str) -> String {
         add("Album", fmt::s(r, "album"));
     }
     add("Link", fmt::s(r, "url"));
-    add("Kind", kind.clone());
+    add("Kind", kind);
     let status = fmt::s(r, "status");
     let (_, label) = super::catalog::status_words(&status);
     let why = if status == "waiting" { wait_words(&fmt::s(r, "wait_reason")) } else { "" };
@@ -1589,7 +1589,7 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
     };
     let body = container(row![thumb, words, right].spacing(14).align_y(Alignment::Center)).padding([11, 16]);
     // a right-click opens the row's ⋯ menu at the pointer
-    let body = iced::widget::mouse_area(body).on_right_press(Msg::Menu(id, status.clone()));
+    let body = iced::widget::mouse_area(body).on_right_press(Msg::Menu(id, status));
     column![body, super::divider()].into()
 }
 
@@ -1991,7 +1991,7 @@ mod tests {
         assert_eq!(lead.text, "The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)");
         assert_eq!(lead.from, "YouTube Music · https://music.youtube.com/watch?v=x · Moonlight Shadow.opus and 2 more");
         // the kept file is gone: Download anyway
-        let mut r2 = r.clone();
+        let mut r2 = r;
         r2["anyway"] = json!({ "action": "download", "id": 1, "text": "The audio sounds like Diase – Sun, not Moonlight Shadow" });
         let d = anyway(&r2).unwrap();
         assert!(!d.keep);
@@ -2071,7 +2071,7 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         let admin = json!({ "ok": false, "path": "/music", "op": "mkdir", "error": "Input/output error (os error 5)",
             "text": "Imports are paused: /music is not writable – mkdir /music/.encore-probe-12-3: Input/output error (os error 5). Checked 14:10, next check 14:20" });
         assert_eq!(storage_text(&admin, true).unwrap(), fmt::s(&admin, "text"));
-        let mut bare = admin.clone();
+        let mut bare = admin;
         bare["text"] = Value::Null;
         assert_eq!(storage_text(&bare, true).unwrap(), "Imports are paused: /music is not writable – mkdir: Input/output error (os error 5).");
         assert_eq!(

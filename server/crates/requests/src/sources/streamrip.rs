@@ -560,7 +560,7 @@ pub async fn reset_config(st: &impl Ctx) -> anyhow::Result<ConfigCheck> {
 /// Diagnostics: does streamrip load its config? Read-only – nothing is written or regenerated here.
 pub async fn config_loads_check(st: &impl Ctx) -> Value {
     let path = config_path(st);
-    let bin = binary(st).unwrap_or("streamrip".into());
+    let bin = binary(st).unwrap_or_else(|| "streamrip".into());
     let (ok, detail) = match binary(st) {
         None => (false, NOT_INSTALLED_MSG.to_string()),
         Some(_) if !path.is_file() => (false, format!("No config file at {} yet – it is written on the first download, or press Reset streamrip config in Settings → Plugins → streamrip", path.display())),
@@ -1582,7 +1582,12 @@ hires_token_client_id = "fX2JxdmntZWK0ixT"
 
     #[test]
     fn a_long_run_log_keeps_its_end() {
-        let text: String = (0..3000).map(|i| format!("line {i}\n")).collect::<String>() + "Traceback: the real error";
+        let mut text: String = (0..3000).fold(String::new(), |mut s, i| {
+            use std::fmt::Write;
+            let _ = writeln!(s, "line {i}");
+            s
+        });
+        text += "Traceback: the real error";
         let log = cap_log(&text, 2000);
         assert!(log.starts_with("line 0\n"), "{log}");
         assert!(log.ends_with("Traceback: the real error"), "{log}");

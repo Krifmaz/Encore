@@ -108,7 +108,7 @@ pub(super) fn render_full() {
         set_full_listeners(ls);
         return;
     };
-    let s = link.as_ref().map(|l| l.state.clone()).unwrap_or(json!({}));
+    let s = link.as_ref().map(|l| l.state.clone()).unwrap_or_else(|| json!({}));
     let (idx, repeat, shuffle_on, q): (i64, String, bool, Vec<Value>) = if link.is_some() {
         let r = s.s("repeat");
         (if s.is_nullish("index") { -1 } else { s.i("index") }, if ["off", "all", "one"].contains(&r.as_str()) { r } else { "off".into() }, s.truthy("shuffle"), s.a("queue"))
@@ -241,7 +241,7 @@ pub(super) fn render_full() {
     wire(&mut ls, &f, "#f-next", "click", |_| next(false));
     wire(&mut ls, &f, "#f-prev", "click", |_| prev());
     wire(&mut ls, &f, "#f-shuffle", "click", move |_| set_shuffle(!shuffle_on));
-    { let r = repeat.clone(); wire(&mut ls, &f, "#f-repeat", "click", move |_| set_repeat(next_repeat(&r))); }
+    { let r = repeat; wire(&mut ls, &f, "#f-repeat", "click", move |_| set_repeat(next_repeat(&r))); }
     wire(&mut ls, &f, "#f-lyrics", "click", |_| set_pane(if st(|s| s.pane == "lyrics") { "now" } else { "lyrics" }));
     wire(&mut ls, &f, "#f-q-clear", "click", |_| clear_up_next());
     wire(&mut ls, &f, "#f-q-shuffle", "click", |_| { g_shuffle(); });

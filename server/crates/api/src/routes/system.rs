@@ -448,7 +448,7 @@ pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) 
             }
             "torznab" | "prowlarr" | "qbit" | "sab" => torznab::status(&st).await,
             "email" => {
-                let to = st.db.one("SELECT email FROM users WHERE id=?", p![u.map(|u| u.i("id")).unwrap_or(0)])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or(st.cfg.str("smtp_from"));
+                let to = st.db.one("SELECT email FROM users WHERE id=?", p![u.map(|u| u.i("id")).unwrap_or(0)])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or_else(|| st.cfg.str("smtp_from"));
                 if to.is_empty() {
                     msg(false, "Add an email address to your account (Account page) to receive the test")
                 } else {

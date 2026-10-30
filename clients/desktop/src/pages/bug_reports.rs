@@ -692,7 +692,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .center_x(Length::Fill)
             .into()
         }
-        Some(Ok(rows)) => column(rows.iter().map(|r| report_row(r, ctx)).collect::<Vec<_>>()).into(),
+        Some(Ok(rows)) => column(rows.iter().map(|r| report_row(r, ctx))).into(),
     };
     column![
         head,

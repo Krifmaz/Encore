@@ -99,7 +99,7 @@ pub fn bind_vpn(hub: &Rc<Hub>, g: Rc<Group>, card: &Element) {
                     dom::set_html(&state, &format!("{}{failed}", diagnostics::vpn_state_html(&r)));
                 }
                 Err(err) => {
-                    let m = if err.message.is_empty() { "Test failed".to_string() } else { err.message.clone() };
+                    let m = if err.message.is_empty() { "Test failed".to_string() } else { err.message };
                     dom::set_html(&state, &format!(r##"<span style="color:var(--err)">{}</span>"##, esc(&m)));
                 }
             }
@@ -301,7 +301,7 @@ pub fn bind_cadenza_cache(hub: &Rc<Hub>, card: &Element) {
     let line = dom::qs_in(card, "#cadenza-engine");
     let locked = hub.values.borrow().o("_meta").o("cadenza_engine_settings").s("source") == "env";
     let refresh: Rc<dyn Fn()> = {
-        let (state, card) = (state.clone(), card.clone());
+        let (state, card) = (state, card.clone());
         Rc::new(move || {
             let (state, card, line) = (state.clone(), card.clone(), line.clone());
             dom::spawn(async move {
@@ -525,7 +525,7 @@ pub fn bind_soulseek(hub: &Rc<Hub>, card: &Element) {
         })
     };
     let refresh: Rc<dyn Fn()> = {
-        let (state, paint) = (state.clone(), paint.clone());
+        let (state, paint) = (state, paint.clone());
         Rc::new(move || {
             let (state, paint) = (state.clone(), paint.clone());
             dom::spawn(async move {
@@ -607,7 +607,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
     let (Some(state), Some(out), Some(btn)) = (dom::qs_in(card, "#tidal-state"), dom::qs_in(card, "#tidal-out"), dom::qs_in(card, "#tidal-signin")) else { return };
     let (Some(paste), Some(toml), Some(save), Some(signout)) = (dom::qs_in(card, "#tidal-paste"), dom::qs_in(card, "#tidal-toml"), dom::qs_in(card, "#tidal-save-tokens"), dom::qs_in(card, "#tidal-signout")) else { return };
     let paint: Rc<dyn Fn(&Value)> = {
-        let (state, out, btn, paste, signout) = (state.clone(), out.clone(), btn.clone(), paste.clone(), signout.clone());
+        let (state, out, btn, paste, signout) = (state.clone(), out.clone(), btn.clone(), paste, signout.clone());
         Rc::new(move |r: &Value| {
             // partial (default lane only) and signed_in never come together: the server reports one or the other
             let partial = r.truthy("partial");
@@ -636,7 +636,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
         })
     };
     {
-        let (paint, state) = (paint.clone(), state.clone());
+        let (paint, state) = (paint.clone(), state);
         dom::spawn(async move {
             match api::get("/system/streamrip/tidal-login").await {
                 Ok(r) => paint(&r),
@@ -647,7 +647,6 @@ pub fn bind_tidal(view: &Element, card: &Element) {
     // Each step has its own link: open the new one when the server moves to step 2.
     let opened: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let open_link: Rc<dyn Fn(&Value)> = {
-        let opened = opened.clone();
         Rc::new(move |r: &Value| {
             let url = r.s("url");
             if r.s("status") == "waiting" && !url.is_empty() && *opened.borrow() != url {
@@ -659,7 +658,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
     // one poll at a time: a new click stops the previous poller
     let polling: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     {
-        let (view, card, out2, btn2, paint, open_link, polling) = (view.clone(), card.clone(), out.clone(), btn.clone(), paint.clone(), open_link.clone(), polling.clone());
+        let (view, card, out2, btn2, paint, open_link, polling) = (view.clone(), card.clone(), out.clone(), btn.clone(), paint.clone(), open_link.clone(), polling);
         dom::on(&btn, "click", move |_| {
             dom::set_disabled(&btn2, true);
             dom::hide(&out2, false);
@@ -696,7 +695,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
         });
     }
     {
-        let (save2, toml, paint) = (save.clone(), toml.clone(), paint.clone());
+        let (save2, toml, paint) = (save.clone(), toml, paint.clone());
         dom::on(&save, "click", move |_| {
             dom::set_disabled(&save2, true);
             let (save, toml, paint) = (save2.clone(), toml.clone(), paint.clone());
@@ -710,7 +709,7 @@ pub fn bind_tidal(view: &Element, card: &Element) {
         });
     }
     {
-        let (out, paint) = (out.clone(), paint.clone());
+        let (out, paint) = (out, paint.clone());
         dom::on(&signout, "click", move |e| {
             e.prevent_default();
             let (out, paint) = (out.clone(), paint.clone());
@@ -807,7 +806,7 @@ mod soulseek_tests {
         // down: the engine log is there to read
         assert!(html.contains("Engine log (last 1 lines)"), "{html}");
         assert_eq!(reconnect_wait(&r), Some(None));
-        let mut r2 = r.clone();
+        let mut r2 = r;
         r2["session"]["reconnect_in"] = json!(12);
         assert_eq!(reconnect_wait(&r2), Some(Some(12)));
         assert_eq!(reconnect_label(Some(12)), "Reconnect now (in 12 s)");

@@ -203,7 +203,7 @@ impl Session {
         let mut c = self.conn();
         c.checked = Some(now);
         if logged_in {
-            let user = user.map(String::from).or(c.username.clone()).unwrap_or_default();
+            let user = user.map(String::from).or_else(|| c.username.clone()).unwrap_or_default();
             let line = c.logged_in(&user, now, encore_core::time::now());
             drop(c);
             Self::note(line);

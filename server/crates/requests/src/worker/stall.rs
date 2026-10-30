@@ -106,15 +106,16 @@ fn restart_import(st: &impl Ctx, r: &mut Req) {
 /// start the way a server restart does ([`queue::restart_detail`]: what was asked for and what MusicBrainz
 /// said stay). Each one's place in the queue is held while it is written. → how many started again
 pub fn watchdog(st: &impl Ctx) -> usize {
-    let rows: Vec<i64> = st.db().query("SELECT id FROM requests WHERE status IN ('searching','importing') ORDER BY id", p![]).unwrap_or_default()
+    let mut rows: Vec<i64> = st.db().query("SELECT id FROM requests WHERE status IN ('searching','importing') ORDER BY id", p![]).unwrap_or_default()
         .into_iter().map(|r| r.i("id")).collect();
     if rows.is_empty() {
         return 0;
     }
     let orphans: Vec<(i64, queue::Hold)> = {
         let mut tasks = st.requests().tasks.0.lock().unwrap_or_else(|p| p.into_inner());
-        let gone: Vec<i64> = rows.into_iter().filter(|id| !tasks.get(id).is_some_and(|h| !h.is_finished())).collect();
-        gone.into_iter().map(|id| (id, queue::hold_place(&mut tasks, id))).collect()
+        // keep the ids no live task works on, in place (the lookup borrows `tasks`, which hold_place then changes)
+        rows.retain(|id| !tasks.get(id).is_some_and(|h| !h.is_finished()));
+        rows.into_iter().map(|id| (id, queue::hold_place(&mut tasks, id))).collect()
     };
     let mut n = 0;
     for (id, _hold) in orphans {

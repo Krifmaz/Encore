@@ -123,7 +123,7 @@ pub async fn remove(st: &impl Ctx, hash: &str) {
 /// The torrent's files in Transmission's order. None until a magnet's metadata is there.
 pub async fn files(st: &impl Ctx, hash: &str) -> anyhow::Result<Option<Vec<String>>> {
     let v = rpc(st, "torrent-get", json!({ "ids": [hash], "fields": ["hashString", "files"] })).await?;
-    let names: Vec<String> = v["torrents"][0]["files"].as_array().cloned().unwrap_or_default().iter().map(|f| f["name"].as_str().unwrap_or("").to_string()).collect();
+    let names: Vec<String> = v["torrents"][0]["files"].as_array().into_iter().flatten().map(|f| f["name"].as_str().unwrap_or("").to_string()).collect();
     Ok(if names.is_empty() { None } else { Some(names) })
 }
 

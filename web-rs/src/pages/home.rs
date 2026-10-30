@@ -218,13 +218,12 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     let Some(body) = m.qs(".modal-body") else { return };
                     foryou::bind_tracks(&body, tracks);
                     if let Some(b) = dom::qs_in(&body, "#mfy-play") {
-                        let p = p.clone();
                         dom::on(&b, "click", move |_| play_owned(&p));
                     }
                     if let Some(b) = dom::qs_in(&body, "#mfy-req") {
-                        let (missing, btn) = (missing.clone(), b.clone());
+                        let (missing, btn) = (missing, b.clone());
                         dom::on(&b, "click", move |e| {
-                            let (missing, btn) = (missing.clone(), dom::target_el(e).and_then(|t| dom::closest_of(&t, "button")).unwrap_or(btn.clone()));
+                            let (missing, btn) = (missing.clone(), dom::target_el(e).and_then(|t| dom::closest_of(&t, "button")).unwrap_or_else(|| btn.clone()));
                             dom::spawn(async move { foryou::request_all(missing, btn).await });
                         });
                     }

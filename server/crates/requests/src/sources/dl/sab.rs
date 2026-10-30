@@ -126,7 +126,7 @@ pub async fn finished_outside(st: &impl Ctx) -> anyhow::Result<Vec<(String, Stri
         return Ok(vec![]);
     }
     let h = sab(st, &[("mode", "history"), ("category", &cat), ("limit", "100")]).await?;
-    Ok(h["history"]["slots"].as_array().cloned().unwrap_or_default().iter().filter(|s| {
+    Ok(h["history"]["slots"].as_array().into_iter().flatten().filter(|s| {
         let name = s["name"].as_str().unwrap_or("");
         s["status"] == "Completed" && !name.starts_with("encore-") && s["category"].as_str().is_none_or(|c| c.eq_ignore_ascii_case(&cat))
     }).filter_map(|s| {

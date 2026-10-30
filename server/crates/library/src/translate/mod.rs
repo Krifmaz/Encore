@@ -205,7 +205,7 @@ pub const MODES: [(&str, &str); 4] = [
 
 /// A user's (mode, target language) from their account prefs.
 pub fn prefs_of(u: &Row) -> (Mode, &'static str) {
-    let p: Value = serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}));
+    let p: Value = serde_json::from_str(&u.s("prefs")).unwrap_or_else(|_| json!({}));
     (Mode::parse(p["translate_mode"].as_str().unwrap_or("off")), script::target(p["translate_lang"].as_str().unwrap_or(script::DEFAULT_TARGET)))
 }
 

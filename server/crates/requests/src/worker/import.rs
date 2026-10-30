@@ -17,7 +17,7 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
     let (surround, stereo) = encore_library::surround::split(files).await;
     if !surround.is_empty() {
         let (filed, _) = encore_library::surround::import(st, &surround, &surround_want(r)).await?;
-        let src = r.opt("source").unwrap_or("import".into());
+        let src = r.opt("source").unwrap_or_else(|| "import".into());
         log_push(r, format!("{src}: {} surround file{} filed in the Surround library", filed.len(), if filed.len() == 1 { "" } else { "s" }));
         if stereo.is_empty() {
             return Err(tagger::Rejected::quality("Only a surround version (filed in the Surround library), no stereo copy".into()).into());
@@ -25,14 +25,14 @@ pub(super) async fn import(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
     }
     let files = if surround.is_empty() { files.to_vec() } else { stereo };
     let files = files.as_slice();
-    let hint = r.hint().or(hint.map(String::from));
+    let hint = r.hint().or_else(|| hint.map(String::from));
     let check = !rejected::skips_check(&r.d);
     let album = r.s("kind") == "album";
     if check {
         let title = if album { r.album_title() } else { r.s("title") };
         if let (Some(words), Some(f)) = (encore_library::matcher::altered_words(&title), files.first()) {
             if tagger::will_verify(st, f) {
-                let src = r.opt("source").unwrap_or("import".into());
+                let src = r.opt("source").unwrap_or_else(|| "import".into());
                 log_push(r, format!("{src}: {}", encore_library::acoustid::skipped_detail(&words)));
             }
         }

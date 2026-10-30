@@ -776,7 +776,7 @@ impl Registry {
         self.0.statuses.lock().unwrap().remove(id);
         self.0.latest.lock().unwrap().remove(id);
         self.0.db.log("info", &format!("Plugin {} removed", m.plugin.name));
-        Ok(self.card(id).unwrap_or(json!({ "id": id, "removed": true })))
+        Ok(self.card(id).unwrap_or_else(|| json!({ "id": id, "removed": true })))
     }
 
     // ---- checking for updates -----------------------------------------------------------------------------------
@@ -1532,7 +1532,7 @@ pub fn field_json(m: &Manifest, s: &manifest::Setting, cfg: &Config) -> Value {
             "key": s.key, "label": s.label, "help": s.help, "type": s.kind.as_deref().unwrap_or("text"),
             "options": s.options.iter().map(|(value, label)| json!({ "value": value, "label": label })).collect::<Vec<_>>(),
             "when": s.when, "secret": def.is_some_and(|d| d.secret) || s.kind.as_deref() == Some("password"),
-            "env": def.and_then(|d| d.env), "env_locked": cfg.env_locked(&s.key), "default": def.map(|d| d.default.to_json()).or(s.default.clone()),
+            "env": def.and_then(|d| d.env), "env_locked": cfg.env_locked(&s.key), "default": def.map(|d| d.default.to_json()).or_else(|| s.default.clone()),
             "unit": s.unit, "min": s.min.map(number), "max": s.max.map(number), "step": s.step.map(number), "full": s.full, "advanced": s.advanced, "part": s.part,
         });
     }

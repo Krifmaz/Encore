@@ -393,7 +393,7 @@ pub fn pull_error(image: &str, e: &str) -> String {
 /// Pull `IMAGE:tag`, then create and start the helper container from it. Ok(the helper's name).
 pub async fn start_update(d: &Docker, self_id: &str, tag: &str) -> Result<String, String> {
     let image = format!("{IMAGE}:{tag}");
-    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| pull_error(&image, &e.to_string()))?;
+    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| pull_error(&image, &e))?;
     let me = d.inspect(self_id).await.map_err(|e| format!("The Docker socket refused the request: {e}"))?
         .ok_or_else(|| "Not running in a container".to_string())?;
     let body = selfupdate::plan_helper_body(&me, &image).ok_or_else(|| "The Docker socket is not mounted from the host (no bind for /var/run/docker.sock)".to_string())?;

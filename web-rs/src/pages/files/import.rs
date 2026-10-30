@@ -254,7 +254,7 @@ fn other_matches(im: Rc<Im>, album: Value) {
     let provider = Rc::new(RefCell::new("musicbrainz".to_string()));
     let seq = Rc::new(Cell::new(0u32));
     let search: Rc<dyn Fn()> = {
-        let (m, res, provider, seq, im, folder) = (m.clone(), res.clone(), provider.clone(), seq.clone(), im.clone(), folder.clone());
+        let (m, res, provider, seq, im, folder) = (m.clone(), res.clone(), provider.clone(), seq, im.clone(), folder.clone());
         Rc::new(move || {
             let (m, res, provider, seq, im, folder) = (m.clone(), res.clone(), provider.borrow().clone(), seq.clone(), im.clone(), folder.clone());
             let n = seq.get() + 1;
@@ -290,7 +290,7 @@ fn other_matches(im: Rc<Im>, album: Value) {
         })
     };
     {
-        let (provider, search, m2) = (provider.clone(), search.clone(), m.clone());
+        let (provider, search, m2) = (provider, search.clone(), m.clone());
         dom::on_sel(&m.el, "#om-prov", "click", move |e| {
             let Some(b) = dom::closest(e, "[data-p]") else { return };
             *provider.borrow_mut() = dom::data(&b, "p");
@@ -303,7 +303,7 @@ fn other_matches(im: Rc<Im>, album: Value) {
         dom::on_sel(&m.el, "#om-q", "submit", move |e| { dom::prevent(e); search(); });
     }
     {
-        let (m2, folder) = (m.clone(), folder.clone());
+        let (m2, folder) = (m, folder);
         let pick = move |rid: String| {
             let (m, im, folder) = (m2.clone(), im.clone(), folder.clone());
             dom::spawn(async move {

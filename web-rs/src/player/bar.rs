@@ -267,11 +267,10 @@ pub fn customize_bar_modal() {
         move || -> Vec<String> { m.qsa("[data-bar]").iter().filter(|b| dom::checked(b)).map(|b| dom::data(b, "bar")).collect() }
     };
     {
-        let read = read.clone();
         dom::on_each(&m.el, "[data-bar]", "change", move |_, _| set_bar_buttons(&read()));
     }
     if let Some(r) = m.qs("[data-bar-reset]") {
-        let m2 = m.clone();
+        let m2 = m;
         dom::on(&r, "click", move |_| {
             for b in m2.qsa("[data-bar]") { dom::set_checked(&b, BAR_DEFAULT.contains(&dom::data(&b, "bar").as_str())); }
             set_bar_buttons(&BAR_DEFAULT.iter().map(|s| s.to_string()).collect::<Vec<_>>());

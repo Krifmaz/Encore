@@ -279,7 +279,7 @@ pub async fn analyze(media: &Media, path: &Path, expected: Option<f64>, min_lufs
     }
     let ps = path.to_string_lossy().to_string();
     let m = media.clone();
-    let info = tokio::task::spawn_blocking(move || m.audio_info(&ps)).await.unwrap_or(json!({}));
+    let info = tokio::task::spawn_blocking(move || m.audio_info(&ps)).await.unwrap_or_else(|_| json!({}));
     let tags = { let ps = path.to_string_lossy().to_string(); tokio::task::spawn_blocking(move || crate::tags::read_tags(&ps)).await.unwrap_or_default() };
     let rate = info["sample_rate"].as_u64().unwrap_or(44100).max(8000) as u32;
     let duration = info["duration"].as_f64().unwrap_or(0.0);

@@ -179,7 +179,7 @@ fn sign_in_answer(status: u16, v: &Value) -> SignIn {
         200 => SignIn::Done(acct),
         202 => SignIn::NeedsCode(acct),
         _ => {
-            let why = acct.error.clone().unwrap_or_else(|| format!("the wrapper answered {status}"));
+            let why = acct.error.unwrap_or_else(|| format!("the wrapper answered {status}"));
             SignIn::Refused(if status == 401 { format!("Apple refused the sign-in: {why}") } else { format!("The sign-in failed: {why}") })
         }
     }

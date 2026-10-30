@@ -759,11 +759,11 @@ impl Fm {
         if self.in_trash() {
             { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::new("Restore", &svg_restore(), move || dom::spawn(me.clone().restore(idx.clone())))); }
             items.push(MenuItem::SEP);
-            { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::danger("Delete forever", &icon("trash"), move || dom::spawn(me.clone().delete_forever(idx.clone())))); }
+            { let (me, idx) = (self.clone(), idx); items.push(MenuItem::danger("Delete forever", &icon("trash"), move || dom::spawn(me.clone().delete_forever(idx.clone())))); }
         } else if multi {
             if w {
                 { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::new(&format!("Move {} items", idx.len()), &svg_move(), move || me.move_items(idx.clone()))); }
-                { let (me, idx) = (self.clone(), idx.clone()); items.push(MenuItem::danger(logic::delete_label(me.trash_keep().0), &icon("trash"), move || dom::spawn(me.clone().trash_items(idx.clone())))); }
+                { let (me, idx) = (self.clone(), idx); items.push(MenuItem::danger(logic::delete_label(me.trash_keep().0), &icon("trash"), move || dom::spawn(me.clone().trash_items(idx.clone())))); }
             }
         } else {
             let Some(e) = self.row(i) else { return };

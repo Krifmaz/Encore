@@ -153,7 +153,7 @@ fn wire_search(view: &Element, id: &str, rows: &str, noun: (&'static str, &'stat
     ) else { return };
     // filter every row against the box's text, then update the clear button and the found line
     let apply: Rc<dyn Fn()> = {
-        let (view, input, clear, found, rows) = (view.clone(), input.clone(), clear.clone(), found.clone(), rows.to_string());
+        let (view, input, clear, found, rows) = (view.clone(), input.clone(), clear.clone(), found, rows.to_string());
         Rc::new(move || {
             let q = dom::value(&input);
             // rows removed meanwhile (× on a song) are no longer in the DOM, so they aren't counted
@@ -318,7 +318,7 @@ fn merge_into_modal(pid: i64, name: &str) {
         .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Merge</button>"#));
     fill_targets(&m, "#minto", vec![pid]);
     if let Some(ok) = m.qs("#ok") {
-        let m2 = m.clone();
+        let m2 = m;
         dom::on(&ok, "click", move |_| {
             let m3 = m2.clone();
             dom::spawn(async move {
@@ -429,7 +429,7 @@ fn render_linked(view: &Element, id: &str, pl: &Value) {
         });
     }
     {
-        let rows = items.clone();
+        let rows = items;
         dom::on_sel(view, "tbody", "click", move |e| {
             let Some(b) = dom::closest(e, "[data-ptmenu]") else { return };
             let Some(it) = dom::data(&b, "ptmenu").parse::<usize>().ok().and_then(|i| rows.get(i)) else { return };
@@ -647,7 +647,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
     }
     // a .txt file fills the list as if it was pasted
     if let Some(f) = m.qs("#imp-file") {
-        let (m2, fold2, open2) = (m.clone(), fold.clone(), open.clone());
+        let (m2, fold2, open2) = (m.clone(), fold.clone(), open);
         dom::on(&f, "change", move |e| {
             let Some(file) = dom::target_el(e).and_then(|t| t.dyn_into::<HtmlInputElement>().ok()).and_then(|i| i.files()).and_then(|l| l.get(0)) else { return };
             let (m3, fold3, open3) = (m2.clone(), fold2.clone(), open2.clone());
@@ -664,7 +664,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
         });
     }
     let body: Rc<dyn Fn() -> Value> = {
-        let (m2, mode2) = (m.clone(), mode.clone());
+        let (m2, mode2) = (m.clone(), mode);
         Rc::new(move || {
             if *mode2.borrow() == "url" { json!({ "url": dom::value_of(&m2.el, "#imp-link").trim() }) } else { json!({ "text": dom::value_of(&m2.el, "#imp-lines") }) }
         })
@@ -704,7 +704,7 @@ pub fn import_modal(url: &str, into: Option<i64>) {
         });
     }
     if let Some(go) = m.qs("#imp-go") {
-        let (m2, body2, go2) = (m.clone(), body.clone(), go.clone());
+        let (m2, body2, go2) = (m, body.clone(), go.clone());
         dom::on(&go, "click", move |e| {
             let btn = dom::target_el(e).unwrap_or_else(|| go2.clone());
             dom::set_disabled(&btn, true);
@@ -793,7 +793,7 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
                     });
                 }
                 if let Some(ok) = m.qs("#ok") {
-                    let m2 = m.clone();
+                    let m2 = m;
                     dom::on(&ok, "click", move |_| {
                         let (m3, ids) = (m2.clone(), ids.clone());
                         dom::spawn(async move {
@@ -1120,7 +1120,7 @@ pub fn render_playlist(view: Element, ctx: Ctx) -> PageFuture {
         }
         {
             // Match… on a row: pick the library song it is
-            let (id2, items2) = (id.clone(), items.clone());
+            let (id2, items2) = (id.clone(), items);
             dom::on_sel(&view, "tbody", "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-match]") else { return };
                 let Some(it) = dom::data(&b, "match").parse::<usize>().ok().and_then(|i| items2.get(i)) else { return };
@@ -1282,7 +1282,7 @@ fn match_modal(pid: &str, it: &Value) {
     // the newest search wins: an older answer that arrives late is dropped
     let gen = Rc::new(RefCell::new(0u32));
     let search: Rc<dyn Fn()> = {
-        let (m2, gen) = (m.clone(), gen.clone());
+        let (m2, gen) = (m.clone(), gen);
         Rc::new(move || {
             let q = dom::value_of(&m2.el, "#mq").trim().to_string();
             *gen.borrow_mut() += 1;
@@ -1348,7 +1348,7 @@ pub fn album_choice(title: &str, go: Rc<dyn Fn(Option<String>)>) {
         <button class="btn ghost" data-m="">Use the admin default</button>
       </div>"#, icon("music"), icon("disc"))));
     if let Some(stack) = m.qs(".stack") {
-        let m2 = m.clone();
+        let m2 = m;
         dom::on(&stack, "click", move |e| {
             let Some(b) = dom::closest(e, "[data-m]") else { return };
             m2.close();
@@ -1368,7 +1368,7 @@ pub fn add_to_playlist_modal(track_ids: Vec<i64>) {
       <div class="row mt"><input class="input" id="newpl" placeholder="…or a new playlist name"><button class="btn" id="mk">{}Create</button></div>"#, icon("plus"))));
         let track_ids = Rc::new(track_ids);
         let add: Rc<dyn Fn(String)> = {
-            let (m2, ids) = (m.clone(), track_ids.clone());
+            let (m2, ids) = (m.clone(), track_ids);
             Rc::new(move |pid: String| {
                 let (m3, ids) = (m2.clone(), ids.clone());
                 dom::spawn(async move {
@@ -1383,7 +1383,7 @@ pub fn add_to_playlist_modal(track_ids: Vec<i64>) {
             dom::on(&m.el, "click", move |e| { if let Some(b) = dom::closest(e, "[data-pl]") { add2(dom::data(&b, "pl")); } });
         }
         if let Some(mk) = m.qs("#mk") {
-            let (m2, add2) = (m.clone(), add.clone());
+            let (m2, add2) = (m, add.clone());
             dom::on(&mk, "click", move |_| {
                 let (m3, add3) = (m2.clone(), add2.clone());
                 dom::spawn(async move {

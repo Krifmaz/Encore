@@ -510,7 +510,7 @@ pub fn streamrip_label(url: Option<&str>, services: &[String]) -> String {
 
 /// The site of a link as the request names its source ("YouTube Music", "bandcamp.com").
 pub fn link_site(url: &str) -> String {
-    let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or("link".into());
+    let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "link".into());
     if host.contains("music.youtube") { "YouTube Music".to_string() } else { host.trim_start_matches("www.").to_string() }
 }
 

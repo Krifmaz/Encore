@@ -843,7 +843,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 let api = ctx.api.clone();
                 let path = format!("/library/albums/{}/retag", state.id);
                 return Task::perform(async move { api.post(&path, body).await }, move |r| {
-                    Message::MatchApplied(provider.clone(), r)
+                    Message::MatchApplied(provider, r)
                 });
             }
         }
@@ -1137,7 +1137,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         button(t(tr(ctx, a, "albumartist")).size(14).font(theme::semibold()))
             .padding(0)
             .style(theme::btn(Btn::Row))
-            .on_press(Message::OpenArtist(artist_name.clone())),
+            .on_press(Message::OpenArtist(artist_name)),
         widgets::muted(meta).size(14),
     ]
     .spacing(0)

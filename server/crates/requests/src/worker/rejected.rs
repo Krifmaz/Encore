@@ -133,7 +133,7 @@ pub(super) async fn keep(st: &impl Ctx, r: &mut Req, files: &[PathBuf], kept: &V
     let n = r.d["rejected"].as_array().into_iter().flatten().filter_map(|e| e["id"].as_i64()).max().unwrap_or(0)
         .max(r.d["rejected_seq"].as_i64().unwrap_or(0)) + 1;
     r.d["rejected_seq"] = json!(n);
-    let src = kept["source"].as_str().filter(|s| !s.is_empty()).map(String::from).or(r.opt("source")).unwrap_or("import".into());
+    let src = kept["source"].as_str().filter(|s| !s.is_empty()).map(String::from).or(r.opt("source")).unwrap_or_else(|| "import".into());
     let mut moved: Vec<PathBuf> = vec![];
     let mut dir = Value::Null;
     if let Some(base) = dir_of(st, r.id) {
@@ -180,7 +180,7 @@ pub(super) async fn keep(st: &impl Ctx, r: &mut Req, files: &[PathBuf], kept: &V
 
 /// A hand pick the audio check turned away fails at once with the reason (the row offers Keep anyway).
 pub(super) async fn fail_pick(st: &impl Ctx, r: &mut Req, rej: &Rejected) {
-    let src = r.opt("source").unwrap_or("import".into());
+    let src = r.opt("source").unwrap_or_else(|| "import".into());
     log_push(r, format!("{src}: {}", rej.why));
     storage::log_failure(st, r, &src, &rej.why);
     fail(st, r, &rej.text).await;
@@ -388,7 +388,7 @@ pub(super) async fn kept_turned_away(st: &impl Ctx, r: &mut Req, e: &anyhow::Err
         d.remove("kept");
         d.remove("wait");
     }
-    let src = r.opt("source").unwrap_or("import".into());
+    let src = r.opt("source").unwrap_or_else(|| "import".into());
     log_push(r, format!("{src}: kept anyway, but turned away by {what}: {e}"));
     fail(st, r, &format!("Kept anyway, but {what} turned it away: {e}")).await;
     Ok(())
@@ -493,7 +493,7 @@ pub fn sweep(st: &impl Ctx) -> usize {
             }
             continue;
         }
-        let d: Value = row.map(|r| serde_json::from_str(&r.s("detail")).unwrap_or(json!({}))).unwrap_or(json!({}));
+        let d: Value = row.map(|r| serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}))).unwrap_or_else(|| json!({}));
         let entries: Vec<&Value> = d["rejected"].as_array().into_iter().flatten().collect();
         let mut keep: Vec<PathBuf> = entries.iter().filter(|x| x["at"].as_f64().is_some_and(|at| t - at < KEEP_SECS))
             .filter_map(|x| x["dir"].as_str().map(PathBuf::from)).collect();
@@ -559,7 +559,7 @@ mod tests {
         std::fs::write(&f, b"x").unwrap();
         let entry = |id: i64, files: Vec<&Path>, pick: Value| json!({ "id": id, "source": "ytdlp", "files": files, "dir": dir, "text": format!("t{id}"), "pick": pick });
         let pick = json!({ "source": "ytmusic", "payload": { "url": "https://music.youtube.com/watch?v=1" } });
-        let d = json!({ "rejected": [entry(1, vec![&f], Value::Null), entry(2, vec![], pick.clone())] });
+        let d = json!({ "rejected": [entry(1, vec![&f], Value::Null), entry(2, vec![], pick)] });
         let m = row_fields("failed", &d, true);
         assert_eq!(m["anyway"], json!({ "action": "keep", "id": 1, "text": "t1" }));
         assert_eq!(m["rejected"][0]["has_file"], true);
@@ -573,7 +573,7 @@ mod tests {
         for s in ["completed", "importing", "cancelled", "pending"] {
             assert_eq!(row_fields(s, &d, true)["anyway"], Value::Null, "{s}");
         }
-        let mut busy = d.clone();
+        let mut busy = d;
         busy["skip_check"] = json!({ "by": "a", "why": "download" });
         assert_eq!(row_fields("downloading", &busy, true)["anyway"], Value::Null);
         assert_eq!(row_fields("failed", &json!({}), true)["anyway"], Value::Null);

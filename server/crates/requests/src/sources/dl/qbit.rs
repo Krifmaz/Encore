@@ -187,7 +187,7 @@ pub async fn finished_outside(st: &impl Ctx) -> anyhow::Result<Vec<(String, Stri
         return Ok(vec![]);
     }
     let list: Value = qbit(st, "torrents/info", None, &[("category", cat), ("filter", "completed".into())]).await?.json().await?;
-    Ok(list.as_array().cloned().unwrap_or_default().iter().filter(|t| {
+    Ok(list.as_array().into_iter().flatten().filter(|t| {
         let state = t["state"].as_str().unwrap_or("");
         let busy = state.starts_with("checking") || state == "moving" || state == "allocating" || state == "error" || state == "missingFiles";
         let ours = t["tags"].as_str().unwrap_or("").split(',').any(|x| x.trim().starts_with("encore-"));
@@ -229,7 +229,7 @@ async fn hash(st: &impl Ctx, id: &str) -> anyhow::Result<Option<String>> {
 pub async fn files(st: &impl Ctx, id: &str) -> anyhow::Result<Option<Vec<String>>> {
     let Some(h) = hash(st, id).await? else { return Ok(None) };
     let v: Value = qbit(st, "torrents/files", None, &[("hash", h)]).await?.json().await?;
-    let mut list: Vec<(i64, String)> = v.as_array().cloned().unwrap_or_default().iter().enumerate()
+    let mut list: Vec<(i64, String)> = v.as_array().into_iter().flatten().enumerate()
         .map(|(i, f)| (f["index"].as_i64().unwrap_or(i as i64), f["name"].as_str().unwrap_or("").to_string())).collect();
     list.sort_by_key(|x| x.0);
     Ok(if list.is_empty() { None } else { Some(list.into_iter().map(|x| x.1).collect()) })

@@ -312,7 +312,7 @@ pub fn fix_song_modal(t: &Value) {
     // `el('#fx-res').onclick = …` is replaced on every identify run
     let res_click: Rc<RefCell<Option<EventListener>>> = Rc::new(RefCell::new(None));
     {
-        let (m, t, slot) = (m.clone(), t.clone(), res_click.clone());
+        let (m, t, slot) = (m.clone(), t.clone(), res_click);
         dom::on_sel(&m.el.clone(), "#fx-id", "click", move |e| {
             let target = dom::target_el(e);
             let (m, t, slot) = (m.clone(), t.clone(), slot.clone());
@@ -346,7 +346,7 @@ pub fn fix_song_modal(t: &Value) {
         });
     }
     {
-        let (m, t) = (m.clone(), t.clone());
+        let (m, t) = (m, t);
         dom::on_sel(&m.el.clone(), "#fx-save", "click", move |e| {
             let target = dom::target_el(e);
             let (m, t) = (m.clone(), t.clone());
@@ -1408,7 +1408,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 });
             }
             {
-                let (view, bulk, wb) = (view.clone(), bulk.clone(), was_busy.clone());
+                let (view, bulk, wb) = (view.clone(), bulk.clone(), was_busy);
                 dom::on_sel(&view.clone(), "#autotag-btn", "click", move |_| {
                     let (view, bulk, wb) = (view.clone(), bulk.clone(), wb.clone());
                     dom::spawn(async move {
@@ -1744,7 +1744,7 @@ fn sweep_bar(body: &Element) {
         running.set(v.truthy("running"));
     }) };
     // follow it until it is over or the bar is gone
-    let follow = { let (show, text) = (show.clone(), text.clone()); Rc::new(move || {
+    let follow = { let (show, text) = (show.clone(), text); Rc::new(move || {
         let (show, text) = (show.clone(), text.clone());
         dom::spawn(async move {
             loop {
@@ -1810,7 +1810,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_album(id.clone(), a.clone())))); }
     items.extend(crate::pages::downloads::menu_items(qt));
     if admin {
-        let (ids, reload) = (ids.clone(), reload.clone());
+        let (ids, reload) = (ids, reload.clone());
         items.push(MenuItem::new("All songs are right (confirm)", &icon("check"), move || {
             let (ids, reload) = (ids.clone(), reload.clone());
             dom::spawn(async move {
@@ -1899,7 +1899,7 @@ fn change_type_modal(id: &str, a: &Value, reload: Rc<dyn Fn()>) {
     let body = format!(r##"<p class="muted" style="margin-top:0">{}</p><div class="type-opts">{rows}</div>"##, esc(&lt::what_is(&a.s("album"))));
     let m = modal(ModalOpts::new("Change type", &body).footer(r##"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ct-save">Save</button>"##));
     let (m2, id) = (m.clone(), id.to_string());
-    dom::on_sel(&m.el.clone(), "#ct-save", "click", move |e| {
+    dom::on_sel(&m.el, "#ct-save", "click", move |e| {
         let target = dom::target_el(e);
         let picked = m2.qs("input[name=ct]:checked").map(|i| dom::value(&i)).unwrap_or_default();
         let (m, id, reload) = (m2.clone(), id.clone(), reload.clone());
@@ -2097,7 +2097,7 @@ fn match_modal(id: &str, a: &Value) {
             else { dom::spawn(mm.search(artist, album)); }
         });
     }
-    dom::spawn(mm.clone().search(if artist0 == "Unknown Artist" { String::new() } else { artist0 }, a.s("album")));
+    dom::spawn(mm.search(if artist0 == "Unknown Artist" { String::new() } else { artist0 }, a.s("album")));
 }
 
 // ---- editModal ----
@@ -2128,7 +2128,7 @@ fn edit_modal(id: &str, _shown: &Value) {
         let m = modal(ModalOpts::new("Edit details", &body)
             .footer(r##"<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">Save</button>"##)
             .wide(true));
-        let (m2, a2, id2) = (m.clone(), a.clone(), id.clone());
+        let (m2, a2, id2) = (m.clone(), a, id.clone());
         dom::on_sel(&m.el, "#save", "click", move |e| {
             let target = dom::target_el(e);
             let (m, a, id) = (m2.clone(), a2.clone(), id2.clone());

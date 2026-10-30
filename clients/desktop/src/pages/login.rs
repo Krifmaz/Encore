@@ -161,7 +161,7 @@ fn probe(state: &mut State, url: String, ctx: &mut Ctx) -> Task<Message> {
         }
     }
     let api = ctx.api.clone();
-    Task::perform(async move { api.info().await }, move |r| Message::Probed(url.clone(), r))
+    Task::perform(async move { api.info().await }, move |r| Message::Probed(url, r))
 }
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {

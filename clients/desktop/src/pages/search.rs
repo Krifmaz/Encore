@@ -123,7 +123,7 @@ fn run(state: &mut State, ctx: &Ctx) -> Task<Message> {
         state.lib_for = state.q.clone();
         let q = state.q.clone();
         let lib_q = format!("/library/search?q={}&limit=12", urlencode(&q));
-        tasks.push(Task::perform(async move { api.get(&lib_q).await }, move |r| Message::Lib(q.clone(), r)));
+        tasks.push(Task::perform(async move { api.get(&lib_q).await }, move |r| Message::Lib(q, r)));
     }
     Task::batch(tasks)
 }
@@ -210,7 +210,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
             state.sending.insert(key.clone());
             let api = ctx.api.clone();
-            return Task::perform(async move { api.post("/requests", *body).await }, move |r| Message::Requested(key.clone(), r));
+            return Task::perform(async move { api.post("/requests", *body).await }, move |r| Message::Requested(key, r));
         }
         Message::Requested(key, r) => {
             state.sending.remove(&key);
@@ -402,7 +402,7 @@ fn library_row<'a>(ctx: &Ctx<'a>, lib: &Value, typ: &str) -> Option<El<'a, Messa
             .iter()
             .map(|a| {
                 let name = fmt::s(a, "name");
-                let open = if fmt::truthy(a, "mbid") { Page::Artist(fmt::s(a, "mbid")) } else { Page::ArtistName(name.clone()) };
+                let open = if fmt::truthy(a, "mbid") { Page::Artist(fmt::s(a, "mbid")) } else { Page::ArtistName(name) };
                 let n = fmt::i(a, "albums");
                 Tile::new(crate::pages::library::tr(ctx, a, "name"), TileKind::Artist, Message::Open(open))
                     .sub(format!("{n} album{}", if n == 1 { "" } else { "s" }))

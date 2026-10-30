@@ -46,7 +46,7 @@ pub fn open(state: &mut State, name: String, ctx: &mut Ctx) -> Task<Message> {
 fn load_one_offs(ctx: &Ctx, name: String, limit: usize) -> Task<Message> {
     let api = ctx.api.clone();
     let url = super::artist::artist_route(&name, "", "one-offs") + &format!("&offset=0&limit={limit}");
-    Task::perform(async move { api.get(&url).await }, move |r| Message::OneOffs(name.clone(), r))
+    Task::perform(async move { api.get(&url).await }, move |r| Message::OneOffs(name, r))
 }
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {

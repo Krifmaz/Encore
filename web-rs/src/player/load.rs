@@ -382,7 +382,7 @@ pub(super) fn maybe_preload_need(force: bool, need: bool) {
         let s = dsp_state(id);
         if s != "cached" && s != "rendering" {
             if now_ms() - dsp_asked(id) > 15000.0 {
-                let n2 = n.clone();
+                let n2 = n;
                 dom::spawn(async move { prepare_dsp(&n2).await; maybe_preload(force); });
             }
             return;

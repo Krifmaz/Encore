@@ -122,8 +122,8 @@ pub fn request_missing(st: &impl Ctx, u: &Row, pid: i64, auto: bool, album_mode:
             }
         };
         if let Some(x) = extra {
-            let d = st.db().one("SELECT detail FROM requests WHERE id=?", p![rid])?.map(|r| r.s("detail")).unwrap_or("{}".into());
-            let mut d: Value = serde_json::from_str(&d).unwrap_or(json!({}));
+            let d = st.db().one("SELECT detail FROM requests WHERE id=?", p![rid])?.map(|r| r.s("detail")).unwrap_or_else(|| "{}".into());
+            let mut d: Value = serde_json::from_str(&d).unwrap_or_else(|_| json!({}));
             d["auto"] = x["auto"].clone();
             st.db().execute("UPDATE requests SET detail=? WHERE id=?", p![d.to_string(), rid])?;
         }
