@@ -374,6 +374,34 @@ class FeaturesApi(private val api: EncoreApi, private val client: OkHttpClient) 
     /** GET /api/discover/probe?url=: title, site, uploader, length or item count, thumbnail (the Downloader's Preview). */
     fun probeLink(url: String): LinkProbe = getObject("/api/discover/probe?url=${EncoreApi.enc(url)}").page(LinkProbe.serializer())
 
+    /** POST /api/video-links {url}: the server starts downloading the video at a link for this phone. */
+    fun startVideo(url: String): VideoJob =
+        (call("POST", "/api/video-links", buildJsonObject { put("url", url) }) as? JsonObject ?: JsonObject(emptyMap())).page(VideoJob.serializer())
+
+    /** GET /api/video-links/{id}: where the server's download of a video stands. */
+    fun videoStatus(id: String): VideoJob = getObject("/api/video-links/${EncoreApi.enc(id)}").page(VideoJob.serializer())
+
+    /** DELETE /api/video-links/{id}: stop the download and delete it from the server. */
+    fun cancelVideo(id: String) {
+        call("DELETE", "/api/video-links/${EncoreApi.enc(id)}", null)
+    }
+
+    /**
+     * GET /api/video-links/{id}/file into the phone's Downloads as [name]; the server deletes its copy once it was sent
+     * whole. Gives the name it was saved under. Blocking.
+     */
+    fun saveVideo(context: android.content.Context, id: String, name: String): String {
+        if (api.base.isEmpty()) throw IOException("Not signed in")
+        val req = Request.Builder().url(api.url("/api/video-links/${EncoreApi.enc(id)}/file")).get().build()
+        client.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) {
+                val o = parseObject(res.body.string())
+                throw ApiException(res.code, o?.str("detail")?.ifEmpty { null } ?: "HTTP ${res.code}", o)
+            }
+            return app.encore.android.core.DownloadsFolder.saveStream(context, name, "video/mp4", res.body.byteStream())
+        }
+    }
+
     /** POST /api/requests/retry-failed {mine, user}: queue every failed request again (members: their own). */
     fun retryFailed(mine: Boolean, user: Long = 0L): RetryFailedResult {
         val o = call("POST", "/api/requests/retry-failed", buildJsonObject { whose(mine, user) }) as? JsonObject

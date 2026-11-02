@@ -110,6 +110,8 @@ pub struct Web {
     pub(crate) sign_ins: Arc<crate::signin::SignIns>,
     /// the recommendations' catalog of the library and the server's co-listening (crate::routes::taste)
     pub(crate) taste: crate::routes::taste::TasteLock,
+    /// videos downloading for devices, or waiting to be fetched (crate::routes::video_links)
+    pub(crate) video_links: crate::routes::video_links::VideoLinks,
 }
 
 /// How long the Storage page's folder sizes and disk usage are reused before they are worked out again (in
@@ -135,6 +137,7 @@ impl Default for Web {
             new_releases: Default::default(),
             sign_ins: Default::default(),
             taste: Default::default(),
+            video_links: Default::default(),
         }
     }
 }

@@ -846,6 +846,28 @@ data class LinkProbe(
     val thumbnail: LString = "",
 )
 
+/**
+ * A video the server downloads for this phone (POST/GET /api/video-links): it is saved in Downloads and then deleted
+ * from the server, never added to the library. [state] is `queued`, `downloading`, `ready` or `failed`.
+ */
+@Serializable
+data class VideoJob(
+    val id: LString = "",
+    val state: LString = "",
+    /** 0–100 while downloading. */
+    val progress: LDouble = 0.0,
+    val title: LString = "",
+    /** The file name to save it as, once ready. */
+    val name: LString = "",
+    /** Its size in bytes, once ready. */
+    val size: LLong = 0L,
+    /** Why it failed. */
+    val error: LString = "",
+) {
+    /** Still on its way on the server (worth asking again). */
+    val running: Boolean get() = state == "queued" || state == "downloading"
+}
+
 /** POST /api/requests/retry-failed: how many were queued again, how many the server refused and why. */
 data class RetryFailedResult(val retried: Int, val skipped: Int, val why: String)
 

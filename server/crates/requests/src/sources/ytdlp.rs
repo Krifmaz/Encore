@@ -1,4 +1,6 @@
-//! yt-dlp (subprocess): YouTube, SoundCloud, Bandcamp, Mixcloud and ~1800 other sites.
+//! yt-dlp (subprocess): YouTube, SoundCloud, Bandcamp, Mixcloud and ~1800 other sites. Songs for the
+//! library ([`download`]), and one video as an MP4 that a device saves and the server then deletes
+//! ([`download_video`]).
 use crate::Ctx;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -149,11 +151,88 @@ pub async fn download(st: &impl Ctx, url: &str, outdir: &Path, playlist: bool, p
         args.extend(["--audio-quality".into(), if q.is_empty() { "0".into() } else { q }]);
     }
     args.extend(js_runtime_args(st).await);
+    with_retries(st, url, &args, outdir, &before, progress, Want::Audio).await
+}
+
+/// What a run keeps of the files yt-dlp leaves in its folder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Want {
+    /// songs: the audio formats yt-dlp writes ([`AUDIO`])
+    Audio,
+    /// one video to hand to a device: an MP4 ([`VIDEO`])
+    Video,
+}
+
+impl Want {
+    /// The extensions a file of this kind has.
+    fn exts(self) -> &'static [&'static str] {
+        match self {
+            Want::Audio => &AUDIO,
+            Want::Video => &VIDEO,
+        }
+    }
+}
+
+/// What a video download writes: MP4 only (yt-dlp merges or remuxes into it, see [`video_args`]).
+pub const VIDEO: [&str; 1] = ["mp4"];
+
+/// The largest video a link may download (yt-dlp's `--max-filesize`): a bigger one is skipped, so a server's
+/// disk is never filled by one paste.
+pub const VIDEO_MAX_SIZE: &str = "4G";
+
+/// The format arguments of a video download into `outdir`: the best video up to 1080p (H.264 first, which
+/// every phone and browser plays) with the best audio (AAC first), merged into one MP4; a site that only has
+/// one non-MP4 file gets it remuxed (no re-encode). One video, never a whole playlist.
+fn video_args(outdir: &Path) -> Vec<String> {
+    let tmpl = outdir.join("%(title).150B [%(id)s].%(ext)s");
+    vec![
+        "-f".into(), "bv*+ba/b".into(), "-S".into(), "res:1080,vcodec:h264,acodec:aac".into(),
+        "--merge-output-format".into(), "mp4".into(), "--remux-video".into(), "mp4".into(),
+        "--max-filesize".into(), VIDEO_MAX_SIZE.into(), "--no-playlist".into(),
+        "-o".into(), tmpl.to_string_lossy().into(), "--windows-filenames".into(),
+        "--retries".into(), "5".into(), "--fragment-retries".into(), "5".into(), "--no-warnings".into(),
+        "--newline".into(), "--progress-template".into(), "download:PROG %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s".into(),
+        "--print".into(), "after_move:JSON %(.{title,track,artist,creator,uploader,album,duration,webpage_url,thumbnail,filepath})j".into(),
+    ]
+}
+
+/// A downloaded video, ready to hand to a device.
+#[derive(Debug, Clone)]
+pub struct Video {
+    /// the MP4 in the folder it was downloaded into
+    pub file: PathBuf,
+    /// the video's title as the site gives it (None when yt-dlp didn't say)
+    pub title: Option<String>,
+}
+
+/// Download one video from a link into `outdir` (created when missing) as an MP4, for a device to save: never
+/// into the library. `progress` gets 0–100. The same retries as [`download`] (other YouTube clients, the
+/// other YouTube host, refreshed cookies). The caller owns `outdir` and removes it when done.
+pub async fn download_video(st: &impl Ctx, url: &str, outdir: &Path, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Video> {
+    use encore_core::fsx::{self, Step};
+    fsx::mkdir_all(outdir, Step::Stage)?;
+    let before: std::collections::HashSet<_> = fsx::read_dir(outdir, Step::Stage)?.flatten().map(|e| e.path()).collect();
+    let mut args = video_args(outdir);
+    args.extend(js_runtime_args(st).await);
+    let d = with_retries(st, url, &args, outdir, &before, progress, Want::Video).await?;
+    // --no-playlist: one file; the largest should a site still hand over more (a stray format)
+    let file = d.files.into_iter().max_by_key(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0))
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp finished without a video file"))?;
+    let title = d.entries.first().and_then(|e| e["title"].as_str()).map(String::from);
+    Ok(Video { file, title })
+}
+
+/// Run yt-dlp with `args` on `url`, trying again the ways YouTube needs: as other clients, without cookies,
+/// on the other YouTube host, and once more after the sign-in's cookies are refreshed.
+async fn with_retries(st: &impl Ctx, url: &str, args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>,
+                      progress: Option<&(dyn Fn(f64) + Send + Sync)>, want: Want) -> anyhow::Result<Download> {
     // YouTube sometimes hides every audio format from one kind of client ("Requested format is not
     // available"): try again as other clients, without cookies, and on the other YouTube host
     let alt_host = if url.contains("music.youtube.com") { Some(url.replace("music.youtube.com", "www.youtube.com")) }
         else if url.contains("www.youtube.com/watch") || url.contains("://youtube.com/watch") { Some(url.replace("://youtube.com", "://www.youtube.com").replace("www.youtube.com", "music.youtube.com")) }
         else { None };
+    // a video stays on www.youtube.com (YouTube Music hands out audio-first formats)
+    let alt_host = alt_host.filter(|_| want == Want::Audio);
     let attempts: Vec<(String, Vec<String>, bool)> = [
         Some((url.to_string(), vec![], true)),
         Some((url.to_string(), vec!["--extractor-args".into(), "youtube:player_client=default,tv,web_music,mweb".into()], false)),
@@ -164,14 +243,14 @@ pub async fn download(st: &impl Ctx, url: &str, outdir: &Path, playlist: bool, p
     let mut i = 0;
     while i < attempts.len() {
         let (u, extra, cookies) = &attempts[i];
-        let mut a = args.clone();
+        let mut a = args.to_vec();
         a.extend(extra.iter().cloned());
         if *cookies {
             a.extend(cookie_args(st, outdir));
         }
         a.push("--".into());
         a.push(u.clone());
-        match run(st, &a, outdir, &before, progress).await {
+        match run(st, &a, outdir, before, progress, want).await {
             Ok(d) => return Ok(d),
             Err(e) => {
                 last_err = e.to_string();
@@ -209,8 +288,8 @@ async fn js_runtime_args(st: &impl Ctx) -> Vec<String> {
     if has_node && !has_deno && new_enough { vec!["--js-runtimes".into(), "node".into()] } else { vec![] }
 }
 
-/// Run yt-dlp with `args`, reading its progress, → the files that are new in `outdir`.
-async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>, progress: Option<&(dyn Fn(f64) + Send + Sync)>) -> anyhow::Result<Download> {
+/// Run yt-dlp with `args`, reading its progress, → the files of the `want`ed kind that are new in `outdir`.
+async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collections::HashSet<PathBuf>, progress: Option<&(dyn Fn(f64) + Send + Sync)>, want: Want) -> anyhow::Result<Download> {
     use encore_core::fsx::{self, Step};
     let program = bin(st);
     // a program that isn't there says so; any other start failure names the program and the errno
@@ -256,7 +335,7 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
             continue;
         }
         let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if AUDIO.contains(&ext.as_str()) {
+        if want.exts().contains(&ext.as_str()) {
             files.push(p);
         } else if ["jpg", "jpeg", "webp", "png"].contains(&ext.as_str()) {
             let _ = std::fs::remove_file(&p);
@@ -265,7 +344,11 @@ async fn run(st: &impl Ctx, args: &[String], outdir: &Path, before: &std::collec
     files.sort();
     if files.is_empty() {
         if status.success() {
-            anyhow::bail!("yt-dlp finished without an audio file");
+            // a video over VIDEO_MAX_SIZE is skipped without an error
+            match want {
+                Want::Audio => anyhow::bail!("yt-dlp finished without an audio file"),
+                Want::Video => anyhow::bail!("yt-dlp finished without a video file (is it bigger than {VIDEO_MAX_SIZE}B?)"),
+            }
         }
         anyhow::bail!("{}", if err.is_empty() { "yt-dlp failed".into() } else { err.chars().take(300).collect::<String>() });
     }
@@ -332,4 +415,34 @@ pub async fn probe(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
 /// Flat track list of a playlist/album link (used for link imports).
 pub async fn playlist(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     json_out(st, &["-J", "--flat-playlist", "--no-warnings", "--", url]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The value after `flag` in `args`.
+    fn after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    }
+
+    #[test]
+    fn video_args_make_one_mp4_in_the_folder() {
+        let dir = Path::new("/tmp/encore-video-x");
+        let a = video_args(dir);
+        assert_eq!(after(&a, "--merge-output-format"), Some("mp4"));
+        assert_eq!(after(&a, "--remux-video"), Some("mp4"));
+        assert_eq!(after(&a, "--max-filesize"), Some(VIDEO_MAX_SIZE));
+        assert!(a.iter().any(|x| x == "--no-playlist"));
+        // audio extraction is the song path's, never the video's
+        assert!(!a.iter().any(|x| x == "-x" || x == "--audio-format"));
+        assert!(after(&a, "-o").is_some_and(|o| o.starts_with("/tmp/encore-video-x/")));
+    }
+
+    #[test]
+    fn each_kind_keeps_its_own_files() {
+        assert_eq!(Want::Video.exts(), ["mp4"]);
+        assert!(Want::Audio.exts().contains(&"m4a"));
+        assert!(!Want::Audio.exts().contains(&"mp4"));
+    }
 }
