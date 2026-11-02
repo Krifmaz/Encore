@@ -52,6 +52,9 @@ async fn settle(app: &Router, cookie: &str, id: &str) -> Value {
 /// A server with two members, and the stand-in in place of yt-dlp.
 fn server(name: &str, hold: Arc<AtomicBool>) -> (TestServer, Router) {
     let ts = TestServer::new(&format!("video-links-{name}"));
+    // the default staging folder (/downloads/…) can't be written on a test machine: the job folders go in the test's
+    let staging = ts.dir.join("staging");
+    let ts = ts.with(json!({ "staging_path": staging.to_string_lossy() }));
     user(&ts.st, "ann", "user");
     user(&ts.st, "bob", "user");
     ts.st.web.video_links.fake(fake(b"MP4DATA-0123456789", hold));
