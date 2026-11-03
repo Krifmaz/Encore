@@ -1,5 +1,7 @@
 package app.encore.android.ui.screens
 
+import androidx.compose.ui.platform.testTag
+import app.encore.android.ui.PerfTags
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -283,7 +285,7 @@ fun AlbumScreen(nav: Nav, albumId: String, playTrack: Long = 0L) {
             }
             val formats = if (surround && album.quality.isNotEmpty()) album.quality
                 else tracks.map { it.format.uppercase() }.filter { it.isNotEmpty() }.distinct().joinToString(" / ")
-            LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            LazyColumn(Modifier.fillMaxSize().padding(padding).testTag(PerfTags.ALBUM_TRACKS)) {
                 // .detail-head
                 item {
                     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter), horizontalAlignment = Alignment.CenterHorizontally) {

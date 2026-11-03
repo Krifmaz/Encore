@@ -21,6 +21,8 @@ class EncoreApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // debug builds: log disk and network work on the main thread (core/DevPerf.kt), from the first line on
+        app.encore.android.core.DevPerf.strictMode()
         // first, so a crash while building the graph is written too (CrashLog.kt)
         CrashLog.install(this)
         app.encore.android.data.api.Translations.init(this)

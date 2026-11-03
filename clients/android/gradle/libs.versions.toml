@@ -12,6 +12,10 @@ coil = "3.5.0"                     # 3.6 needs compileSdk 37 and pulls Compose 1
 datastore = "1.2.1"               # plain DataStore (the session token is app-private, allowBackup=false)
 carApp = "1.7.0"                  # androidx.car.app (Encore Lyrics car app): MapWithContentTemplate needs 1.7 / car API level 7
 junit = "4.13.2"                  # unit tests only (app/src/test: the pure rules of offline, updates, bug reports)
+metrics = "1.0.0"                 # JankStats (debug builds log janky frames, core/DevPerf.kt)
+benchmark = "1.5.0"               # Macrobenchmark (:benchmark) and the Baseline Profile Gradle plugin (:baselineprofile, :app)
+uiautomator = "2.4.0"             # the journeys (:journeys) drive the app with UiAutomator
+androidxTestExtJunit = "1.3.0"    # AndroidJUnit4 runner for :benchmark and :baselineprofile
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -31,9 +35,15 @@ coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref 
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 coil-network-cache-control = { group = "io.coil-kt.coil3", name = "coil-network-cache-control", version.ref = "coil" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-metrics-performance = { group = "androidx.metrics", name = "metrics-performance", version.ref = "metrics" }
+androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmark" }
+androidx-test-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-android-library = { id = "com.android.library", version.ref = "agp" }   # :cadenza module
+android-library = { id = "com.android.library", version.ref = "agp" }   # :cadenza and :journeys modules
+android-test = { id = "com.android.test", version.ref = "agp" }         # :benchmark and :baselineprofile modules
+baselineprofile = { id = "androidx.baselineprofile", version.ref = "benchmark" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

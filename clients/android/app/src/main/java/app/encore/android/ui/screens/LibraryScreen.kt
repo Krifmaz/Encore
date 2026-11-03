@@ -1,5 +1,7 @@
 package app.encore.android.ui.screens
 
+import androidx.compose.ui.platform.testTag
+import app.encore.android.ui.PerfTags
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -537,7 +539,7 @@ private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "", admin: Boolean = 
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(140.dp),
                 state = grid,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().testTag(PerfTags.LIBRARY_ALBUMS),
                 contentPadding = PaddingValues(start = Gutter, end = Gutter, top = 4.dp, bottom = 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),

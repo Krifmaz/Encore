@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    // the Baseline Profile consumer: adds the benchmarkRelease / nonMinifiedRelease build types Macrobenchmark and the
+    // profile generator run against (PERFORMANCE.md)
+    alias(libs.plugins.baselineprofile)
 }
 
 // Version from the release pipeline: -PencoreVersionName=0.30.0 -PencoreVersionCode=260300000 (release.yml: 260000000 +
@@ -97,6 +100,9 @@ dependencies {
 
     // Cadenza on the phone (JNI binding + libencore_cadenza.so when built with cargo-ndk); CadenzaEngine adapts it
     implementation(project(":cadenza"))
+
+    // JankStats: debug builds log janky frames with the screen's name (core/DevPerf.kt); R8 removes it from release
+    implementation(libs.androidx.metrics.performance)
 
     // JUnit 4 for app/src/test (pure Kotlin rules; no Android classes, so no Robolectric). Not in the APK.
     testImplementation(libs.junit)

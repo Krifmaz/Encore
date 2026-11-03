@@ -1,0 +1,159 @@
+# Android performance (clients/android/PERFORMANCE.md): the release app's startup time and frame timing on an
+# emulator, against an Encore server (the published Docker image) with a made-up library of 80 albums. Optionally
+# regenerates the Baseline Profile on the same emulator and commits it to the branch.
+#
+# Emulator numbers are for comparing two commits on the same runner, not phone numbers: the GPU is software
+# (SwiftShader) and Cadenza is left out (x86_64, no cargo-ndk build). PERFORMANCE.md has the phone numbers.
+#
+# Runs on pushes to claude/** and perf/** branches that touch the Android app, and by hand (Actions → Android
+# performance → Run workflow). A commit message with [baseline-profile] (or the input) regenerates the profile.
+name: Android performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Regenerate the Baseline Profile and commit it to this branch"
+        type: boolean
+        default: false
+      compilation:
+        description: "auto: partial when the app ships a Baseline Profile, none otherwise"
+        type: choice
+        options: [auto, partial, none]
+        default: auto
+  push:
+    branches: ["claude/**", "perf/**"]
+    paths:
+      - "clients/android/**"
+      - ".github/workflows/android-perf.yml"
+
+permissions:
+  # the regenerated Baseline Profile is pushed back to the branch
+  contents: write
+
+concurrency:
+  group: android-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ENCORE_USER: bench
+      ENCORE_PASSWORD: a-long-password-1
+      # the host as the emulator sees it
+      ENCORE_SERVER: http://10.0.2.2:8080
+      EMULATOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mode
+        id: mode
+        env:
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_COMPILATION: ${{ inputs.compilation }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          PROFILE=0
+          if [ -d clients/android/baselineprofile ] && { [ "$IN_PROFILE" = true ] || [[ "$MESSAGE" == *"[baseline-profile]"* ]]; }; then PROFILE=1; fi
+          C="${IN_COMPILATION:-auto}"
+          if [ "$C" = auto ]; then
+            if [ "$PROFILE" = 1 ] || [ -f clients/android/app/src/main/generated/baselineProfiles/baseline-prof.txt ]; then C=partial; else C=none; fi
+          fi
+          echo "profile=$PROFILE compilation=$C"
+          { echo "profile=$PROFILE"; echo "compilation=$C"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      - name: Gradle version
+        # the same Gradle as apps.yml: the one the wrapper properties name
+        id: gradle
+        run: |
+          G=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip.*/\1/p' clients/android/gradle/wrapper/gradle-wrapper.properties)
+          [ -n "$G" ] || { echo "::error::no Gradle version in gradle-wrapper.properties"; exit 1; }
+          echo "version=$G" >> "$GITHUB_OUTPUT"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle.outputs.version }}
+      - name: Encore server with a made-up library
+        run: |
+          command -v ffmpeg >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg; }
+          bash clients/android/benchmark/ci/make-library.sh "$RUNNER_TEMP/music" 80 10
+          mkdir -p "$RUNNER_TEMP/config" && chmod 777 "$RUNNER_TEMP/config"
+          docker run -d --name encore -p 8080:8080 \
+            -e PUID="$(id -u)" -e PGID="$(id -g)" \
+            -e ENCORE_ADMIN_USER="$ENCORE_USER" -e ENCORE_ADMIN_PASSWORD="$ENCORE_PASSWORD" \
+            -e ENCORE_LIBRARY_PATH=/music \
+            -v "$RUNNER_TEMP/music:/music:ro" -v "$RUNNER_TEMP/config:/config" \
+            ghcr.io/krifmaz/encore:latest
+      - name: Build the app and the benchmarks
+        # before the emulator starts, so its time goes to the measurements
+        run: gradle -p clients/android --no-daemon --stacktrace :app:assembleBenchmarkRelease :benchmark:assembleBenchmarkRelease
+      - name: Wait for the library scan
+        run: |
+          H='x-requested-with: encore'
+          N=0
+          for i in $(seq 1 120); do
+            if curl -fsS -c "$RUNNER_TEMP/jar" -H "$H" -H 'content-type: application/json' \
+                 -d "{\"username\":\"$ENCORE_USER\",\"password\":\"$ENCORE_PASSWORD\"}" http://localhost:8080/api/auth/login >/dev/null 2>&1; then
+              N=$(curl -fsS -b "$RUNNER_TEMP/jar" -H "$H" 'http://localhost:8080/api/library/albums?limit=1' | jq -r '.total // (.albums | length) // 0' || echo 0)
+              echo "albums in the library: $N"
+              [ "$N" -ge 80 ] && exit 0
+            fi
+            sleep 5
+          done
+          docker logs --tail 80 encore || true
+          echo "::warning::the library scan did not reach 80 albums ($N)"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Benchmarks on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          PROFILE: ${{ steps.mode.outputs.profile }}
+          COMPILATION: ${{ steps.mode.outputs.compilation }}
+          LABEL: ${{ github.sha }} (${{ steps.mode.outputs.compilation }})
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 6000M
+          # with audio (the player journeys play); animations stay on, they are part of what is measured
+          emulator-options: -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none -no-snapshot
+          disable-animations: false
+          script: bash clients/android/benchmark/ci/run.sh
+      - name: Summary
+        if: always()
+        run: |
+          S=clients/android/benchmark/build/summary.md
+          if [ -f "$S" ]; then cat "$S" >> "$GITHUB_STEP_SUMMARY"; cat "$S"; fi
+      - name: Server log
+        if: failure()
+        run: docker logs --tail 200 encore || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-perf-${{ github.sha }}
+          path: |
+            clients/android/benchmark/build/outputs/connected_android_test_additional_output
+            clients/android/benchmark/build/outputs/androidTest-results
+            clients/android/benchmark/build/summary.md
+            clients/android/app/src/main/generated
+          if-no-files-found: warn
+      - name: Commit the Baseline Profile
+        if: steps.mode.outputs.profile == '1'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git add clients/android/app/src/main/generated
+          if git diff --cached --quiet; then echo "the profile did not change"; exit 0; fi
+          git commit -m "Android: regenerate the Baseline Profile and startup profile"
+          git push origin "HEAD:${GITHUB_REF#refs/heads/}"

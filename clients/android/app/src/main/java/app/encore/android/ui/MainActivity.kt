@@ -25,15 +25,27 @@ import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
 import app.encore.android.ui.theme.isDarkTheme
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.metrics.performance.JankStats
+import app.encore.android.core.DevPerf
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var appGraph: AppGraph
     private lateinit var player: PlayerConnection
 
+    /** Debug builds: logs janky frames with the screen's name (core/DevPerf.kt); null in other builds. */
+    private var jankStats: JankStats? = null
+
     // Android 13+: the media notification needs the notification permission.
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    // testTagsAsResourceId was experimental in older Compose releases
+    @OptIn(ExperimentalComposeUiApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         appGraph = graph
@@ -44,13 +56,17 @@ class MainActivity : ComponentActivity() {
         Updater.checkAtStart(this)
         // a group listen link shared to the app (not again when the activity is only recreated)
         if (savedInstanceState == null) handleIntent(intent)
+        jankStats = DevPerf.trackJank(this)
         setContent {
             val settings by appGraph.store.settings.collectAsState()
             // Match device follows the system's dark mode
             val dark = isDarkTheme(settings, isSystemInDarkTheme())
             LaunchedEffect(dark) { applySystemBars(dark) }
             EncoreTheme(settings) {
-                EncoreRoot(appGraph, player)
+                // the Compose test tags (PerfTags) become resource ids, so the performance journeys find them
+                Box(Modifier.semantics { testTagsAsResourceId = true }) {
+                    EncoreRoot(appGraph, player)
+                }
             }
         }
     }
@@ -95,6 +111,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        jankStats?.isTrackingEnabled = true
         player.connect()
         appGraph.likes.refresh()
     }
@@ -102,6 +119,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         // released so the service can stop when nothing plays; it keeps playing while it does
         player.release()
+        jankStats?.isTrackingEnabled = false
         super.onStop()
     }
 

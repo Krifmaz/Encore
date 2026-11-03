@@ -1,5 +1,6 @@
 package app.encore.android.ui
 
+import app.encore.android.core.DevPerf
 import app.encore.android.data.api.ServerRoute
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -365,6 +366,16 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             group != null -> GroupBar(nav)
             link == null -> SpotBar(nav, session)
             else -> LinkedBar(nav)
+        }
+    }
+
+    // debug builds: janky frames are logged with the name of what is on top (core/DevPerf.kt)
+    DevPerf.ScreenName {
+        when {
+            showUpNext || upNextOpen -> "UpNext"
+            lyricsOpen -> "Lyrics"
+            showPlayer -> "FullPlayer"
+            else -> stack.lastOrNull()?.let { it::class.simpleName } ?: tab.name
         }
     }
 

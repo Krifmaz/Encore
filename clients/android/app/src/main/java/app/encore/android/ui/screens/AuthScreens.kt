@@ -1,5 +1,7 @@
 package app.encore.android.ui.screens
 
+import androidx.compose.ui.platform.testTag
+import app.encore.android.ui.PerfTags
 import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.background
@@ -110,7 +112,7 @@ private fun ServerScreen(graph: AppGraph, onFound: (String, AuthInfo) -> Unit) {
             placeholder = { Text("music.example.com") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(PerfTags.SERVER_FIELD),
         )
         error?.let {
             Spacer(Modifier.height(8.dp))
@@ -195,7 +197,7 @@ private fun SignInScreen(graph: AppGraph, server: String, info: AuthInfo, onBack
             singleLine = true,
             enabled = !needsCode,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Next),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(PerfTags.USERNAME_FIELD),
         )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
@@ -206,7 +208,7 @@ private fun SignInScreen(graph: AppGraph, server: String, info: AuthInfo, onBack
             enabled = !needsCode,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(PerfTags.PASSWORD_FIELD),
         )
         if (needsCode) {
             Spacer(Modifier.height(12.dp))

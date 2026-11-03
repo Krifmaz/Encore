@@ -1,5 +1,9 @@
 package app.encore.android.ui.screens
 
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import app.encore.android.ui.PerfTags
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -182,7 +186,7 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
             Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(p.gradient))
         }
         Row(
-            Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            Modifier.fillMaxWidth().testTag(PerfTags.MINI_PLAYER).clickable(onClick = onOpen).padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Cover(
@@ -272,6 +276,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
+            .testTag(PerfTags.FULL_PLAYER)
             .background(p.bg)
             // swallow taps so they don't reach the screen underneath
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}),
@@ -791,6 +796,7 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
  * @param showTitle false leaves the "Up next" title out of the head (the TV panel's switch already names it).
  * @param modifier sizes the list (the head sits above it).
  */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class) // testTagsAsResourceId, experimental in older Compose
 @Composable
 fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, showTitle: Boolean = true) {
     val queue by nav.player.queue.collectAsState()
@@ -815,7 +821,8 @@ fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, sho
             Text("Then shuffle library", style = MaterialTheme.typography.bodySmall, color = p.muted)
         }
     }
-    LazyColumn(modifier) {
+    // the sheet is a window of its own, outside MainActivity's testTagsAsResourceId: set it here for the journeys
+    LazyColumn(modifier.semantics { testTagsAsResourceId = true }.testTag(PerfTags.UP_NEXT)) {
         itemsIndexed(upNext) { k, q ->
             val i = index + 1 + k
             Row(

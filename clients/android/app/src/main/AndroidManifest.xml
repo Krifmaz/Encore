@@ -45,6 +45,12 @@
         android:theme="@style/Theme.Encore"
         android:usesCleartextTraffic="true">
 
+        <!-- profileable: Macrobenchmark (and Android Studio's profilers) may trace a release build from the shell
+             (PERFORMANCE.md); it gives no access to the app's data and changes nothing for the person using it -->
+        <profileable
+            android:shell="true"
+            tools:targetApi="29" />
+
         <!-- configChanges: turning the phone, folding or resizing it (split screen, a window on a desktop), a keyboard
              and dark mode no longer make the activity again. Compose lays the same screen out for the new size, so
              the open page, its scroll and what it loaded stay; without this every turn reloaded Home from scratch. -->
