@@ -24,4 +24,5 @@ dependencies {
     // `api`: the journeys are MacrobenchmarkScope extensions, so both test modules see these types
     api(libs.androidx.benchmark.macro.junit4)
     api(libs.androidx.test.uiautomator)
+    api(libs.androidx.test.runner)
 }
