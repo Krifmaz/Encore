@@ -45,6 +45,8 @@ jobs:
       # the host as the emulator sees it
       ENCORE_SERVER: http://10.0.2.2:8080
       EMULATOR: "1"
+      # and the debug build's StrictMode / JankStats pass after the measurements
+      STRICTMODE: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Mode
@@ -134,7 +136,9 @@ jobs:
         if: always()
         run: |
           S=clients/android/benchmark/build/summary.md
-          if [ -f "$S" ]; then cat "$S" >> "$GITHUB_STEP_SUMMARY"; cat "$S"; fi
+          for S in clients/android/benchmark/build/summary.md clients/android/benchmark/build/strictmode.md; do
+            if [ -f "$S" ]; then cat "$S" >> "$GITHUB_STEP_SUMMARY"; cat "$S"; fi
+          done
       - name: Server log
         if: failure()
         run: docker logs --tail 200 encore || true
@@ -146,6 +150,8 @@ jobs:
             clients/android/benchmark/build/outputs/connected_android_test_additional_output
             clients/android/benchmark/build/outputs/androidTest-results
             clients/android/benchmark/build/summary.md
+            clients/android/benchmark/build/strictmode.md
+            clients/android/benchmark/build/debug-logcat.txt
             clients/android/app/src/main/generated
           if-no-files-found: warn
       - name: Commit the Baseline Profile

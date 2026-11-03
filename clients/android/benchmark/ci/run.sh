@@ -9,6 +9,8 @@
 #   EMULATOR      1: let Macrobenchmark run on an emulator (its numbers only compare with the same emulator)
 #   ITERATIONS, STARTUP_ITERATIONS  iterations of the frame-timing journeys (5) and of each startup (10)
 #   LABEL         a name for the tables (e.g. the commit)
+#   STRICTMODE    1: afterwards, drive the debug build through every journey once and summarise what StrictMode and
+#                 JankStats logged (benchmark/build/strictmode.md)
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # clients/android
 A=android.testInstrumentationRunnerArguments
@@ -30,4 +32,18 @@ rm -rf "$OUT"
 STATUS=0
 gradle "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest || STATUS=$?
 python3 benchmark/ci/summarize.py "$OUT" "${LABEL:-}" | tee benchmark/build/summary.md || true
+
+if [ "${STRICTMODE:-0}" = 1 ]; then
+  # the debug build (StrictMode and JankStats on, core/DevPerf.kt) through each journey once, uncompiled
+  gradle --no-daemon :app:installDebug
+  adb logcat -c
+  gradle "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest \
+    "-P$A.class=app.encore.android.benchmark.JourneyBenchmarks" \
+    "-P$A.encore.package=app.encore.client.debug" \
+    "-P$A.encore.compilation=none" \
+    "-P$A.encore.iterations=1" \
+    "-P$A.androidx.benchmark.suppressErrors=EMULATOR,DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
+  adb logcat -d -v brief > benchmark/build/debug-logcat.txt || true
+  python3 benchmark/ci/strictmode.py benchmark/build/debug-logcat.txt | tee benchmark/build/strictmode.md || true
+fi
 exit "$STATUS"

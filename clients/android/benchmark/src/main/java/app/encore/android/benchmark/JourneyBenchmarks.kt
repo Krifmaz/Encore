@@ -6,7 +6,6 @@ import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.benchmark.macro.junit4.MacrobenchmarkRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.uiautomator.UiObject2
-import app.encore.android.journeys.ENCORE_PACKAGE
 import app.encore.android.journeys.JourneyArgs
 import app.encore.android.journeys.editUpNext
 import app.encore.android.journeys.openAlbumAndScroll
@@ -60,7 +59,7 @@ class JourneyBenchmarks {
     /** Measures [journey] with [FrameTimingMetric], after [setup] (not measured), [JourneyArgs.iterations] times. */
     private fun frames(setup: MacrobenchmarkScope.() -> Unit, journey: MacrobenchmarkScope.() -> Unit) =
         rule.measureRepeated(
-            packageName = ENCORE_PACKAGE,
+            packageName = JourneyArgs.packageName,
             metrics = listOf(FrameTimingMetric()),
             compilationMode = JourneyArgs.compilationMode,
             iterations = JourneyArgs.iterations,

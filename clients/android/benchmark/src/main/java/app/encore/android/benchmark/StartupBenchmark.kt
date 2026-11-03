@@ -5,7 +5,6 @@ import androidx.benchmark.macro.StartupMode
 import androidx.benchmark.macro.StartupTimingMetric
 import androidx.benchmark.macro.junit4.MacrobenchmarkRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import app.encore.android.journeys.ENCORE_PACKAGE
 import app.encore.android.journeys.JourneyArgs
 import app.encore.android.journeys.prepare
 import app.encore.android.journeys.prepareCold
@@ -25,7 +24,7 @@ class StartupBenchmark {
     /** The process is not running: Application, the graph, the first frame of Home. */
     @Test
     fun coldStartup() = rule.measureRepeated(
-        packageName = ENCORE_PACKAGE,
+        packageName = JourneyArgs.packageName,
         metrics = listOf(StartupTimingMetric()),
         compilationMode = JourneyArgs.compilationMode,
         iterations = JourneyArgs.startupIterations,
@@ -39,7 +38,7 @@ class StartupBenchmark {
     /** The process is alive, the activity is made again (after Back or the system closing it). */
     @Test
     fun warmStartup() = rule.measureRepeated(
-        packageName = ENCORE_PACKAGE,
+        packageName = JourneyArgs.packageName,
         metrics = listOf(StartupTimingMetric()),
         compilationMode = JourneyArgs.compilationMode,
         iterations = JourneyArgs.startupIterations,

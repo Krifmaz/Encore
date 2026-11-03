@@ -57,6 +57,12 @@ object Tags {
 object JourneyArgs {
     private val args get() = InstrumentationRegistry.getArguments()
 
+    /**
+     * The package to drive: the release app ([ENCORE_PACKAGE]) unless `encore.package` names another, such as the debug
+     * build (`app.encore.client.debug`) for the StrictMode and JankStats pass of `benchmark/ci/run.sh`.
+     */
+    val packageName: String get() = args.getString("encore.package")?.takeIf { it.isNotBlank() } ?: ENCORE_PACKAGE
+
     /** The Encore server's address, as typed on the sign-in screen (e.g. `http://10.0.2.2:8080` from an emulator). */
     val server: String? get() = args.getString("encore.server")?.takeIf { it.isNotBlank() }
 
