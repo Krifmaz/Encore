@@ -112,14 +112,17 @@ private fun UiDevice.need(selector: BySelector, what: String, timeoutMs: Long = 
 
 /**
  * Fails the journey with [message], first saving the window hierarchy and a screenshot to the test's output folder
- * (they come back with the results as `journey-failure.xml` and `journey-failure.png`).
+ * (they come back with the results as `journey-failure-<time>.xml` and `.png`; benchmark/ci/failures.py prints what
+ * was on screen).
  */
 private fun fail(device: UiDevice, message: String): Nothing {
     JourneyArgs.outputDir?.let { dir ->
         try {
             dir.mkdirs()
-            File(dir, "journey-failure.xml").outputStream().use { device.dumpWindowHierarchy(it) }
-            device.takeScreenshot(File(dir, "journey-failure.png"))
+            // one pair per failure (several tests run into the same folder)
+            val name = "journey-failure-${System.currentTimeMillis()}"
+            File(dir, "$name.xml").outputStream().use { device.dumpWindowHierarchy(it) }
+            device.takeScreenshot(File(dir, "$name.png"))
         } catch (e: Exception) {
             Log.w(TAG, "could not save the failure dump", e)
         }

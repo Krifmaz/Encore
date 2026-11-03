@@ -25,24 +25,45 @@ if [ "${EMULATOR:-0}" = 1 ]; then
   ARGS+=("-P$A.androidx.benchmark.suppressErrors=EMULATOR")
 fi
 if [ "${PROFILE:-0}" = 1 ]; then
-  gradle "${ARGS[@]}" :app:generateBaselineProfile
+  mkdir -p benchmark/build
+  gradle "${ARGS[@]}" :app:generateBaselineProfile > benchmark/build/gradle-profile.log 2>&1 \
+    || { grep -E -A3 "What went wrong|FAILED|AssertionError|Exception: " benchmark/build/gradle-profile.log | grep -v "^\s*at " | head -60
+         python3 benchmark/ci/failures.py baselineprofile/build/outputs/androidTest-results baselineprofile/build/outputs || true
+         exit 1; }
 fi
 OUT=benchmark/build/outputs/connected_android_test_additional_output
-rm -rf "$OUT"
+RESULTS=benchmark/build/outputs/androidTest-results
+rm -rf "$OUT" "$RESULTS"
+mkdir -p benchmark/build
+
+# Runs Gradle with its output in a log file ($1), printing only the lines that say what went wrong; returns its status.
+quiet_gradle() {
+  local log=$1; shift
+  local status=0
+  gradle "$@" > "$log" 2>&1 || status=$?
+  if [ "$status" != 0 ]; then
+    grep -E -A3 "What went wrong|^e: |FAILED|AssertionError|Exception: " "$log" | grep -v "^\s*at " | head -60 || true
+  fi
+  return "$status"
+}
+
 STATUS=0
-gradle "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest || STATUS=$?
+quiet_gradle benchmark/build/gradle-benchmark.log "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest || STATUS=$?
+python3 benchmark/ci/failures.py "$RESULTS" "$OUT" || true
 python3 benchmark/ci/summarize.py "$OUT" "${LABEL:-}" | tee benchmark/build/summary.md || true
 
 if [ "${STRICTMODE:-0}" = 1 ]; then
   # the debug build (StrictMode and JankStats on, core/DevPerf.kt) through each journey once, uncompiled
-  gradle --no-daemon :app:installDebug
+  quiet_gradle benchmark/build/gradle-install-debug.log --no-daemon :app:installDebug || true
   adb logcat -c
-  gradle "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest \
+  rm -rf "$RESULTS" "$OUT"
+  quiet_gradle benchmark/build/gradle-debug-pass.log "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest \
     "-P$A.class=app.encore.android.benchmark.JourneyBenchmarks" \
     "-P$A.encore.package=app.encore.client.debug" \
     "-P$A.encore.compilation=none" \
     "-P$A.encore.iterations=1" \
     "-P$A.androidx.benchmark.suppressErrors=EMULATOR,DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
+  python3 benchmark/ci/failures.py "$RESULTS" "$OUT" || true
   adb logcat -d -v brief > benchmark/build/debug-logcat.txt || true
   python3 benchmark/ci/strictmode.py benchmark/build/debug-logcat.txt | tee benchmark/build/strictmode.md || true
 fi
