@@ -258,16 +258,14 @@ fun MacrobenchmarkScope.watchFullPlayer(seconds: Int = 10) {
 }
 
 /**
- * Journey: opens Up next from the full player, scrolls it to the end and back, and removes the first queued song
- * (the phone's Up next has no drag to reorder; removing a song moves every song after it up, which is the change of
- * order the list animates).
+ * Journey: opens Up next from the full player, scrolls it to the end, and removes a queued song (the phone's Up next
+ * has no drag to reorder; removing a song moves every song after it up, which is the change of order the list
+ * animates). It never swipes down: at the top of the list that drags the sheet closed.
  */
 fun MacrobenchmarkScope.editUpNext() {
     val list = openUpNext()
     list.setGestureMargin(device.displayWidth / 5)
     list.fling(Direction.DOWN)
-    device.waitForIdle(300)
-    list.fling(Direction.UP)
     device.waitForIdle(300)
     device.need(By.desc("Remove"), "a queued song's Remove button").click()
     // the rows below move up (animateItem)

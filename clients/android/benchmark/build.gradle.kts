@@ -16,6 +16,11 @@ android {
         minSdk = 28
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Macrobenchmark errors to let pass, e.g. -Pencore.suppressErrors=EMULATOR,DEBUGGABLE (benchmark/ci/run.sh).
+        // Set here because a comma-separated -Pandroid.testInstrumentationRunnerArguments value is cut at the comma.
+        providers.gradleProperty("encore.suppressErrors").orNull?.let {
+            testInstrumentationRunnerArguments["androidx.benchmark.suppressErrors"] = it
+        }
     }
 
     // the test APK instruments itself and drives the app over UiAutomator (a Macrobenchmark must not run in the

@@ -21,10 +21,11 @@ ARGS=(--no-daemon --stacktrace
   "-P$A.encore.compilation=${COMPILATION:-partial}"
   "-P$A.encore.iterations=${ITERATIONS:-5}"
   "-P$A.encore.startupIterations=${STARTUP_ITERATIONS:-10}")
-# errors Macrobenchmark lets pass: an emulator in CI (the debug pass adds DEBUGGABLE; a repeated -P would not override)
+# errors Macrobenchmark lets pass: an emulator in CI (the debug pass adds DEBUGGABLE); benchmark/build.gradle.kts
+# reads encore.suppressErrors
 SUPPRESS=""
 if [ "${EMULATOR:-0}" = 1 ]; then SUPPRESS=EMULATOR; fi
-if [ -n "$SUPPRESS" ]; then ARGS+=("-P$A.androidx.benchmark.suppressErrors=$SUPPRESS"); fi
+if [ -n "$SUPPRESS" ]; then ARGS+=("-Pencore.suppressErrors=$SUPPRESS"); fi
 if [ "${PROFILE:-0}" = 1 ]; then
   mkdir -p benchmark/build
   gradle "${ARGS[@]}" :app:generateBaselineProfile > benchmark/build/gradle-profile.log 2>&1 \
@@ -68,7 +69,7 @@ if [ "${STRICTMODE:-0}" = 1 ]; then
     "-P$A.encore.package=app.encore.client.debug" \
     "-P$A.encore.compilation=none" \
     "-P$A.encore.iterations=1" \
-    "-P$A.androidx.benchmark.suppressErrors=${SUPPRESS:+$SUPPRESS,}DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
+    "-Pencore.suppressErrors=${SUPPRESS:+$SUPPRESS,}DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
   python3 benchmark/ci/failures.py "$RESULTS" "$OUT" || true
   adb logcat -d -v brief > benchmark/build/debug-logcat.txt || true
   python3 benchmark/ci/strictmode.py benchmark/build/debug-logcat.txt | tee benchmark/build/strictmode.md || true
