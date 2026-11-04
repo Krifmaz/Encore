@@ -11,7 +11,10 @@ encore-db = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
+# the table's types, the loader and the schema answer (the kit's settings crate)
+kit-server-settings = { workspace = true }
 
 [build-dependencies]
-# build.rs reads settings.toml; preserve_order keeps the file's order (cards and their fields)
-toml = { version = "0.8.23", default-features = false, features = ["parse", "preserve_order"] }
+# build.rs checks settings.toml and generates settings_gen.rs with the kit's settings crate (without its server
+# half); the path is the workspace's `kit-server-settings` one, from this crate's folder
+kit-server-settings = { path = "../../../../kit/crates/kit-server-settings", default-features = false, features = ["toml"] }
