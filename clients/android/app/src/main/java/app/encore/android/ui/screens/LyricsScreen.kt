@@ -30,6 +30,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -204,7 +205,7 @@ class LyricsLoad {
     /** the song these are for (-1: none yet) */
     var forId: Long = -1L
     /** bumped by [reload]: [rememberLyrics] asks the server again */
-    var version by mutableStateOf(0)
+    var version by mutableIntStateOf(0)
     /** the next answer replaces the copy saved with a download (a lyrics report changed them) */
     var refreshSaved: Boolean = false
 

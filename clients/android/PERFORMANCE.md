@@ -151,16 +151,30 @@ Each change is under the hood: nothing looks or behaves differently.
 
 ## Debug-build checks
 
-A debug-build pass through the same journeys (`STRICTMODE=1`, CI run of `4b13db5`) logged these main-thread disk
-reads; there was no main-thread network access.
+A debug-build pass through the same journeys (`STRICTMODE=1`) logs StrictMode's main-thread violations; there was
+no main-thread network access, only disk reads (and two first writes that create a folder).
 
 | Where | What it reads | Done |
 |---|---|---|
-| `CadenzaEngine.available` (15) | loads `libcadenza.so` | loaded by `Warmup` first |
-| `LibraryScreen`, `LibrarySorts`, `OfflineStore`, `CarPrefs`, `TvPrefs`, `RemoteDevice`, `ServerRoute`, `PrefsRepository`, `AuthScreens.legacyServer` | a SharedPreferences file's first read | loaded by `Warmup` first |
+| `CadenzaEngine.available` (15 before, 0 after) | loads `libcadenza.so` | loaded by `Warmup` first: gone |
+| `LibraryScreen`, `LibrarySorts` (6 before, 0 after) | Library's preferences files | loaded by `Warmup` first: gone |
+| `OfflineStore`, `CarPrefs`, `TvPrefs`, `RemoteDevice`, `ServerRoute`, `PrefsRepository`, `GroupListen`, `AuthScreens.legacyServer` | a preferences file's first read | `Warmup` loads them too, but these are read in the first milliseconds after start (the graph, the playback service, the first frame), usually before the background thread gets to them; still logged, and a later read never waits |
 | `CrashLog.install`, `Translations.init`, `EncoreApp.onCreate` | the crash folder, the translation setting | kept: needed before the first frame, a few hundred bytes, once per start |
-| `buildHttpClient`, `ApiCache.init`, `EncorePlaybackService.onCreate` | `cacheDir`/`filesDir` (a folder check) | kept: a single `stat` each, once per process |
+| `buildHttpClient`, `ApiCache.init`, `EncorePlaybackService.onCreate`, `CoverPreloader` | `cacheDir`/`filesDir` (a folder check) | kept: a single `stat` each, once per process |
+
+Moving the remaining start-up reads off the main thread would mean building the app's graph and the playback
+service asynchronously, which changes the order things start in; that is a larger change than this pass.
 
 JankStats (debug build, so slower than release; compare screens with each other): UpNext 12 janky frames (median
 12 ms, the slide animations), Library 6 (131 ms, the first page and covers arriving), Home 4 (291 ms, the first
 frame after start), Album 4 (68 ms), FullPlayer 3 (137 ms, opening it).
+
+## Lint
+
+`android-perf.yml` runs Android lint and prints the issues in the files this branch changed. Fixed: a `StateFlow`
+read during composition in the player's menu (now `collectAsState`) and every `mutableStateOf(0)` in the changed
+screens (now `mutableIntStateOf`, no boxing). Left as they were, because they predate this work and fixing them
+would change behaviour or dependencies rather than performance: the manifest notes (media search intent filter,
+exported services, backup rules), newer library and SDK versions, `Configuration.screenWidthDp` in two layouts
+(its replacement measures the window differently), and two `SharedPreferences.edit` KTX suggestions (the app has
+no `core-ktx` dependency).

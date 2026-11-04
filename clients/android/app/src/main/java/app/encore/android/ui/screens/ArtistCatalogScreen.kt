@@ -35,6 +35,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -437,7 +438,7 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
     val libColumns = ((LocalConfiguration.current.screenWidthDp - 2 * Gutter.value + 14f) / (140f + 14f)).toInt().coerceAtLeast(2)
     val statuses = rememberRequestStatuses()
     LiveRequestStatuses(nav, statuses)
-    var filter by remember { mutableStateOf(0) }
+    var filter by remember { mutableIntStateOf(0) }
     // the discography sections opened with "View all" (a grid of every release instead of the sideways row)
     var expanded by remember { mutableStateOf(setOf<String>()) }
     var confirmMissing by remember { mutableStateOf<Pair<String, List<CatalogAlbum>>?>(null) }

@@ -33,6 +33,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -365,7 +366,7 @@ fun PlaylistEditScreen(nav: Nav, id: Long) {
     val features = nav.features
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
-    var version by remember { mutableStateOf(0) }
+    var version by remember { mutableIntStateOf(0) }
     val loader = rememberLoad("playlist-edit", id, version) { features.playlistPage(id) }
     var items by remember { mutableStateOf<List<PlaylistItem>?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -488,7 +489,7 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
     val features = nav.features
     val p = MaterialTheme.palette
     val scope = rememberCoroutineScope()
-    var mode by remember { mutableStateOf(0) }
+    var mode by remember { mutableIntStateOf(0) }
     // Settings → Connections → Import Liked Songs opens this with the service's liked-songs link filled in
     var url by remember { mutableStateOf(startUrl) }
     var text by remember { mutableStateOf("") }
@@ -512,7 +513,7 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
     val albumModes = listOf("" to "Albums: admin default", "song" to "Just the songs", "album" to "Whole albums")
     // the Requests link box's "Import as playlist" (the web Downloader's): missing songs requested, its album choice
     var requestMissing by remember { mutableStateOf(startRequestMissing) }
-    var albumMode by remember { mutableStateOf(albumModes.indexOfFirst { it.first == startAlbumMode }.coerceAtLeast(0)) }
+    var albumMode by remember { mutableIntStateOf(albumModes.indexOfFirst { it.first == startAlbumMode }.coerceAtLeast(0)) }
     var preview by remember { mutableStateOf<ImportPreview?>(null) }
     var previewError by remember { mutableStateOf<String?>(null) }
     var previewing by remember { mutableStateOf(false) }

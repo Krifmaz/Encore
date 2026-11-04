@@ -54,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -142,7 +143,7 @@ private object LibraryState {
     var text by mutableStateOf("")
     /** with a query: the one results view (true), or the selected tab filtered by the query (false) */
     var results by mutableStateOf(true)
-    var tab by mutableStateOf(0)
+    var tab by mutableIntStateOf(0)
     /** the albums list's Type (0.36): a key of GET /api/library/album-types, "" = All types */
     var albumType by mutableStateOf("")
     /** offline mode as the page last saw it: Downloaded is picked once when it starts, not on every visit */
@@ -342,7 +343,7 @@ private class Paged<T>(val pageSize: Int) {
     var done by mutableStateOf(false)
     var loading by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
-    var generation by mutableStateOf(0)
+    var generation by mutableIntStateOf(0)
     /** set by the screen on every composition: how to fetch a page, and where to run it */
     var fetch: (offset: Int, limit: Int) -> List<T> = { _, _ -> emptyList() }
     var scope: CoroutineScope? = null
@@ -776,7 +777,7 @@ private fun LibraryResults(nav: Nav, q: String, onShowAll: (Int) -> Unit) {
     val nowPlaying by nav.player.nowPlaying.collectAsState()
     var found by remember { mutableStateOf<Pair<String, LibrarySearch>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var generation by remember { mutableStateOf(0) }
+    var generation by remember { mutableIntStateOf(0) }
     // a song corrected or deleted from its ⋯: the search runs again (the results stay until it answers)
     OnSongFixed { generation += 1 }
     // the newest query wins: a new one cancels the request of the one before

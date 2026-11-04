@@ -718,6 +718,8 @@ internal fun PlayerActions(
     // a group listen: the ⋯ menu's "Start a group listen" / "Group listen"
     val group by GroupListen.state.collectAsState()
     val groupsHere by GroupListen.available.collectAsState()
+    // who is signed in (admins and "own_files" get Bring your own music in the menu), followed while the menu shows
+    val me by app.encore.android.features.library.SongFixUi.me.collectAsState()
     Row(
         modifier,
         horizontalArrangement = Arrangement.spacedBy(18.dp, if (center) Alignment.CenterHorizontally else Alignment.Start),
@@ -752,7 +754,7 @@ internal fun PlayerActions(
                 // one tap to the report sheet for the song playing now (wrong song, bad audio, wrong lyrics …)
                 if (!track.isSurround && track.id > 0) MenuEntry("Report a problem", R.drawable.ic_flag) { ReportUi.track(track.id, track.title) } else null,
                 // bring your own music (admins and the "own_files" permission)
-                app.encore.android.features.library.OwnFileUi.entry(app.encore.android.features.library.SongFixUi.me.value, track.id, track.title, track.isSurround),
+                app.encore.android.features.library.OwnFileUi.entry(me, track.id, track.title, track.isSurround),
                 when {
                     group != null -> MenuEntry("Group listen", R.drawable.ic_group) { GroupListen.sheetOpen.value = true }
                     groupsHere == true && link == null -> MenuEntry("Start a group listen", R.drawable.ic_group) { GroupListen.startOpen.value = true }
