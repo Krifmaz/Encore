@@ -1031,6 +1031,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "kit-server-updates",
  "libc",
  "serde",
  "serde_json",
@@ -1708,6 +1709,7 @@ name = "kit-server-diagnostics"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "kit-server-core",
  "serde",
  "serde_json",
@@ -1727,9 +1729,11 @@ name = "kit-server-notices"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "kit-server-core",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -1752,6 +1756,8 @@ dependencies = [
  "kit-server-core",
  "serde",
  "serde_json",
+ "sha2",
+ "tokio",
  "tracing",
 ]
 

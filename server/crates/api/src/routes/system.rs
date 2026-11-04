@@ -22,7 +22,6 @@ use serde_json::{json, Value};
 /// The system routes: service tests, VPN and Soulseek state, streamrip's Tidal sign-in, downloads, tools, backups and updates.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/system/test/{service}", post(test))
         .route("/api/system/vpn", get(vpn_status))
         .route("/api/system/soulseek", get(soulseek_status))
         .route("/api/system/soulseek/reconnect", post(soulseek_reconnect))
@@ -41,9 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/backups/{name}", get(backup_download))
         .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
-        // Encore's own updates and "Restart server" (update.rs)
-        .route("/api/system/update", get(super::update::get_update).post(super::update::post_update))
-        .route("/api/system/restart", post(super::update::post_restart))
+        // Encore's own updates and "Restart server": the kit's routes over update.rs
+        .merge(kit_server_updates::router())
 }
 
 // ---- the old Download tools card: answered from the plugins for one more release ---------------
@@ -395,13 +393,15 @@ fn msg(ok: bool, m: impl Into<String>) -> Value {
     json!({ "ok": ok, "message": m.into() })
 }
 
-/// POST /api/system/test/{service}: test a service's settings (admins).
-async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<String>) -> ApiResult<Json<Value>> {
-    match run_test(&st, &service, Some(&u)).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) if e.to_string() == "__unknown" => Err(err(404, "Unknown service")),
-        // the whole chain, never cut: "streamrip config path: config failed: start /config/tools/venv/bin/rip: …"
-        Err(e) => Ok(Json(msg(false, format!("{e:#}")))),
+/// POST /api/system/test/{service} (admins; the kit's route, kit_server_diagnostics, registered in
+/// routes::stats): `None` for a service there is no test for (404 "Unknown service"), the whole chain of a
+/// test that failed on the way, never cut ("streamrip config path: config failed: start /config/tools/venv/bin/rip: …",
+/// answered `{ok: false, message}`).
+pub(crate) async fn test(st: AppState, service: String, u: kit_server_core::Account) -> Option<kit_server_diagnostics::TestResult> {
+    match run_test(&st, &service, Some(&u.row)).await {
+        Ok(v) => Some(Ok(v)),
+        Err(e) if e.to_string() == "__unknown" => None,
+        Err(e) => Some(Err(format!("{e:#}"))),
     }
 }
 

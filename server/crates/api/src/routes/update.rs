@@ -3,50 +3,32 @@
 //!        restart: "ready", self_update: "ready" | "unavailable", self_update_reason, image, …}
 //!   POST /api/system/update {tag?}     (admin) → 202: the new image is pulled and the helper container started
 //!   POST /api/system/restart           (admin) → 202: the server stops gracefully and exits with code 75
-//! What they do is encore_system::update's.
-use crate::auth::Admin;
-use encore_db::RowExt;
-use encore_core::error::{err, ApiResult};
+//! The routes are the kit's (`kit_server_updates::router`, merged in routes::system); what they do is
+//! encore_system::update's, through the kit's `Updates` trait implemented here.
 use crate::state::AppState;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::Json;
+use encore_core::error::err;
 use encore_system::update;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use kit_server_core::Account;
+use serde_json::Value;
 
-/// `GET /api/system/update` query.
-#[derive(Deserialize)]
-pub struct UpdateQ {
-    /// "1", "true" or "yes" checks again instead of the cached answer
-    force: Option<String>,
-}
-
-/// GET /api/system/update: the running version and the newest release (admins).
-pub async fn get_update(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<UpdateQ>) -> ApiResult<Json<Value>> {
-    let force = matches!(q.force.as_deref(), Some("1" | "true" | "yes"));
-    Ok(Json(update::status(&st, force).await))
-}
-
-/// `POST /api/system/update` body.
-#[derive(Deserialize, Default)]
-pub struct UpdateBody {
-    /// the release to update to (default: the newest)
-    tag: Option<String>,
-}
-
-/// POST /api/system/update: update the server to a release (admins).
-pub async fn post_update(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<UpdateBody>>) -> ApiResult<(StatusCode, Json<Value>)> {
-    match update::update_now(&st, &u.s("username"), body.and_then(|b| b.0.tag)).await {
-        Ok(v) => Ok((StatusCode::ACCEPTED, Json(v))),
-        Err(update::Refused(code, why)) => Err(err(code, why)),
+impl kit_server_updates::Updates for AppState {
+    /// The update card (`force`: Check now).
+    async fn update_status(&self, force: bool) -> kit_server_core::Result<Value> {
+        Ok(update::status(self, force).await)
     }
-}
 
-/// "Restart server": 202 at once, the restart half a second later.
-pub async fn post_restart(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<(StatusCode, Json<Value>)> {
-    update::restart(&st, &u.s("username"));
-    Ok((StatusCode::ACCEPTED, Json(json!({ "ok": true, "message": "Restarting" }))))
+    /// Update now: the new image pulled and the helper container started; Encore's refusals as they are.
+    async fn update_now(&self, who: &Account, tag: Option<String>) -> kit_server_core::Result<Value> {
+        match update::update_now(self, &who.username, tag).await {
+            Ok(v) => Ok(v),
+            Err(update::Refused(code, why)) => Err(err(code, why).into()),
+        }
+    }
+
+    /// Restart server: half a second later, so the 202 answer gets out first.
+    fn restart(&self, who: &Account) {
+        update::restart(self, &who.username);
+    }
 }
 
 #[cfg(test)]

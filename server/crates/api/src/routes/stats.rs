@@ -1,4 +1,5 @@
-//! /api/stats (home numbers, leaderboard), /api/system/diagnostics, /api/admin/autodownload and /api/admin/tasks.
+//! /api/stats (home numbers, leaderboard), /api/system/diagnostics and /api/system/test/{service} (the kit's
+//! routes, kit_server_diagnostics, over Encore's checks registered here), /api/admin/autodownload and /api/admin/tasks.
 use crate::enrich::enrich_now;
 use crate::auth::{Admin, User};
 use encore_db::{now, Row, RowExt};
@@ -13,6 +14,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use kit_server_diagnostics::{Check, Registry};
 use std::time::Instant;
 
 /// The stats, diagnostics, auto-download and scheduled task routes.
@@ -20,7 +22,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/stats/me", get(me))
         .route("/api/stats/leaderboard", get(leaderboard))
-        .route("/api/system/diagnostics", get(diagnostics))
+        // GET /api/system/diagnostics and POST /api/system/test/{service}
+        .merge(kit_server_diagnostics::router())
         .route("/api/diagnostics/client-crash", get(client_crash::list).post(client_crash::upload).delete(client_crash::clear))
         .route("/api/admin/autodownload", get(get_auto).put(put_auto))
         .route("/api/admin/autodownload/upgrade-now", post(upgrade_now))
@@ -304,95 +307,157 @@ async fn tool(st: &AppState, name: &str, cmd: &str, arg: &'static str) -> Value 
     json!({ "name": name, "kind": "tool", "request": format!("{cmd} {arg}"), "ok": ok, "detail": d })
 }
 
-/// GET /api/system/diagnostics: every service and folder checked at once (admins).
-async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    let g = |k: &str| st.cfg.str(k).trim_end_matches('/').to_string();
-    let mbu = if g("musicbrainz_url").is_empty() { "https://musicbrainz.org".into() } else { g("musicbrainz_url") };
-    let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>>> = vec![
-        Box::pin(http_check(&st, "MusicBrainz", format!("{mbu}/ws/2/artist?query=test&limit=1&fmt=json"), vec![], &[200])),
-    ];
-    if !g("prowlarr_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "Prowlarr", format!("{}/api/v1/system/status", g("prowlarr_url")), vec![("X-Api-Key", st.cfg.str("prowlarr_api_key"))], &[200])));
-    }
-    // the chosen download clients (a blackhole folder is checked as a path below)
-    let basic = |u: &str, p: &str| ("Authorization", format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", st.cfg.str(u), st.cfg.str(p)))));
-    match Client::torrent(&st) {
-        Client::Qbit if !g("qbit_url").is_empty() => futs.push(Box::pin(http_check(&st, "qBittorrent", format!("{}/api/v2/app/version", g("qbit_url")), vec![], &[200, 403]))),
-        // without a session id Transmission answers 409, which proves the address and the login
-        Client::Transmission if !g("transmission_url").is_empty() => {
-            let u = g("transmission_url");
-            let u = if u.ends_with("/rpc") { u } else { format!("{u}/transmission/rpc") };
-            futs.push(Box::pin(http_check(&st, "Transmission", u, vec![basic("transmission_user", "transmission_password")], &[200, 409])))
-        }
-        Client::Deluge if !g("deluge_url").is_empty() => futs.push(Box::pin(http_check(&st, "Deluge", g("deluge_url"), vec![], &[200]))),
-        Client::Rtorrent if !g("rtorrent_url").is_empty() => futs.push(Box::pin(http_check(&st, "rTorrent", g("rtorrent_url"), vec![basic("rtorrent_user", "rtorrent_password")], &[200, 405]))),
-        _ => {}
-    }
-    match Client::usenet(&st) {
-        Client::Sab if !g("sab_url").is_empty() => futs.push(Box::pin(http_check(&st, "SABnzbd", format!("{}/api?mode=version&output=json&apikey={}", g("sab_url"), st.cfg.str("sab_api_key")), vec![], &[200]))),
-        Client::NzbGet if !g("nzbget_url").is_empty() => {
-            let u = g("nzbget_url");
-            let u = if u.ends_with("/jsonrpc") { format!("{u}/version") } else { format!("{u}/jsonrpc/version") };
-            futs.push(Box::pin(http_check(&st, "NZBGet", u, vec![basic("nzbget_user", "nzbget_password")], &[200])))
-        }
-        _ => {}
-    }
-    if !g("jellyfin_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "Jellyfin", format!("{}/System/Info/Public", g("jellyfin_url")), vec![], &[200])));
-    }
-    if !g("plex_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "Plex", format!("{}/identity", g("plex_url")), vec![("Accept", "application/json".into()), ("X-Plex-Token", st.cfg.str("plex_token"))], &[200])));
-    }
-    if !g("navidrome_url").is_empty() {
-        futs.push(Box::pin(http_check(&st, "Navidrome", format!("{}/rest/ping?v=1.16.1&c=encore&f=json", g("navidrome_url")), vec![], &[200])));
-    }
-    if !st.cfg.str("acoustid_api_key").is_empty() {
-        futs.push(Box::pin(http_check(&st, "AcoustID", encore_http::acoustid::check_key_url(&st.cfg.str("acoustid_api_key")), vec![], &[200])));
-    }
-    futs.push(Box::pin(http_check(&st, "Cover Art Archive", format!("{}/", encore_http::coverartarchive::BASE), vec![], &[200, 301, 302, 307, 308])));
-    futs.push(Box::pin(http_check(&st, "YouTube Music", "https://music.youtube.com/".into(), vec![], &[200, 301, 302, 303])));
-    let mut checks: Vec<Value> = futures_util::future::join_all(futs).await;
-    // the Soulseek session as Encore keeps it (no call: the session's supervisor reads slskd all the time);
-    // the card's sentence, pointing at the card ("fix them in Settings → Plugins → Soulseek", not "below")
-    if encore_requests::slskd_managed::configured(&st) {
-        let s = encore_requests::slskd_session::status(&st);
-        let detail = encore_requests::slskd_session::text_elsewhere(s["text"].as_str().unwrap_or(""));
-        checks.push(json!({ "name": "Soulseek", "kind": "service", "request": "GET /api/system/soulseek", "ok": s["state"] == "logged_in",
-            "detail": detail, "soulseek": s }));
-    }
-    // the folders: a write test in each (on the blocking pool; these are checks of the folders as they are now)
-    let mut paths: Vec<(&str, String)> = vec![("Music library", st.cfg.str("library_path")), ("Staging folder", st.cfg.str("staging_path"))];
-    if st.cfg.bool("slskd_enabled") {
-        paths.push(("Soulseek downloads", st.cfg.str("slskd_download_path")));
-    }
-    if torznab_on(&st) {
-        let c = Client::torrent(&st);
-        if c == Client::TorrentHole {
-            paths.push(("Torrent blackhole watch folder", st.cfg.str("torrent_blackhole_watch")));
-        }
-        paths.push(("Torrent downloads (as seen by Encore)", st.cfg.str(c.download_path_key())));
-    }
-    if st.cfg.bool("torznab_enabled") && Client::usenet(&st).ready(&st) && Client::usenet(&st) != Client::Sab {
-        let c = Client::usenet(&st);
-        if c == Client::NzbHole {
-            paths.push(("Usenet blackhole watch folder", st.cfg.str("nzb_blackhole_watch")));
-        }
-        paths.push(("Usenet downloads (as seen by Encore)", st.cfg.str(c.download_path_key())));
-    }
-    paths.push(("Config folder", st.data_dir().to_string_lossy().to_string()));
-    let owned: Vec<(String, String)> = paths.into_iter().map(|(l, p)| (l.to_string(), p)).collect();
-    checks.extend(tokio::task::spawn_blocking(move || owned.iter().map(|(l, p)| path_check(l, p, true)).collect::<Vec<_>>()).await.unwrap_or_default());
-    checks.push(cover_check(&st));
-    checks.push(tool(&st, "ffmpeg", "ffmpeg", "-version").await);
-    checks.push(tool(&st, "fpcalc (audio fingerprints)", "fpcalc", "-version").await);
-    // which yt-dlp and streamrip run (the updated copy when it is newer: their versions are asked) on the
-    // blocking pool
-    let (ytdlp_bin, streamrip_bin) = st.blocking(|st| Ok((encore_requests::sources::ytdlp::bin(st), streamrip::binary(st)))).await?;
-    checks.push(tool(&st, "yt-dlp", &ytdlp_bin, "--version").await);
-    checks.push(tool(&st, "streamrip", streamrip_bin.as_deref().unwrap_or("streamrip"), "--version").await);
-    if streamrip_bin.is_some() {
-        checks.push(streamrip::config_loads_check(&st).await);
-    }
+/// A group of one check built as JSON.
+fn one(v: Value) -> kit_server_core::Result<Vec<Check>> {
+    Ok(vec![Check::from(v)])
+}
+
+/// A setting's value without a trailing slash.
+fn setting(st: &AppState, k: &str) -> String {
+    st.cfg.str(k).trim_end_matches('/').to_string()
+}
+
+/// `Authorization: Basic …` from two settings.
+fn basic(st: &AppState, u: &str, p: &str) -> (&'static str, String) {
+    ("Authorization", format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:{}", st.cfg.str(u), st.cfg.str(p)))))
+}
+
+/// A service checked with a GET when its address setting `key` is filled in: none otherwise.
+fn service_if(st: &AppState, key: &str) -> bool {
+    !setting(st, key).is_empty()
+}
+
+/// Encore's checks for GET /api/system/diagnostics, in the page's order: the services (each only once set
+/// up), Soulseek's session, the folders (a write test in each), the cover pass and the tools; all run at once.
+/// The settings cards' Test buttons are [`super::system::run_test`]'s.
+pub(crate) fn registry() -> Registry<AppState> {
+    Registry::new()
+        .group("musicbrainz", |st: AppState| async move {
+            let g = |k: &str| setting(&st, k);
+            let mbu = if g("musicbrainz_url").is_empty() { "https://musicbrainz.org".into() } else { g("musicbrainz_url") };
+            one(http_check(&st, "MusicBrainz", format!("{mbu}/ws/2/artist?query=test&limit=1&fmt=json"), vec![], &[200]).await)
+        })
+        .group("prowlarr", |st: AppState| async move {
+            if !service_if(&st, "prowlarr_url") {
+                return Ok(vec![]);
+            }
+            one(http_check(&st, "Prowlarr", format!("{}/api/v1/system/status", setting(&st, "prowlarr_url")), vec![("X-Api-Key", st.cfg.str("prowlarr_api_key"))], &[200]).await)
+        })
+        // the chosen download clients (a blackhole folder is checked as a path below)
+        .group("torrent client", |st: AppState| async move {
+            let g = |k: &str| setting(&st, k);
+            let c = match Client::torrent(&st) {
+                Client::Qbit if !g("qbit_url").is_empty() => http_check(&st, "qBittorrent", format!("{}/api/v2/app/version", g("qbit_url")), vec![], &[200, 403]).await,
+                // without a session id Transmission answers 409, which proves the address and the login
+                Client::Transmission if !g("transmission_url").is_empty() => {
+                    let u = g("transmission_url");
+                    let u = if u.ends_with("/rpc") { u } else { format!("{u}/transmission/rpc") };
+                    http_check(&st, "Transmission", u, vec![basic(&st, "transmission_user", "transmission_password")], &[200, 409]).await
+                }
+                Client::Deluge if !g("deluge_url").is_empty() => http_check(&st, "Deluge", g("deluge_url"), vec![], &[200]).await,
+                Client::Rtorrent if !g("rtorrent_url").is_empty() => http_check(&st, "rTorrent", g("rtorrent_url"), vec![basic(&st, "rtorrent_user", "rtorrent_password")], &[200, 405]).await,
+                _ => return Ok(vec![]),
+            };
+            one(c)
+        })
+        .group("usenet client", |st: AppState| async move {
+            let g = |k: &str| setting(&st, k);
+            let c = match Client::usenet(&st) {
+                Client::Sab if !g("sab_url").is_empty() => http_check(&st, "SABnzbd", format!("{}/api?mode=version&output=json&apikey={}", g("sab_url"), st.cfg.str("sab_api_key")), vec![], &[200]).await,
+                Client::NzbGet if !g("nzbget_url").is_empty() => {
+                    let u = g("nzbget_url");
+                    let u = if u.ends_with("/jsonrpc") { format!("{u}/version") } else { format!("{u}/jsonrpc/version") };
+                    http_check(&st, "NZBGet", u, vec![basic(&st, "nzbget_user", "nzbget_password")], &[200]).await
+                }
+                _ => return Ok(vec![]),
+            };
+            one(c)
+        })
+        .group("jellyfin", |st: AppState| async move {
+            if !service_if(&st, "jellyfin_url") {
+                return Ok(vec![]);
+            }
+            one(http_check(&st, "Jellyfin", format!("{}/System/Info/Public", setting(&st, "jellyfin_url")), vec![], &[200]).await)
+        })
+        .group("plex", |st: AppState| async move {
+            if !service_if(&st, "plex_url") {
+                return Ok(vec![]);
+            }
+            one(http_check(&st, "Plex", format!("{}/identity", setting(&st, "plex_url")), vec![("Accept", "application/json".into()), ("X-Plex-Token", st.cfg.str("plex_token"))], &[200]).await)
+        })
+        .group("navidrome", |st: AppState| async move {
+            if !service_if(&st, "navidrome_url") {
+                return Ok(vec![]);
+            }
+            one(http_check(&st, "Navidrome", format!("{}/rest/ping?v=1.16.1&c=encore&f=json", setting(&st, "navidrome_url")), vec![], &[200]).await)
+        })
+        .group("acoustid", |st: AppState| async move {
+            if st.cfg.str("acoustid_api_key").is_empty() {
+                return Ok(vec![]);
+            }
+            one(http_check(&st, "AcoustID", encore_http::acoustid::check_key_url(&st.cfg.str("acoustid_api_key")), vec![], &[200]).await)
+        })
+        .group("coverartarchive", |st: AppState| async move {
+            one(http_check(&st, "Cover Art Archive", format!("{}/", encore_http::coverartarchive::BASE), vec![], &[200, 301, 302, 307, 308]).await)
+        })
+        .group("youtube music", |st: AppState| async move { one(http_check(&st, "YouTube Music", "https://music.youtube.com/".into(), vec![], &[200, 301, 302, 303]).await) })
+        // the Soulseek session as Encore keeps it (no call: the session's supervisor reads slskd all the time);
+        // the card's sentence, pointing at the card ("fix them in Settings → Plugins → Soulseek", not "below")
+        .group("soulseek", |st: AppState| async move {
+            if !encore_requests::slskd_managed::configured(&st) {
+                return Ok(vec![]);
+            }
+            let s = encore_requests::slskd_session::status(&st);
+            let detail = encore_requests::slskd_session::text_elsewhere(s["text"].as_str().unwrap_or(""));
+            one(json!({ "name": "Soulseek", "kind": "service", "request": "GET /api/system/soulseek", "ok": s["state"] == "logged_in", "detail": detail, "soulseek": s }))
+        })
+        // the folders: a write test in each (on the blocking pool; these are checks of the folders as they are now)
+        .group("folders", |st: AppState| async move {
+            let mut paths: Vec<(&str, String)> = vec![("Music library", st.cfg.str("library_path")), ("Staging folder", st.cfg.str("staging_path"))];
+            if st.cfg.bool("slskd_enabled") {
+                paths.push(("Soulseek downloads", st.cfg.str("slskd_download_path")));
+            }
+            if torznab_on(&st) {
+                let c = Client::torrent(&st);
+                if c == Client::TorrentHole {
+                    paths.push(("Torrent blackhole watch folder", st.cfg.str("torrent_blackhole_watch")));
+                }
+                paths.push(("Torrent downloads (as seen by Encore)", st.cfg.str(c.download_path_key())));
+            }
+            if st.cfg.bool("torznab_enabled") && Client::usenet(&st).ready(&st) && Client::usenet(&st) != Client::Sab {
+                let c = Client::usenet(&st);
+                if c == Client::NzbHole {
+                    paths.push(("Usenet blackhole watch folder", st.cfg.str("nzb_blackhole_watch")));
+                }
+                paths.push(("Usenet downloads (as seen by Encore)", st.cfg.str(c.download_path_key())));
+            }
+            paths.push(("Config folder", st.data_dir().to_string_lossy().to_string()));
+            let owned: Vec<(String, String)> = paths.into_iter().map(|(l, p)| (l.to_string(), p)).collect();
+            let checks = tokio::task::spawn_blocking(move || owned.iter().map(|(l, p)| path_check(l, p, true)).collect::<Vec<_>>()).await.unwrap_or_default();
+            Ok(checks.into_iter().map(Check::from).collect())
+        })
+        .group("covers", |st: AppState| async move { one(cover_check(&st)) })
+        .group("ffmpeg", |st: AppState| async move { one(tool(&st, "ffmpeg", "ffmpeg", "-version").await) })
+        .group("fpcalc", |st: AppState| async move { one(tool(&st, "fpcalc (audio fingerprints)", "fpcalc", "-version").await) })
+        // which yt-dlp and streamrip run (the updated copy when it is newer: their versions are asked) on the
+        // blocking pool
+        .group("downloaders", |st: AppState| async move {
+            let (ytdlp_bin, streamrip_bin) = st.blocking(|st| Ok((encore_requests::sources::ytdlp::bin(st), streamrip::binary(st)))).await?;
+            let mut out = vec![
+                Check::from(tool(&st, "yt-dlp", &ytdlp_bin, "--version").await),
+                Check::from(tool(&st, "streamrip", streamrip_bin.as_deref().unwrap_or("streamrip"), "--version").await),
+            ];
+            if streamrip_bin.is_some() {
+                out.push(Check::from(streamrip::config_loads_check(&st).await));
+            }
+            Ok(out)
+        })
+        .tests(super::system::test)
+}
+
+/// GET /api/system/diagnostics's answer around the `checks`: the version, the settings that are not at their
+/// default, the machine and the download folders.
+pub(crate) async fn diagnostics_answer(st: &AppState, checks: Vec<Value>) -> ApiResult<Value> {
     let dump = st.cfg.public_dump();
     let mut settings = vec![];
     for (k, d) in st.cfg.defs.iter() {
@@ -405,8 +470,18 @@ async fn diagnostics(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
     let uid = Some(effective_uid() as i64);
     // every folder downloads are saved in, with its last probe's result and time (the probe runs every minute)
     let folders = st.blocking(|st| Ok(encore_requests::worker::downloads::status(st, true))).await?;
-    Ok(Json(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "machine": super::system::server_block(&st),
-                    "download_folders": folders, "time": now() })))
+    Ok(json!({ "version": crate::VERSION, "server": "rust", "uid": uid, "checks": checks, "settings": settings, "machine": super::system::server_block(st),
+               "download_folders": folders, "time": now() }))
+}
+
+impl kit_server_diagnostics::Diagnostics for AppState {
+    fn diagnostics(&self) -> Registry<AppState> {
+        registry()
+    }
+
+    async fn answer(&self, checks: Vec<Value>) -> kit_server_core::Result<Value> {
+        Ok(diagnostics_answer(self, checks).await?)
+    }
 }
 
 /// How far the cover thumbnail pass is: "Cover thumbnails: 12 340 / 18 000".
