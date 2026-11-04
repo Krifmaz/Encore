@@ -396,25 +396,7 @@ pub fn chip<'a, M: Clone + 'a>(label: String, accent: bool, on: M) -> El<'a, M> 
         .into()
 }
 
-/// A text link: the label in the text colour, pressed like a button.
-pub fn link<'a, M: Clone + 'a>(label: impl Into<String>, size: f32, on: M) -> El<'a, M> {
-    let p = theme::look();
-    button(t(label.into()).size(size).color(p.text).font(theme::semibold()))
-        .padding([0, 2])
-        .style(theme::btn(Btn::Row))
-        .on_press(on)
-        .into()
-}
-
-/// A muted text link (`a.muted`).
-pub fn muted_link<'a, M: Clone + 'a>(label: impl Into<String>, size: f32, on: M) -> El<'a, M> {
-    let p = theme::look();
-    button(t(label.into()).size(size).color(p.muted))
-        .padding([0, 2])
-        .style(theme::btn(Btn::Row))
-        .on_press(on)
-        .into()
-}
+pub use kit_iced::widgets::{link, muted_link};
 
 // ----- pictures ---------------------------------------------------------------------------
 
