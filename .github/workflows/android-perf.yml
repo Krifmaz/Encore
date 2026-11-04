@@ -95,6 +95,16 @@ jobs:
       - name: Build the app and the benchmarks
         # before the emulator starts, so its time goes to the measurements
         run: gradle -p clients/android --no-daemon --stacktrace :app:assembleBenchmarkRelease :benchmark:assembleBenchmarkRelease
+      - name: Lint of the files this branch changed
+        # Android lint of the app; prints only the warnings in files that differ from main (the project's rule: fix
+        # the warnings in the files you change). Informational: it never fails the run.
+        continue-on-error: true
+        run: |
+          gradle -p clients/android --no-daemon -q :app:lintDebug > /dev/null 2>&1 || true
+          git fetch -q --deepen=200 origin "$GITHUB_REF" || true
+          git fetch -q --depth=200 origin main || true
+          git diff --name-only origin/main...HEAD > /tmp/changed.txt || true
+          python3 clients/android/benchmark/ci/lint.py clients/android/app/build/reports/lint-results-debug.xml /tmp/changed.txt
       - name: Wait for the library scan
         run: |
           H='x-requested-with: encore'
