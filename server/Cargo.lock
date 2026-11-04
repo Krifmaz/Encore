@@ -1670,6 +1670,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kit-rules"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kit-server-bugreports"
 version = "0.1.0"
 dependencies = [
@@ -1689,6 +1697,7 @@ name = "kit-server-changelog"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "kit-rules",
  "kit-server-core",
  "serde",
  "serde_json",
