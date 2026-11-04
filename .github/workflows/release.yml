@@ -5,10 +5,13 @@ name: release
 # by hand (e.g. 1.0.0). The tag is created through the release (the API may create tags; a git push
 # from the Actions token may not).
 #   Start one: Actions → release → Run workflow.
+#   Every merge to the default branch makes one too (release-on-merge.yml, bump "auto": PATCH, or MINOR/MAJOR when
+#   the merge adds docs/releases/<that version>.md), with the server and Docker image only.
 #   Tick "apps" to also build the desktop installers and the Android APK (the macOS runner costs 10× minutes,
-#   so they are off by default and a release without them is just the server + Docker image). They can be
-#   built on your own machine instead and attached to the release: scripts/release-apps.sh.
-#   Desktop: the native app (apps.yml `desktop`, clients/desktop).
+#   so they are off by default and a release without them is just the server + Docker image, with the apps of the
+#   previous release attached again). They can be built on your own machine instead and attached to the release:
+#   scripts/release-apps.sh.
+#   Desktop: the native app (clients/desktop).
 #   If the macOS desktop job waits for a runner, cancel the run after the server, Docker, Android, Windows and Linux
 #   jobs are done: publish still runs and the notes name what is missing. GitHub itself cancels a job no runner
 #   takes within about 15 minutes; either way, mac-backfill.yml adds the Mac app to the published release later. A cancel after the server and Docker jobs
@@ -17,15 +20,13 @@ name: release
 #   Notes: docs/releases/<version>.md if it exists, otherwise the commit list since the previous release.
 #   Checks first (the `test` job, which pull requests run too through docker.yml): the server's tests and clippy
 #   for every crate of the workspace, the web app's checks, and whether Cadenza is pinned to one rev everywhere.
-#   The x86_64 server build also runs the speed table (server/benches/perf.rs) into its job summary.
+#   The x86_64 server build of a release started by hand also runs the speed table (server/benches/perf.rs) into
+#   its job summary.
 #   SHA256SUMS covers every file of the release; the desktop app checks its updates against it.
-#   Hotfixes: hotfix.yml calls this file with channel = hotfix on every push to the default branch. Version
-#   <newest release>.<run number> (0.35.2.17), the server and Docker image only (no apps, no speed table), image
-#   tags :<version>, :hotfix and :latest, a normal GitHub release tagged hotfix-<version> that becomes "Latest" (unless a higher full release came out while it built) –
-#   so :latest and the stable channel get it too. The desktop and Android apps and the version bump above only
-#   look at v<version> releases, so they never pick a hotfix. Only the newest
-#   three hotfixes are kept (their releases, tags and images); a full release counts as newer than all of them.
-#   Servers on Settings → Diagnostics → Updates → "Hotfixes" (update_channel = hotfix) are offered them.
+# The steps themselves are the Krifmaz kit's shared workflows (github.com/Krifmaz/kit, .github/workflows/): kit-ci
+# (the checks), kit-release (version, web app, server tarballs, notes, SHA256SUMS, the release), kit-docker,
+# kit-android and kit-desktop. What is Encore's own (names, install notes, the extension, old installer names) is
+# passed to them below.
 on:
   workflow_dispatch:
     inputs:
@@ -47,463 +48,191 @@ on:
         type: choice
         options: [all, android]
         default: all
-  # docker.yml (pull requests, by hand) runs only the test job below: it calls this file with only = test
+  # release-on-merge.yml: every merge to the default branch
   workflow_call:
     inputs:
-      only:
+      bump:
         type: string
         required: false
-        default: test
-      # hotfix.yml: hotfix (see above); stable otherwise
-      channel:
-        type: string
-        required: false
-        default: stable
+        default: auto
 
 permissions:
   contents: write
   packages: write
 
-# releases queue one after the other; a test-only call (docker.yml) gets a group of its own; a hotfix gets
-# its own too, where a newer push cancels the hotfix still on its way
+# releases queue one after the other
 concurrency:
-  group: ${{ inputs.only == 'test' && format('release-test-{0}', github.run_id) || inputs.channel == 'hotfix' && 'release-hotfix' || 'release' }}
-  cancel-in-progress: ${{ inputs.channel == 'hotfix' }}
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  version:
-    if: inputs.only != 'test'
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-      semver: ${{ steps.v.outputs.semver }}
-      code: ${{ steps.v.outputs.code }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      # Releases come from main only: 0.42.17 and 0.42.18 were built from a stale default branch and shipped an
-      # older database schema than the releases before them (their servers could not open the database).
-      - name: Built from main
-        run: |
-          git fetch --quiet origin main
-          git merge-base --is-ancestor HEAD origin/main || { echo "::error::Releases are built from main only; $GITHUB_REF_NAME ($GITHUB_SHA) is not on main."; exit 1; }
-      - name: The database schema never goes down (scripts/check-schema-version.sh)
-        run: bash scripts/check-schema-version.sh
-      - id: v
-        env:
-          BUMP: ${{ inputs.bump }}
-          WANT: ${{ inputs.version }}
-          CHANNEL: ${{ inputs.channel }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          semver() { echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
-          if [ "$CHANNEL" = hotfix ]; then
-            # a hotfix: the newest full release with the run number as a fourth part (0.35.2.17)
-            LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
-                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-            V="${LAST:-0.20.0}.$GITHUB_RUN_NUMBER"
-            IFS=. read -r A B C <<< "${LAST:-0.20.0}"
-            echo "version=$V" >> "$GITHUB_OUTPUT"
-            echo "semver=$A.$B.$C" >> "$GITHUB_OUTPUT"
-            echo "code=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))" >> "$GITHUB_OUTPUT"
-            echo "Hotfix $V"
-            exit 0
-          fi
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            V="${GITHUB_REF_NAME#v}"
-          elif [ -n "$WANT" ]; then
-            V="${WANT#v}"
-          else
-            # the newest version so far: release tags (v0.20.1 …)
-            LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
-                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-            if [ -z "$LAST" ]; then
-              V="0.20.0"                               # the first numbered release after the date-based ones
-            else
-              IFS=. read -r A B C <<< "$LAST"
-              case "$BUMP" in
-                major) V="$((A + 1)).0.0" ;;
-                minor) V="$A.$((B + 1)).0" ;;
-                *)     V="$A.$B.$((C + 1))" ;;
-              esac
-            fi
-          fi
-          semver "$V" || { echo "bad version $V (want MAJOR.MINOR.PATCH)"; exit 1; }
-          IFS=. read -r A B C <<< "$V"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          # the apps take the same semver
-          echo "semver=$V" >> "$GITHUB_OUTPUT"
-          # Android versionCode, always increasing and above the old date-based codes (26101302 …):
-          # 260000000 + major*1000000 + minor*10000 + patch*10
-          echo "code=$(( 260000000 + A * 1000000 + B * 10000 + C * 10 ))" >> "$GITHUB_OUTPUT"
-          echo "Version $V"
-
-  # The checks every release and every pull request runs (docker.yml calls this job with only = test).
+  # The checks every release and every pull request runs (docker.yml runs the same).
   test:
-    runs-on: ubuntu-latest
-    env:
-      # line numbers in backtraces are all a test run needs; full debug info for every crate's test binary would
-      # fill the runner's disk (and the cache)
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            server
-            web-rs
+    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    with:
+      rust-dirs: server
+      wasm-dirs: web-rs
+      # Encore's code is not cargo fmt'ed (its own style); the kit's code is
+      fmt: false
       # The server, the desktop app and the phone build the same Cadenza engine and move their pins to a new rev
       # together (scripts/check-cadenza-pins.sh lists them). Not blocking yet: the desktop app is ahead of the
       # server and the phone, and moving the server's pin changes what its Cadenza processing renders, which a
-      # structure-only release (0.29) leaves alone. The step shows the differing pins; once they match, remove
-      # continue-on-error so a split can't come back.
-      - name: Cadenza is pinned to the same rev everywhere
-        continue-on-error: true
-        run: bash scripts/check-cadenza-pins.sh
-      # Dependencies a Cargo.toml lists but no code uses (every Rust project of the repo: the server's crates,
-      # the web app, the desktop app and the phone's engine): they only cost build time, so the check fails.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-machete
-      - name: No unused dependencies
-        run: cargo machete
-      - name: The release guard's own tests (scripts/test-check-schema-version.sh)
-        run: bash scripts/test-check-schema-version.sh
-      - name: Server tests (every crate of the workspace)
-        working-directory: server
-        run: cargo test --workspace --locked
-      - name: Server clippy (every crate, tests and the bench included)
-        working-directory: server
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Check the web app (web-rs) for WebAssembly, clippy and its tests (the strings reference among them)
-        working-directory: web-rs
-        run: |
-          cargo check --locked --target wasm32-unknown-unknown
-          cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
-          cargo test --locked
+      # structure-only release (0.29) leaves alone. The step shows the differing pins; once they match, make it a
+      # `check` so a split can't come back.
+      advisory-name: Cadenza is pinned to the same rev everywhere
+      advisory: bash scripts/check-cadenza-pins.sh
 
-  # the web app in Rust/WebAssembly (web-rs) → static/, packed into the Linux tarballs (the image builds it itself)
-  ui:
-    if: inputs.only != 'test'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: web-rs
-      - run: curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
-      - run: trunk build --release
-        working-directory: web-rs
-      - name: The dist has everything the server serves by name
-        working-directory: web-rs
-        run: |
-          for f in index.html sw.js share.html css/app.css manifest.webmanifest favicon.svg icons/icon-192.png; do test -f "dist/$f" || { echo "dist/$f missing"; exit 1; }; done
-          ls dist/encore-web-*_bg.wasm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ui-dist
-          path: web-rs/dist
-
-  server:
-    needs: [version, test, ui]
-    # every release builds the server, an Android-only one too: servers are offered every v<version> release, and
-    # one without its own server and image made "Update now" fail ("Could not pull ghcr.io/krifmaz/encore:0.36.4")
-    if: inputs.only != 'test'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-gnu
-          - arch: aarch64
-            target: aarch64-unknown-linux-gnu
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: server
-          key: ${{ matrix.target }}
-      - if: matrix.arch == 'aarch64'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Build
-        working-directory: server
-        env:
-          ENCORE_VERSION: ${{ needs.version.outputs.version }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: ui-dist
-          path: web-rs/dist
-      - name: Package
-        run: |
-          V=${{ needs.version.outputs.version }}
-          # static/ is the Rust UI (trunk's dist)
-          mkdir -p out/encore && cp server/target/${{ matrix.target }}/release/encore out/encore/ && cp -r web-rs/dist out/encore/static
-          tar -C out -czf encore-$V-linux-${{ matrix.arch }}.tar.gz encore
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-${{ matrix.arch }}
-          path: "*.tar.gz"
-      # The speed table (server/benches/perf.rs, the same as docs/perf/) on this release build, in the job summary.
-      # A GitHub runner is another machine with other neighbours, so compare its numbers only with other runs here.
-      # Only the x86_64 build can run on the runner; a failed bench does not hold the release back.
-      - name: Speed table (cargo bench --bench perf)
-        if: matrix.arch == 'x86_64' && inputs.channel != 'hotfix'
-        continue-on-error: true
-        working-directory: server
-        env:
-          # the same as the build above, so the crates it compiled are reused
-          ENCORE_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          # -p encore: a bench across the workspace would turn on encore-core's test-only fault-io feature
-          # (through encore-api's and encore-requests' dev-dependencies), which refuses a release build
-          cargo bench -p encore --locked --target ${{ matrix.target }} --bench perf > perf.md
-          { echo "## Speed table, Encore ${{ needs.version.outputs.version }} (release build, GitHub runner)"; cat perf.md; } >> "$GITHUB_STEP_SUMMARY"
+  # the version, the web app (web-rs → static/) and the server tarballs for x86_64 and aarch64
+  prepare:
+    needs: test
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    with:
+      stage: prepare
+      app-name: Encore
+      bump: ${{ inputs.bump }}
+      version: ${{ inputs.version }}
+      # the first numbered release after the date-based ones
+      first-version: "0.20.0"
+      # Android versionCode, always increasing and above the old date-based codes (26101302 …):
+      # 260000000 + major*1000000 + minor*10000 + patch*10
+      code-base: 260000000
+      web-dir: web-rs
+      web-files: index.html sw.js share.html css/app.css manifest.webmanifest favicon.svg icons/icon-192.png
+      server-dir: server
+      server-bin: encore
+      version-env: ENCORE_VERSION
+      # The speed table (server/benches/perf.rs, the same as docs/perf/), on releases started by hand only (a merge's
+      # release skips it, as the hotfixes did). -p encore: a bench across the workspace would turn on encore-core's
+      # test-only fault-io feature (through encore-api's and encore-requests' dev-dependencies), which refuses a
+      # release build
+      bench: ${{ github.event_name == 'workflow_dispatch' && 'cargo bench -p encore --locked --target "$TARGET" --bench perf' || '' }}
 
   docker:
-    needs: [version, test]
-    # an Android-only release too (see `server`): the in-app updater pulls :<version> of every release
-    if: inputs.only != 'test'
-    runs-on: ubuntu-latest
-    env:
-      DOCKER_BUILD_RECORD_UPLOAD: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Tags
-        id: tags
-        run: |
-          I="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/encore"
-          # every build moves :latest, a hotfix :hotfix as well
-          T="$I:${{ needs.version.outputs.version }},$I:latest${{ inputs.channel == 'hotfix' && format(',{0}:hotfix', '$I') || '' }}"
-          echo "tags=$T" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            ENCORE_BUILD=${{ github.sha }}
-            ENCORE_VERSION=${{ needs.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  apps:
-    needs: [version, test]
-    if: inputs.apps || inputs.only == 'android'
-    uses: ./.github/workflows/apps.yml
+    # an Android-only release too: the in-app updater pulls :<version> of every release
+    needs: prepare
+    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
-      version: ${{ needs.version.outputs.version }}
-      semver: ${{ needs.version.outputs.semver }}
-      code: ${{ needs.version.outputs.code }}
-      only: ${{ inputs.only == 'android' && 'android-native' || 'all' }}
-    # the Android release key lives in repository secrets; a called workflow only sees them when passed on
-    secrets: inherit
+      image: encore
+      version: ${{ needs.prepare.outputs.version }}
+      build-args: |
+        ENCORE_BUILD=${{ github.sha }}
+        ENCORE_VERSION=${{ needs.prepare.outputs.version }}
 
-  # a hotfix: a release (the new Latest, unless a higher full release came out meanwhile) of the server and the
-  # image, then only the newest three hotfixes stay
-  hotfix:
-    needs: [version, server, docker]
-    if: inputs.channel == 'hotfix'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: server-*
-          path: out
-          merge-multiple: true
-      - name: Publish the hotfix
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          V: ${{ needs.version.outputs.version }}
-        run: |
-          cp docker-compose.yml out/
-          (cd out && sha256sum -- * > SHA256SUMS)
-          PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
-          {
-            echo "Hotfix build of \`${GITHUB_SHA::7}\` (the main branch after ${PREV:-the first release}). Servers are offered it on"
-            echo "Settings → Diagnostics → Updates; the next full release replaces it."
-            echo; echo "## Changes since ${PREV:-the start}"
-            git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60
-            echo; echo "---"
-            echo "* **Docker**: \`ghcr.io/krifmaz/encore:latest\` or \`:hotfix\` (\`:$V\` pins this build)"
-            echo "* **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\`"
-            echo "* The desktop and Android apps are built for full releases only."
-          } > notes.md
-          gh release delete "hotfix-$V" --yes --cleanup-tag 2>/dev/null || true
-          # A full release published while this hotfix was building (v0.42.6 beside hotfix-0.42.5.191) is numbered
-          # above it: then the hotfix must not take "Latest" from it. Servers compare numbers, not the flag, and the
-          # next push makes a hotfix on top of the new release.
-          NEWEST=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
-                    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-          LATEST=--latest
-          if [ -n "$NEWEST" ] && [ "$(printf '%s\n%s\n' "$NEWEST" "$V" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -1)" = "$NEWEST" ]; then
-            echo "v$NEWEST came out while hotfix $V was building: published without Latest"
-            LATEST=--latest=false
-          fi
-          gh release create "hotfix-$V" out/* --title "Encore $V (hotfix)" --notes-file notes.md --target "$GITHUB_SHA" "$LATEST"
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Keep only the newest three hotfixes
-        # a failed clean-up never fails the hotfix: the next one tries again
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KEEP: 3
-        run: |
-          # releases and their tags: hotfix-<a>.<b>.<c>.<n>, newest version first
-          OLD=$(gh release list --limit 200 --json tagName -q '.[].tagName' | sed -n 's/^hotfix-\([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' \
-                | sort -rV | tail -n +$((KEEP + 1)))
-          for v in $OLD; do echo "deleting release hotfix-$v"; gh release delete "hotfix-$v" --yes --cleanup-tag || true; done
-          # images: a package version whose tags are all hotfix versions not kept, and the per-platform manifests
-          # under it (they show as untagged versions; another image's untagged ones are never touched)
-          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          API="/users/$OWNER/packages/container/encore/versions"
-          gh api --paginate "$API?per_page=100" > versions.json 2>/dev/null || { echo "can't list the image's versions"; exit 0; }
-          jq -s 'add' versions.json > all.json
-          KEPT=$(jq -r '.[].metadata.container.tags[]' all.json | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -rV | head -n "$KEEP")
-          jq -c '.[] | select((.metadata.container.tags | length) > 0)' all.json | while read -r ver; do
-            TAGS=$(echo "$ver" | jq -r '.metadata.container.tags[]')
-            # only versions tagged with hotfix numbers alone (never :latest, :hotfix or a release's)
-            echo "$TAGS" | grep -qvE '^[0-9]+(\.[0-9]+){3}$' && continue
-            for t in $TAGS; do echo "$KEPT" | grep -qx "$t" && continue 2; done
-            ID=$(echo "$ver" | jq -r .id); DIGEST=$(echo "$ver" | jq -r .name)
-            for child in $(docker buildx imagetools inspect --raw "ghcr.io/$OWNER/encore@$DIGEST" 2>/dev/null | jq -r '.manifests[]?.digest'); do
-              CID=$(jq -r --arg d "$child" '.[] | select(.name == $d and (.metadata.container.tags | length) == 0) | .id' all.json)
-              [ -n "$CID" ] && gh api -X DELETE "$API/$CID" >/dev/null && echo "deleted $child"
-            done
-            gh api -X DELETE "$API/$ID" >/dev/null && echo "deleted image $(echo $TAGS) ($DIGEST)"
-          done
+  # The native Android app (clients/android), Encore-android-<version>.apk, signed with the permanent release key
+  # from the ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD secrets.
+  # Cadenza (libencore_cadenza.so) must be in it, 16 KB aligned.
+  android:
+    needs: prepare
+    if: inputs.apps || inputs.only == 'android'
+    uses: Krifmaz/kit/.github/workflows/kit-android.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    with:
+      app-name: Encore
+      version: ${{ needs.prepare.outputs.version }}
+      code: ${{ needs.prepare.outputs.code }}
+      project-dir: clients/android
+      version-property: encore
+      android-packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      build-tools: "36.0.0"
+      ndk: "29.0.13846066"
+      rust-targets: aarch64-linux-android,armv7-linux-androideabi
+      rust-dir: clients/android/cadenza/rust
+      native-libs: libencore_cadenza.so
+    secrets:
+      android-keystore-base64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      android-keystore-password: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      android-key-alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+      android-key-password: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+  # The desktop app (clients/desktop, Iced) by scripts/desktop-package.sh: the names its updater looks for
+  # (clients/desktop/src/desktop/updater.rs). Windows and Linux carry Cadenza's CUDA offload; macOS has none and is
+  # built on Intel for both Mac targets (arm64 Macs ran out of capacity in late October 2026; mac-backfill.yml adds a
+  # missed .dmg later).
+  desktop:
+    needs: prepare
+    if: inputs.apps && inputs.only != 'android'
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    with:
+      app-name: Encore
+      version: ${{ needs.prepare.outputs.version }}
+      project-dir: clients/desktop
+      package-script: scripts/desktop-package.sh
+      linux-features: cuda
+      windows-features: cuda
+      # ALSA (Cadenza's output), xkbcommon and Wayland (the window), udev; no GTK or libxdo: the tray is ksni over
+      # D-Bus and file dialogs use the desktop portal. `file` for appimagetool
+      linux-packages: libasound2-dev libxkbcommon-dev libwayland-dev libudev-dev pkg-config file
+      linux-check: bash clients/desktop/packaging/check.sh
+      linux-files: "Encore-{V}-linux-x86_64.AppImage encore_{V}_amd64.deb"
+      windows-files: "Encore-{V}-windows-x86_64.exe"
+      macos-files: "Encore-{V}-macos-universal.dmg"
+    secrets:
+      windows-cert-pfx-base64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      windows-cert-password: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      macos-cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+      macos-sign-identity: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      apple-id: ${{ secrets.APPLE_ID }}
+      apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+      apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
 
   publish:
-    needs: [version, server, docker, apps]
+    needs: [prepare, docker, android, desktop]
     if: >-
-      always() && inputs.channel != 'hotfix' && (
-        needs.server.result == 'success' && needs.docker.result == 'success' &&
-        (inputs.only != 'android' || needs.apps.result == 'success')
-      )
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      # only our files (the Docker build record artifact can't be downloaded this way)
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: server-*
-          path: out
-          merge-multiple: true
-      # the apps that did build, also when one of them didn't (a Mac build that never got a machine): the
-      # notes below name what is attached and what is not
-      - uses: actions/download-artifact@v4
-        if: needs.apps.result != 'skipped'
-        continue-on-error: true
-        with:
-          pattern: Encore-*
-          path: out
-          merge-multiple: true
-      - name: Files and notes
-        env:
-          APPS: ${{ needs.apps.result }}
-          ONLY: ${{ inputs.only }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          V=${{ needs.version.outputs.version }}; SV=${{ needs.version.outputs.semver }}
-          if [ "$ONLY" = android ]; then
-            # Android only: keep the desktop apps of the newest release, with this run's APK and server (SHA256SUMS
-            # is written again when publishing)
-            # the newest full release (a hotfix can be "Latest" and has no apps)
-            PREV=$(gh release list --limit 200 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-            mkdir -p keep && [ -n "$PREV" ] && gh release download "$PREV" --dir keep 2>/dev/null || true
-            rm -f keep/Encore-android-*.apk keep/docker-compose.yml keep/SHA256SUMS keep/encore-*-linux-*.tar.gz
-            # the classic Tauri desktop app (removed in 0.29) and its update manifest are not carried over
-            (cd keep && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm latest.json)
-            mv keep/* out/ 2>/dev/null || true
-          fi
-          # desktop installers carry the npm version in their names – show the real one
-          if [ "$SV" != "$V" ]; then for f in out/*"$SV"*; do [ -e "$f" ] && mv "$f" "${f//$SV/$V}"; done; fi
-          cp docker-compose.yml out/
-          # the YouTube sign-in browser extension (chrome/ and firefox/ folders in one zip)
-          rm -f out/Encore-youtube-extension-*.zip
-          bash scripts/build-extension.sh "$V" out
-          ls -la out
-          if [ -f "docs/releases/$V.md" ]; then cp "docs/releases/$V.md" notes.md; else
-            PREV=$(git tag -l 'v[0-9]*' --sort=-creatordate | head -1)
-            { echo "## Changes"; git log --no-merges --pretty='- %s' ${PREV:+$PREV..}HEAD | head -60; } > notes.md
-          fi
-          cat >> notes.md <<EOT
+      always() && needs.prepare.result == 'success' && needs.docker.result == 'success' &&
+      (inputs.only != 'android' || needs.android.result == 'success')
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    with:
+      stage: publish
+      app-name: Encore
+      version: ${{ needs.prepare.outputs.version }}
+      only: ${{ inputs.only || 'all' }}
+      # success when every app built, skipped when none ran
+      apps-result: >-
+        ${{ (needs.android.result == 'skipped' && needs.desktop.result == 'skipped') && 'skipped' ||
+        (needs.android.result == 'success' && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')) && 'success' || 'failure' }}
+      # Android only: these of the newest release are not kept (built again, or the classic Tauri desktop app removed
+      # in 0.29 and its update manifest)
+      keep-drop: >-
+        Encore-android-*.apk docker-compose.yml encore-*-linux-*.tar.gz
+        Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm latest.json
+      # the compose file and the YouTube sign-in browser extension (chrome/ and firefox/ folders in one zip)
+      files: |
+        cp docker-compose.yml "$OUT/"
+        rm -f "$OUT"/Encore-youtube-extension-*.zip
+        bash scripts/build-extension.sh "$V" "$OUT"
+      # the installers; a run that built none of them attaches the previous release's (encore_*.deb is the desktop
+      # app's Debian package), without the extension (built fresh) and the classic Tauri desktop app
+      app-files: Encore-android-*.apk Encore-*-windows-*.exe Encore-*-linux-x86_64.AppImage Encore-*-macos-universal.dmg
+      carry-over: Encore-* encore_*.deb
+      carry-over-drop: >-
+        Encore-youtube-extension-*.zip Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz*
+        Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm
+      # the install part of the notes
+      notes: |
+        cat >> "$NOTES" <<EOT
 
-          ---
-          ### Install
-          * **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached
-          * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\` (the yt-dlp and streamrip plugins need uv and Python 3.14 on the host, python3.14 in /usr/bin or /usr/local/bin; the Docker image has both)
-          * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
-          EOT
-          if [ "$ONLY" = android ]; then cat >> notes.md <<EOT
-          * **Android**: \`Encore-android-$V.apk\` (this build) · the desktop apps are from the previous release
-          EOT
-          elif [ "$APPS" = success ]; then cat >> notes.md <<EOT
-          * **Android**: \`Encore-android-$V.apk\`
-          * **Desktop app** (native, with Cadenza playing on this computer; it updates itself): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
-          EOT
-          elif compgen -G "out/Encore-android-*.apk" >/dev/null || compgen -G "out/Encore-*-windows-*.exe" >/dev/null \
-            || compgen -G "out/Encore-*-linux-x86_64.AppImage" >/dev/null || compgen -G "out/Encore-*-macos-universal.dmg" >/dev/null; then
-            # some apps built, some didn't: name what is attached
-            have() { compgen -G "out/$1" >/dev/null; }
-            if have "Encore-android-$V.apk"; then echo "* **Android**: \`Encore-android-$V.apk\`" >> notes.md; else echo "* **Android**: not in this release (its build did not finish); the next release has it" >> notes.md; fi
-            D=""; M=""
-            if have "Encore-$V-windows-x86_64.exe"; then D="$D **Windows** \`Encore-$V-windows-x86_64.exe\` ·"; else M="$M Windows,"; fi
-            if have "Encore-$V-macos-universal.dmg"; then D="$D **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) ·"; else M="$M macOS,"; fi
-            if have "Encore-$V-linux-x86_64.AppImage"; then D="$D **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` ·"; else M="$M Linux,"; fi
-            if [ -n "$D" ]; then echo "* **Desktop app** (native, with Cadenza playing on this computer; it updates itself):$D checksums in \`SHA256SUMS\`" >> notes.md; fi
-            if [ -n "$M" ]; then echo "* **Not in this release:**${M%,} desktop app – its build did not run this time; the next release has it" >> notes.md; fi
-          else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> notes.md; fi
-          sed -i 's/^          //' notes.md
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          V: ${{ needs.version.outputs.version }}
-          APPS: ${{ needs.apps.result }}
-        run: |
-          # app installers from the previous release when this run built none of them (a run with some of the
-          # apps attaches only those: an older build beside a newer one would offer two versions)
-          # (encore_*.deb is the desktop app's Debian package)
-          if [ "$APPS" != success ] && ! compgen -G "out/Encore-android-*.apk" >/dev/null && ! compgen -G "out/Encore-*-windows-*.exe" >/dev/null \
-            && ! compgen -G "out/Encore-*-linux-x86_64.AppImage" >/dev/null && ! compgen -G "out/Encore-*-macos-universal.dmg" >/dev/null; then
-            PREV=$(gh release list --limit 200 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "v$V" | sort -V | tail -1)
-            mkdir -p prev && [ -n "$PREV" ] && gh release download "$PREV" --dir prev --pattern 'Encore-*' --pattern 'encore_*.deb' 2>/dev/null || true
-            rm -f prev/Encore-youtube-extension-*.zip   # built fresh above
-            # the classic Tauri desktop app (removed in 0.29) is not carried over
-            (cd prev && rm -f Encore-Setup-* Encore-classic-* Encore-*-mac.dmg Encore-*-mac.app.tar.gz* Encore-*-linux-amd64.deb Encore-*-linux-x86_64.rpm)
-            mv prev/* out/ 2>/dev/null || true
-          fi
-          # SHA256SUMS over every file, written last so it covers them all: the native desktop app installs an update
-          # only when its file is listed here with the same hash (clients/desktop/src/desktop/updater.rs)
-          (cd out && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
-          gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "v$V" out/* --title "Encore $V" --notes-file notes.md --target "$GITHUB_SHA" --latest
+        ---
+        ### Install
+        * **Docker**: \`ghcr.io/krifmaz/encore:latest\` (\`:$V\` pins this build) · compose file attached
+        * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\` (the yt-dlp and streamrip plugins need uv and Python 3.14 on the host, python3.14 in /usr/bin or /usr/local/bin; the Docker image has both)
+        * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
+        EOT
+        if [ "$ONLY" = android ]; then cat >> "$NOTES" <<EOT
+        * **Android**: \`Encore-android-$V.apk\` (this build) · the desktop apps are from the previous release
+        EOT
+        elif [ "$APPS" = success ]; then cat >> "$NOTES" <<EOT
+        * **Android**: \`Encore-android-$V.apk\`
+        * **Desktop app** (native, with Cadenza playing on this computer; it updates itself): **Windows** \`Encore-$V-windows-x86_64.exe\` · **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) · **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` · checksums in \`SHA256SUMS\`
+        EOT
+        elif compgen -G "$OUT/Encore-android-*.apk" >/dev/null || compgen -G "$OUT/Encore-*-windows-*.exe" >/dev/null \
+          || compgen -G "$OUT/Encore-*-linux-x86_64.AppImage" >/dev/null || compgen -G "$OUT/Encore-*-macos-universal.dmg" >/dev/null; then
+          # some apps built, some didn't: name what is attached
+          have() { compgen -G "$OUT/$1" >/dev/null; }
+          if have "Encore-android-$V.apk"; then echo "* **Android**: \`Encore-android-$V.apk\`" >> "$NOTES"; else echo "* **Android**: not in this release (its build did not finish); the next release has it" >> "$NOTES"; fi
+          D=""; M=""
+          if have "Encore-$V-windows-x86_64.exe"; then D="$D **Windows** \`Encore-$V-windows-x86_64.exe\` ·"; else M="$M Windows,"; fi
+          if have "Encore-$V-macos-universal.dmg"; then D="$D **macOS** \`Encore-$V-macos-universal.dmg\` (if macOS will not open it the first time: System Settings → Privacy & Security → Open Anyway) ·"; else M="$M macOS,"; fi
+          if have "Encore-$V-linux-x86_64.AppImage"; then D="$D **Linux** \`Encore-$V-linux-x86_64.AppImage\` or \`encore_${V}_amd64.deb\` ·"; else M="$M Linux,"; fi
+          if [ -n "$D" ]; then echo "* **Desktop app** (native, with Cadenza playing on this computer; it updates itself):$D checksums in \`SHA256SUMS\`" >> "$NOTES"; fi
+          if [ -n "$M" ]; then echo "* **Not in this release:**${M%,} desktop app – its build did not run this time; the next release has it" >> "$NOTES"; fi
+        else echo "* **Apps**: the desktop and Android apps were not rebuilt for this release – the ones attached are from the last build that made them." >> "$NOTES"; fi
