@@ -12,9 +12,9 @@ anyhow = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 # the table's types, the loader and the schema answer (the kit's settings crate)
-kit-server-settings = { workspace = true }
+kit-server-settings = { workspace = true, features = ["server", "toml"] }
 
 [build-dependencies]
 # build.rs checks settings.toml and generates settings_gen.rs with the kit's settings crate (without its server
-# half); the path is the workspace's `kit-server-settings` one, from this crate's folder
-kit-server-settings = { path = "../../../../kit/crates/kit-server-settings", default-features = false, features = ["toml"] }
+# half)
+kit-server-settings = { workspace = true, features = ["toml"] }

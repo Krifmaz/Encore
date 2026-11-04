@@ -26,7 +26,7 @@ kit-server-changelog = { workspace = true, features = ["server"] }
 kit-server-notices = { workspace = true }
 kit-server-bugreports = { workspace = true }
 kit-server-diagnostics = { workspace = true }
-kit-server-settings = { workspace = true }
+kit-server-settings = { workspace = true, features = ["server", "toml"] }
 kit-server-updates = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }

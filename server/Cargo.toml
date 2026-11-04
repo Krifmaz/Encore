@@ -34,7 +34,7 @@ kit-server-changelog = { path = "../../kit/crates/kit-server-changelog", default
 kit-server-notices = { path = "../../kit/crates/kit-server-notices" }
 kit-server-bugreports = { path = "../../kit/crates/kit-server-bugreports" }
 kit-server-diagnostics = { path = "../../kit/crates/kit-server-diagnostics" }
-kit-server-settings = { path = "../../kit/crates/kit-server-settings" }
+kit-server-settings = { path = "../../kit/crates/kit-server-settings", default-features = false }
 kit-server-updates = { path = "../../kit/crates/kit-server-updates" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
