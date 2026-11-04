@@ -41,7 +41,8 @@ const NOTES_MAX: usize = 4000;
 const SCOPE: &str = "encore:update";
 /// Where the last answer of the hotfix channel is kept.
 const SCOPE_HOTFIX: &str = "encore:update:hotfix";
-/// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
+/// The tag prefix of the builds CI published on every push before each merge became a full release (the old
+/// .github/workflows/hotfix.yml).
 pub const HOTFIX_PREFIX: &str = "hotfix-";
 /// How many releases the hotfix channel looks through (newest first).
 const HOTFIX_PAGE: usize = 30;
