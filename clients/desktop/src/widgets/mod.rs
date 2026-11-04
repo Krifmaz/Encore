@@ -7,7 +7,6 @@ pub mod centered_bar;
 pub mod choice;
 pub mod cover;
 pub mod details;
-pub mod drop_zone;
 pub mod empty;
 pub mod eq_graph;
 pub mod list_row;
@@ -19,13 +18,13 @@ pub mod request_list;
 pub mod search_box;
 pub mod sidebar;
 pub mod stat;
-pub mod tabs;
 pub mod tile;
 pub mod toast;
 pub mod track_row;
 
 // The kit's building blocks (kit_iced::widgets), under the names the pages use.
-pub use kit_iced::widgets::{badge, icons, modal, skeleton, text_area};
+pub use kit_iced::drop_zone;
+pub use kit_iced::widgets::{badge, icons, modal, skeleton, tabs, text_area};
 
 // The re-exports are the pages' toolbox.
 
@@ -37,7 +36,7 @@ pub use modal::confirm;
 pub use pop_menu::{pop_menu, MenuItem};
 pub use search_box::{search_box, search_box_clearable};
 pub use skeleton::{skeleton_rows, skeleton_tiles};
-pub use tabs::{seg, tabs, tabs_maybe};
+pub use tabs::{seg, tabs_maybe};
 pub use tile::{grid, rail, Tile, TileKind};
 pub use toast::ToastKind;
 pub use track_row::TrackRow;

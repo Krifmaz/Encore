@@ -7,43 +7,29 @@
 use crate::api::ApiError;
 use crate::fmt;
 use crate::widgets::drop_zone;
-use crate::pages::bug_reports::{kind_badge, pick_files, status_badge, status_label, status_table, Picked, Picker};
+use crate::pages::bug_reports::{form, kind_badge, pick_files, status_badge, status_label, status_table, Reply, ReplyMsg, ReplyOut};
+pub use kit_iced::bug_report::meta_line;
 use crate::pages::{Ctx, El, Page};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::catalog;
 use crate::widgets::choice::select;
-use crate::widgets::text_area::text_area;
 use crate::widgets::{
-    self, badge, btn, btn_icon, card, card_flat, confirm, error_box, h1, section_head, skeleton_rows, small,
+    self, badge, btn_icon, card, card_flat, confirm, error_box, h1, section_head, skeleton_rows, small,
     small_muted, t, Icon,
 };
-use iced::widget::{button, column, container, image, row, space, text_editor};
+use iced::widget::{button, column, container, image, row, space};
 use iced::{Alignment, ContentFit, Length, Subscription, Task};
 use serde_json::{json, Value};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct State {
     pub id: i64,
     /// `{report, messages}`; None while loading, Err(message) when it failed.
     data: Option<Result<Box<Value>, String>>,
-    reply: text_editor::Content,
-    picker: Picker,
-    sending: bool,
+    /// The reply box (the kit's: its text, files and Send).
+    reply: Reply,
     /// The delete confirm is open.
     confirm_delete: bool,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            data: None,
-            reply: text_editor::Content::new(),
-            picker: Picker::default(),
-            sending: false,
-            confirm_delete: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,14 +47,8 @@ pub enum Message {
     Delete,
     DeleteConfirmed,
     Deleted(Result<Value, ApiError>),
-    Reply(text_editor::Action),
-    AddFiles,
-    Picked(Vec<Picked>),
-    /// A file dragged over or dropped on the window: it joins the reply's attachments.
-    Drop(drop_zone::Event),
-    RemoveFile(usize),
-    Send,
-    Sent(Result<Value, ApiError>),
+    /// The reply box: its text, files (picked or dropped on the window), Send and the server's answer.
+    Reply(ReplyMsg),
     CloseDialog,
 }
 
@@ -95,12 +75,11 @@ async fn open_attachment(api: std::sync::Arc<crate::api::Api>, url: String, name
 /// Called when the app navigates here (with the route's parameters).
 pub fn open(state: &mut State, id: i64, ctx: &mut Ctx) -> Task<Message> {
     if state.id != id {
-        state.reply = text_editor::Content::new();
-        state.picker = Picker::default();
+        state.reply = Reply::default();
     }
     state.id = id;
     state.data = None;
-    state.sending = false;
+    state.reply.sending = false;
     state.confirm_delete = false;
     load(state, ctx)
 }
@@ -164,46 +143,31 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             ctx.navigate(Page::BugReports);
         }
         Message::Deleted(Err(e)) => ctx.toast_err(e.message),
-        Message::Reply(a) => state.reply.perform(a),
-        Message::AddFiles => return Task::perform(pick_files(), Message::Picked),
-        Message::Picked(files) => state.picker.add(files, ctx),
-        Message::Drop(ev) => state.picker.dropped(ev, ctx),
-        Message::RemoveFile(i) => state.picker.remove(i),
-        Message::Send => {
-            if state.sending {
-                return Task::none();
-            }
-            let text = state.reply.text().trim().to_string();
-            if text.is_empty() && state.picker.files.is_empty() {
-                ctx.toast_err("Write a reply or add a file");
-                return Task::none();
-            }
-            state.sending = true;
-            let api = ctx.api.clone();
-            let path = format!("/bug-reports/{}/messages", state.id);
-            let paths = state.picker.files.clone();
-            return Task::perform(
-                async move {
-                    let mut form = reqwest::multipart::Form::new().text("body", text);
-                    for part in Picker::parts(paths).await? {
-                        form = form.part("file", part);
+        Message::Reply(m) => {
+            let mut tasks = Vec::new();
+            for out in kit_iced::bug_report::reply_update(&mut state.reply, m) {
+                match out {
+                    ReplyOut::PickFiles => tasks.push(Task::perform(pick_files(), |f| Message::Reply(ReplyMsg::Picked(f)))),
+                    ReplyOut::Error(e) => ctx.toast_err(e),
+                    ReplyOut::Done(s) => ctx.toast_ok(s),
+                    ReplyOut::Send(r) => {
+                        let api = ctx.api.clone();
+                        let path = format!("/bug-reports/{}/messages", state.id);
+                        tasks.push(Task::perform(
+                            async move {
+                                let form = form(&r.fields(), &r.files).await?;
+                                api.post_form(&path, form).await
+                            },
+                            |r: Result<Value, ApiError>| Message::Reply(ReplyMsg::Sent(r.map(|_| ()).map_err(|e| e.message))),
+                        ));
                     }
-                    api.post_form(&path, form).await
-                },
-                Message::Sent,
-            );
-        }
-        Message::Sent(Ok(_)) => {
-            state.sending = false;
-            state.reply = text_editor::Content::new();
-            state.picker = Picker::default();
-            ctx.toast_ok("Reply sent");
-            ctx.refresh_shell();
-            return load(state, ctx);
-        }
-        Message::Sent(Err(e)) => {
-            state.sending = false;
-            ctx.toast_err(e.message);
+                    ReplyOut::Reload => {
+                        ctx.refresh_shell();
+                        tasks.push(load(state, ctx));
+                    }
+                }
+            }
+            return Task::batch(tasks);
         }
         Message::CloseDialog => state.confirm_delete = false,
     }
@@ -274,22 +238,6 @@ fn message_view<'a>(m: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     column![container(col).padding([12, 16]).width(Length::Fill), widgets::divider()].into()
 }
 
-/// "by user · date · page X · app Y · device".
-pub fn meta_line(r: &Value) -> String {
-    let mut s = format!("by {} · {}", fmt::s(r, "username"), fmt::date(fmt::f(r, "created_at")));
-    let page = fmt::s(r, "page");
-    if !page.is_empty() {
-        s += &format!(" · page {page}");
-    }
-    if fmt::truthy(r, "app_version") {
-        s += &format!(" · app {}", fmt::s(r, "app_version"));
-    }
-    if fmt::truthy(r, "device") {
-        s += &format!(" · {}", fmt::s(r, "device"));
-    }
-    s
-}
-
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let admin = ctx.is_admin();
     let back = catalog::muted_link("← Bug reports", 12.0, Message::Back);
@@ -335,26 +283,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             } else {
                 column(msgs.iter().map(|m| message_view(m, ctx)).collect::<Vec<_>>()).into()
             };
-            let reply = card(drop_zone::view(
-                column![
-                    text_area(&state.reply, "Write a reply", 3, Message::Reply),
-                    row![
-                        btn_icon(Icon::Plus, "Add images", Btn::Default, Some(Message::AddFiles)),
-                        container(state.picker.view(Message::RemoveFile)).width(Length::Fill),
-                        btn(
-                            if state.sending { "Sending…" } else { "Send" },
-                            Btn::Primary,
-                            (!state.sending).then_some(Message::Send)
-                        ),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(10),
-                &state.picker.drop,
-                "Drop images, .txt or .log files to attach them to your reply",
-            ))
-            .width(Length::Fill);
+            let reply = kit_iced::bug_report::reply_view(&state.reply).map(Message::Reply);
             column![
                 head,
                 meta.wrap(),
@@ -387,19 +316,6 @@ pub fn overlay<'a>(state: &'a State, _ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
 
 /// Files dragged onto the window go to the reply's attachments.
 pub fn subscription(_state: &State) -> Subscription<Message> {
-    drop_zone::events().map(Message::Drop)
+    drop_zone::events().map(|e| Message::Reply(ReplyMsg::Drop(e)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_meta_line_lists_what_is_known() {
-        let r = json!({ "username": "ann", "created_at": 1_792_311_210.0, "page": "#/library", "app_version": "0.27.0", "device": "Encore desktop" });
-        assert_eq!(meta_line(&r), "by ann · 18 Oct 2026 · page #/library · app 0.27.0 · Encore desktop");
-        let r = json!({ "username": "ann", "created_at": 1_792_311_210.0, "page": "", "app_version": "" });
-        assert_eq!(meta_line(&r), "by ann · 18 Oct 2026");
-        assert_eq!(status_label("fixed"), "Fixed");
-    }
-}

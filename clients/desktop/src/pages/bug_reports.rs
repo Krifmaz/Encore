@@ -8,62 +8,24 @@
 use crate::api::{Api, ApiError};
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
-use crate::theme::{self, Badge, Btn};
-use crate::widgets::drop_zone::{self, DropZone, Outcome};
-use crate::widgets::text_area::text_area;
+use crate::theme::{self, Btn};
+use crate::widgets::drop_zone;
 use crate::widgets::{
-    self, badge, btn, btn_icon, card_flat, error_box, field, h1, modal, muted, seg, skeleton_rows, small, small_muted,
+    self, btn_icon, card_flat, error_box, h1, muted, seg, skeleton_rows, small, small_muted,
     t, tabs, Icon,
 };
-use iced::widget::{button, column, container, image, row, space, text_editor, text_input};
+use iced::widget::{button, column, container, row, space, text_input};
 use iced::{Alignment, Length, Subscription, Task};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// The three kinds, as the server stores them and as the user reads them.
-/// Every kind: the list's chips and the labels; `crash` is a crash log the phone app sends (the Crash logs section).
-pub const KINDS: [(&str, &str); 4] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…"), ("crash", "Crash log")];
-/// The kinds a new report can pick (a crash log comes from the app).
-pub const PICK_KINDS: [(&str, &str); 3] = [("bug", "Bug"), ("not_bug", "Not a bug"), ("howto", "How do I…")];
-/// The five statuses: key, label, badge.
-pub const STATUSES: [(&str, &str, Badge); 5] = [
-    ("new", "New", Badge::Warn),
-    ("looking", "Looking into it", Badge::Info),
-    ("fixed", "Fixed", Badge::Ok),
-    ("wontfix", "Won't fix", Badge::Plain),
-    ("answered", "Answered", Badge::Accent),
-];
-pub const MAX_FILES: usize = 6;
-pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-pub fn kind_label(k: &str) -> &'static str {
-    KINDS.iter().find(|(key, _)| *key == k).map(|(_, l)| *l).unwrap_or("Bug")
-}
-
-pub fn kind_badge<'a, M: 'a>(k: &str) -> El<'a, M> {
-    let kind = match k {
-        "bug" => Badge::Err,
-        "howto" => Badge::Info,
-        "crash" => Badge::Warn,
-        _ => Badge::Plain,
-    };
-    badge(kind_label(k), kind)
-}
-
-pub fn status_label(s: &str) -> &'static str {
-    STATUSES.iter().find(|(key, _, _)| *key == s).map(|(_, l, _)| *l).unwrap_or("New")
-}
-
-pub fn status_badge<'a, M: 'a>(s: &str) -> El<'a, M> {
-    let kind = STATUSES.iter().find(|(key, _, _)| *key == s).map(|(_, _, b)| *b).unwrap_or(Badge::Warn);
-    badge(status_label(s), kind)
-}
-
-/// `(key, label)` pairs for a status select.
-pub fn status_table() -> Vec<(&'static str, &'static str)> {
-    STATUSES.iter().map(|(k, l, _)| (*k, *l)).collect()
-}
+// The words, the file picker and the New report dialog are the kit's (kit_iced::bug_report);
+// this page keeps what needs the session: the app version, the device line, the file dialog and the request.
+pub use kit_iced::bug_report::{
+    count_words, kind_badge, status_badge, status_label, status_table, NewMsg, NewOut, NewReport, Picked, Reply, ReplyMsg, ReplyOut,
+    ATTACH_FILES, FILE_FIELD, FILE_FILTER, KINDS, STATUSES,
+};
 
 /// The server's version as the app knows it (`/api/auth/info`), "" when it has none.
 pub fn app_version(ctx: &Ctx) -> String {
@@ -72,142 +34,24 @@ pub fn app_version(ctx: &Ctx) -> String {
 
 /// What stands for the browser line on the web: the app's user agent and the window size.
 pub fn device(ctx: &Ctx) -> String {
-    format!(
-        "{} · {}x{}",
-        crate::api::user_agent(),
-        ctx.size.width.round() as u32,
-        ctx.size.height.round() as u32
-    )
+    kit_iced::bug_report::device_line(&crate::api::user_agent(), ctx.size.width, ctx.size.height)
 }
 
-/// "No replies", "1 reply", "3 replies" + " · 2 files".
-pub fn count_words(messages: i64, files: i64) -> String {
-    let mut s = match messages {
-        0 => "No replies".to_string(),
-        1 => "1 reply".to_string(),
-        n => format!("{n} replies"),
-    };
-    if files > 0 {
-        s += &format!(" · {files} file{}", if files == 1 { "" } else { "s" });
+/// The multipart form of a report or a reply: its text fields, then one `file` part per file.
+pub async fn form(fields: &[(&'static str, &str)], paths: &[PathBuf]) -> Result<reqwest::multipart::Form, ApiError> {
+    let mut form = reqwest::multipart::Form::new();
+    for (name, value) in fields {
+        form = form.text(*name, value.to_string());
     }
-    s
-}
-
-// ---- the file picker behind "Add images" (the New report dialog and the reply box) ---------
-
-/// A picked file: its path and size.
-pub type Picked = (PathBuf, u64);
-
-#[derive(Debug, Default)]
-pub struct Picker {
-    pub files: Vec<PathBuf>,
-    /// Files dragged onto the window: they join the picked ones.
-    pub drop: DropZone,
-}
-
-/// The files *Add images* takes, picked or dropped (images, .txt and .log files, several at once).
-pub const ATTACH_FILES: drop_zone::Accept = drop_zone::Accept::many(&["png", "jpg", "jpeg", "webp", "gif", "txt", "log"]);
-
-impl Picker {
-    /// Add picked files within the limits; the rule that stopped one goes to a toast.
-    pub fn add(&mut self, picked: Vec<Picked>, ctx: &mut Ctx) {
-        for (path, size) in picked {
-            if self.files.len() >= MAX_FILES {
-                ctx.toast_err(format!("At most {MAX_FILES} files per report"));
-                break;
-            }
-            if size > MAX_BYTES {
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                ctx.toast_err(format!("{name} is over 8 MB"));
-                continue;
-            }
-            if !self.files.contains(&path) {
-                self.files.push(path);
-            }
-        }
+    for p in paths {
+        form = form.part(FILE_FIELD, Api::file_part(p).await?);
     }
-
-    /// A file dragged over or dropped on the window: a dropped one is added like a picked one
-    /// (same types, same limits); one that isn't taken goes to a toast.
-    pub fn dropped(&mut self, ev: drop_zone::Event, ctx: &mut Ctx) {
-        match self.drop.handle(ev, &ATTACH_FILES) {
-            Outcome::Take(path) => {
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                self.add(vec![(path, size)], ctx);
-            }
-            Outcome::Refused(m) => ctx.toast_err(m),
-            Outcome::Nothing => {}
-        }
-    }
-
-    pub fn remove(&mut self, i: usize) {
-        if i < self.files.len() {
-            self.files.remove(i);
-        }
-    }
-
-    /// The thumbnails (pictures) or names (text files), each with its × button.
-    pub fn view<'a, M: Clone + 'a>(&'a self, on_remove: impl Fn(usize) -> M + 'a) -> El<'a, M> {
-        let p = theme::look();
-        let mut r = row![].spacing(8);
-        for (i, f) in self.files.iter().enumerate() {
-            let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let inner: El<'a, M> = if is_picture(f) {
-                image(image::Handle::from_path(f))
-                    .width(56)
-                    .height(56)
-                    .content_fit(iced::ContentFit::Cover)
-                    .border_radius(6.0)
-                    .into()
-            } else {
-                container(small(name.clone()).color(p.muted))
-                    .padding([6, 10])
-                    .height(56)
-                    .max_width(160)
-                    .center_y(56)
-                    .style(theme::panel2)
-                    .into()
-            };
-            r = r.push(
-                row![
-                    inner,
-                    button(widgets::icon(Icon::X, 12.0, p.muted))
-                        .padding(4)
-                        .style(theme::btn(Btn::Icon))
-                        .on_press(on_remove(i)),
-                ]
-                .spacing(2)
-                .align_y(Alignment::Start),
-            );
-        }
-        r.wrap().into()
-    }
-
-    /// The multipart parts of the picked files, each under the field name `file`.
-    pub async fn parts(paths: Vec<PathBuf>) -> Result<Vec<reqwest::multipart::Part>, ApiError> {
-        let mut out = Vec::with_capacity(paths.len());
-        for p in &paths {
-            out.push(Api::file_part(p).await?);
-        }
-        Ok(out)
-    }
-}
-
-/// Whether the file is a picture by its extension.
-pub fn is_picture(path: &std::path::Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "gif")
-    )
+    Ok(form)
 }
 
 /// The OS file dialog for pictures, .txt and .log files; the picked files with their sizes.
 pub async fn pick_files() -> Vec<Picked> {
-    let Some(chosen) = rfd::AsyncFileDialog::new()
-        .add_filter("Images and text files", ATTACH_FILES.exts)
-        .pick_files()
-        .await
-    else {
+    let Some(chosen) = rfd::AsyncFileDialog::new().add_filter(FILE_FILTER, ATTACH_FILES.exts).pick_files().await else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(chosen.len());
@@ -219,109 +63,37 @@ pub async fn pick_files() -> Vec<Picked> {
     out
 }
 
-// ---- the New report dialog -------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct NewReport {
-    pub kind: String,
-    /// The page the person came from (`#/library/album/…`), sent along.
-    pub page: String,
-    pub title: String,
-    pub body: text_editor::Content,
-    pub picker: Picker,
-    pub sending: bool,
-}
-
-impl Default for NewReport {
-    fn default() -> Self {
-        Self {
-            kind: "bug".into(),
-            page: String::new(),
-            title: String::new(),
-            body: text_editor::Content::new(),
-            picker: Picker::default(),
-            sending: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum NewMsg {
-    Kind(String),
-    Title(String),
-    Body(text_editor::Action),
-    AddFiles,
-    Picked(Vec<Picked>),
-    /// A file dragged over or dropped on the window: it joins the attachments.
-    Drop(drop_zone::Event),
-    RemoveFile(usize),
-    Send,
-    Sent(Result<Value, ApiError>),
+/// The server's answer to a new report, as the dialog takes it: the report's id or the error's words.
+pub fn sent(r: Result<Value, ApiError>) -> NewMsg {
+    NewMsg::Sent(r.map(|v| fmt::i(&v, "id")).map_err(|e| e.message))
 }
 
 /// Drive the dialog. `Some(id)` comes back when the report was sent: the report to show.
 pub fn new_update(d: &mut NewReport, msg: NewMsg, ctx: &mut Ctx) -> (Task<NewMsg>, Option<i64>) {
-    match msg {
-        NewMsg::Kind(k) => d.kind = k,
-        NewMsg::Title(s) => d.title = s,
-        NewMsg::Body(a) => d.body.perform(a),
-        NewMsg::AddFiles => return (Task::perform(pick_files(), NewMsg::Picked), None),
-        NewMsg::Picked(files) => d.picker.add(files, ctx),
-        NewMsg::Drop(ev) => d.picker.dropped(ev, ctx),
-        NewMsg::RemoveFile(i) => d.picker.remove(i),
-        NewMsg::Send => {
-            if d.sending {
-                return (Task::none(), None);
-            }
-            let title = d.title.trim().to_string();
-            let text = d.body.text().trim().to_string();
-            if title.is_empty() {
-                ctx.toast_err("Give the report a title");
-                return (Task::none(), None);
-            }
-            if text.is_empty() {
-                ctx.toast_err("Say what happened");
-                return (Task::none(), None);
-            }
-            d.sending = true;
-            let api = ctx.api.clone();
-            let kind = d.kind.clone();
-            let version = app_version(ctx);
-            let device = device(ctx);
-            let paths = d.picker.files.clone();
-            let page = d.page.clone();
-            return (
-                Task::perform(
+    let mut tasks = Vec::new();
+    let mut shown = None;
+    for out in kit_iced::bug_report::new_update(d, msg, &app_version(ctx), &device(ctx)) {
+        match out {
+            NewOut::PickFiles => tasks.push(Task::perform(pick_files(), NewMsg::Picked)),
+            NewOut::Error(e) => ctx.toast_err(e),
+            NewOut::Done(s) => ctx.toast_ok(s),
+            NewOut::Send(r) => {
+                let api = ctx.api.clone();
+                tasks.push(Task::perform(
                     async move {
-                        let mut form = reqwest::multipart::Form::new()
-                            .text("kind", kind)
-                            .text("title", title)
-                            .text("body", text)
-                            .text("page", page)
-                            .text("app_version", version)
-                            .text("device", device);
-                        for part in Picker::parts(paths).await? {
-                            form = form.part("file", part);
-                        }
+                        let form = form(&r.fields(), &r.files).await?;
                         api.post_form("/bug-reports", form).await
                     },
-                    NewMsg::Sent,
-                ),
-                None,
-            );
-        }
-        NewMsg::Sent(Ok(r)) => {
-            d.sending = false;
-            ctx.toast_ok("Report sent. Thanks.");
-            ctx.refresh_shell();
-            return (Task::none(), Some(fmt::i(&r, "id")));
-        }
-        NewMsg::Sent(Err(e)) => {
-            d.sending = false;
-            ctx.toast_err(e.message);
+                    sent,
+                ));
+            }
+            NewOut::Show(id) => {
+                ctx.refresh_shell();
+                shown = Some(id);
+            }
         }
     }
-    (Task::none(), None)
+    (Task::batch(tasks), shown)
 }
 
 /// The whole modal in the page's message type.
@@ -331,54 +103,7 @@ pub fn new_dialog<'a, M: Clone + 'a>(
     wrap: impl Fn(NewMsg) -> M + 'a,
     on_close: M,
 ) -> El<'a, M> {
-    let send = wrap(NewMsg::Send);
-    let version = app_version(ctx);
-    let body = column![
-        seg(&PICK_KINDS, &d.kind, NewMsg::Kind),
-        field(
-            "Title",
-            text_input("A short name for it", &d.title)
-                .on_input(NewMsg::Title)
-                .padding([9, 12])
-                .size(14)
-                .style(theme::input)
-        ),
-        field(
-            "Description",
-            text_area(&d.body, "What happened, what you expected, how to repeat it", 6, NewMsg::Body)
-        ),
-        drop_zone::view(
-            column![
-                row![
-                    btn_icon(Icon::Plus, "Add images", Btn::Default, Some(NewMsg::AddFiles)),
-                    small_muted(format!("Up to {MAX_FILES} files, 8 MB each. Images, .txt and .log files (pick or drop them).")),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .wrap(),
-                d.picker.view(NewMsg::RemoveFile),
-            ]
-            .spacing(12),
-            &d.picker.drop,
-            "Drop images, .txt or .log files to attach them",
-        ),
-        small_muted(format!(
-            "Sent along: {}the app version ({}) and this computer.",
-            if d.page.is_empty() { String::new() } else { format!("the page you came from ({}), ", d.page) },
-            if version.is_empty() { "unknown" } else { &version }
-        )),
-    ]
-    .spacing(12);
-    let footer = row![
-        btn("Cancel", Btn::Default, Some(on_close.clone())),
-        btn(
-            if d.sending { "Sending…" } else { "Send" },
-            Btn::Primary,
-            (!d.sending).then_some(send)
-        ),
-    ]
-    .spacing(10);
-    modal("New report", El::from(body).map(wrap), Some(footer.into()), false, on_close)
+    kit_iced::bug_report::new_dialog(d, &app_version(ctx), wrap, on_close)
 }
 
 // ---- the list filter ---------------------------------------------------------------------
@@ -727,18 +452,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn words_match_the_web() {
-        assert_eq!(kind_label("howto"), "How do I…");
-        assert_eq!(kind_label("nope"), "Bug");
-        assert_eq!(status_label("wontfix"), "Won't fix");
-        assert_eq!(status_label("?"), "New");
-        assert_eq!(count_words(0, 0), "No replies");
-        assert_eq!(count_words(1, 1), "1 reply · 1 file");
-        assert_eq!(count_words(3, 2), "3 replies · 2 files");
-        assert_eq!(status_table().len(), 5);
-    }
-
-    #[test]
     fn the_filter_builds_the_same_queries() {
         let mut f = Filter::default();
         assert!(!f.active());
@@ -754,11 +467,5 @@ mod tests {
         assert_eq!(f.list_query(true), "?status=looking&kind=bug&q=hi&mine=1");
         assert_eq!(f.list_query(false), "?status=looking&kind=bug&q=hi");
         assert_eq!(f.export_url("http://s"), "http://s/api/bug-reports/export?status=looking&kind=bug&format=txt");
-    }
-
-    #[test]
-    fn pictures_by_extension() {
-        assert!(is_picture(std::path::Path::new("/a/b.PNG")));
-        assert!(!is_picture(std::path::Path::new("/a/b.log")));
     }
 }
