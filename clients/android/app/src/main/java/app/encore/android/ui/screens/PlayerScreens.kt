@@ -4,6 +4,7 @@ import androidx.compose.material3.SliderState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.SolidColor
 import app.encore.android.ui.ElapsedTime
 import app.encore.android.ui.drawPlayed
@@ -202,6 +203,8 @@ fun MiniPlayer(nav: Nav, onOpen: () -> Unit, covered: Boolean = false) {
             Modifier
                 .fillMaxWidth()
                 .height(3.dp)
+                // its own layer: a frame of progress redraws only this line, not the screen around it
+                .graphicsLayer()
                 .background(p.border)
                 .drawBehind { drawPlayed(played, fractionOf(live.longValue, duration)) },
         )
@@ -804,6 +807,8 @@ private fun ThinSeek(positionMs: () -> Long, durationMs: Long, onSeek: (Long) ->
             Modifier
                 .fillMaxWidth()
                 .height(if (drag != null) 5.dp else 3.dp)
+                // its own layer: a frame of progress redraws only this line, not the screen around it
+                .graphicsLayer()
                 .clip(RoundedCornerShape(3.dp))
                 .background(p.border)
                 .drawBehind { drawPlayed(played, drag ?: fractionOf(positionMs(), dur)) },

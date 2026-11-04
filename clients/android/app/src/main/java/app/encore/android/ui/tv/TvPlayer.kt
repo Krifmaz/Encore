@@ -6,6 +6,7 @@
 package app.encore.android.ui.tv
 
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.SolidColor
 import app.encore.android.ui.ElapsedTime
 import app.encore.android.ui.drawPlayed
@@ -379,6 +380,8 @@ private fun TvSeek(nav: Nav, modifier: Modifier = Modifier) {
                 Modifier
                     .fillMaxWidth()
                     .height(if (focused) 8.dp else 4.dp)
+                    // its own layer: a frame of progress redraws only this line, not the screen around it
+                    .graphicsLayer()
                     .clip(RoundedCornerShape(4.dp))
                     .background(p.border)
                     .drawBehind { drawPlayed(played, fractionOf(live.longValue, dur)) },
