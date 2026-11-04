@@ -2,9 +2,9 @@ name: test-and-build
 
 # Encore: the server + web app. Runs the tests and checks that the Docker image builds – on pull
 # requests and by hand only, to keep Actions minutes down. Images are only published by the release
-# workflow: :latest and :<version>. The tests are release.yml's test job (the server's tests and clippy
-# for every crate, the web app's checks, the Cadenza pins); a run started by hand also puts the speed table
-# in the package job's summary.
+# workflow: :latest and :<version>. The tests are the same as release.yml's test job (the Krifmaz kit's kit-ci:
+# the server's tests and clippy for every crate, the web app's checks, the Cadenza pins); a run started by hand
+# also puts the speed table in the package job's summary.
 on:
   pull_request:
   workflow_dispatch:
@@ -14,11 +14,15 @@ permissions:
   packages: write
 
 jobs:
-  # the same tests as a release (release.yml's test job, called with only = test)
+  # the same tests as a release (release.yml's test job)
   test:
-    uses: ./.github/workflows/release.yml
+    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@93ef80f21b96e67489359f1c038e71d4750db095
     with:
-      only: test
+      rust-dirs: server
+      wasm-dirs: web-rs
+      fmt: false
+      advisory-name: Cadenza is pinned to the same rev everywhere
+      advisory: bash scripts/check-cadenza-pins.sh
 
   # the web app and the Linux build a pull request can be tried with (encore-linux artifact)
   package:
@@ -65,17 +69,12 @@ jobs:
           cargo bench -p encore --locked --bench perf > perf.md
           { echo "## Speed table (release build, GitHub runner)"; cat perf.md; } >> "$GITHUB_STEP_SUMMARY"
 
+  # the image builds (amd64, not pushed)
   docker:
     needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: false
-          build-args: ENCORE_BUILD=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    with:
+      image: encore
+      push: false
+      platforms: linux/amd64
+      build-args: ENCORE_BUILD=${{ github.sha }}

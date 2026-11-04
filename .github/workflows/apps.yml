@@ -1,9 +1,14 @@
 name: apps
 
-# Android APK + desktop apps (Windows, macOS, Linux). Never runs on push – the macOS runner alone costs
-# 10× Actions minutes. Start it by hand (Actions → apps → Run workflow; "only" picks a single job) or through
-# the release workflow with "apps" ticked, which attaches the installers to the release. The Android APK is the
-# native app (android-native: clients/android); the desktop app is the native one (desktop: clients/desktop, Iced).
+# Android APK + desktop apps (Windows, macOS, Linux), built by hand to try them: Actions → apps → Run workflow
+# ("only" picks a single job). Never runs on push – the macOS runner alone costs 10× Actions minutes. A release
+# builds them through release.yml with "apps" ticked, which attaches the installers to the release; the jobs here
+# are the same ones (the Krifmaz kit's kit-android and kit-desktop, with release.yml's settings), with version
+# dev.<run number>. The Android APK is the native app (clients/android); the desktop app is the native one
+# (clients/desktop, Iced).
+#   Android: signed with the permanent release key from the ANDROID_KEYSTORE_* secrets; without them this run warns
+#   and signs with the runner's debug key (installs, but won't update a release build).
+#   Desktop: scripts/desktop-package.sh, signed when the WINDOWS_CERT_* / MACOS_CERT_* secrets exist.
 on:
   workflow_dispatch:
     inputs:
@@ -12,303 +17,50 @@ on:
         type: choice
         options: [all, android-native, desktop]
         default: all
-  workflow_call:
-    inputs:
-      only:
-        # release.yml passes `all` (every job), or `android-native` for a release run with only=android
-        type: string
-        required: false
-        default: all
-      version:
-        type: string
-        required: true
-      semver:
-        type: string
-        required: true
-      code:
-        type: string
-        required: true
 
 permissions:
   contents: read
 
-# A release calls this file with inputs.version set; a manual run leaves it empty (version dev.<run number>).
 jobs:
   android-native:
-    # Native Kotlin app: clients/android (clients/android/README.md). This is the APK a release attaches as
-    # Encore-android-<version>.apk. Signed with the permanent release key from the ANDROID_KEYSTORE_BASE64,
-    # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD secrets. Without them a release fails;
-    # a manual run warns and signs with the runner's debug key (installs, but won't update a release build).
-    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'android-native'
-    runs-on: ubuntu-latest
-    env:
-      ENCORE_VERSION: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-      ENCORE_CODE: ${{ inputs.code || github.run_number }}
-      IS_RELEASE: ${{ inputs.version != '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools platforms;android-36 build-tools;36.0.0 ndk;29.0.13846066"
-      # Cadenza on the phone: Rust + Android targets + cargo-ndk, so the Gradle task :cadenza:cargoNdkBuild builds
-      # libencore_cadenza.so (arm64-v8a, armeabi-v7a) into the APK. Without these steps the task is skipped with a
-      # warning and the APK still builds (with no sound effects or phone upsampling: there is no other engine).
-      # github.com/Krifmaz/cadenza is public, so no deploy key (decision D2).
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: clients/android/cadenza/rust
-          key: android-native
-      - name: cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-      - name: NDK for cargo-ndk
-        # cargo-ndk also finds $ANDROID_HOME/ndk/<newest> on its own; be explicit so a second NDK can't win
-        run: |
-          NDK="$ANDROID_HOME/ndk/29.0.13846066"
-          [ -d "$NDK" ] || { echo "::error::NDK not found at $NDK"; ls "$ANDROID_HOME/ndk" || true; exit 1; }
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-      - name: Cadenza JNI crate tests (host)
-        run: cargo test --manifest-path clients/android/cadenza/rust/Cargo.toml
-      - name: Gradle version
-        # no gradlew/wrapper jar is committed: run the Gradle the wrapper properties name, so bumping the
-        # wrapper (clients/android/gradle/wrapper/gradle-wrapper.properties) bumps CI too
-        id: gradle
-        run: |
-          G=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip.*/\1/p' clients/android/gradle/wrapper/gradle-wrapper.properties)
-          [ -n "$G" ] || { echo "::error::no Gradle version in clients/android/gradle/wrapper/gradle-wrapper.properties"; exit 1; }
-          echo "Gradle $G"
-          echo "version=$G" >> "$GITHUB_OUTPUT"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ steps.gradle.outputs.version }}
-      - name: Signing key
-        env:
-          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          MISSING=""
-          [ -n "$KS_B64" ]    || MISSING="$MISSING ANDROID_KEYSTORE_BASE64"
-          [ -n "$KS_PASS" ]   || MISSING="$MISSING ANDROID_KEYSTORE_PASSWORD"
-          [ -n "$KEY_ALIAS" ] || MISSING="$MISSING ANDROID_KEY_ALIAS"
-          [ -n "$KEY_PASS" ]  || MISSING="$MISSING ANDROID_KEY_PASSWORD"
-          if [ -z "$MISSING" ]; then
-            KS="$RUNNER_TEMP/release.jks"
-            printf '%s' "$KS_B64" | base64 -d > "$KS" || { echo "::error::ANDROID_KEYSTORE_BASE64 is not valid base64 (create it with: base64 -w0 release.jks)"; exit 1; }
-            [ -s "$KS" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 decodes to an empty file"; exit 1; }
-            {
-              echo "ANDROID_KEYSTORE_PATH=$KS"
-              echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
-              echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
-              echo "ANDROID_KEY_PASSWORD=$KEY_PASS"
-            } >> "$GITHUB_ENV"
-            echo "Release key: $KS (alias $KEY_ALIAS)"
-            exit 0
-          fi
-          if [ "$IS_RELEASE" = true ]; then
-            echo "::error title=Android signing::missing secret(s):$MISSING. A release must be signed with the permanent release key, or phones can't update. Add them under Settings → Secrets and variables → Actions."
-            exit 1
-          fi
-          echo "::warning title=Android signing::missing secret(s):$MISSING – this APK is signed with the runner's throw-away debug key. It installs fresh but can't update (or be updated by) a release build."
-          # the release build type falls back to the debug key; make sure the runner has one where AGP looks
-          D="$HOME/.android"
-          echo "ANDROID_USER_HOME=$D" >> "$GITHUB_ENV"
-          mkdir -p "$D"
-          [ -f "$D/debug.keystore" ] || keytool -genkeypair -v -keystore "$D/debug.keystore" -storepass android \
-            -alias androiddebugkey -keypass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
-      - name: Build APK
-        run: |
-          gradle -p clients/android --no-daemon --stacktrace :app:assembleRelease \
-            "-PencoreVersionName=$ENCORE_VERSION" "-PencoreVersionCode=$ENCORE_CODE"
-      - name: Unit tests
-        # app/src/test (JUnit 4, plain Kotlin rules of offline songs, updates and bug reports); debug is the build
-        # type AGP always gives unit tests
-        run: gradle -p clients/android --no-daemon --stacktrace :app:testDebugUnitTest
-      - name: Collect
-        run: |
-          APK=$(find clients/android/app/build/outputs/apk/release -name '*.apk' ! -name '*unsigned*' | head -1)
-          [ -n "$APK" ] || { echo "::error::no signed release APK built"; find clients/android/app/build/outputs -type f; exit 1; }
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
-          # Cadenza must be in a release APK (the Gradle task only skips when cargo-ndk is missing, which it isn't here)
-          for abi in arm64-v8a armeabi-v7a; do
-            unzip -l "$APK" | grep -q "lib/$abi/libencore_cadenza.so" || { echo "::error::lib/$abi/libencore_cadenza.so is missing from the APK (did :cadenza:cargoNdkBuild run?)"; unzip -l "$APK" | grep ' lib/' || true; exit 1; }
-          done
-          cp "$APK" "Encore-android-$ENCORE_VERSION.apk" && ls -la Encore-android-*.apk
-      - name: 16 KB pages
-        # Phones with 16 KB memory pages (Android 15+) load a native library only when every LOAD segment is aligned
-        # to 16 KB (cadenza/rust/build.rs links with -z max-page-size=16384) and the APK keeps the uncompressed .so
-        # files 16 KB aligned (zipalign -P 16)
-        run: |
-          APK="Encore-android-$ENCORE_VERSION.apk"
-          READELF=$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf 2>/dev/null | head -1)
-          [ -n "$READELF" ] || { echo "::error::llvm-readelf not found under $ANDROID_NDK_HOME"; exit 1; }
-          D=$(mktemp -d)
-          unzip -q -o "$APK" 'lib/*' -d "$D"
-          BAD=0
-          for so in $(find "$D/lib" -name '*.so' | sort); do
-            ALIGNS=$("$READELF" -lW "$so" | awk '$1 == "LOAD" { print $NF }')
-            [ -n "$ALIGNS" ] || { echo "::error::${so#"$D"/}: no LOAD segments read"; BAD=1; continue; }
-            echo "${so#"$D"/}: LOAD alignment $(echo $ALIGNS)"
-            for a in $ALIGNS; do
-              if [ $((a)) -lt $((0x4000)) ]; then
-                echo "::error::${so#"$D"/} has a LOAD segment aligned to $a, below 16 KB (0x4000)"
-                BAD=1
-              fi
-            done
-          done
-          rm -rf "$D"
-          [ "$BAD" = 0 ] || exit 1
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK" > zipalign.log 2>&1 \
-            || { tail -20 zipalign.log; echo "::error::the APK is not aligned for 16 KB pages (zipalign -c -P 16 -v 4)"; exit 1; }
-          tail -1 zipalign.log
-      - name: Remove signing key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-android-native
-          path: Encore-android-*.apk
-          if-no-files-found: error
+    if: inputs.only == 'all' || inputs.only == 'android-native'
+    uses: Krifmaz/kit/.github/workflows/kit-android.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    with:
+      app-name: Encore
+      project-dir: clients/android
+      version-property: encore
+      android-packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      build-tools: "36.0.0"
+      ndk: "29.0.13846066"
+      rust-targets: aarch64-linux-android,armv7-linux-androideabi
+      rust-dir: clients/android/cadenza/rust
+      native-libs: libencore_cadenza.so
+    secrets:
+      android-keystore-base64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      android-keystore-password: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      android-key-alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+      android-key-password: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
   desktop:
-    # The desktop app: clients/desktop (Iced, pure Rust, Cadenza playing on this computer), built and packaged by
-    # scripts/desktop-package.sh – Encore-<version>-windows-x86_64.exe (NSIS, per user under %LOCALAPPDATA%\Encore),
-    # Encore-<version>-macos-universal.dmg (lipo of both Mac targets), Encore-<version>-linux-x86_64.AppImage and
-    # encore_<version>_amd64.deb. The app's updater looks for exactly these names in the newest release and checks
-    # them against its SHA256SUMS (release.yml writes it), so a renamed file here needs the same change in
-    # clients/desktop/src/desktop/updater.rs. Windows and Linux carry Cadenza's CUDA offload (the crate's `cuda`
-    # feature: loaded at run time, the NVIDIA driver is enough); macOS has none.
-    # Signing is optional, from these secrets (without them the .exe is unsigned and the .app is signed ad hoc –
-    # macOS then asks for System Settings → Privacy & Security → Open Anyway the first time):
-    #   Windows: WINDOWS_CERT_PFX_BASE64, WINDOWS_CERT_PASSWORD
-    #   macOS:   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY; APPLE_ID, APPLE_TEAM_ID and
-    #            APPLE_APP_PASSWORD to notarize the .dmg
-    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'desktop'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            features: cuda
-            args: ""
-          - os: windows-latest
-            features: cuda
-            args: ""
-          # Intel, not macos-latest (arm64): GitHub's arm64 Macs ran out of capacity in late October 2026, and a job
-          # no runner takes within about 15 minutes is cancelled ("The job was not acquired by Runner of type hosted
-          # even after multiple attempts"), so 0.42.3 and 0.42.5 shipped without a Mac app. --universal builds
-          # both Mac targets and joins them with lipo, so the runner's own architecture doesn't matter. A release
-          # that still misses the .dmg gets it from mac-backfill.yml.
-          - os: macos-15-intel
-            features: ""
-            args: --universal
-    runs-on: ${{ matrix.os }}
-    env:
-      # V names the files (dev.<run number> on a manual run). A release also builds the app as that version
-      # (--stamp), so the in-app updater compares the right number; a manual run keeps Cargo.toml's.
-      V: ${{ inputs.version || format('dev.{0}', github.run_number) }}
-      IS_RELEASE: ${{ inputs.version != '' }}
-      # the test build without debug info: several GB smaller, so the rust-cache entries of the three systems do not
-      # push the server's and web-rs's caches out of the repository's 10 GB (panics still name file and line)
-      CARGO_PROFILE_DEV_DEBUG: 0
-      # whether the optional signing secrets exist (a step's `if` cannot read `secrets` directly)
-      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
-      HAS_MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
-    steps:
-      - name: LF line ends (Windows)
-        # Git for Windows would check the scripts out with CRLF line ends, which bash cannot run
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: clients/desktop
-          key: desktop
-      - name: System packages (Linux)
-        if: runner.os == 'Linux'
-        # ALSA (Cadenza's output), xkbcommon and Wayland (the window), udev; no GTK or libxdo: the tray is
-        # ksni over D-Bus and file dialogs use the desktop portal. `file` for appimagetool
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libudev-dev pkg-config file
-      - name: Packaging checks (Linux)
-        # the file names agree with the in-app updater, the installer folder, --stamp (seconds, no build)
-        if: runner.os == 'Linux'
-        run: bash clients/desktop/packaging/check.sh
-      - name: NSIS (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: command -v makensis >/dev/null || [ -f "/c/Program Files (x86)/NSIS/makensis.exe" ] || choco install nsis -y --no-progress
-      - name: Tests
-        # on Linux and Windows; the Mac skips them to save its 10× minutes (the release build below still compiles
-        # all of its code)
-        if: runner.os != 'macOS'
-        working-directory: clients/desktop
-        run: cargo test --locked
-      - name: Signing certificate (Windows)
-        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
-        shell: bash
-        env:
-          PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
-        run: |
-          F="$(cygpath -u "$RUNNER_TEMP")/encore-sign.pfx"
-          printf '%s' "$PFX" | base64 -d > "$F" || { echo "::error::WINDOWS_CERT_PFX_BASE64 is not valid base64"; exit 1; }
-          echo "WINDOWS_CERT_PFX=$F" >> "$GITHUB_ENV"
-      - name: Signing certificate (macOS)
-        if: runner.os == 'macOS' && env.HAS_MACOS_CERT == 'true'
-        env:
-          MACOS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-        run: |
-          set -euo pipefail
-          P12="$RUNNER_TEMP/encore-sign.p12"
-          printf '%s' "$MACOS_CERT" | base64 --decode > "$P12"
-          security create-keychain -p ci encore-build.keychain
-          security default-keychain -s encore-build.keychain
-          security unlock-keychain -p ci encore-build.keychain
-          # a new keychain locks itself after 5 idle minutes, long before the two release builds reach codesign
-          security set-keychain-settings -lut 21600 encore-build.keychain
-          security import "$P12" -k encore-build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k ci encore-build.keychain
-          rm -f "$P12"
-      - name: Build and package
-        shell: bash
-        env:
-          FEATURES: ${{ matrix.features }}
-          WINDOWS_CERT_PASSWORD: ${{ env.HAS_WINDOWS_CERT == 'true' && secrets.WINDOWS_CERT_PASSWORD || '' }}
-          MACOS_SIGN_IDENTITY: ${{ env.HAS_MACOS_CERT == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
-          APPLE_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_TEAM_ID: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_TEAM_ID || '' }}
-          APPLE_APP_PASSWORD: ${{ env.HAS_MACOS_CERT == 'true' && secrets.APPLE_APP_PASSWORD || '' }}
-        run: |
-          STAMP=""; [ "$IS_RELEASE" = true ] && STAMP=--stamp
-          # shellcheck disable=SC2086
-          bash scripts/desktop-package.sh --version "$V" $STAMP --features "$FEATURES" ${{ matrix.args }} --out out
-          # the names the in-app updater looks for
-          case "$RUNNER_OS" in
-            Linux)   WANT="Encore-$V-linux-x86_64.AppImage encore_${V}_amd64.deb" ;;
-            macOS)   WANT="Encore-$V-macos-universal.dmg" ;;
-            Windows) WANT="Encore-$V-windows-x86_64.exe" ;;
-          esac
-          for f in $WANT; do
-            [ -s "out/$f" ] || { echo "::error::out/$f was not made"; ls -la out; exit 1; }
-          done
-      - name: Remove signing keys
-        if: always()
-        shell: bash
-        run: |
-          rm -f "${WINDOWS_CERT_PFX:-/nonexistent}"
-          if [ "$RUNNER_OS" = macOS ]; then security delete-keychain encore-build.keychain 2>/dev/null || true; fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Encore-desktop-${{ runner.os }}
-          path: out/*
-          if-no-files-found: error
+    if: inputs.only == 'all' || inputs.only == 'desktop'
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    with:
+      app-name: Encore
+      project-dir: clients/desktop
+      package-script: scripts/desktop-package.sh
+      linux-features: cuda
+      windows-features: cuda
+      linux-packages: libasound2-dev libxkbcommon-dev libwayland-dev libudev-dev pkg-config file
+      linux-check: bash clients/desktop/packaging/check.sh
+      linux-files: "Encore-{V}-linux-x86_64.AppImage encore_{V}_amd64.deb"
+      windows-files: "Encore-{V}-windows-x86_64.exe"
+      macos-files: "Encore-{V}-macos-universal.dmg"
+    secrets:
+      windows-cert-pfx-base64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      windows-cert-password: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      macos-cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      macos-cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+      macos-sign-identity: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      apple-id: ${{ secrets.APPLE_ID }}
+      apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+      apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
