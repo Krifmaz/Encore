@@ -21,6 +21,8 @@ pub mod library_types;
 pub mod own_file;
 pub mod lyrics;
 pub mod picker;
+/// Sorting a playlist's songs (Custom order, Date added, Title, Artist, Album, Duration), kept per playlist.
+pub mod playlist_sort;
 pub mod playlists;
 pub mod report;
 pub mod requests;

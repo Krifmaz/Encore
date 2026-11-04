@@ -1296,7 +1296,7 @@ mod tests {
         let p = json!({ "total": 10, "matched": 8, "follow": 1, "source": "spotify", "sync_targets": ["plex", "x"] });
         assert_eq!(tile_sub(&p), "10 tracks · 80% in library · following\nSpotify → Plex / Plexamp, x");
         assert_eq!(tile_sub(&json!({ "total": 0, "matched": 0, "source": "" })), "0 tracks · 0% in library");
-        let mut shared = p.clone();
+        let mut shared = p;
         shared["share"] = json!({ "token": "abc", "path": "/s/abc", "url": "http://x/s/abc" });
         assert_eq!(tile_sub(&shared), "10 tracks · 80% in library · following · shared\nSpotify → Plex / Plexamp, x");
         assert_eq!(

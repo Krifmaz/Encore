@@ -17,7 +17,7 @@ use encore_db::{now, p, RowExt};
 use encore_library::taste::{self, Catalog, CoListen, Profile, Rng, Scope, Signals, SongIn};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/taste/genres", get(genres))
         .route("/api/taste/profile", get(profile))
         .route("/api/taste/skip", post(skip))
+        .route("/api/taste/listened", post(listened))
         .route("/api/taste/dislikes", get(dislikes))
         .route("/api/taste/dislikes/tracks/{id}", put(dislike_track).delete(undislike_track))
         .route("/api/taste/dislikes/artists/{name}", put(dislike_artist).delete(undislike_artist))
@@ -70,7 +71,7 @@ fn catalog(st: &AppState) -> ApiResult<Arc<Catalog>> {
         }
     }
     // each song once (not the copies of a song, encore_library::twins), with every artist it credits
-    let rows = st.db.query(&format!("SELECT id, artist, artist_credit, album_id, genre, year FROM tracks WHERE {}", encore_library::twins::SHOWN), p![])?;
+    let rows = st.db.query(&format!("SELECT id, artist, artist_credit, album_id, genre, year, duration FROM tracks WHERE {}", encore_library::twins::SHOWN), p![])?;
     let songs = rows.into_iter().map(|r| {
         let mut artists: Vec<String> = serde_json::from_str::<Value>(&r.s("artist_credit")).ok()
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect()))
@@ -78,7 +79,7 @@ fn catalog(st: &AppState) -> ApiResult<Arc<Catalog>> {
         if artists.is_empty() {
             artists.push(r.s("artist"));
         }
-        SongIn { id: r.i("id"), artists, album_id: r.s("album_id"), genre: r.s("genre"), year: r.s("year") }
+        SongIn { id: r.i("id"), artists, album_id: r.s("album_id"), genre: r.s("genre"), year: r.s("year"), duration: r.f("duration") }
     }).collect();
     let c = Arc::new(Catalog::build(songs));
     st.web.taste.lock().unwrap().catalog = Some((version, c.clone()));
@@ -100,22 +101,46 @@ fn co_listen(st: &AppState, cat: &Arc<Catalog>) -> ApiResult<Arc<CoListen>> {
     Ok(co)
 }
 
-/// What user `uid` told the server: plays, Liked Songs, their own playlists' songs, skips and dislikes.
+/// What user `uid` told the server: plays (with how much of each was heard), Liked Songs, the share links they
+/// made, their own playlists' songs, skips (with how far into the song) and dislikes.
 fn signals(st: &AppState, uid: i64) -> ApiResult<Signals> {
     let t = now();
     let ids = |sql: &str, params: Vec<Value>| -> ApiResult<Vec<i64>> { Ok(st.db.query(sql, params)?.iter().map(|r| r.i("id")).collect()) };
     Ok(Signals {
-        plays: st.db.query("SELECT track_id, played_at FROM plays WHERE user_id=? AND track_id IS NOT NULL AND played_at > ? ORDER BY played_at DESC LIMIT ?",
-            p![uid, t - 400.0 * 86400.0, PROFILE_PLAYS])?.iter().map(|r| (r.i("track_id"), r.f("played_at"))).collect(),
+        plays: st.db.query("SELECT track_id, played_at, listened FROM plays WHERE user_id=? AND track_id IS NOT NULL AND played_at > ? ORDER BY played_at DESC LIMIT ?",
+            p![uid, t - 400.0 * 86400.0, PROFILE_PLAYS])?.iter()
+            .map(|r| (r.i("track_id"), r.f("played_at"), r.get("listened").and_then(Value::as_f64))).collect(),
         likes: ids("SELECT i.track_id id FROM playlist_items i JOIN playlists l ON l.id=i.playlist_id WHERE l.user_id=? AND l.kind='liked' AND i.track_id IS NOT NULL", p![uid])?,
         // the listener's own playlists (not ones added from someone else's share, not Liked Songs)
         playlisted: ids("SELECT DISTINCT i.track_id id FROM playlist_items i JOIN playlists l ON l.id=i.playlist_id
                          WHERE l.user_id=? AND l.kind='playlist' AND i.track_id IS NOT NULL LIMIT 20000", p![uid])?,
-        skips: st.db.query("SELECT track_id, skipped_at FROM skips WHERE user_id=? AND skipped_at > ?", p![uid, t - taste::SKIP_WINDOW])?
-            .iter().map(|r| (r.i("track_id"), r.f("skipped_at"))).collect(),
+        shares: shares(st, uid)?,
+        skips: st.db.query("SELECT track_id, skipped_at, seconds FROM skips WHERE user_id=? AND skipped_at > ?", p![uid, t - taste::SKIP_WINDOW])?
+            .iter().map(|r| (r.i("track_id"), r.f("skipped_at"), r.f("seconds"))).collect(),
         disliked_songs: st.db.query("SELECT ref FROM dislikes WHERE user_id=? AND kind='track'", p![uid])?.iter().filter_map(|r| r.s("ref").parse().ok()).collect(),
         disliked_artists: st.db.query("SELECT ref FROM dislikes WHERE user_id=? AND kind='artist'", p![uid])?.iter().map(|r| r.s("ref")).collect(),
     })
+}
+
+/// The share links user `uid` made, as [`Signals::shares`]: a song's link is that song with portion 1, an album's
+/// link each of the album's songs (each song once, not its copies) with portion 1 / their count. Playlist links
+/// are left out: a playlist is already counted as the listener's own (and may hold songs others added).
+fn shares(st: &AppState, uid: i64) -> ApiResult<Vec<(i64, f64, f64)>> {
+    let mut out: Vec<(i64, f64, f64)> = st.db.query("SELECT track_id, created_at FROM shares WHERE user_id=? AND COALESCE(kind,'track')='track'", p![uid])?
+        .iter().map(|r| (r.i("track_id"), r.f("created_at"), 1.0)).collect();
+    let albums = st.db.query(&format!(
+        "SELECT s.ref, s.created_at, tracks.id FROM shares s JOIN tracks ON tracks.album_id = s.ref WHERE s.user_id=? AND s.kind='album' AND {}",
+        encore_library::twins::SHOWN), p![uid])?;
+    // each album's songs gathered first, so each gets its part of the one album link
+    let mut per_album: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    for r in &albums {
+        per_album.entry(r.s("ref")).or_default().push((r.i("id"), r.f("created_at")));
+    }
+    for songs in per_album.values() {
+        let portion = 1.0 / songs.len() as f64;
+        out.extend(songs.iter().map(|(id, at)| (*id, *at, portion)));
+    }
+    Ok(out)
 }
 
 /// Everything one recommendation needs for user `uid`: the catalog, the co-listening and their profile.
@@ -330,7 +355,7 @@ async fn profile(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
 
 // ---- feedback -----------------------------------------------------------------------------------------
 
-/// `POST /api/taste/skip` body.
+/// `POST /api/taste/skip` and `POST /api/taste/listened` body.
 #[derive(Deserialize)]
 struct SkipBody {
     /// the song skipped
@@ -351,6 +376,27 @@ async fn skip(State(st): State<AppState>, User(u): User, Json(b): Json<SkipBody>
     // skips older than the window count for nothing: the table keeps only those
     st.db.execute("DELETE FROM skips WHERE user_id=? AND skipped_at < ?", p![u.i("id"), now() - taste::SKIP_WINDOW])?;
     Ok(Json(json!({ "ok": true, "counted": true })))
+}
+
+/// How long after a play was saved the player may still say how much of it was heard (seconds): a long song
+/// paused for a while still gets its answer, a play from yesterday is left as it is.
+const LISTENED_WITHIN: f64 = 12.0 * 3600.0;
+
+/// POST /api/taste/listened `{track_id, seconds}`: a song whose play already counted ended, or the listener moved
+/// on from it, `seconds` in. The listener's latest play of the song (saved in the last [`LISTENED_WITHIN`]) keeps
+/// the furthest point it was told, and the recommendations weigh the play by it (encore_library::taste::play_weight).
+/// `{ok: true, counted}`: `counted` is false when there was no such play.
+async fn listened(State(st): State<AppState>, User(u): User, Json(b): Json<SkipBody>) -> ApiResult<Json<Value>> {
+    if !b.seconds.is_finite() || b.seconds <= 0.0 {
+        return Ok(Json(json!({ "ok": true, "counted": false })));
+    }
+    let secs = b.seconds.min(7200.0);
+    // MAX: a second report (another tab, a retry) never moves it back; RETURNING says whether a play was there
+    let changed = st.db.query(
+        "UPDATE plays SET listened = MAX(COALESCE(listened, 0), ?) WHERE id = (SELECT id FROM plays WHERE user_id=? AND track_id=? AND played_at > ? ORDER BY played_at DESC LIMIT 1) RETURNING id",
+        p![secs, u.i("id"), b.track_id, now() - LISTENED_WITHIN],
+    )?;
+    Ok(Json(json!({ "ok": true, "counted": !changed.is_empty() })))
 }
 
 /// GET /api/taste/dislikes: what the listener disliked, newest first – `{tracks: [{id, name, created_at}],

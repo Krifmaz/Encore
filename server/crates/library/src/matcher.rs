@@ -553,13 +553,46 @@ pub async fn resolve_recording(st: &impl encore_http::Ctx, artist: &str, title: 
         }
     }
     let want = describe(title, artist, length, None, None);
-    for r in mb::search_recordings(st, title, 10, Some(artist)).await? {
+    let hits = mb::search_recordings(st, title, 10, Some(artist)).await?;
+    let matched: Vec<&serde_json::Value> = hits.iter().filter(|r| {
         let l = r["length"].as_f64().filter(|l| *l > 0.0);
-        if compare(&want, &describe(r["title"].as_str().unwrap_or(""), r["artist"].as_str().unwrap_or(""), l, None, None), true).matched {
-            return Ok(r["id"].as_str().map(String::from));
-        }
+        compare(&want, &describe(r["title"].as_str().unwrap_or(""), r["artist"].as_str().unwrap_or(""), l, None, None), true).matched
+    }).collect();
+    Ok(most_original(&matched, title).and_then(|r| r["id"].as_str().map(String::from)))
+}
+
+/// Of the search hits that match a song, the one it was released as: the lowest [`mb::recording_rank`] (the
+/// recording on its studio album before one only on a single or a best-of, and any of those before a live take
+/// named just like the song), the first in the search's order among equals. A title that asks for a live take
+/// itself ("Song (Live at Wembley)") keeps the search's first match.
+pub fn most_original<'a>(hits: &[&'a serde_json::Value], title: &str) -> Option<&'a serde_json::Value> {
+    if encore_config::release_types::is_live_title(title) {
+        return hits.first().copied();
     }
-    Ok(None)
+    // (min_by_key keeps the first of equals; a hit without a rank counts as one on compilations only)
+    hits.iter().copied().min_by_key(|r| r["rank"].as_u64().unwrap_or(encore_http::mb::RANK_COLLECTION as u64))
+}
+
+/// The recording to tag a song with when `rid` was given for it (by a request, a playlist, a search row): `rid`
+/// itself, unless it is a live take or another version of the song ([`mb::RANK_VERSION`]) and the title asks
+/// for no such thing – then the studio recording of the same name and artist when MusicBrainz has one, so the
+/// song is filed under the album it is from rather than a one-song live release. MusicBrainz failing keeps `rid`.
+pub async fn original_recording(st: &impl encore_http::Ctx, rid: &str, artist: &str, title: &str, length: Option<f64>) -> String {
+    use encore_http::mb;
+    if encore_config::release_types::is_live_title(title) || artist.is_empty() || title.is_empty() {
+        return rid.to_string();
+    }
+    match mb::recording_rank_of(st, rid).await {
+        Ok(rank) if rank >= mb::RANK_VERSION => {}
+        _ => return rid.to_string(),
+    }
+    match resolve_recording(st, artist, title, length, None).await {
+        Ok(Some(other)) if other != rid && mb::recording_rank_of(st, &other).await.is_ok_and(|r| r < mb::RANK_VERSION) => {
+            tracing::info!("{artist} - {title}: recording {rid} is a live take or another version – using the studio recording {other}");
+            other
+        }
+        _ => rid.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -568,6 +601,19 @@ mod tests {
     fn d(t: &str, a: &str) -> Desc {
         describe(t, a, None, None, None)
     }
+    /// The studio recording is taken over a live take listed before it; a live title keeps the first.
+    #[test]
+    fn the_studio_recording_is_taken_over_a_live_take() {
+        let live = serde_json::json!({ "id": "live", "rank": 3 });
+        let single = serde_json::json!({ "id": "single", "rank": 1 });
+        let album = serde_json::json!({ "id": "album", "rank": 0 });
+        let album2 = serde_json::json!({ "id": "album2", "rank": 0 });
+        assert_eq!(most_original(&[&live, &single, &album, &album2], "Hymn for the Weekend").unwrap()["id"], "album");
+        assert_eq!(most_original(&[&live, &single], "Hymn for the Weekend").unwrap()["id"], "single");
+        assert_eq!(most_original(&[&live, &album], "Hymn for the Weekend (Live at Wembley)").unwrap()["id"], "live");
+        assert!(most_original(&[], "Song").is_none());
+    }
+
     #[test]
     fn versions() {
         assert!(compare(&d("Blinding Lights", "The Weeknd"), &d("Blinding Lights (2020 Remaster)", "The Weeknd"), true).matched);

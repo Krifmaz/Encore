@@ -16,19 +16,6 @@ pub fn cadenza_dir(data: &Path) -> PathBuf {
     data.join("tools").join("cadenza")
 }
 
-/// The program of downloaded version `ver`.
-pub fn cadenza_bin(data: &Path, ver: &str) -> PathBuf {
-    cadenza_dir(data).join(ver).join("cadenza")
-}
-
-/// The version `current` points at (it may not work: see [`Programs::external_of`]).
-pub fn cadenza_current(data: &Path) -> Option<String> {
-    let v = std::fs::read_to_string(cadenza_dir(data).join("current")).ok()?;
-    let v = v.trim();
-    // a version is a folder name: nothing that leaves the cadenza folder
-    (!v.is_empty() && !v.contains('/') && !v.starts_with('.')).then(|| v.to_string())
-}
-
 /// A version number from Cargo.lock: the `version` of the `[[package]]` named `name`.
 pub fn lock_version(lock: &str, name: &str) -> Option<String> {
     let mut in_pkg = false;

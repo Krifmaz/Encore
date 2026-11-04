@@ -76,7 +76,7 @@ fn twins_are_matched_by_mbid_and_never_inside_a_discography() {
     let id = create_request(&*st, &u, &album, None, None).unwrap();
     st.db.execute("UPDATE requests SET status='failed', message='nope' WHERE id=?", p![id]).unwrap();
     // the same release group under another spelling of its title: the id decides
-    let renamed = NewRequest { title: Some("Album (Deluxe)".into()), cover_url: Some("https://x/cover.jpg".into()), ..album.clone() };
+    let renamed = NewRequest { title: Some("Album (Deluxe)".into()), cover_url: Some("https://x/cover.jpg".into()), ..album };
     assert_eq!(create_request(&*st, &u, &renamed, None, None).unwrap(), id);
     let r = row(&st, id);
     assert_eq!(r["title"], "Album (Deluxe)");

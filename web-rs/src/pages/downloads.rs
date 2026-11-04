@@ -406,7 +406,7 @@ impl Page {
         let Some(r) = g.songs.get(si).cloned() else { return };
         let mut items: Vec<Option<MenuItem>> = vec![];
         if mode::can_play() {
-            { let (p, songs) = (self.clone(), g.songs.clone()); items.push(MenuItem::new("Play", &icon("play"), move || p.play(&songs, si, "album"))); }
+            { let (p, songs) = (self.clone(), g.songs); items.push(MenuItem::new("Play", &icon("play"), move || p.play(&songs, si, "album"))); }
             { let t = track_of(&r); items.push(MenuItem::new("Play next", &icon("next"), move || { player::play_next(vec![t.clone()]); toast("Plays next", "ok"); })); }
             { let t = track_of(&r); items.push(MenuItem::new("Add to queue", &icon("list"), move || { player::enqueue(vec![t.clone()]); toast("Added to queue", "ok"); })); }
         }
@@ -539,7 +539,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             }));
         }
         {
-            let p = page.clone();
+            let p = page;
             ctx.on_leave(dom::listener(&list, "click", move |e| {
                 let Some(sec) = dom::closest(e, "[data-g]") else { return };
                 let Ok(gi) = dom::data(&sec, "g").parse::<usize>() else { return };

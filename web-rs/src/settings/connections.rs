@@ -86,7 +86,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let d = Rc::new(d);
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         if let Some(grid) = dom::qs_in(&view, ".grid") {
-            let d2 = d.clone();
+            let d2 = d;
             dom::on(&grid, "click", move |e| {
                 let Some(b) = dom::closest(e, "[data-act]") else { return };
                 let Some(card_el) = dom::closest_of(&b, "[data-svc]") else { return };
@@ -251,7 +251,7 @@ fn connect(svc: &str, d: &Value, admin: bool) {
     let m = modal(ModalOpts::new("Connect", &format!(r#"<form class="stack" id="cf">{fields}</form>"#))
         .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ok">Connect</button>"#));
     if let Some(ok) = m.qs("#ok") {
-        let m2 = m.clone();
+        let m2 = m;
         let svc = svc.to_string();
         dom::on(&ok, "click", move |_| {
             let m = m2.clone();
@@ -289,7 +289,7 @@ fn connect_lastfm() {
         });
     }
     if let Some(b) = m.qs("#lf-ok") {
-        let m2 = m.clone();
+        let m2 = m;
         dom::on(&b, "click", move |_| {
             let m = m2.clone();
             dom::spawn(async move {
@@ -350,7 +350,7 @@ cookie: …"></textarea>
         });
     }
     if let Some(b) = m.qs("#ytm-start") {
-        let m2 = m.clone();
+        let m2 = m;
         dom::on(&b, "click", move |ev| {
             let Some(t) = dom::target_el(ev) else { return };
             let m = m2.clone();

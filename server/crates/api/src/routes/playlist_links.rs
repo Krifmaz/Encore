@@ -196,7 +196,7 @@ pub(super) fn linked_detail(st: &AppState, u: &Row, row: &Row) -> ApiResult<Valu
     v["remote_ids"] = json!({});
     let mut items = match &live {
         Some(pl) => st.db.query(&format!(
-            "SELECT i.id, i.position, i.track_id, t.title, t.artist, t.album, t.albumartist, t.album_id, t.duration, t.format, t.bitrate, t.verify_status, t.track, t.disc, t.year
+            "SELECT i.id, i.position, i.added_at, i.track_id, t.title, t.artist, t.album, t.albumartist, t.album_id, t.duration, t.format, t.bitrate, t.verify_status, t.track, t.disc, t.year
              FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? ORDER BY {}", library::playlist_order(pl)), p![pl.id])?,
         None => vec![],
     };

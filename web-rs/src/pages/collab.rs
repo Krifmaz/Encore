@@ -160,7 +160,7 @@ fn fill(m: crate::ui::Modal, id: String, reload: fn()) {
         };
         { let f = invite.clone(); dom::on_sel(&body, "#cm-add", "click", move |_| f()); }
         if let Some(input) = m.qs("#cm-user") {
-            let f = invite.clone();
+            let f = invite;
             dom::on(&input, "keydown", move |e| { if dom::key(e) == "Enter" { dom::prevent(e); f(); } });
             dom::focus(&input);
         }
@@ -190,7 +190,7 @@ fn fill(m: crate::ui::Modal, id: String, reload: fn()) {
             });
         }
         {
-            let (id, again) = (id.clone(), again.clone());
+            let (id, again) = (id.clone(), again);
             dom::on_each(&body, "[data-rm-member]", "click", move |b, _| {
                 let (id, again, uid) = (id.clone(), again.clone(), dom::data(b, "rm-member"));
                 dom::spawn(async move {

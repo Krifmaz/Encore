@@ -53,8 +53,8 @@ class ShareOpenRulesTest {
 
     @Test
     fun theServersAnswerOpensThePage() {
-        assertEquals(ShareOpenRules.Go.Album("a1", 7L), ShareOpenRules.goOf(obj("""{"kind":"track","track_id":7,"album_id":"a1"}""")))
-        assertEquals(ShareOpenRules.Go.Album("a1", 0L), ShareOpenRules.goOf(obj("""{"kind":"album","album_id":"a1"}""")))
+        assertEquals(ShareOpenRules.Go.Track("a1", 7L), ShareOpenRules.goOf(obj("""{"kind":"track","track_id":7,"album_id":"a1"}""")))
+        assertEquals(ShareOpenRules.Go.Album("a1"), ShareOpenRules.goOf(obj("""{"kind":"album","album_id":"a1"}""")))
         assertEquals(ShareOpenRules.Go.Artist("Coldplay"), ShareOpenRules.goOf(obj("""{"kind":"artist","name":"Coldplay"}""")))
         assertEquals(ShareOpenRules.Go.Playlist(4L, "Road trip"), ShareOpenRules.goOf(obj("""{"kind":"playlist","own":true,"added":false,"playlist_id":4,"name":"Road trip"}""")))
         assertEquals(ShareOpenRules.Go.Playlist(9L, "Road trip"), ShareOpenRules.goOf(obj("""{"kind":"playlist","own":false,"added":true,"playlist_id":9,"name":"Road trip"}""")))
@@ -63,5 +63,13 @@ class ShareOpenRulesTest {
         // nothing to open: the browser
         assertEquals(ShareOpenRules.Go.Browser, ShareOpenRules.goOf(obj("""{"kind":"track","track_id":7,"album_id":""}""")))
         assertEquals(ShareOpenRules.Go.Browser, ShareOpenRules.goOf(obj("""{"kind":"what"}""")))
+    }
+
+    @Test
+    fun aSharedSongStartsWhereItIsOnItsAlbum() {
+        assertEquals(2, ShareOpenRules.startOf(listOf(5L, 6L, 7L), 7L))
+        // not on the album as loaded: it plays on its own
+        assertEquals(-1, ShareOpenRules.startOf(listOf(5L, 6L), 7L))
+        assertEquals(-1, ShareOpenRules.startOf(emptyList(), 7L))
     }
 }

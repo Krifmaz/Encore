@@ -437,7 +437,7 @@ pub async fn place_in_queue(st: &impl Ctx, username: &str, id: &str) -> Option<u
 /// The files slskd is downloading (or downloaded) from `username`; empty when slskd can't say.
 pub async fn user_downloads(st: &impl Ctx, username: &str) -> Vec<Value> {
     let Ok(d) = req(st, reqwest::Method::GET, &format!("transfers/downloads/{}", urlencoding::encode(username)), None, &[]).await else { return vec![] };
-    d["directories"].as_array().cloned().unwrap_or_default().iter().flat_map(|d| d["files"].as_array().cloned().unwrap_or_default()).collect()
+    d["directories"].as_array().into_iter().flatten().flat_map(|d| d["files"].as_array().cloned().unwrap_or_default()).collect()
 }
 
 /// The file name of a Soulseek path (either slash).

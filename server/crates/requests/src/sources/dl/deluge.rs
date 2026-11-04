@@ -143,7 +143,7 @@ pub async fn remove(st: &impl Ctx, hash: &str) {
 /// The torrent's files by Deluge's file index. None until a magnet's metadata is there.
 pub async fn files(st: &impl Ctx, hash: &str) -> anyhow::Result<Option<Vec<String>>> {
     let t = rpc(st, "core.get_torrent_status", json!([hash, ["files"]])).await?;
-    let mut list: Vec<(i64, String)> = t["files"].as_array().cloned().unwrap_or_default().iter().enumerate()
+    let mut list: Vec<(i64, String)> = t["files"].as_array().into_iter().flatten().enumerate()
         .map(|(i, f)| (f["index"].as_i64().unwrap_or(i as i64), f["path"].as_str().unwrap_or("").to_string())).collect();
     list.sort_by_key(|x| x.0);
     Ok(if list.is_empty() { None } else { Some(list.into_iter().map(|x| x.1).collect()) })

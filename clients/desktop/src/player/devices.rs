@@ -326,7 +326,7 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
 
     let mut head = row![
         icon(Icon::Devices, 16.0, p.text),
-        t(name.clone()).size(14).font(theme::bold()),
+        t(name).size(14).font(theme::bold()),
         space().width(Length::Fill)
     ]
     .spacing(8)
@@ -403,7 +403,7 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
             controls = controls.push(widgets::btn_sm(
                 "Send my music there",
                 Btn::Primary,
-                Some(Message::SendThere(id.clone())),
+                Some(Message::SendThere(id)),
             ));
         }
         card = card.push(controls.wrap());
@@ -508,7 +508,7 @@ fn zone_card<'a>(z: &'a Value, state: &'a State, ctx: &Ctx<'a>) -> El<'a, Messag
             .padding([7, 10])
             .size(13)
             .style(theme::input),
-        iced::widget::tooltip(widgets::btn_sm("Play in Roon…", Btn::Default, Some(Message::ZonePlay(id.clone()))), crate::widgets::tip_box("Search Roon's library and play the first match here"), iced::widget::tooltip::Position::Bottom).gap(4),
+        iced::widget::tooltip(widgets::btn_sm("Play in Roon…", Btn::Default, Some(Message::ZonePlay(id))), crate::widgets::tip_box("Search Roon's library and play the first match here"), iced::widget::tooltip::Position::Bottom).gap(4),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -618,7 +618,7 @@ mod tests {
         };
         assert!(!forward_play(std::slice::from_ref(&t), 0));
         set_linked(true);
-        assert!(forward_play(&[t.clone(), Track::default()], 0));
+        assert!(forward_play(&[t, Track::default()], 0));
         assert!(forward_queue(&[Track::default()], true), "a file-only list goes nowhere but counts as handled");
         let pending = take_pending();
         assert_eq!(pending.len(), 1);

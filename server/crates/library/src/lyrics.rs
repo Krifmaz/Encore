@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(wrong.screen(other_song.clone()).unwrap()["id"], 3);
 
         let sync = set(reject_rows(Some((bad, true)), Complaint::OutOfSync));
-        let kept = sync.screen(hit.clone()).unwrap();
+        let kept = sync.screen(hit).unwrap();
         assert!(kept["syncedLyrics"].is_null() && kept["plainLyrics"].is_string());
         assert!(sync.screen(other_timing.clone()).unwrap()["syncedLyrics"].is_string());
 

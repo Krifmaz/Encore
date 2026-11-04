@@ -1336,7 +1336,7 @@ pub fn shared_update(sh: &mut Shared, act: Act, ctx: &mut Ctx) -> Task<Act> {
             let api = ctx.api.clone();
             return Task::perform(
                 async move { api.get(&format!("/library/tracks/{id}/info")).await },
-                move |r| Act::QualityInfo(t.clone(), r),
+                move |r| Act::QualityInfo(t, r),
             );
         }
         Act::QualityInfo(t, r) => {
@@ -2254,7 +2254,7 @@ fn search(state: &mut State, ctx: &Ctx) -> Task<Message> {
     state.found_for = q.clone();
     let api = ctx.api.clone();
     let url = format!("/library/search?q={}&limit={RESULTS_LIMIT}", urlencode(&q));
-    Task::perform(async move { api.get(&url).await }, move |r| Message::Found(q.clone(), r))
+    Task::perform(async move { api.get(&url).await }, move |r| Message::Found(q, r))
 }
 
 /// Keep the query (and the tab) in the route, so Back comes back to it.
@@ -2775,7 +2775,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::PlayAlbum(id) => {
             let api = ctx.api.clone();
             let path = format!("/library/albums/{id}");
-            return Task::perform(async move { api.get(&path).await }, move |r| Message::AlbumTracks(id.clone(), r));
+            return Task::perform(async move { api.get(&path).await }, move |r| Message::AlbumTracks(id, r));
         }
         Message::AlbumTracks(id, Ok(a)) => {
             let tracks = with_album_id(&fmt::items(&a["tracks"]), &id);
@@ -2895,7 +2895,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let k = key.clone();
             return Task::perform(
                 async move { api.post("/library/duplicates/ignore", json!({ "key": k })).await },
-                move |r| Message::DupDone(key.clone(), None, r),
+                move |r| Message::DupDone(key, None, r),
             );
         }
         Message::DupResolve(key) => {
@@ -3605,6 +3605,7 @@ fn results_body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     col.into()
 }
 
+/// A tile of the Albums grid: a click opens the album, or plays a single (one song) as a song.
 pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     let id = fmt::s(a, "id");
     let title = if fmt::truthy(a, "album") { tr(ctx, a, "album") } else { "Unknown album".to_string() };
@@ -3612,8 +3613,10 @@ pub fn album_tile<'a>(a: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
     if fmt::truthy(a, "year") {
         sub.push_str(&format!(" · {}", fmt::s(a, "year")));
     }
-    let mut tile = Tile::new(title, TileKind::Album, Message::OpenAlbum(id.clone()))
-        .sub(sub)
+    // a single has no album page to open: a click plays its song
+    let open = if widgets::catalog::is_single(a) { Message::PlayAlbum(id.clone()) } else { Message::OpenAlbum(id.clone()) };
+    let mut tile = Tile::new(title, TileKind::Album, open)
+        .sub(widgets::catalog::album_sub(a, sub))
         .cover(ctx.cover(&id, &a["cover_v"], 400))
         .play(Message::PlayAlbum(id));
     // a Surround album names its format in the corner: Dolby Atmos, 5.1, 7.1
@@ -3701,7 +3704,7 @@ fn dup_card<'a>(g: &'a Value, state: &State, p: theme::Palette) -> El<'a, Messag
         let id = fmt::i(&c, "id");
         let k = key.clone();
         let mut r = row![
-            radio("", id, Some(keep), move |v| Message::DupKeep(k.clone(), v))
+            radio("", id, Some(keep), move |v| Message::DupKeep(k, v))
                 .size(16)
                 .spacing(0),
             column![

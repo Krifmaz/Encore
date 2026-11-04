@@ -232,7 +232,7 @@ pub fn parse(ver: &str, md: &str) -> Release {
 
 /// A user's preferences.
 fn prefs(u: &encore_db::Row) -> Value {
-    serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}))
+    serde_json::from_str(&u.s("prefs")).unwrap_or_else(|_| json!({}))
 }
 
 /// The popup is on unless the person switched it off.

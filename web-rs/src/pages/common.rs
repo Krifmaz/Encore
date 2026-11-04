@@ -34,6 +34,23 @@ pub async fn submit_request(body: Value, btn: Option<Element>) -> Option<Value> 
 /// `a.x || a.y`, as a string.
 fn or(v: &Value, a: &str, b: &str) -> String { if v.truthy(a) { v.s(a) } else { v.s(b) } }
 
+/// Whether a library album row (`tracks`: its song count) is a single: one song, which the pages show and play as a
+/// song instead of opening an album page for it. The album page itself stays (Go to album, Tag this album …).
+pub fn is_single(a: &Value) -> bool {
+    a.i("tracks") == 1
+}
+
+/// The library album a catalogue release tile plays as a song (its `library_album_id` when the library's copy has
+/// exactly one song, `library_tracks`), or None for a release with a page of its own.
+pub fn single_of(a: &Value) -> Option<String> {
+    (a.truthy("library_album_id") && a.i("library_tracks") == 1).then(|| a.s("library_album_id"))
+}
+
+/// The ` data-single="<album id>"` of a tile that plays its one song on a tap ([`bind_tiles`]), or "".
+fn single_attr(id: Option<String>) -> String {
+    id.map(|id| format!(r#" data-single="{}""#, esc(&id))).unwrap_or_default()
+}
+
 /// `albumTile(a, { href, actions, sub })`.
 pub fn album_tile(a: &Value, href: &str, actions: &str, sub: Option<&str>) -> String {
     album_tile_with(a, href, actions, sub, None, None)
@@ -57,7 +74,9 @@ pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, 
             esc(&std::iter::once(artist).filter(|x| !x.is_empty()).chain(rest).collect::<Vec<_>>().join(" · "))
         }
     };
-    format!(r#"<div class="tile" data-href="{href}">
+    // an owned single (one song in the library) plays on a tap instead of opening the release's page
+    let single = single_attr(single_of(a));
+    format!(r#"<div class="tile" data-href="{href}"{single}>
     <div class="art">{art}
       <div class="corner"{key_attr}>{corner}</div>
       <div class="overlay">{actions}</div>
@@ -70,18 +89,22 @@ pub fn album_tile_with(a: &Value, href: &str, actions: &str, sub: Option<&str>, 
         title = esck(a, "title"), shown = esc(&ui::tr(a, "title")), under = ui::tr_sub(a, "title"))
 }
 
-/// `libraryTile(a)`.
+/// `libraryTile(a)`. A single ([`is_single`]) is shown as a song ("Song · artist · year") and a tap plays it in the
+/// full player instead of opening its album page.
 pub fn library_tile(a: &Value) -> String {
     let id = a.s("id");
-    format!(r#"<div class="tile" data-href="/library/album/{id}">
+    let single = is_single(a);
+    format!(r#"<div class="tile" data-href="/library/album/{id}"{single_attr}>
     <div class="art">{art}
       {untagged}
       <div class="overlay"><button class="fab" data-play-album="{id}" aria-label="Play">{play}</button></div>
     </div>
     <div class="t ellipsis" title="{album}">{album_or}</div>{under}
-    <div class="s ellipsis">{artist}{year}</div>
+    <div class="s ellipsis">{song}{artist}{year}</div>
   </div>"#,
         id = esc(&id),
+        single_attr = single_attr(single.then(|| id.clone())),
+        song = if single { "Song · " } else { "" },
         art = ui::art(&format!("/api/library/albums/{}/cover{}", a.s("id"), ui::cover_q(a)), &a.s("album"), ""),
         // a Surround album (0.35) names its format in the corner: Dolby Atmos, 5.1, 7.1
         untagged = if a.s("class") == "surround" { format!(r#"<div class="corner"><span class="badge accent">{}</span></div>"#, esc(&if a.truthy("atmos") { "Dolby Atmos".to_string() } else { a.s("quality") })) }
@@ -116,7 +139,11 @@ pub fn bind_tiles(root: &Element) {
             return;
         }
         if dom::closest(e, "button, a, input").is_some() { return; }
-        if let Some(tile) = dom::closest(e, "[data-href]") { app::navigate(&dom::data(&tile, "href")); }
+        if let Some(tile) = dom::closest(e, "[data-href]") {
+            // a single: its song plays in the full player, there is no album page to open for it
+            if let Some(id) = dom::data_opt(&tile, "single").filter(|id| !id.is_empty()) { pages::library::play_single(&id); return; }
+            app::navigate(&dom::data(&tile, "href"));
+        }
     });
 }
 
@@ -256,7 +283,7 @@ pub fn request_row(r: &Value, admin: bool) -> String {
     let same = offer.as_ref().is_some_and(|a| a.text.trim() == r.s("message").trim());
     let shown_message = r.truthy("message") && !same;
     format!(r#"<div class="list-item req-row" data-id="{id}">
-    <div class="thumb">{thumb}</div>
+    <div class="thumb"{play}>{thumb}</div>
     <div class="grow req-text" data-act="details" title="Show the whole text">
       <div class="ellipsis" style="font-weight:600">{what}</div>
       <div class="small muted ellipsis"{full}>
@@ -283,6 +310,8 @@ pub fn request_row(r: &Value, admin: bool) -> String {
   </div>"#,
         id = r.s("id"),
         thumb = ui::art(&r.s("cover_url"), &or(r, "title", "artist"), ""),
+        // a finished request's cover plays it (the details' Play); the rest of the row still opens the details
+        play = if can_play(r) { r#" data-act="play" title="Play" role="button""# } else { "" },
         kind = esc(&kind),
         // the dot after attempts and source only when something follows it (a hand pick's reason shows on its own line)
         attempts = { let n = r.f("attempts") as i64; if n > 1 { format!(r#"<span class="faint" title="Requested or retried {n} times">{n} attempts</span>{}"#, if r.truthy("source") || shown_message { " ·" } else { "" }) } else { String::new() } },
@@ -425,8 +454,8 @@ pub fn download_all_now(whose: Whose, reload: Rc<dyn Fn()>) {
 /// The tooltip of Download all now.
 pub const DOWNLOAD_ALL_NOW_TITLE: &str = "Wake every waiting request and move requests up in their lines – never more at once than each source allows";
 
-/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick / Download now and the ⋯ menu of request
-/// rows.
+/// `bindRequestActions(root, reload)`: approve / deny / retry / cancel / pick / Download now, the ⋯ menu of request
+/// rows, and the cover of a finished request, which plays it.
 pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
     dom::on(root, "click", move |e| {
         let Some(b) = dom::closest(e, "[data-act]") else { return };
@@ -437,6 +466,11 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
             // a click that ends a text selection on the row is not a request for the dialog
             if dom::closest(e, "a, button").is_some() || details::selecting() { return; }
             show_request_details(&id, reload.clone());
+            return;
+        }
+        if act == "play" {
+            // the cover of a finished request: play what it brought into the library
+            if let Some(r) = drawn_row(&id) { play_request(&r); }
             return;
         }
         if act == "keep-anyway" || act == "download-anyway" {
@@ -472,7 +506,7 @@ pub fn bind_request_actions(root: &Element, reload: Rc<dyn Fn()>) {
                     });
                 })
             };
-            let (id2, reload2) = (id.clone(), reload.clone());
+            let (id2, reload2) = (id, reload.clone());
             let mut items = vec![
                 MenuItem::new("Details", &icon("list"), move || show_request_details(&id2, reload2.clone())),
                 MenuItem::new("Remove from list", &icon("x"), { let del = del.clone(); move || del(false) }),
@@ -711,7 +745,7 @@ pub fn request_text(r: &Value, version: &str, date: &dyn Fn(f64) -> String) -> S
     add("Artist", r.s("artist"));
     if kind == "track" && r.s("album") != r.s("title") { add("Album", r.s("album")); }
     add("Link", r.s("url"));
-    add("Kind", kind.clone());
+    add("Kind", kind);
     let status = r.s("status");
     let label = ui::status_info(&status).1;
     let why = if status == "waiting" { wait_words(&r.s("wait_reason")) } else { "" };
@@ -955,6 +989,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A one-song album is a single: its tile says "Song", carries the album to play and opens no album page; an
+    /// album of two songs or more, and a row without a count, keep their page.
+    #[test]
+    fn a_single_plays_instead_of_opening_an_album_page() {
+        let one = json!({ "id": "a1", "album": ">one (greater than one)", "albumartist": "VALORANT & ericdoa", "year": "2023", "tracks": 1 });
+        let html = library_tile(&one);
+        assert!(html.contains(r#"data-single="a1""#) && html.contains("Song · VALORANT"), "{html}");
+        for a in [json!({ "id": "a2", "album": "Two", "tracks": 2 }), json!({ "id": "a3", "album": "No count" })] {
+            let html = library_tile(&a);
+            assert!(!html.contains("data-single") && !html.contains("Song · "), "{html}");
+        }
+        // a release of the artist's discography: only when the library's copy has one song
+        let rel = |n: i64| json!({ "id": "rg", "title": ">one", "library_album_id": "a1", "library_tracks": n });
+        assert_eq!(single_of(&rel(1)).as_deref(), Some("a1"));
+        assert_eq!(single_of(&rel(3)), None);
+        assert_eq!(single_of(&json!({ "id": "rg", "library_tracks": 1 })), None, "not in the library");
+        assert!(album_tile_with(&rel(1), "/album/rg", "", None, None, None).contains(r#"data-single="a1""#));
+        assert!(!album_tile_with(&rel(2), "/album/rg", "", None, None, None).contains("data-single"));
+    }
+
     /// A row of GET /api/requests whose import waits for the storage (S1's answer, R1).
     fn waiting_row() -> Value {
         json!({ "id": 12, "kind": "album", "status": "waiting", "title": "Illuminate EP", "artist": "Duumu", "album": "Illuminate EP",
@@ -988,7 +1042,7 @@ mod tests {
         assert_eq!(drawn_row("12").map(|v| v.s("title")), Some("Illuminate EP".to_string()));
 
         // a failed import whose files are kept: Import again too
-        let mut f = r.clone();
+        let mut f = r;
         f["status"] = json!("failed");
         f["wait_reason"] = Value::Null;
         let html = request_row(&f, false);
@@ -1058,6 +1112,19 @@ mod tests {
         assert_eq!(Whose::default().query(), "");
         assert_eq!(Whose { mine: false, user: Some(12) }.query(), "&user=12");
         assert_eq!(Whose::mine().query(), "&mine=true");
+    }
+
+    /// The cover of a finished request plays it; a request with nothing in the library yet keeps a plain cover, and
+    /// the text beside it opens the details either way.
+    #[test]
+    fn the_cover_of_a_finished_request_plays_it() {
+        let done = json!({ "id": 31, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "completed", "library_album_id": "abc" });
+        let html = request_row(&done, false);
+        assert!(html.contains(r#"<div class="thumb" data-act="play" title="Play" role="button">"#), "{html}");
+        assert!(html.contains(r#"class="grow req-text" data-act="details""#), "{html}");
+        let queued = json!({ "id": 32, "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "queued" });
+        let html = request_row(&queued, false);
+        assert!(html.contains(r#"<div class="thumb">"#) && !html.contains(r#"data-act="play""#), "{html}");
     }
 
     #[test]
@@ -1271,7 +1338,7 @@ The audio sounds like Diase – Sun, not Moonlight Shadow (nightcore)
         old.as_object_mut().unwrap().retain(|k, _| !["can_download_now", "download_now", "line", "remote_queue", "stalled_since", "pressed"].contains(&k.as_str()));
         assert!(!request_row(&old, true).contains("download-now"));
         // the title is the server's (it says what pressing does)
-        let mut sw = r.clone();
+        let mut sw = r;
         sw["download_now"] = json!({ "act": "switch", "title": "Switch to a user with a free upload slot – it is 12th in alice's queue" });
         assert!(request_row(&sw, true).contains(r#"title="Switch to a user with a free upload slot – it is 12th in alice&#39;s queue""#));
         // the toast: ok when something changed or started, warn when nothing could be sooner

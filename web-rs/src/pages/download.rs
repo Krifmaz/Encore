@@ -34,6 +34,79 @@ async fn load_rows(list: &Element) -> Result<(), api::ApiError> {
     Ok(())
 }
 
+/// Whether the signed-in account may save videos to its device (the `video_download` permission, on unless an
+/// admin turned it off; admins always may).
+fn may_save_video() -> bool {
+    crate::app::is_admin() || crate::app::user().is_some_and(|u| u.g("perms").truthy("video_download"))
+}
+
+/// One video download's card in `#video-out` (`id`: the job; `body`: what it says now).
+fn video_card(id: &str, body: &str) -> String {
+    format!(r#"<div class="card flat row" data-video="{}"><div class="grow">{body}</div><button class="btn sm ghost" type="button" data-video-cancel="{}" title="Stop and delete it from the server">{}</button></div>"#,
+        esc(id), esc(id), icon("x"))
+}
+
+/// Save video to this device: the server downloads the video at `url` (POST /api/video-links), this page
+/// shows its progress in a card added to `out`, and once it is ready the browser saves the MP4
+/// (GET …/file as a download), after which the server deletes its copy. The card's ✕ cancels. → whether the
+/// download was handed to the browser.
+async fn save_video(url: &str, out: &Element) -> bool {
+    let job = match api::post("/video-links", json!({ "url": url })).await {
+        Ok(j) => j,
+        Err(e) => { toast(&e.message, "err"); return false; }
+    };
+    let id = job.s("id");
+    let card = dom::create("div");
+    dom::set_html(&card, &video_card(&id, r#"<span class="spinner"></span> Getting the video…"#));
+    let _ = out.prepend_with_node_1(&card);
+    {
+        let (id, card) = (id.clone(), card.clone());
+        dom::on_sel(&card.clone(), "[data-video-cancel]", "click", move |_| {
+            let (id, card) = (id.clone(), card.clone());
+            dom::spawn(async move {
+                let _ = api::del(&format!("/video-links/{id}")).await;
+                dom::remove(&card);
+            });
+        });
+    }
+    let body = |html: &str| if let Some(b) = dom::qs_in(&card, ".grow") { dom::set_html(&b, html); };
+    // until the card is gone (cancelled, or the page left), once a second
+    while card.is_connected() {
+        let j = match api::get(&format!("/video-links/{id}")).await {
+            Ok(j) => j,
+            Err(e) => { body(&format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))); return false; }
+        };
+        let title = j.s("title");
+        match j.s("state").as_str() {
+            "ready" => {
+                let name = j.s("name");
+                // a plain link with `download`: the browser saves it with its own progress, signed in by cookie
+                let a = dom::create("a");
+                let _ = a.set_attribute("href", &format!("/api/video-links/{id}/file"));
+                let _ = a.set_attribute("download", &name);
+                dom::click(&a);
+                body(&format!(r#"{} <b>{}</b><div class="small muted">{} · saving to this device – the server deletes its copy once it's sent</div>"#,
+                    icon("check"), esc(&name), ui::fmt::size(j.f("size"))));
+                // nothing left on the server to cancel
+                if let Some(x) = dom::qs_in(&card, "[data-video-cancel]") { dom::remove(&x); }
+                return true;
+            }
+            "failed" => {
+                body(&format!(r#"<div class="error-box">{}</div>"#, esc(&j.s("error"))));
+                return false;
+            }
+            state => {
+                let what = if title.is_empty() { "the video".to_string() } else { format!("<b>{}</b>", esc(&title)) };
+                let pct = j.f("progress");
+                body(&format!(r#"<span class="spinner"></span> {} {what}<div class="progress mt" style="height:6px"><i style="width:{}%"></i></div>"#,
+                    if state == "queued" { "Waiting to download" } else { "Downloading" }, crate::num::js_num(pct.round())));
+            }
+        }
+        dom::sleep(1000).await;
+    }
+    false
+}
+
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         dom::set_html(&view, &format!(r##"
@@ -58,12 +131,18 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         <button class="btn primary" type="submit" id="get-songs" title="Works with any link: matched to the best source, or downloaded directly">{download}Download</button>
         <button class="btn" type="button" id="as-playlist">{list}Import as playlist</button>
         <button class="btn ghost" type="button" id="direct" title="Skip matching and download exactly this link">{link}Exactly this link</button>
+        {save_video}
       </div>
       <div id="probe-out"></div>
+      <div id="video-out" class="stack"></div>
     </form>
     <div class="section-head"><h2>Recent downloads</h2><div class="row" style="gap:8px">{retry_failed}<button class="btn sm" id="dl-clear">{trash}Clear…</button></div></div>
     <div class="card flat" id="dl-list"></div>"##,
             link = icon("link"), download = icon("download"), list = icon("list"), trash = icon("trash"),
+            // the video comes to this device and is deleted from the server: never into the library
+            save_video = if may_save_video() {
+                format!(r#"<button class="btn ghost" type="button" id="save-video" title="Download the video as an MP4 to this device – it isn't kept on the server or added to the library">{}Save video to this device</button>"#, icon("video"))
+            } else { String::new() },
             // members without Fix their own downloads may not retry (the server answers "Ask an admin to retry")
             retry_failed = if common::may_fix() {
                 format!(r#"<button class="btn sm" id="dl-retry-failed" title="Queue every failed download again">{}Retry failed</button>"#, icon("refresh"))
@@ -210,6 +289,22 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                     dom::set_html(&o, "");
                     l();
                     dom::set_disabled(&d, false);
+                });
+            });
+        }
+
+        if let Some(btn) = dom::qs_in(&view, "#save-video") {
+            let (u, b) = (url_in.clone(), btn.clone());
+            let video_out = need(&view, "#video-out")?;
+            dom::on(&btn, "click", move |e| {
+                dom::prevent(e);
+                let url = dom::value(&u).trim().to_string();
+                if url.is_empty() { dom::focus(&u); return; }
+                let (b, o, u) = (b.clone(), video_out.clone(), u.clone());
+                dom::set_disabled(&b, true);
+                dom::spawn(async move {
+                    if save_video(&url, &o).await { dom::set_value(&u, ""); }
+                    dom::set_disabled(&b, false);
                 });
             });
         }

@@ -74,6 +74,8 @@ import app.encore.android.data.repo.TopTrack
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.data.repo.Me
+import app.encore.android.features.library.openAlbum
+import app.encore.android.features.library.openLibraryAlbum
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
@@ -739,7 +741,7 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                     // albums in the library: by name, the library's own albums of the artist (the Library tab's grid)
                     if (byName && d.libraryAlbums.isNotEmpty()) {
                         tileRows(d.libraryAlbums, libColumns, key = "lib") { al ->
-                            AlbumCard(al, api.coverUrl(al.id, 400), nav.graph.imageLoader) { nav.open(Screen.Album(al.id)) }
+                            AlbumCard(al, api.coverUrl(al.id, 400), nav.graph.imageLoader) { nav.openAlbum(al) }
                         }
                     }
                     if (a.libraryAlbums.isNotEmpty()) {
@@ -1038,7 +1040,7 @@ private fun ExtReleaseTile(nav: Nav, artistName: String, m: ExtRelease, statuses
         Tile(
             title = m.title,
             subtitle = listOf(m.date.ifEmpty { m.year }, m.type, if (m.tracks > 0) "${m.tracks} tracks" else "").filter { it.isNotEmpty() }.joinToString(" · "),
-            onClick = { if (m.libraryAlbumId.isNotEmpty()) nav.open(Screen.Album(m.libraryAlbumId)) else onOpen() },
+            onClick = { if (m.libraryAlbumId.isNotEmpty()) nav.openLibraryAlbum(m.libraryAlbumId, m.libraryTracks) else onOpen() },
         ) { mod ->
             Box(mod) {
                 Cover(m.cover.ifEmpty { null }, nav.graph.imageLoader, Modifier.fillMaxSize(), corner = 12.dp, label = m.title)

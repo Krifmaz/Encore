@@ -73,6 +73,9 @@ import app.encore.android.data.repo.SearchResults
 import app.encore.android.data.repo.features
 import app.encore.android.data.repo.statusKind
 import app.encore.android.data.repo.statusLabel
+import app.encore.android.features.library.SingleRules
+import app.encore.android.features.library.openAlbum
+import app.encore.android.features.library.playSingle
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
@@ -470,6 +473,8 @@ fun CatalogAlbumTile(
 
 /** Opens a catalogue album: its page, or (an album only Deezer / Apple know) its artist. */
 fun openCatalogAlbum(nav: Nav, a: CatalogAlbum, scope: kotlinx.coroutines.CoroutineScope) {
+    // a single the library has (one song) plays as a song instead of opening the release's page
+    if (a.libraryAlbumId.isNotEmpty() && SingleRules.isSingle(a.libraryTracks)) return nav.playSingle(a.libraryAlbumId)
     if (a.ext == null) nav.open(Screen.CatalogAlbum(a.id)) else openCatalogArtist(nav, a.artistId, a.artist, scope)
 }
 
@@ -675,7 +680,7 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
                         item {
                             LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                 items(libAlbums, key = { "lib-album-" + it.id }) { a ->
-                                    AlbumCard(a, nav.graph.api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.open(Screen.Album(a.id)) }
+                                    AlbumCard(a, nav.graph.api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(140.dp)) { nav.openAlbum(a) }
                                 }
                             }
                         }

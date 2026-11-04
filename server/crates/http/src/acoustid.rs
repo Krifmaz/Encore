@@ -41,9 +41,14 @@ pub async fn lookup(st: &impl Ctx, duration: f64, fp: &str) -> anyhow::Result<Ve
     if d["status"] != "ok" {
         anyhow::bail!("{}", d["error"]["message"].as_str().unwrap_or("AcoustID error"));
     }
-    let mut out: Vec<Value> = d["results"].as_array().cloned().unwrap_or_default().iter().map(|res| {
-        let recs: Vec<Value> = res["recordings"].as_array().cloned().unwrap_or_default().iter().map(|rec| {
-            let artist: String = rec["artists"].as_array().map(|a| a.iter().map(|x| format!("{}{}", x["name"].as_str().unwrap_or(""), x["joinphrase"].as_str().unwrap_or(""))).collect()).unwrap_or_default();
+    let mut out: Vec<Value> = d["results"].as_array().into_iter().flatten().map(|res| {
+        let recs: Vec<Value> = res["recordings"].as_array().into_iter().flatten().map(|rec| {
+            let artist: String = rec["artists"].as_array().map(|a| a.iter().fold(String::new(), |mut s, x| {
+                // name then joinphrase ("A", " & ", "B", ""), appended in place
+                s.push_str(x["name"].as_str().unwrap_or(""));
+                s.push_str(x["joinphrase"].as_str().unwrap_or(""));
+                s
+            })).unwrap_or_default();
             let groups = rec["releasegroups"].as_array().cloned().unwrap_or_default();
             json!({ "id": rec["id"], "title": rec["title"].as_str().unwrap_or(""), "artist": artist, "length": rec["duration"],
                 "release_groups": groups.iter().take(3).map(|g| g["title"].clone()).collect::<Vec<_>>(),

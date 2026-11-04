@@ -4,7 +4,7 @@
 //! file flushed to the disk) under a temporary name, renames the copy into place, and only then removes the
 //! original.
 use crate::dirfd::{copy_tree, Dir, Kind};
-use crate::names::{self, MISSING, TAKEN};
+use crate::names::{self, TAKEN};
 use crate::resolve::{io_error, Target};
 use crate::roots::LibraryDirs;
 use crate::rows::Change;
@@ -166,9 +166,4 @@ pub fn move_items(st: &impl Ctx, who: &Who, from: &[Target], to: &Target) -> Res
 /// What a folder holds, for a check before a write (a link to a folder is a link).
 pub fn kind_of(dir: &Dir, name: &str) -> Result<Option<Kind>, ApiError> {
     Ok(dir.lstat(name).map_err(io_error)?.map(|s| s.kind))
-}
-
-/// 404 unless something has that name.
-pub fn must_exist(dir: &Dir, name: &str) -> Result<Kind, ApiError> {
-    kind_of(dir, name)?.ok_or_else(|| err(404, MISSING))
 }

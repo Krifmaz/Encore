@@ -180,13 +180,14 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (39, "own_files", include_str!("../migrations/0039_own_files.sql")),
     (40, "taste", include_str!("../migrations/0040_taste.sql")),
     (41, "lyrics_shift", include_str!("../migrations/0041_lyrics_shift.sql")),
+    (42, "plays_listened", include_str!("../migrations/0042_plays_listened.sql")),
 ];
 
 /// The schema this server writes, stamped into `PRAGMA user_version`: the number of the last file in
 /// MIGRATIONS. An older server that finds a higher number refuses to touch the file (it would otherwise
 /// fail half-way through and leave a database neither version can read), and a lower number means
 /// "back up, then migrate" (and ANALYZE after it: new indexes have no statistics yet).
-pub const SCHEMA_VERSION: i64 = 41;
+pub const SCHEMA_VERSION: i64 = 42;
 
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;

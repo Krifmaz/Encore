@@ -118,6 +118,15 @@ pub(super) fn report_skip() {
     dom::spawn(async move { let _ = api::post("/taste/skip", json!({ "track_id": id, "seconds": p })).await; });
 }
 
+/// A song whose play counted is over (the next one starts): tell the server how far it got, so the
+/// recommendations weigh the play by it (heard to the end counts more than left soon after half). Nothing when
+/// no play counted, or without the server (the play itself waits in the outbox; it counts as an ordinary play).
+pub(super) fn report_heard() {
+    let Some((id, p)) = st_mut(|s| s.heard.take()) else { return };
+    if !p.is_finite() || p <= 0.0 || no_server() { return; }
+    dom::spawn(async move { let _ = api::post("/taste/listened", json!({ "track_id": id, "seconds": p })).await; });
+}
+
 /// After the rest of the queue was shuffled with smart shuffle on: the server puts it in a taste-weighted order
 /// (favourites more often near the front, artists spread out, disliked songs out). The local shuffle stays when
 /// the server can't answer, and an answer for a queue that changed meanwhile is dropped.

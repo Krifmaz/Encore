@@ -739,7 +739,7 @@ async fn import_link_files(st: &impl Ctx, r: &mut Req, files: &[PathBuf], root: 
     } else {
         let albums: std::collections::HashSet<String> = entries.iter().filter_map(|e| e["album"].as_str().filter(|a| !a.is_empty()).map(String::from)).collect();
         if files.len() > 1 && albums.len() == 1 {
-            let artist = entries.first().and_then(|e| e["artist"].as_str().map(String::from)).or(r.opt("artist")).unwrap_or("Unknown Artist".into());
+            let artist = entries.first().and_then(|e| e["artist"].as_str().map(String::from)).or(r.opt("artist")).unwrap_or_else(|| "Unknown Artist".into());
             groups.push((Some((artist, albums.into_iter().next().unwrap())), files.to_vec()));
         } else {
             groups.extend(files.iter().map(|f| (None, vec![f.clone()])));
@@ -844,7 +844,7 @@ fn park(st: &impl Ctx, r: &mut Req, e: &StepError, reason: &str) -> anyhow::Resu
     let place = if e.failing_path().starts_with(&lib) && !lib.as_os_str().is_empty() { "library storage error" } else { "storage error" };
     let msg = format!("Waiting: {place} – {}. Next try at {}", e.short(), crate::slskd_session::clock(at));
     if news {
-        let src = r.opt("source").unwrap_or("import".into());
+        let src = r.opt("source").unwrap_or_else(|| "import".into());
         log_push(r, format!("{src}: {text}"));
         let line = format!("Request #{} ({}) waits for the storage: {text}", r.id, r.label());
         tracing::warn!("{line}");
@@ -871,7 +871,7 @@ async fn fail_kept(st: &impl Ctx, r: &mut Req, e: &anyhow::Error) {
         d.remove("wait");
     }
     let text = fsx::explain(e);
-    let src = r.opt("source").unwrap_or("import".into());
+    let src = r.opt("source").unwrap_or_else(|| "import".into());
     log_push(r, format!("{src}: {text}"));
     tracing::warn!("request {} ({}): {text}", r.id, r.label());
     fail(st, r, &text).await;
@@ -1051,7 +1051,7 @@ pub(super) fn recover(st: &impl Ctx) {
     let t = now();
     for r in st.db().query("SELECT id, status, kind, source, detail FROM requests WHERE status IN ('importing','waiting','failed')", p![]).unwrap_or_default() {
         let id = r.i("id");
-        let mut d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let mut d: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
         if !d.is_object() {
             continue;
         }

@@ -195,7 +195,7 @@ pub fn bind(view: &Element, card: &Element) {
     // ask the server and paint; true while a setup runs
     let busy = Rc::new(Cell::new(false));
     let refresh: Rc<dyn Fn()> = {
-        let (body, busy) = (body.clone(), busy.clone());
+        let (body, busy) = (body, busy.clone());
         Rc::new(move || {
             let (body, busy) = (body.clone(), busy.clone());
             dom::spawn(async move {
@@ -213,14 +213,13 @@ pub fn bind(view: &Element, card: &Element) {
     refresh();
     // the answer of an action, under the block
     let say: Rc<dyn Fn(bool, &str)> = {
-        let out = out.clone();
         Rc::new(move |ok: bool, msg: &str| {
             dom::hide(&out, false);
             dom::set_html(&out, &super::test_result(&json!({ "ok": ok, "message": msg })));
         })
     };
     {
-        let (card2, refresh, say, log) = (card.clone(), refresh.clone(), say.clone(), log.clone());
+        let (card2, refresh, say, log) = (card.clone(), refresh.clone(), say.clone(), log);
         dom::on(card, "click", move |e| {
             let Some(b) = dom::closest(e, "[data-wr]") else { return };
             dom::prevent(e);

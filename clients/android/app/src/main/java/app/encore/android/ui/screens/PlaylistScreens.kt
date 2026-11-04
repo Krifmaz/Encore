@@ -54,6 +54,8 @@ import app.encore.android.features.library.CollabInvites
 import app.encore.android.features.library.LinkedPlaylistMenu
 import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
+import app.encore.android.features.library.PlaylistMissingRules
+import app.encore.android.features.settings.copyToClipboard
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
 import app.encore.android.data.api.Playlist
@@ -90,6 +92,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import app.encore.android.features.library.PlaylistSearchRules
+import app.encore.android.features.library.PlaylistSortChip
+import app.encore.android.features.library.PlaylistSortRules
+import app.encore.android.features.library.PlaylistSorts
 
 /** The web's Liked Songs art: a heart on the accent gradient. */
 @Composable
@@ -285,6 +290,9 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
     val closeSearch: () -> Unit = { searching = false; query = "" }
     val toggleSearch: () -> Unit = { if (searching) closeSearch() else searching = true }
     BackHandler(enabled = searching) { closeSearch() }
+    // the Sort chip's pick, kept per playlist on this phone (features/library/PlaylistSortUi.kt)
+    val sortStore = remember(context) { PlaylistSorts(context) }
+    var sort by remember(id) { mutableStateOf(sortStore.get(id)) }
     val listState = rememberLazyListState()
     // the box sits under the head and the Play buttons (item 2) and stays pinned at the top while the results
     // scroll: opening it scrolls there, so it shows even from deep down a long playlist
@@ -335,14 +343,29 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
             val tracks = detail.tracks
             val rows = detail.rows
             val missing = rows.size - tracks.size
+            // the missing songs "Download missing" can't ask for: badged, and copied as a list from the head
+            val cant = remember(rows) { PlaylistMissingRules.cantRequest(rows) }
+            // Liked Songs lists the liked songs: the hearts follow what it says (a song found in the library since
+            // the last refresh of the likes showed an empty heart here)
+            if (pl.isLiked) LaunchedEffect(detail) { nav.graph.likes.adopt(tracks.map { it.id }.toSet()) }
             val covers = rows.mapNotNull { it.track?.albumId?.takeIf { a -> a.isNotEmpty() } }.distinct().take(4).map { api.coverUrl(it, 400) }
-            // the rows the search keeps, by their position in the playlist (all of them while it is empty)
-            val shown = remember(rows, query) { PlaylistSearchRules.filter(rows, query) }
-            // each row's place among the songs in the library, so a tap plays the whole playlist from that song
-            // (counted once here instead of per row, which was quadratic on a 5000-song Liked Songs)
-            val songAt = remember(rows) {
+            // every row's position in the playlist, in the order the Sort chip shows them
+            val ordered = remember(rows, sort) { PlaylistSortRules.order(rows, sort) }
+            // the rows the search keeps, by their position in the playlist, in that order (all of them while it is empty)
+            val shown = remember(ordered, query) {
+                val hits = PlaylistSearchRules.filter(rows, query).toHashSet()
+                ordered.filter { it in hits }
+            }
+            // the songs in the library in the order shown, so Play, Shuffle and a tap follow the sort
+            val sortedTracks = remember(ordered) { ordered.mapNotNull { rows[it].track } }
+            // each row's place among those songs, so a tap plays the whole playlist from that song, and its number
+            // in the order shown (counted once here instead of per row, which was quadratic on a 5000-song Liked Songs)
+            val (songAt, rank) = remember(ordered) {
+                val at = IntArray(rows.size)
+                val rk = IntArray(rows.size)
                 var n = 0
-                IntArray(rows.size) { i -> n.also { if (rows[i].track != null) n++ } }
+                ordered.forEachIndexed { k, i -> rk[i] = k; at[i] = n; if (rows[i].track != null) n++ }
+                at to rk
             }
             LazyColumn(Modifier.fillMaxSize().padding(padding), state = listState) {
                 // .detail-head
@@ -377,6 +400,13 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Text("${tracks.size}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = EncoreColors.Ok)
                                 Text(" in library · $missing missing", style = MaterialTheme.typography.bodyMedium, color = p.muted)
                             }
+                            // the songs that can't be requested, copied as an "Artist - Title" list to fix by hand
+                            if (cant.isNotEmpty() && !pl.isMember) {
+                                Badge(
+                                    PlaylistMissingRules.buttonText(cant.size), "err", Modifier.padding(top = 8.dp),
+                                    onClick = { copyToClipboard(context, PlaylistMissingRules.listText(cant)) },
+                                )
+                            }
                             // the web's Shared mark: anyone with the link can play these songs; how many added it, never who
                             if (pl.isShared) {
                                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -401,13 +431,21 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                     }
                 }
                 item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        if (tracks.isNotEmpty()) {
-                            PlayButtons(nav, tracks) {
-                                val entries = offlineMenu.entries(tracks)
-                                if (entries.isNotEmpty()) MoreButton(entries = entries)
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            if (tracks.isNotEmpty()) {
+                                PlayButtons(nav, sortedTracks) {
+                                    val entries = offlineMenu.entries(sortedTracks)
+                                    if (entries.isNotEmpty()) MoreButton(entries = entries)
+                                }
+                            } else Spacer(Modifier.height(16.dp))
+                        }
+                        // Sort: once there are two songs to order (in this item, so the search stays item 2)
+                        if (rows.size > 1) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), horizontalArrangement = Arrangement.End) {
+                                PlaylistSortChip(sort, { sort = it; sortStore.set(id, it) })
                             }
-                        } else Spacer(Modifier.height(16.dp))
+                        }
                     }
                 }
                 if (searching && rows.isNotEmpty()) {
@@ -427,7 +465,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                     }
                 }
                 items(shown.size) { k ->
-                    // `i` is the row's position in the whole playlist, whatever the search hides
+                    // `i` is the row's position in the whole playlist, whatever the sort and the search do
                     val i = shown[k]
                     val row = rows[i]
                     val t = row.track
@@ -439,7 +477,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                             coverUrl = if (t.albumId.isNotEmpty()) api.coverUrl(t.albumId, 96) else null,
                             liked = t.id in liked,
                             playing = nowPlaying?.id == t.id,
-                            onClick = { nav.player.play(tracks, at) },
+                            onClick = { nav.player.play(sortedTracks, at) },
                             onLike = { nav.graph.likes.toggle(t.id) },
                             subtitle = listOf(t.artist, t.album).filter { it.isNotEmpty() }.joinToString(" · "),
                             subtitleLinks = rememberSongLinks(nav, t),
@@ -452,7 +490,7 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                (i + 1).toString(),
+                                (rank[i] + 1).toString(),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = p.faint,
                                 textAlign = TextAlign.End,
@@ -463,7 +501,11 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                                 Text(row.title, fontWeight = FontWeight.SemiBold, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(row.artist, style = MaterialTheme.typography.bodySmall, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            if (row.requestStatus.isNotEmpty()) StatusBadge(row.requestStatus) else Badge("missing")
+                            when {
+                                row.requestStatus.isNotEmpty() -> StatusBadge(row.requestStatus)
+                                row.cantRequest.isNotEmpty() -> Badge(PlaylistMissingRules.BADGE, "err")
+                                else -> Badge("missing")
+                            }
                         }
                     }
                 }

@@ -275,7 +275,7 @@ async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ
         return Err(err(409, "A scan is already running"));
     }
     // the library folder, the extra library folders and the Surround folder, in one scanning session
-    let st2 = st.clone();
+    let st2 = st;
     tokio::spawn(async move { st2.library.scan_library(st2.db.clone(), &st2.cfg, q.full).await });
     Ok(Json(json!({ "ok": true })))
 }
@@ -577,7 +577,7 @@ async fn artists(State(st): State<AppState>, User(u): User, Query(a): Query<Simp
         let idx = st.library.artists.index(&st.db);
         let limit = a.limit.unwrap_or(ARTISTS_MAX as i64).clamp(1, ARTISTS_MAX as i64) as usize;
         let mut v = if a.q.trim().is_empty() {
-            let (ix, sort, dir) = (idx.clone(), a.sort.clone(), a.dir.clone());
+            let (ix, sort, dir) = (idx, a.sort.clone(), a.dir.clone());
             let all = cached_list(st, &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir), move || Ok(json!(ix.list(&sort, &dir))))?;
             json!(page(&all, a.offset, limit))
         } else {
@@ -837,7 +837,6 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
         return Ok(Json(json!({ "ok": true })));
     }
     if !starts.is_empty() {
-        let st = st.clone();
         tokio::spawn(async move {
             for (tid, start) in starts {
                 encore_sync::scrobble::scrobble(&st, uid, tid, start);
@@ -964,7 +963,7 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
     let surround = encore_library::surround::is_track(id);
     let t = st.db.one(&format!("SELECT id, path, format, size, bitrate, duration FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let (path, media) = (t.s("path"), st.media.clone());
-    let mut info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
+    let mut info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or_else(|_| json!({}));
     let plan = plan(&t.s("format"), &info, decoders(&headers, &q.codecs).as_deref());
     info["stream"] = json!({ "kind": plan.kind, "codec": plan.codec, "reason": plan.reason });
     // otherwise a client saves a conversion (`?q=aac` or `?q=opus`, its quality marked "(converted)")
@@ -1354,7 +1353,7 @@ fn write_zip(to: &FsPath, songs: &[String], cover: impl FnOnce() -> Option<std::
         }
         if let Some(c) = cover() {
             if let Ok(mut f) = std::fs::File::open(&c) {
-                let ext = c.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or("jpg".into());
+                let ext = c.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "jpg".into());
                 z.start_file(format!("cover.{ext}"), opts)?;
                 std::io::copy(&mut f, &mut z)?;
             }
@@ -1962,7 +1961,7 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
         let t = first;
         let path = t.s("path");
         let media = st.media.clone();
-        let info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
+        let info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or_else(|_| json!({}));
         return Ok((json!({
             "kind": "track",
             "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),

@@ -121,7 +121,7 @@ pub async fn lb_playlists(st: &AppState, user: &str) -> anyhow::Result<Vec<Value
 pub async fn lb_playlist_tracks(st: &AppState, pid: &str) -> anyhow::Result<Vec<Value>> {
     let v = cached(st, &format!("lbtr:{pid}"), 6 * 3600, || async {
         let d = encore_http::json(listenbrainz::playlist(st, pid, None)).await?;
-        Ok(json!(d["playlist"]["track"].as_array().cloned().unwrap_or_default().iter().map(lb_track).collect::<Vec<_>>()))
+        Ok(json!(d["playlist"]["track"].as_array().into_iter().flatten().map(lb_track).collect::<Vec<_>>()))
     }).await?;
     Ok(v.as_array().cloned().unwrap_or_default())
 }
@@ -163,7 +163,7 @@ fn lastfm_user(st: &AppState, user_id: i64) -> Option<String> {
 async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<Value> {
     cached(st, &format!("lffy:{}", user.to_lowercase()), 6 * 3600, || async {
         let top = lastfm(st, "user.gettopartists", &[("user", user.into()), ("period", "3month".into()), ("limit", "30".into())]).await?;
-        let top: Vec<String> = top["topartists"]["artist"].as_array().cloned().unwrap_or_default().iter().map(|a| s(&a["name"])).filter(|n| !n.is_empty()).collect();
+        let top: Vec<String> = top["topartists"]["artist"].as_array().into_iter().flatten().map(|a| s(&a["name"])).filter(|n| !n.is_empty()).collect();
         let known: HashSet<String> = top.iter().map(|n| norm_keep_underscore(n)).collect();
         let lib = library_artists(st).await;
         let seeds: Vec<String> = top.iter().take(8).cloned().collect();
@@ -212,8 +212,8 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
         // played in Encore, else the top songs of the artists you play most (a fresh account has no scrobbles yet)
         let mut seeds: Vec<(String, String)> = vec![];
         for period in ["1month", "3month", "overall"] {
-            let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", period.into()), ("limit", "10".into())]).await.unwrap_or(json!({}));
-            seeds = tt["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter()
+            let tt = lastfm(st, "user.gettoptracks", &[("user", user.into()), ("period", period.into()), ("limit", "10".into())]).await.unwrap_or_else(|_| json!({}));
+            seeds = tt["toptracks"]["track"].as_array().into_iter().flatten()
                 .map(|t| (s(&t["artist"]["name"]), s(&t["name"]))).filter(|(a, t)| !a.is_empty() && !t.is_empty()).take(6).collect();
             if !seeds.is_empty() { break; }
         }
@@ -225,7 +225,7 @@ async fn lastfm_for_you(st: &AppState, user: &str, uid: i64) -> anyhow::Result<V
         if seeds.is_empty() {
             for n in top.iter().take(3) {
                 if let Ok(d) = lastfm(st, "artist.gettoptracks", &[("artist", n.clone()), ("limit", "2".into()), ("autocorrect", "1".into())]).await {
-                    seeds.extend(d["toptracks"]["track"].as_array().cloned().unwrap_or_default().iter().map(|t| (n.clone(), s(&t["name"]))).filter(|(_, t)| !t.is_empty()));
+                    seeds.extend(d["toptracks"]["track"].as_array().into_iter().flatten().map(|t| (n.clone(), s(&t["name"]))).filter(|(_, t)| !t.is_empty()));
                 }
             }
         }
@@ -435,7 +435,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
                 d = lastfm(st, "artist.getsimilar", &[("artist", name.into()), ("limit", lim.clone()), ("autocorrect", "1".into())]).await;
             }
             if let Ok(d) = d {
-                let items: Vec<Value> = d["similarartists"]["artist"].as_array().cloned().unwrap_or_default().iter().map(|a| json!({
+                let items: Vec<Value> = d["similarartists"]["artist"].as_array().into_iter().flatten().map(|a| json!({
                     "name": s(&a["name"]), "mbid": a["mbid"].as_str().filter(|s| !s.is_empty()),
                     "score": a["match"].as_str().and_then(|s| s.parse::<f64>().ok()).or(a["match"].as_f64()).unwrap_or(0.0) })).collect();
                 if !items.is_empty() {
@@ -456,7 +456,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
                     }
                 }
                 let items: Vec<Value> = rows.into_iter().filter(|x| x["artist_mbid"] != mbid).take(limit)
-                    .map(|x| json!({ "name": x["name"], "mbid": x["artist_mbid"], "score": x.get("score").cloned().unwrap_or(json!(0)) })).collect();
+                    .map(|x| json!({ "name": x["name"], "mbid": x["artist_mbid"], "score": x.get("score").cloned().unwrap_or_else(|| json!(0)) })).collect();
                 if !items.is_empty() {
                     return Ok(json!({ "source": "ListenBrainz", "artists": with_pictures(st, items).await }));
                 }
@@ -466,7 +466,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
         if let Ok(Some(a)) = deezer_artist(st, name).await {
             let id = a["id"].as_i64().unwrap_or(0);
             if let Ok(d) = deezer::get(st, deezer::artist_related(st, id, limit as u32)).await {
-                let items: Vec<Value> = d["data"].as_array().cloned().unwrap_or_default().iter().take(limit).map(|a| json!({
+                let items: Vec<Value> = d["data"].as_array().into_iter().flatten().take(limit).map(|a| json!({
                     "name": s(&a["name"]), "mbid": null, "image": a["picture_medium"], "score": a["nb_fan"].as_i64().unwrap_or(0) })).collect();
                 if !items.is_empty() {
                     return Ok(json!({ "source": "Deezer", "artists": with_pictures(st, items).await }));
@@ -474,7 +474,7 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
             }
         }
         Ok(json!({ "source": null, "artists": [] }))
-    }).await.unwrap_or(json!({ "source": null, "artists": [] }));
+    }).await.unwrap_or_else(|_| json!({ "source": null, "artists": [] }));
     mark_library(st, res).await
 }
 
@@ -512,7 +512,7 @@ async fn similar_tracks(State(st): State<AppState>, User(viewer): User, Query(q)
                 d = lastfm(&st, "track.getsimilar", &[("artist", artist.clone()), ("track", title.clone()), ("limit", "25".into()), ("autocorrect", "1".into())]).await;
             }
             if let Ok(d) = d {
-                let items: Vec<Value> = d["similartracks"]["track"].as_array().cloned().unwrap_or_default().iter().map(|t| json!({
+                let items: Vec<Value> = d["similartracks"]["track"].as_array().into_iter().flatten().map(|t| json!({
                     "title": s(&t["name"]), "artist": s(&t["artist"]["name"]), "mbid": t["mbid"].as_str().filter(|s| !s.is_empty()),
                     "length": t["duration"].as_i64().filter(|d| *d > 0), "album": "", "cover": null })).collect();
                 if !items.is_empty() {
@@ -522,7 +522,7 @@ async fn similar_tracks(State(st): State<AppState>, User(viewer): User, Query(q)
         }
         let Some(a) = deezer_artist(&st, &artist).await? else { return Ok(json!({ "source": null, "tracks": [] })) };
         let d = deezer::get(&st, deezer::artist_radio(&st, &a["id"], 25)).await?;
-        let tracks: Vec<Value> = d["data"].as_array().cloned().unwrap_or_default().iter().map(|t| json!({
+        let tracks: Vec<Value> = d["data"].as_array().into_iter().flatten().map(|t| json!({
             "title": t["title_short"].as_str().or(t["title"].as_str()).unwrap_or(""), "artist": s(&t["artist"]["name"]), "mbid": null,
             "length": t["duration"], "album": s(&t["album"]["title"]), "cover": t["album"]["cover_medium"], "isrc": t["isrc"] })).collect();
         Ok(json!({ "source": "Deezer radio", "tracks": tracks }))
@@ -544,13 +544,13 @@ const FALLBACK_TAGS: [&str; 22] = ["rock", "pop", "electronic", "hip hop", "jazz
 async fn tags(State(st): State<AppState>, User(viewer): User) -> ApiResult<Json<Value>> {
     let top = cached(&st, "toptags", 7 * 86400, || async {
         if let Ok(d) = lastfm(&st, "tag.getTopTags", &[]).await {
-            let t: Vec<String> = d["toptags"]["tag"].as_array().cloned().unwrap_or_default().iter().map(|t| s(&t["name"])).take(40).collect();
+            let t: Vec<String> = d["toptags"]["tag"].as_array().into_iter().flatten().map(|t| s(&t["name"])).take(40).collect();
             if !t.is_empty() {
                 return Ok(json!(t));
             }
         }
         Ok(json!(FALLBACK_TAGS))
-    }).await.unwrap_or(json!(FALLBACK_TAGS));
+    }).await.unwrap_or_else(|_| json!(FALLBACK_TAGS));
     // the library's genres: a GROUP BY over every song, made on a read connection once per state of the library
     let lib = super::library::cached_read(&st, "genres".into(), |c| {
         Ok(json!(c.query("SELECT lower(genre) g, COUNT(*) n FROM tracks WHERE genre IS NOT NULL AND genre!='' GROUP BY lower(genre) ORDER BY n DESC LIMIT 30", p![])?
@@ -575,7 +575,7 @@ async fn tag(State(st): State<AppState>, User(viewer): User, Path(name): Path<St
     let res = cached(&st, &format!("tag:{}:{page}", name.to_lowercase()), 86400, || async {
         if !st.cfg.str("lastfm_api_key").is_empty() {
             if let Ok(d) = lastfm(&st, "tag.gettopartists", &[("tag", name.clone()), ("limit", "48".into()), ("page", page.to_string())]).await {
-                let arts: Vec<Value> = d["topartists"]["artist"].as_array().cloned().unwrap_or_default().iter()
+                let arts: Vec<Value> = d["topartists"]["artist"].as_array().into_iter().flatten()
                     .map(|a| json!({ "name": s(&a["name"]), "mbid": a["mbid"].as_str().filter(|s| !s.is_empty()) })).collect();
                 if !arts.is_empty() {
                     let summary = lastfm(&st, "tag.getinfo", &[("tag", name.clone())]).await.ok()
@@ -586,7 +586,7 @@ async fn tag(State(st): State<AppState>, User(viewer): User, Path(name): Path<St
             }
         }
         let d = st.mb.get(&st, "artist", &[("query", format!("tag:\"{}\"", mb::esc(&name))), ("limit", "48".into()), ("offset", ((page - 1) * 48).to_string())]).await?;
-        let arts: Vec<Value> = d["artists"].as_array().cloned().unwrap_or_default().iter().map(|a| json!({ "name": a["name"], "mbid": a["id"] })).collect();
+        let arts: Vec<Value> = d["artists"].as_array().into_iter().flatten().map(|a| json!({ "name": a["name"], "mbid": a["id"] })).collect();
         Ok(json!({ "source": "MusicBrainz", "summary": "", "artists": with_pictures(&st, arts).await }))
     }).await.map_err(|e| err(502, e.to_string()))?;
     let mut res = mark_library(&st, res).await;
@@ -606,7 +606,7 @@ async fn deezer_extras(st: &AppState, name: &str) -> anyhow::Result<Value> {
     }
     out["fans"] = a["nb_fan"].clone();
     let top = deezer::get(st, deezer::artist_top(st, &a["id"], 10)).await?;
-    out["top"] = json!(top["data"].as_array().cloned().unwrap_or_default().iter().map(|t| json!({
+    out["top"] = json!(top["data"].as_array().into_iter().flatten().map(|t| json!({
         "title": t["title_short"].as_str().or(t["title"].as_str()).unwrap_or(""), "version": s(&t["title_version"]),
         "album": s(&t["album"]["title"]), "cover": t["album"]["cover_medium"], "duration": t["duration"], "isrc": t["isrc"], "rank": t["rank"] })).collect::<Vec<_>>());
     Ok(out)

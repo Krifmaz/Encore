@@ -59,13 +59,13 @@ fn coerce(default: &Value, raw: &Value) -> Value {
         },
         Value::Number(n) if n.is_i64() || n.is_u64() => match raw {
             Value::Number(x) => json!(x.as_f64().unwrap_or(0.0) as i64),
-            Value::String(s) => s.trim().parse::<f64>().map(|f| json!(f as i64)).unwrap_or(default.clone()),
+            Value::String(s) => s.trim().parse::<f64>().map(|f| json!(f as i64)).unwrap_or_else(|_| default.clone()),
             Value::Bool(b) => json!(*b as i64),
             _ => default.clone(),
         },
         Value::Number(_) => match raw {
             Value::Number(x) => json!(x.as_f64().unwrap_or(0.0)),
-            Value::String(s) => s.trim().parse::<f64>().map(|f| json!(f)).unwrap_or(default.clone()),
+            Value::String(s) => s.trim().parse::<f64>().map(|f| json!(f)).unwrap_or_else(|_| default.clone()),
             _ => default.clone(),
         },
         _ => match raw {
@@ -142,7 +142,7 @@ impl Config {
                     }
                 }
             }
-            cache.insert(key.clone(), stored.get(key).map(|v| coerce(&def.default, v)).unwrap_or(def.default.clone()));
+            cache.insert(key.clone(), stored.get(key).map(|v| coerce(&def.default, v)).unwrap_or_else(|| def.default.clone()));
         }
         drop(cache);
         drop(env);
@@ -280,7 +280,7 @@ mod release_type_tests {
         let d = tmp("singles");
         let db = Db::open(&d).unwrap();
         db.execute("INSERT INTO settings VALUES ('discography_singles', 'true')", p![]).unwrap();
-        let cfg = Config::load(db.clone()).unwrap();
+        let cfg = Config::load(db).unwrap();
         assert_eq!(cfg.str("release_types"), "Album,EP,Single");
         assert_eq!(crate::release_types::ReleaseFilter::from_cfg(&cfg).kinds, vec!["Album", "EP", "Single"]);
         // stored once: changing the boxes later is not undone by the old switch

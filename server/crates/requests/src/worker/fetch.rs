@@ -62,7 +62,7 @@ async fn take_line(st: &impl Ctx, r: &mut Req, line: &Arc<crate::line::Line>, la
 /// first in line (Download now by carol)").
 pub(super) fn served_first(st: &impl Ctx, r: &mut Req, source: &str) {
     if let Some(p) = st.requests().lines.pressed.take_served(r.id, source) {
-        let src = r.opt("source").unwrap_or(source.to_string());
+        let src = r.opt("source").unwrap_or_else(|| source.to_string());
         log_push(r, format!("{src}: started first in line (Download now by {})", p.by));
     }
 }
@@ -132,7 +132,7 @@ pub(super) async fn slskd_cancel_current(st: &impl Ctx, c: &Value) {
 
 /// A transfer's id in slskd.
 fn file_id(f: &Value) -> String {
-    f["id"].as_str().map(String::from).unwrap_or(f["id"].to_string())
+    f["id"].as_str().map(String::from).unwrap_or_else(|| f["id"].to_string())
 }
 
 /// How many times a user's files are asked for again after a [`slskd::Failure::Transient`] failure before
@@ -235,7 +235,7 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
                 // the session (or slskd itself, restarting) is gone, not this user: the supervisor looks at
                 // once, and the request waits for Soulseek like a search that finds it down
                 let down = st.requests().slskd.session().search_found_it_down();
-                r.d["slskd"]["pending"] = json!({ "since": pending_since.unwrap_or(now()) });
+                r.d["slskd"]["pending"] = json!({ "since": pending_since.unwrap_or_else(now) });
                 if let (Some(k), Some(tried)) = (marked.take(), r.d["slskd_tried"].as_array_mut()) {
                     if let Some(i) = tried.iter().rposition(|t| t.as_str() == Some(k.as_str())) {
                         tried.remove(i);
@@ -243,7 +243,7 @@ pub(super) async fn slskd_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -> 
                 }
                 return Err(if e.is::<slskd::NotConnected>() { e } else { down.into() });
             }
-            let since = pending_since.unwrap_or(now());
+            let since = pending_since.unwrap_or_else(now);
             if e.is::<slskd::EnqueueBusy>() && now() - since < ENQUEUE_BUSY_MAX {
                 // slskd is taking other downloads: this one is asked for again at the next look
                 r.d["slskd"]["pending"] = json!({ "since": since });
@@ -426,7 +426,7 @@ async fn poll_slskd_once(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
                 // slskd doesn't say: the user is asked, every 5 minutes at most
                 None if asked_at.is_none_or(|a| t - a >= REMOTE_ASK_SECS) => {
                     asked_at = Some(t);
-                    let first = wanted.iter().find_map(|n| latest.get(n)).map(|f| f["id"].as_str().map(String::from).unwrap_or(f["id"].to_string()));
+                    let first = wanted.iter().find_map(|n| latest.get(n)).map(|f| f["id"].as_str().map(String::from).unwrap_or_else(|| f["id"].to_string()));
                     match first {
                         Some(fid) => slskd::place_in_queue(st, &user, &fid).await,
                         None => None,
@@ -587,7 +587,7 @@ pub(super) async fn torznab_try_next(st: &impl Ctx, r: &mut Req, reason: &str) -
         };
         let proto = c["protocol"].as_str().unwrap_or("torrent");
         if let Some(p) = downloads::failing_client(st, proto) {
-            held.get_or_insert((proto.to_string(), p));
+            held.get_or_insert_with(|| (proto.to_string(), p));
             continue;
         }
         match torznab::add(st, &c, r.id).await {
@@ -783,7 +783,7 @@ pub(super) async fn poll_torznab(st: &impl Ctx, r: &mut Req) -> anyhow::Result<(
             if r.d["torznab"]["outside"].as_bool() == Some(true) {
                 return outside::import_copy(st, r, &files, &path, via).await;
             }
-            let root = path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone());
+            let root = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.clone());
             let cand = r.d["torznab"]["candidates"][r.d["torznab"]["idx"].as_u64().unwrap_or(0) as usize].clone();
             if r.s("kind") == "track" && files.len() > 1 {
                 // only the song is imported; the rest goes with the download when it is removed
@@ -882,7 +882,7 @@ pub(super) async fn start_streamrip(st: &impl Ctx, r: &mut Req, urls: Option<Vec
     upd(st, r, &[("status", json!("searching")), ("message", json!(looking))]);
     let mut urls = urls.unwrap_or_default();
     if urls.is_empty() {
-        if let (Some(dz), true) = (r.d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or(r.d["ext"]["deezer"].as_str().map(String::from)), streamrip::services(st).iter().any(|s| s == "deezer")) {
+        if let (Some(dz), true) = (r.d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or_else(|| r.d["ext"]["deezer"].as_str().map(String::from)), streamrip::services(st).iter().any(|s| s == "deezer")) {
             urls.push(format!("https://www.deezer.com/album/{dz}"));
         }
     }
@@ -1041,7 +1041,7 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
         upd(st, r, &[("status", json!("searching")), ("message", json!("Searching YouTube Music for the album…"))]);
         let ext = r.d["ext"].clone();
         let yt_album = if let Some(u) = &pick_url {
-            Some(json!({ "title": r.d["pick"]["title"].as_str().map(String::from).unwrap_or(album.clone()), "playlist_url": u }))
+            Some(json!({ "title": r.d["pick"]["title"].as_str().map(String::from).unwrap_or_else(|| album.clone()), "playlist_url": u }))
         } else if ext["ytm"].is_string() || ext["bandcamp"].is_string() {
             // release MusicBrainz lacks: download exactly the YouTube Music / Bandcamp release it was found on
             let mut a = json!({ "title": album, "playlist_url": ext["bandcamp"] });
@@ -1097,7 +1097,7 @@ pub(super) async fn start_ytdlp(st: &impl Ctx, r: &mut Req, pick_url: Option<Str
         for (i, t) in tracks.iter().enumerate() {
             check(st, r.id)?;
             let title = t["title"].as_str().unwrap_or("").to_string();
-            let artist = t["artist"].as_str().filter(|a| !a.is_empty()).map(String::from).unwrap_or(r.s("artist"));
+            let artist = t["artist"].as_str().filter(|a| !a.is_empty()).map(String::from).unwrap_or_else(|| r.s("artist"));
             upd(st, r, &[("status", json!("downloading")), ("progress", json!((i as f64 / n as f64 * 1000.0).round() / 10.0)),
                          ("message", json!(format!("YouTube: track {}/{n} – {title}", i + 1)))]);
             let len = t["length"].as_f64().filter(|l| *l > 0.0);
@@ -1279,7 +1279,7 @@ pub(super) async fn run_url(st: &impl Ctx, r: &mut Req) -> anyhow::Result<()> {
     upd(st, r, &[("status", json!("importing")), ("message", json!("Tagging and importing…"))]);
     let hint = r.hint().or_else(|| (res.entries.len() == 1).then(|| res.entries[0]["thumbnail"].as_str().map(String::from)).flatten());
     let url = r.s("url");
-    let host = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or("link".into());
+    let host = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "link".into());
     let src = if host.contains("music.youtube") { "YouTube Music".to_string() } else { host.trim_start_matches("www.").to_string() };
     let mut spec = storage::Spec::new("ytdlp", true, json!({ "source": src, "detail": "direct link", "url": url }), "");
     spec.how = "url";

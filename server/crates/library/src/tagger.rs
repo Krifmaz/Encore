@@ -807,8 +807,8 @@ pub async fn retag_album(st: &impl Ctx, album_id: &str, release_id: &str, rename
     let old: Vec<PathBuf> = found.iter().map(|r| PathBuf::from(r.s("path"))).collect();
     let ids: Vec<i64> = found.iter().map(|r| r.i("id")).collect();
     let pv = preview(st, &old, release_id, false).await?;
-    let new = apply_preview(st, &pv, rename.unwrap_or(st.cfg().bool("rename_on_import")), None, None).await?;
-    let rows: Vec<PathBuf> = pv["rows"].as_array().cloned().unwrap_or_default().iter().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
+    let new = apply_preview(st, &pv, rename.unwrap_or_else(|| st.cfg().bool("rename_on_import")), None, None).await?;
+    let rows: Vec<PathBuf> = pv["rows"].as_array().into_iter().flatten().map(|r| PathBuf::from(r["path"].as_str().unwrap_or(""))).collect();
     relink(st, &rows, &new);
     index_paths(st, &new);
     // the owner's type choice follows the album to its new id; the release's facts are the new release's
@@ -822,16 +822,43 @@ pub async fn retag_album(st: &impl Ctx, album_id: &str, release_id: &str, rename
 
 // ---- matching -----------------------------------------------------------------------------------
 
+/// How well a file's title names a release track, 0..1, for [`map_files`].
+///
+/// The best of:
+/// - the titles' own likeness ([`sim`]),
+/// - the likeness once bracketed or " - …" parts are taken off ([`crate::search::base_title`]), a little
+///   lower so that the exact title still wins when a release has both "Song" and "Song (Remix)",
+/// - for a one-song release only, the file's title against the release's title: a single is often tagged
+///   with its release's name (">one (greater than one)") while MusicBrainz names the song shorter (">one").
+fn title_score(file_title: &str, track_title: &str, release_title: Option<&str>) -> f64 {
+    let own = sim(file_title, track_title);
+    // the titles without their bracketed and " - …" parts (an empty fold has nothing to compare)
+    let bare = {
+        let (fb, tb) = (crate::search::base_title(file_title), crate::search::base_title(track_title));
+        if fb.is_empty() || tb.is_empty() { 0.0 } else { sim(&fb, &tb) * 0.9 }
+    };
+    let release = release_title.map(|r| sim(file_title, r)).unwrap_or(0.0);
+    own.max(bare).max(release)
+}
+
 /// Assign local files to release tracks → (file index → track index), confidence 0..1.
-pub fn map_files(files: &[Row], tracks: &[Value]) -> (Vec<Option<usize>>, f64) {
+///
+/// `release_title` is the release's own title: with one file and a one-song release (a single), the file's
+/// title may name the release instead of the song ([`title_score`]).
+pub fn map_files(files: &[Row], tracks: &[Value], release_title: &str) -> (Vec<Option<usize>>, f64) {
     let numbered = files.iter().all(|f| f.i("track") > 0)
         && files.iter().map(|f| (f.i("disc").max(1), f.i("track"))).collect::<std::collections::HashSet<_>>().len() == files.len();
     let multi_disc = tracks.iter().map(|t| t["disc"].as_i64().unwrap_or(1)).collect::<std::collections::HashSet<_>>().len() > 1;
+    // one file for a one-song release: there is no order to get wrong, so a missing track number costs nothing
+    let lone = files.len() == 1 && tracks.len() == 1;
+    let release = lone.then_some(release_title).filter(|r| !r.trim().is_empty());
     let mut scores = vec![];
     for (i, f) in files.iter().enumerate() {
         for (j, t) in tracks.iter().enumerate() {
-            let mut s = sim(&f.s("title"), t["title"].as_str().unwrap_or("")) * 0.6;
-            if numbered {
+            let mut s = title_score(&f.s("title"), t["title"].as_str().unwrap_or(""), release) * 0.6;
+            if lone {
+                s += 0.3;
+            } else if numbered {
                 let same = f.i("track") == t["track"].as_i64().unwrap_or(0) && (f.i("disc").max(1) == t["disc"].as_i64().unwrap_or(1) || !multi_disc);
                 s += if same { 0.3 } else { 0.0 };
             } else {
@@ -1047,7 +1074,7 @@ pub async fn preview(st: &impl Ctx, paths: &[PathBuf], release_id: &str, single:
     let rel = crate::meta::release(st, release_id).await?;
     let files: Vec<Row> = paths.iter().map(|p| read_tags(&p.to_string_lossy())).collect();
     let tracks = rel["tracks"].as_array().cloned().unwrap_or_default();
-    let (assign, conf) = map_files(&files, &tracks);
+    let (assign, conf) = map_files(&files, &tracks, rel["title"].as_str().unwrap_or(""));
     let rows: Vec<Value> = paths.iter().zip(files.iter()).zip(assign).map(|((p, f), j)| {
         let mut row = json!({ "path": p, "old_title": f.s("title"), "old_track": f.get("track"), "old_artist": f.s("artist"), "old_album": f.s("album") });
         if let Some(j) = j {
@@ -1063,7 +1090,7 @@ pub async fn preview(st: &impl Ctx, paths: &[PathBuf], release_id: &str, single:
         }
         row
     }).collect();
-    let mut r = rel.clone();
+    let mut r = rel;
     r.as_object_mut().unwrap().remove("tracks");
     Ok(json!({ "release": r, "tracks": tracks, "rows": rows, "confidence": conf }))
 }
@@ -1223,12 +1250,18 @@ pub async fn import_single(st: &impl Ctx, path: &Path, artist: &str, title: &str
     progress::step("looking it up on MusicBrainz");
     let lookup = async {
         match recording_id.filter(|r| !r.is_empty()) {
-            Some(r) => mb::recording(st, r).await.ok(),
+            // a live take (or another version) asked for by id is swapped for the studio recording, so the
+            // song is filed under its album rather than a one-song live release
+            Some(r) => mb::recording(st, &crate::matcher::original_recording(st, r, artist, title, length).await).await.ok(),
             None => match mb::search_recordings(st, title, 5, Some(artist)).await {
-                Ok(res) => match res.iter().find(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6) {
-                    Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
-                    None => None,
-                },
+                Ok(res) => {
+                    let close: Vec<&Value> = res.iter().filter(|r| sim(r["title"].as_str().unwrap_or(""), title) > 0.8 && sim(r["artist"].as_str().unwrap_or(""), artist) > 0.6).collect();
+                    // of the close ones, the studio recording (not a live take named just like it)
+                    match crate::matcher::most_original(&close, title) {
+                        Some(r) => mb::recording(st, r["id"].as_str().unwrap_or("")).await.ok(),
+                        None => None,
+                    }
+                }
                 Err(e) => {
                     st.db().log("warning", &format!("MusicBrainz lookup failed for {artist} - {title}: {e}"));
                     None
@@ -1482,7 +1515,7 @@ pub async fn import_album_files(st: &impl Ctx, paths: &[PathBuf], what: AlbumImp
     };
     // the songs must belong to the album we're about to label them as
     let expected: Vec<String> = match &pv {
-        Some(pv) => pv["rows"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["values"]["title"].as_str().map(String::from)).collect(),
+        Some(pv) => pv["rows"].as_array().into_iter().flatten().filter_map(|r| r["values"]["title"].as_str().map(String::from)).collect(),
         None => source_meta.and_then(|m| m["tracks"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["title"].as_str().map(String::from)).collect(),
     };
     let mut pv = pv;
@@ -1756,6 +1789,34 @@ pub async fn retag_external(st: &impl Ctx) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single tagged with its release's name and no track number is still an exact match: the reported
+    /// ">one (greater than one)" file against MusicBrainz's one-song release ">one" scored 41%.
+    #[test]
+    fn single_tagged_with_its_release_title_matches() {
+        use encore_db::Row;
+        let mut f = Row::new();
+        f.insert("title".into(), json!(">one (greater than one)"));
+        f.insert("duration".into(), json!(150.0));
+        let tracks = vec![json!({ "title": ">one", "track": 1, "disc": 1, "length": 151.0 })];
+        let (assign, conf) = map_files(&[f.clone()], &tracks, ">one (greater than one)");
+        assert_eq!(assign, vec![Some(0)]);
+        assert!(conf >= 0.95, "confidence {conf}");
+        // without the release title, the bracket-free title still carries it
+        let (_, conf) = map_files(&[f], &tracks, "");
+        assert!(conf >= 0.9, "confidence {conf}");
+    }
+
+    /// On a release with both "Song" and "Song (Remix)", each file still lands on its own exact title.
+    #[test]
+    fn exact_title_beats_bracket_free_title() {
+        use encore_db::Row;
+        let file = |t: &str, n: i64| { let mut r = Row::new(); r.insert("title".into(), json!(t)); r.insert("track".into(), json!(n)); r };
+        let tracks = vec![json!({ "title": "Song", "track": 1, "disc": 1 }), json!({ "title": "Song (Remix)", "track": 2, "disc": 1 })];
+        let (assign, conf) = map_files(&[file("Song (Remix)", 0), file("Song", 0)], &tracks, "Album");
+        assert_eq!(assign, vec![Some(1), Some(0)]);
+        assert!(conf >= 0.8, "confidence {conf}");
+    }
     #[test]
     fn wrong_release_is_caught() {
         use encore_db::Row;

@@ -362,8 +362,8 @@ private fun ProgressBar(progress: Int, modifier: Modifier = Modifier) {
 
 /**
  * One request (common.rs `request_row`): cover, what, kind badge · attempts · via source · message · by user · ago,
- * progress, the status and its buttons, and ⋯. A tap opens the details sheet with the whole message and the log; a
- * long press opens ⋯ (the web's right-click).
+ * progress, the status and its buttons, and ⋯. A tap on the cover of a finished request plays it; a tap anywhere else
+ * opens the details sheet with the whole message and the log; a long press opens ⋯ (the web's right-click).
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
@@ -377,7 +377,13 @@ fun RequestItem(a: RequestActions, r: RequestRow, indent: Dp = 0.dp) {
             .padding(start = Gutter + indent, end = Gutter, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Cover(r.coverUrl.ifEmpty { null }, a.nav.graph.imageLoader, size = 48.dp, corner = 8.dp, label = r.title.ifEmpty { r.artist })
+        // a finished request's cover plays it (the details sheet's Play); the rest of the row still opens the details
+        val playable = RequestRules.canPlay(r)
+        Cover(
+            r.coverUrl.ifEmpty { null }, a.nav.graph.imageLoader,
+            modifier = if (playable) Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClickLabel = "Play") { a.play(r) } else Modifier,
+            size = 48.dp, corner = 8.dp, label = r.title.ifEmpty { r.artist },
+        )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

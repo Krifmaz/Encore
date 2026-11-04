@@ -17,7 +17,7 @@ pub const SERVICES: [(&str, &str, &str); 9] = [
 /// The connection of user `uid` to `service`, with its `data` read from JSON.
 pub fn get(st: &impl Ctx, uid: i64, service: &str) -> Option<Row> {
     let mut c = st.db().one("SELECT * FROM connections WHERE user_id=? AND service=?", p![uid, service]).ok()??;
-    let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+    let d: Value = serde_json::from_str(&c.s("data")).unwrap_or_else(|_| json!({}));
     c.insert("data".into(), d);
     Some(c)
 }
@@ -25,7 +25,7 @@ pub fn get(st: &impl Ctx, uid: i64, service: &str) -> Option<Row> {
 /// Every connection of user `uid`, by service, each with its `data` read.
 pub fn list_for(st: &impl Ctx, uid: i64) -> Vec<Row> {
     st.db().query("SELECT * FROM connections WHERE user_id=? ORDER BY service", p![uid]).unwrap_or_default().into_iter().map(|mut c| {
-        let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&c.s("data")).unwrap_or_else(|_| json!({}));
         c.insert("data".into(), d);
         c
     }).collect()
@@ -55,7 +55,7 @@ pub fn public(c: &Row) -> Value {
     }
     if kind == "scrobble" {
         // can this connection scrobble (Last.fm needs a signed-in session, not just a username), and is it on?
-        let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&c.s("data")).unwrap_or_else(|_| json!({}));
         v["can_scrobble"] = json!(svc == "listenbrainz" || d["sk"].as_str().is_some_and(|s| !s.is_empty()));
         v["scrobble"] = json!(d["scrobble"] != json!(false));
     }
@@ -145,8 +145,8 @@ pub async fn oauth_exchange(st: &impl Ctx, service: &str, code: &str, verifier: 
         let name = me["display_name"].as_str().or(me["id"].as_str()).unwrap_or("Spotify").to_string();
         Ok((name, json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": me["id"] })))
     } else {
-        let tuid = tok["user_id"].as_i64().map(|x| x.to_string()).or(tok["user"]["userId"].as_i64().map(|x| x.to_string())).unwrap_or_default();
-        let name = tok["user"]["username"].as_str().map(String::from).unwrap_or(if tuid.is_empty() { "Tidal".into() } else { tuid.clone() });
+        let tuid = tok["user_id"].as_i64().map(|x| x.to_string()).or_else(|| tok["user"]["userId"].as_i64().map(|x| x.to_string())).unwrap_or_default();
+        let name = tok["user"]["username"].as_str().map(String::from).unwrap_or_else(|| if tuid.is_empty() { "Tidal".into() } else { tuid.clone() });
         Ok((name, json!({ "access_token": access, "refresh_token": tok["refresh_token"], "expires": expires, "user_id": tuid,
             "country": tok["user"]["countryCode"].as_str().unwrap_or("US") })))
     }

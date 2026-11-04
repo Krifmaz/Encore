@@ -102,7 +102,7 @@ fn album(e: &Env, user: i64, title: &str) -> i64 {
 
 fn row(st: &AppState, id: i64) -> (String, String, String, Value, f64) {
     let r = st.db.one("SELECT status, message, source, detail, updated_at FROM requests WHERE id=?", p![id]).unwrap().unwrap();
-    (r.s("status"), r.s("message"), r.s("source"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})), r.f("updated_at"))
+    (r.s("status"), r.s("message"), r.s("source"), serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({})), r.f("updated_at"))
 }
 
 fn activity(st: &AppState, like: &str) -> Vec<String> {

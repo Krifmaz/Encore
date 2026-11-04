@@ -40,11 +40,6 @@ pub fn root(cfg: &encore_config::Config) -> Option<PathBuf> {
     (!lib.is_empty()).then(|| Path::new(lib).join("Surround"))
 }
 
-/// Whether a path is in the Surround folder.
-pub fn in_root(cfg: &encore_config::Config, path: &Path) -> bool {
-    root(cfg).is_some_and(|r| path.starts_with(&r))
-}
-
 /// A surround album's id: `s` + 15 hex characters of sha1("surround|albumartist|album") (of its folder without
 /// an album name), never equal to a stereo album's id.
 pub fn album_key(albumartist: &str, album: &str, path: &str) -> String {
@@ -460,7 +455,7 @@ pub fn write_ignore_files(cfg: &encore_config::Config) {
     if rel.is_empty() {
         return;
     }
-    for (file, line) in [(".plexignore", format!("{rel}/*")), (".ndignore", rel.clone())] {
+    for (file, line) in [(".plexignore", format!("{rel}/*")), (".ndignore", rel)] {
         let path = lib.join(file);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         if text.lines().any(|l| l.trim() == line) {

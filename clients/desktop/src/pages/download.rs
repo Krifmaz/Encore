@@ -133,6 +133,26 @@ pub struct State {
     import: Option<Import>,
     admin: bool,
     activity: Activity,
+    /// "Save video to this device": the server's download of it, while there is one.
+    video: Option<Video>,
+}
+
+/// A video the server downloads for this device (`/api/video-links`): it is saved where the user picks
+/// and then deleted from the server; never added to the library.
+#[derive(Debug, Default)]
+struct Video {
+    /// the server's job id; empty while the start is on its way
+    id: String,
+    /// `queued`, `downloading`, `ready` or `failed` (the server's words)
+    state: String,
+    /// 0–100 while downloading
+    progress: f32,
+    /// the video's title, once the server knows it
+    title: String,
+    /// why it failed
+    error: Option<String>,
+    /// the save dialog is open, or the file is on its way to disk
+    saving: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +188,18 @@ pub enum Message {
     ClearedSlskd(Result<Value, ApiError>),
     /// A line in full in the details dialog, with Copy: `(title, text)`.
     ShowText(String, String),
+    /// "Save video to this device" (`POST /api/video-links`).
+    SaveVideo,
+    VideoStarted(Result<Value, ApiError>),
+    /// Once a second while the server downloads the video.
+    VideoTick,
+    VideoStatus(Result<Value, ApiError>),
+    /// The video was saved (its path; "" when the save dialog was cancelled) or failed to.
+    VideoSaved(Result<String, String>),
+    /// ✕: stop the download and delete it from the server (or close a finished card).
+    VideoCancel,
+    /// The server dropped the job (nothing to do with the answer).
+    VideoDropped,
 }
 
 /// The 30 most recent url / track / album requests of this user.
@@ -207,6 +239,7 @@ pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
     state.list.admin = false;
     state.list.mine = true;
     state.activity = Activity::default();
+    state.video = None;
     let mut tasks = vec![state.list.load(ctx).map(Message::List)];
     if state.admin {
         tasks.push(load_activity(ctx));
@@ -489,8 +522,104 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 Err(e) => ctx.toast_err(e.message),
             }
         }
+        Message::SaveVideo => {
+            let url = state.url.trim().to_string();
+            if url.is_empty() || state.video.as_ref().is_some_and(|v| v.error.is_none()) {
+                return Task::none();
+            }
+            state.video = Some(Video { state: "queued".into(), ..Default::default() });
+            let api = ctx.api.clone();
+            return Task::perform(async move { api.post("/video-links", json!({ "url": url })).await }, Message::VideoStarted);
+        }
+        Message::VideoStarted(r) => match r {
+            Ok(j) => {
+                state.url.clear();
+                state.probe = Probe::None;
+                return update(state, Message::VideoStatus(Ok(j)), ctx);
+            }
+            Err(e) => {
+                state.video = None;
+                ctx.toast_err(e.message);
+            }
+        },
+        Message::VideoTick => {
+            if let Some(v) = state.video.as_ref().filter(|v| !v.id.is_empty() && matches!(v.state.as_str(), "queued" | "downloading")) {
+                let (api, path) = (ctx.api.clone(), format!("/video-links/{}", v.id));
+                return Task::perform(async move { api.get(&path).await }, Message::VideoStatus);
+            }
+        }
+        Message::VideoStatus(r) => {
+            let Some(v) = state.video.as_mut() else { return Task::none() };
+            match r {
+                Ok(j) => {
+                    v.id = fmt::s(&j, "id");
+                    v.state = fmt::s(&j, "state");
+                    v.progress = fmt::f(&j, "progress") as f32;
+                    v.title = fmt::s(&j, "title");
+                    if v.state == "failed" {
+                        v.error = Some(fmt::s(&j, "error"));
+                    } else if v.state == "ready" && !v.saving {
+                        // where it goes is the user's pick; the server deletes its copy once it's sent
+                        v.saving = true;
+                        let (api, path) = (ctx.api.clone(), format!("/video-links/{}/file", v.id));
+                        let name = fmt::s(&j, "name");
+                        return Task::perform(crate::pages::library::save_as(api, path, name), Message::VideoSaved);
+                    }
+                }
+                Err(e) => v.error = Some(e.message),
+            }
+        }
+        Message::VideoSaved(r) => match r {
+            Ok(path) if path.is_empty() => {
+                // the save dialog was cancelled: the server's copy goes now rather than waiting to expire
+                return update(state, Message::VideoCancel, ctx);
+            }
+            Ok(path) => {
+                state.video = None;
+                ctx.toast_ok(format!("Video saved to {path}"));
+            }
+            Err(e) => {
+                // a broken-off transfer may be asked again until it expires: ✕ drops it
+                if let Some(v) = state.video.as_mut() {
+                    v.saving = false;
+                    v.state = "failed".into();
+                    v.error = Some(e);
+                }
+            }
+        },
+        Message::VideoCancel => {
+            let Some(v) = state.video.take() else { return Task::none() };
+            if !v.id.is_empty() {
+                let (api, path) = (ctx.api.clone(), format!("/video-links/{}", v.id));
+                return Task::perform(async move { api.del(&path).await }, |_| Message::VideoDropped);
+            }
+        }
+        Message::VideoDropped => {}
     }
     Task::none()
+}
+
+/// The card of the video the server downloads for this device: progress, then saving, or why it failed;
+/// with ✕ to stop it and delete it from the server.
+fn video_view(v: &Video) -> El<'_, Message> {
+    let what = if v.title.is_empty() { "the video".to_string() } else { format!("“{}”", v.title) };
+    let body: El<'_, Message> = match (&v.error, v.state.as_str()) {
+        (Some(e), _) => error_box(e),
+        (None, "ready") => small_muted(format!("Saving {what} to this device – the server deletes its copy once it's sent")).into(),
+        (None, state) => column![
+            small_muted(format!("{} {what}…", if state == "queued" { "Waiting to download" } else { "Downloading" })),
+            container(progress_bar(0.0..=100.0, v.progress).girth(5).style(theme::progress)).max_width(420),
+        ]
+        .spacing(6)
+        .into(),
+    };
+    row![
+        container(body).width(Length::Fill),
+        btn_icon(Icon::X, "", Btn::Ghost, (!v.saving).then_some(Message::VideoCancel)),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 // ----- view -------------------------------------------------------------------------------
@@ -593,11 +722,28 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .gap(4),
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Center);
+    // the video comes to this device and is deleted from the server: never into the library
+    let video_busy = state.video.as_ref().is_some_and(|v| v.error.is_none());
+    let actions = if ctx.is_admin() || ctx.session.perm("video_download") {
+        actions.push(
+            tooltip(
+                btn_icon(Icon::Video, "Save video to this device", Btn::Ghost, (has_url && !video_busy).then_some(Message::SaveVideo)),
+                tip_box("Download the video as an MP4 to this computer – it isn't kept on the server or added to the library"),
+                tooltip::Position::Bottom,
+            )
+            .gap(4),
+        )
+    } else {
+        actions
+    }
     .wrap();
     let mut form = column![input, mode, actions].spacing(14).width(Length::Fill);
     if let Some(p) = probe_view(state, ctx) {
         form = form.push(p);
+    }
+    if let Some(v) = &state.video {
+        form = form.push(video_view(v));
     }
     // Retry failed for those who may retry (the server answers others "Ask an admin to retry")
     let mut recent_actions = row![].spacing(8).align_y(Alignment::Center);
@@ -817,7 +963,7 @@ fn slskd_row<'a>(f: &Value, _ctx: &Ctx<'a>) -> El<'a, Message> {
                 .spacing(2)
                 .width(Length::Fill),
                 small_muted(fmt::s(f, "username")).width(120),
-                badge(state.clone(), kind),
+                badge(state, kind),
                 column![
                     progress_bar(0.0..=100.0, pct as f32).girth(5).style(theme::progress).length(160),
                     widgets::faint(format!("{}%{speed}", pct.round() as i64)).size(12),
@@ -950,6 +1096,12 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
 
 pub fn subscription(state: &State) -> Subscription<Message> {
     let rows = iced::time::every(Duration::from_secs(4)).map(|_| Message::Tick);
+    // the server's download of a video, once a second while it runs
+    let rows = if state.video.as_ref().is_some_and(|v| matches!(v.state.as_str(), "queued" | "downloading") && v.error.is_none()) {
+        Subscription::batch([rows, iced::time::every(Duration::from_secs(1)).map(|_| Message::VideoTick)])
+    } else {
+        rows
+    };
     if state.admin {
         Subscription::batch([
             rows,

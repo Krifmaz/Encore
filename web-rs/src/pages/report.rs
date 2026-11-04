@@ -236,7 +236,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 if let Some(i) = dom::data_opt(&b, "replace") {
                     let Some(t) = tracks.get(i.parse::<usize>().unwrap_or(usize::MAX)).cloned() else { return };
                     let codes: Vec<String> = t.a("issues").iter().map(|x| x.s("code")).collect();
-                    let (v, c) = (view.clone(), ctx.clone());
+                    let (v, c) = (view, ctx);
                     report_modal("track", t.g("id").clone(), &t.s("title"), reason_for(&codes), Some(Rc::new(move |_| rerender(v.clone(), c.clone()))));
                     return;
                 }

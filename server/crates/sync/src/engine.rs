@@ -199,7 +199,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
                 with_tid(self.item_map().await?, liked)
             }
             "navidrome" => {
-                let songs: Vec<Value> = self.sub("getStarred2", &[]).await?["starred2"]["song"].as_array().cloned().unwrap_or_default().iter().map(sub_song).collect();
+                let songs: Vec<Value> = self.sub("getStarred2", &[]).await?["starred2"]["song"].as_array().into_iter().flatten().map(sub_song).collect();
                 with_tid(self.item_map().await?, songs)
             }
             "listenbrainz" => {
@@ -224,7 +224,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
                 while page <= 20 {
                     let d: Value = lastfm::loved_tracks(self.st, &self.st.cfg().str("lastfm_api_key"), &s(&self.d["user"]), page).send().await?.json().await?;
                     let lt = &d["lovedtracks"];
-                    out.extend(lt["track"].as_array().cloned().unwrap_or_default().iter().map(|t| json!({ "title": t["name"], "artist": t["artist"]["name"],
+                    out.extend(lt["track"].as_array().into_iter().flatten().map(|t| json!({ "title": t["name"], "artist": t["artist"]["name"],
                         "mbid": t["mbid"].as_str().filter(|m| !m.is_empty()) })));
                     if page >= lt["@attr"]["totalPages"].as_str().and_then(|x| x.parse().ok()).unwrap_or(1) {
                         break;
@@ -258,18 +258,18 @@ impl<'a, S: Ctx> Adapter<'a, S> {
             }
             first = false;
             let page: Value = rb.send().await?.error_for_status()?.json().await?;
-            ids.extend(page["data"].as_array().cloned().unwrap_or_default().iter().map(|x| s(&x["id"])));
+            ids.extend(page["data"].as_array().into_iter().flatten().map(|x| s(&x["id"])));
             next = page["links"]["next"].as_str().map(String::from);
         }
         let mut out = vec![];
         for chunk in ids.chunks(20) {
             let d: Value = tidal::get(self.st, &tok, "/tracks")
                 .query(&[("countryCode", country.as_str()), ("filter[id]", &chunk.join(",")), ("include", "artists")]).send().await?.json().await?;
-            let names: HashMap<String, String> = d["included"].as_array().cloned().unwrap_or_default().iter().filter(|x| x["type"] == "artists")
+            let names: HashMap<String, String> = d["included"].as_array().into_iter().flatten().filter(|x| x["type"] == "artists")
                 .map(|x| (s(&x["id"]), s(&x["attributes"]["name"]))).collect();
             for x in d["data"].as_array().cloned().unwrap_or_default() {
                 let a = &x["attributes"];
-                let artists: Vec<String> = x["relationships"]["artists"]["data"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| names.get(&s(&r["id"])).cloned()).collect();
+                let artists: Vec<String> = x["relationships"]["artists"]["data"].as_array().into_iter().flatten().filter_map(|r| names.get(&s(&r["id"])).cloned()).collect();
                 let mut title = s(&a["title"]);
                 let ver = s(&a["version"]);
                 if !ver.is_empty() && !title.to_lowercase().contains(&ver.to_lowercase()) {
@@ -295,7 +295,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
         let t = self.st.db().one("SELECT title, artist, duration FROM tracks WHERE id=?", p![tid]).ok()??;
         let hit = encore_library::ytmusic::find_song(self.st, &t.s("artist"), &t.s("title"), Some(t.f("duration"))).await;
         let vid = hit.and_then(|h| h["videoId"].as_str().map(String::from));
-        let _ = self.st.db().execute("INSERT OR REPLACE INTO sync_state VALUES (0,?,?)", p![key, vid.clone().unwrap_or("-".into())]);
+        let _ = self.st.db().execute("INSERT OR REPLACE INTO sync_state VALUES (0,?,?)", p![key, vid.clone().unwrap_or_else(|| "-".into())]);
         vid
     }
 
@@ -343,17 +343,17 @@ impl<'a, S: Ctx> Adapter<'a, S> {
     pub async fn playlists(&mut self) -> anyhow::Result<Vec<Value>> {
         Ok(match self.svc().as_str() {
             "jellyfin" => self.jf("/Items", &[("userId", s(&self.d["user_id"])), ("IncludeItemTypes", "Playlist".into()), ("Recursive", "true".into())]).await?["Items"]
-                .as_array().cloned().unwrap_or_default().iter().map(|p| json!({ "id": p["Id"], "name": p["Name"] })).collect(),
-            "plex" => self.plex("/playlists", &[("playlistType", "audio".into())]).await?["Metadata"].as_array().cloned().unwrap_or_default().iter()
+                .as_array().into_iter().flatten().map(|p| json!({ "id": p["Id"], "name": p["Name"] })).collect(),
+            "plex" => self.plex("/playlists", &[("playlistType", "audio".into())]).await?["Metadata"].as_array().into_iter().flatten()
                 .filter(|p| !p["smart"].as_bool().unwrap_or(false)).map(|p| json!({ "id": s(&p["ratingKey"]), "name": p["title"] })).collect(),
-            "navidrome" => self.sub("getPlaylists", &[]).await?["playlists"]["playlist"].as_array().cloned().unwrap_or_default().iter()
+            "navidrome" => self.sub("getPlaylists", &[]).await?["playlists"]["playlist"].as_array().into_iter().flatten()
                 .map(|p| json!({ "id": p["id"], "name": p["name"] })).collect(),
             "spotify" => {
                 let Some(tok) = connections::spotify_token(self.st, self.conn.i("user_id")).await else { return Ok(vec![]) };
                 let (mut out, mut next) = (vec![], Some("https://api.spotify.com/v1/me/playlists?limit=50".to_string()));
                 while let Some(u) = next {
                     let d: Value = self.st.http().get(&u).bearer_auth(&tok).send().await?.json().await?;
-                    out.extend(d["items"].as_array().cloned().unwrap_or_default().iter().filter(|p| p.is_object())
+                    out.extend(d["items"].as_array().into_iter().flatten().filter(|p| p.is_object())
                         .map(|p| json!({ "id": p["id"], "name": p["name"], "url": format!("https://open.spotify.com/playlist/{}", s(&p["id"])) })));
                     next = d["next"].as_str().map(String::from);
                 }
@@ -361,13 +361,13 @@ impl<'a, S: Ctx> Adapter<'a, S> {
             }
             "deezer" => {
                 let d: Value = deezer::user_playlists(self.st, s(&self.d["user_id"]), 200).send().await?.json().await?;
-                d["data"].as_array().cloned().unwrap_or_default().iter().map(|p| json!({ "id": s(&p["id"]), "name": p["title"], "url": p["link"] })).collect()
+                d["data"].as_array().into_iter().flatten().map(|p| json!({ "id": s(&p["id"]), "name": p["title"], "url": p["link"] })).collect()
             }
             "tidal" => {
                 let Some(tok) = connections::tidal_token(self.st, self.conn.i("user_id")).await else { return Ok(vec![]) };
                 let d: Value = tidal::get(self.st, &tok, "/playlists")
                     .query(&[("countryCode", self.d["country"].as_str().unwrap_or("US")), ("filter[r.owners.id]", &s(&self.d["user_id"]))]).send().await?.json().await?;
-                d["data"].as_array().cloned().unwrap_or_default().iter().map(|p| json!({ "id": p["id"], "name": p["attributes"]["name"], "url": format!("https://tidal.com/playlist/{}", s(&p["id"])) })).collect()
+                d["data"].as_array().into_iter().flatten().map(|p| json!({ "id": p["id"], "name": p["attributes"]["name"], "url": format!("https://tidal.com/playlist/{}", s(&p["id"])) })).collect()
             }
             "ytmusic" => {
                 let d = self.yt().await?;
@@ -384,7 +384,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
                 .iter().map(|i| json!({ "id": i["Id"], "entry": i["PlaylistItemId"], "title": i["Name"], "artist": i["AlbumArtist"], "album": i["Album"] })).collect(),
             "plex" => self.plex(&format!("/playlists/{rid}/items"), &[]).await?["Metadata"].as_array().cloned().unwrap_or_default()
                 .iter().map(|i| json!({ "id": s(&i["ratingKey"]), "title": i["title"], "artist": i["grandparentTitle"], "album": i["parentTitle"] })).collect(),
-            "navidrome" => self.sub("getPlaylist", &[("id", rid.into())]).await?["playlist"]["entry"].as_array().cloned().unwrap_or_default().iter().map(sub_song).collect(),
+            "navidrome" => self.sub("getPlaylist", &[("id", rid.into())]).await?["playlist"]["entry"].as_array().into_iter().flatten().map(sub_song).collect(),
             _ => vec![],
         })
     }
@@ -459,7 +459,7 @@ impl<'a, S: Ctx> Adapter<'a, S> {
                 let mut q: Vec<(&str, String)> = match &remote { Some(r) => vec![("playlistId", r.clone())], None => vec![("name", name.into())] };
                 q.extend(ids.iter().map(|i| ("songId", i.clone())));
                 match self.sub("createPlaylist", &q).await {
-                    Ok(d) => Ok(remote.or(d["playlist"]["id"].as_str().map(String::from))),
+                    Ok(d) => Ok(remote.or_else(|| d["playlist"]["id"].as_str().map(String::from))),
                     Err(_) if remote.is_some() => Box::pin(self.push_playlist(name, tids, None)).await, // deleted on the server → recreate
                     Err(e) => Err(e),
                 }

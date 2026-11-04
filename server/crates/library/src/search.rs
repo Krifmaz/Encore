@@ -275,12 +275,12 @@ pub struct Found {
 
 /// MusicBrainz artists (the shape of `mb::search_artists`) with their aliases and score.
 pub fn mb_artists(raw: &Value) -> Vec<(Value, Vec<String>, f64)> {
-    raw["artists"].as_array().cloned().unwrap_or_default().iter().map(|a| {
+    raw["artists"].as_array().into_iter().flatten().map(|a| {
         let mut tags: Vec<(i64, String)> = a["tags"].as_array().map(|t| t.iter().map(|x| (x["count"].as_i64().unwrap_or(0), s(&x["name"]))).collect()).unwrap_or_default();
         tags.sort_by_key(|x| std::cmp::Reverse(x.0));
         let v = json!({
             "id": s(&a["id"]), "name": s(&a["name"]), "disambiguation": s(&a["disambiguation"]), "type": s(&a["type"]), "country": s(&a["country"]),
-            "score": a.get("score").cloned().unwrap_or(json!(0)), "begin": s(&a["life-span"]["begin"]),
+            "score": a.get("score").cloned().unwrap_or_else(|| json!(0)), "begin": s(&a["life-span"]["begin"]),
             "tags": tags.into_iter().take(4).map(|t| t.1).collect::<Vec<_>>(),
         });
         let aliases = a["aliases"].as_array().map(|x| x.iter().map(|y| s(&y["name"])).filter(|n| !n.is_empty()).collect()).unwrap_or_default();
@@ -293,7 +293,7 @@ pub fn mb_artists(raw: &Value) -> Vec<(Value, Vec<String>, f64)> {
 pub fn evidence_hits(f: &Found) -> Vec<(String, String)> {
     let dz: Vec<(String, String)> = f.deezer_tracks.last().and_then(|d| d["data"].as_array()).cloned().unwrap_or_default().iter()
         .map(|t| (s(&t["artist"]["name"]), s(&t["title"]))).collect();
-    let it: Vec<(String, String)> = f.itunes_songs["results"].as_array().cloned().unwrap_or_default().iter()
+    let it: Vec<(String, String)> = f.itunes_songs["results"].as_array().into_iter().flatten()
         .map(|t| (s(&t["artistName"]), s(&t["trackName"]))).collect();
     let mut out = vec![];
     for i in 0..dz.len().max(it.len()) {
@@ -346,7 +346,7 @@ fn release_rank(r: &Value) -> (i32, std::cmp::Reverse<String>) {
 /// A MusicBrainz recording as a result (shown on its best release).
 fn song_from_mb(r: &Value) -> Song {
     let rels = r["releases"].as_array().cloned().unwrap_or_default();
-    let rel = rels.iter().max_by_key(|x| release_rank(x)).cloned().unwrap_or(json!({}));
+    let rel = rels.iter().max_by_key(|x| release_rank(x)).cloned().unwrap_or_else(|| json!({}));
     let rgid = s(&rel["release-group"]["id"]);
     let year: String = { let d = s(&rel["date"]); if d.is_empty() { s(&r["first-release-date"]) } else { d } }.chars().take(4).collect();
     let isrcs: Vec<String> = r["isrcs"].as_array().map(|a| a.iter().map(|x| x.as_str().map(String::from).unwrap_or_else(|| s(&x["id"]))).collect()).unwrap_or_default();
@@ -356,7 +356,7 @@ fn song_from_mb(r: &Value) -> Song {
         "id": s(&r["id"]), "title": title, "artist": artist, "artist_id": mb::credit_id(&r["artist-credit"]),
         "length": length, "album": album, "release_id": rel.get("id").cloned().unwrap_or(Value::Null),
         "release_group_id": if rgid.is_empty() { Value::Null } else { json!(rgid) }, "year": year,
-        "score": r.get("score").cloned().unwrap_or(json!(0)), "cover": if rgid.is_empty() { Value::Null } else { json!(mb::cover_rg(&rgid, 250)) },
+        "score": r.get("score").cloned().unwrap_or_else(|| json!(0)), "cover": if rgid.is_empty() { Value::Null } else { json!(mb::cover_rg(&rgid, 250)) },
         "isrc": isrcs.first().cloned(), "source": "MusicBrainz",
     });
     Song {
@@ -528,7 +528,7 @@ fn alb_from_mb(g: &Value) -> Alb {
 /// An album only Deezer / Apple know, shaped like the catalog merge's "ext" releases.
 fn ext_album(title: &str, artist: &str, typ: &str, date: &str, cover: Value, tracks: Value, src: (&str, &str, Value, String)) -> Alb {
     let (name, key, id, url) = src;
-    let id_s = id.as_str().map(String::from).unwrap_or(id.to_string());
+    let id_s = id.as_str().map(String::from).unwrap_or_else(|| id.to_string());
     let v = json!({
         "id": format!("ext-{}{}", name.chars().next().unwrap_or('x').to_lowercase(), id_s), "title": title, "artist": artist, "artist_id": null,
         "type": typ, "secondary": [], "date": date, "year": date.chars().take(4).collect::<String>(), "score": 0, "cover": cover, "tracks": tracks,
@@ -550,7 +550,7 @@ fn alb_from_itunes(a: &Value) -> Alb {
     let raw = s(&a["collectionName"]);
     let title = raw.trim_end_matches(" - Single").trim_end_matches(" - EP").to_string();
     let cover = s(&a["artworkUrl100"]).replace("100x100bb", "600x600bb");
-    let url = a["collectionViewUrl"].as_str().map(String::from).unwrap_or(format!("https://music.apple.com/album/{}", a["collectionId"]));
+    let url = a["collectionViewUrl"].as_str().map(String::from).unwrap_or_else(|| format!("https://music.apple.com/album/{}", a["collectionId"]));
     ext_album(&title, &s(&a["artistName"]), catalog::kind_of("", &raw), &s(&a["releaseDate"]).chars().take(10).collect::<String>(),
         if cover.is_empty() { Value::Null } else { json!(cover) }, a["trackCount"].clone(), ("Apple Music", "apple", a["collectionId"].clone(), url))
 }
@@ -625,11 +625,11 @@ pub fn rank(q: &str, sp: Option<&Split>, f: &Found, lib_artist: &dyn Fn(&str) ->
         }
         let mut ext: Vec<(usize, Song)> = vec![];
         for raw in &f.deezer_tracks {
-            for (i, x) in raw["data"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+            for (i, x) in raw["data"].as_array().into_iter().flatten().enumerate() {
                 ext.push((i, song_from_deezer(x, &f.isrcs)));
             }
         }
-        for (i, x) in f.itunes_songs["results"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        for (i, x) in f.itunes_songs["results"].as_array().into_iter().flatten().enumerate() {
             if x["wrapperType"].as_str().unwrap_or("track") == "track" {
                 ext.push((i, song_from_itunes(x)));
             }
@@ -680,10 +680,10 @@ pub fn rank(q: &str, sp: Option<&Split>, f: &Found, lib_artist: &dyn Fn(&str) ->
             }
         }
         let mut ext: Vec<(usize, Alb)> = vec![];
-        for (i, a) in f.deezer_albums["data"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        for (i, a) in f.deezer_albums["data"].as_array().into_iter().flatten().enumerate() {
             ext.push((i, alb_from_deezer(a)));
         }
-        for (i, a) in f.itunes_albums["results"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        for (i, a) in f.itunes_albums["results"].as_array().into_iter().flatten().enumerate() {
             if a["wrapperType"].as_str().unwrap_or("collection") == "collection" {
                 ext.push((i, alb_from_itunes(a)));
             }
@@ -903,7 +903,7 @@ async fn discover_uncached(st: &impl Ctx, q: &str, alt: Option<&str>, t: &str) -
     if want("track") && deezer_up && until.saturating_duration_since(Instant::now()) > Duration::from_millis(500) {
         let mut ids: Vec<String> = vec![];
         for d in &f.deezer_tracks {
-            for x in d["data"].as_array().cloned().unwrap_or_default().iter().take(3) {
+            for x in d["data"].as_array().into_iter().flatten().take(3) {
                 let id = x["id"].to_string();
                 if x["isrc"].is_null() && !ids.contains(&id) && ids.len() < 3 {
                     ids.push(id);
@@ -1311,19 +1311,16 @@ impl<'a> Fuzzy<'a> {
 /// [`library_track_ids`] with the splits, initials and typo matches given.
 fn track_ids_with(idx: &Index, q: &str, sort: &str, dir: &str, split: &LibHits, initials: &LibHits, fuzzy: &Fuzzy) -> Vec<i64> {
     let plain = idx.search_track_refs(q, sort, dir);
-    let mut seq: Vec<&Track> = split.tracks.iter().map(|x| x.1).collect();
     let few = plain.len() < 5;
-    seq.extend(plain);
     // initials: by score (a split's), then in the list's order
     let ord = idx.track_order(sort, dir);
     let mut ini: Vec<(f64, &Track)> = initials.tracks.clone();
     ini.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| ord(a.1, b.1)));
-    seq.extend(ini.into_iter().map(|x| x.1));
-    if few {
-        seq.extend(fuzzy.get().tracks.iter().map(|x| x.1));
-    }
+    // the splits, the plain matches, the initials, and the typo matches only when there are few: one pass, first wins
+    let typos = few.then(|| fuzzy.get().tracks.iter().map(|x| x.1)).into_iter().flatten();
+    let seq = split.tracks.iter().map(|x| x.1).chain(plain).chain(ini.into_iter().map(|x| x.1)).chain(typos);
     let mut seen = HashSet::new();
-    idx.dedupe(seq.into_iter().filter(|t| seen.insert(t.id))).into_iter().map(|t| t.id).collect()
+    idx.dedupe(seq.filter(|t| seen.insert(t.id))).into_iter().map(|t| t.id).collect()
 }
 
 /// `/api/library/albums?q=`: album ids and their tier: 0 for a split's album and the albums of the songs a

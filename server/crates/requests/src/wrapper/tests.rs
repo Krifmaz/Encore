@@ -161,7 +161,7 @@ fn fake_source(dir: &Path, libs: &[(&str, Vec<u8>)]) {
     let text = json!({
         "apple_music": { "version": "3.6.0-beta", "build": "1109" },
         "android_system": { "x86_64": { "bin/linker64": stage::sha256_hex(b"linker") }, "arm64-v8a": { "bin/linker64": stage::sha256_hex(b"linker") } },
-        "libs": { "x86_64": libs_json.clone(), "arm64-v8a": libs_json },
+        "libs": { "x86_64": libs_json, "arm64-v8a": libs_json },
     });
     std::fs::write(dir.join("LIBS_VERSION.json"), text.to_string()).unwrap();
     for arch in ["x86_64", "arm64-v8a"] {

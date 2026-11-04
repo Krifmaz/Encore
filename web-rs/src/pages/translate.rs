@@ -65,7 +65,7 @@ pub fn edit_translation(text: String, kind: &'static str, on_saved: Option<Rc<dy
             });
         }
         if let Some(b) = m.qs("#tr-reset") {
-            let (done, original) = (done.clone(), original.clone());
+            let (done, original) = (done.clone(), original);
             dom::on(&b, "click", move |_| {
                 let (done, original) = (done.clone(), original.clone());
                 dom::spawn(async move {

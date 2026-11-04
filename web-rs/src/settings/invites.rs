@@ -126,7 +126,7 @@ pub fn render_invites(view: Element, _ctx: Ctx) -> PageFuture {
         <label class="field"><span>Note</span><input class="input" name="note" placeholder="e.g. for Sam"></label>
       </form><div id="made"></div>"#).footer(r#"<button class="btn" data-close>Close</button><button class="btn primary" id="ok">Create invite</button>"#));
                 if let Some(ok) = m.qs("#ok") {
-                    let (m2, ld, link) = (m.clone(), ld.clone(), link.clone());
+                    let (m2, ld, link) = (m, ld.clone(), link.clone());
                     dom::on(&ok, "click", move |ev| {
                         let f = m2.qs("#ni").map(|f| form_entries(&f)).unwrap_or_else(|| json!({}));
                         let target = dom::target_el(ev);
@@ -147,7 +147,7 @@ pub fn render_invites(view: Element, _ctx: Ctx) -> PageFuture {
                                             esc(&link(&code)), icon("copy"), esc(&code)));
                                     }
                                     if let Some(cp) = m2.qs("#cp") {
-                                        let (link, code) = (link.clone(), code.clone());
+                                        let (link, code) = (link.clone(), code);
                                         dom::on(&cp, "click", move |_| copy_text(&link(&code)));
                                     }
                                     ld();

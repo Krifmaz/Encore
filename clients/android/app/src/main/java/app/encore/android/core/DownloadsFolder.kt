@@ -12,10 +12,13 @@ import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 
 /**
- * Saves a finished file (a bug report export, a crash log) straight into the phone's public Downloads folder, so the
- * Export buttons need no share sheet or picker: the file is simply there, in Files → Downloads.
+ * Saves a finished file (a bug report export, a crash log, a video from the Downloader) straight into the phone's
+ * public Downloads folder, so the Export buttons need no share sheet or picker: the file is simply there, in Files →
+ * Downloads.
  *
  * Android 10 and later write through MediaStore (no permission needed for the app's own rows); Android 8–9 write a
  * plain file, which needs the storage permission there ([canSave] says whether it is held, so the caller can fall
@@ -37,17 +40,27 @@ object DownloadsFolder {
      * already taken gets a number, "name (1).txt"). Blocking: call it off the main thread.
      */
     fun save(context: Context, source: File, mime: String): String =
-        if (Build.VERSION.SDK_INT >= 29) toMediaStore(context, source, mime) else toFolder(context, source)
+        source.inputStream().use { saveStream(context, source.name, mime, it) }
+
+    /**
+     * Copies [input] (read to its end, not closed) into Downloads as [name] with type [mime]; gives the name it was
+     * saved under, numbered like [save]. A copy that fails part way leaves nothing behind. Blocking: call it off the
+     * main thread.
+     */
+    fun saveStream(context: Context, name: String, mime: String, input: InputStream): String {
+        val write: (OutputStream) -> Unit = { o -> input.copyTo(o) }
+        return if (Build.VERSION.SDK_INT >= 29) toMediaStore(context, name, mime, write) else toFolder(context, name, write)
+    }
 
     /** The MIME type for an export by its extension: a .zip, else plain text (every other export is a .txt). */
     fun mimeOf(file: File): String = if (file.name.endsWith(".zip")) "application/zip" else "text/plain"
 
     /** Android 10 and later: a pending Downloads row while it is written, removed again if the copy fails. */
     @RequiresApi(29)
-    private fun toMediaStore(context: Context, source: File, mime: String): String {
+    private fun toMediaStore(context: Context, name: String, mime: String, write: (OutputStream) -> Unit): String {
         val resolver = context.contentResolver
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
             put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/")
             // hidden from other apps until the copy is complete
@@ -56,7 +69,7 @@ object DownloadsFolder {
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IOException(NO_SAVE)
         try {
             val out = resolver.openOutputStream(uri) ?: throw IOException(NO_SAVE)
-            out.use { o -> source.inputStream().use { it.copyTo(o) } }
+            out.use(write)
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
         } catch (e: Throwable) {
             try { resolver.delete(uri, null, null) } catch (_: Exception) {}
@@ -67,18 +80,18 @@ object DownloadsFolder {
             resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
         } catch (_: Exception) {
             null
-        } ?: source.name
+        } ?: name
     }
 
     /** Android 8–9: a plain file in the public Downloads folder, then shown to the media scanner (Files lists it). */
     @Suppress("DEPRECATION")
-    private fun toFolder(context: Context, source: File): String {
+    private fun toFolder(context: Context, name: String, write: (OutputStream) -> Unit): String {
         if (!canSave(context)) throw IOException("Encore needs access to the phone's storage to save in Downloads")
         val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         if (!dir.isDirectory && !dir.mkdirs()) throw IOException(NO_SAVE)
-        val target = unique(dir, source.name)
+        val target = unique(dir, name)
         try {
-            source.inputStream().use { i -> FileOutputStream(target).use { i.copyTo(it) } }
+            FileOutputStream(target).use(write)
         } catch (e: Throwable) {
             target.delete()
             throw e

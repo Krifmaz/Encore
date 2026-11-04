@@ -9,7 +9,7 @@ pub struct Jobs(Arc<Mutex<Map<String, Value>>>);
 impl Jobs {
     /// The state of `job` (`{"running": false}` when it never ran).
     pub fn get(&self, job: &str) -> Value {
-        self.0.lock().unwrap().get(job).cloned().unwrap_or(json!({ "running": false }))
+        self.0.lock().unwrap().get(job).cloned().unwrap_or_else(|| json!({ "running": false }))
     }
 
     /// Whether `job` is running now.

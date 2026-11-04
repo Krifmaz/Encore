@@ -9,6 +9,15 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[lints.clippy]
+# Lints on top of clippy's defaults that catch wasted copies: a String or Vec copied with to_string/to_owned
+# where clone (or nothing) would do, and to_string through an extra reference (the slow, generic path).
+# Where CI runs clippy with -D warnings they cannot creep back in. redundant_clone and needless_collect are
+# left out on purpose: they are nursery lints whose suggestions here would not compile (a value used after
+# the clone it "doesn't need"; a collect that ends a borrow), so run them by hand now and then instead.
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+
 [dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

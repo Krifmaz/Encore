@@ -9,7 +9,7 @@ use encore_http::lastfm::signed as lastfm_signed;
 
 /// The connection's data, when it scrobbles (on unless switched off).
 fn wants(c: &Row) -> Option<Value> {
-    let d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
+    let d: Value = serde_json::from_str(&c.s("data")).unwrap_or_else(|_| json!({}));
     (d["scrobble"] != json!(false)).then_some(d)
 }
 

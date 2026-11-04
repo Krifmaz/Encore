@@ -91,7 +91,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::Mode(m) => {
             let api = ctx.api.clone();
             let body = json!({ "signup_mode": m });
-            return Task::perform(async move { api.put("/admin/settings", body).await }, move |r| Message::ModeSaved(m.clone(), r));
+            return Task::perform(async move { api.put("/admin/settings", body).await }, move |r| Message::ModeSaved(m, r));
         }
         Message::ModeSaved(m, Ok(_)) => {
             let label = MODES.iter().find(|(k, _)| *k == m).map(|(_, l)| *l).unwrap_or("");

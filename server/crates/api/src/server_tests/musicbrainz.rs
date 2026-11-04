@@ -129,7 +129,7 @@ async fn server(name: &str) -> (TestServer, Hits, Arc<AtomicU8>) {
 
 fn row(st: &AppState, id: i64) -> (String, String, Value) {
     let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
-    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
+    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({})))
 }
 
 /// Every message request `id` shows while `work` runs (read every 20 ms).
@@ -212,8 +212,7 @@ async fn an_import_says_what_it_waits_for_and_goes_before_background_work() {
     let (status, message, _) = row(&st, id);
     assert_eq!((status.as_str(), message.as_str()), ("completed", "Downloaded from Soulseek"), "{seen:?}");
     assert!(seen.iter().any(|m| m == "Importing – looking it up on MusicBrainz"), "{seen:?}");
-    let waits: Vec<&String> = seen.iter().filter(|m| m.starts_with("Importing – waiting for MusicBrainz (under a minute, ") && m.ends_with(" ahead)")).collect();
-    assert!(!waits.is_empty(), "{seen:?}");
+    assert!(seen.iter().any(|m| m.starts_with("Importing – waiting for MusicBrainz (under a minute, ") && m.ends_with(" ahead)")), "{seen:?}");
     // (the steps after it – the cover, the move into the library – are too quick here to be seen every time)
     // the order MusicBrainz was asked in: every page, then the import, then the background work
     let hits = hits.lock().unwrap().clone();

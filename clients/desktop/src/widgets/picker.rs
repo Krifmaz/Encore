@@ -726,7 +726,7 @@ pub fn count_tabs<'a, M: Clone + 'a>(
 fn result_row<'a>(ctx: &Ctx<'a>, state: &State, src: &str, i: usize, x: &Value) -> El<'a, Message> {
     let p = ctx.look;
     let title = fmt::s(x, "title");
-    let mut lines = column![t(title.clone()).size(14).font(theme::semibold())].spacing(2);
+    let mut lines = column![t(title).size(14).font(theme::semibold())].spacing(2);
     if fmt::truthy(x, "subtitle") && x["subtitle"] != x["title"] {
         lines = lines.push(small_muted(fmt::s(x, "subtitle")));
     }
@@ -1093,7 +1093,7 @@ mod tests {
         // the same words in another order or case are the same search
         assert_eq!(found_line(&kept, "illuminate ep, DUUMU", false), Some(("Found at 14:02".into(), true)));
         // Soulseek not connected: the reason instead of Search again
-        let mut down = kept.clone();
+        let mut down = kept;
         down["can_search"] = json!(false);
         down["notice"] = json!("Soulseek isn't connected – next attempt at 14:20");
         assert_eq!(

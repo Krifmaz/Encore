@@ -1435,7 +1435,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
                 "/library/tracks?ids={}",
                 ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
             );
-            return Task::perform(async move { api.get(&path).await }, move |r| Message::SpotTracks(s.clone(), r));
+            return Task::perform(async move { api.get(&path).await }, move |r| Message::SpotTracks(s, r));
         }
         Message::SpotDismiss => {
             if let Some(o) = state.spot.take() {

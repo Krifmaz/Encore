@@ -79,12 +79,24 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
+[workspace.lints.clippy]
+# Lints on top of clippy's defaults that catch wasted copies: a String or Vec copied with to_string/to_owned
+# where clone (or nothing) would do, and to_string through an extra reference (the slow, generic path).
+# Where CI runs clippy with -D warnings they cannot creep back in. redundant_clone and needless_collect are
+# left out on purpose: they are nursery lints whose suggestions here would not compile (a value used after
+# the clone it "doesn't need"; a collect that ends a borrow), so run them by hand now and then instead.
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+
 [package]
 name = "encore"
 version.workspace = true
 edition.workspace = true
 description = "Encore music server"
 license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 encore-api = { workspace = true }

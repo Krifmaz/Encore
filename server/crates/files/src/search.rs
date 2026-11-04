@@ -276,7 +276,7 @@ mod tests {
         let root = root(&r);
         let (found, truncated, scanned) = walk(&root, r.clone(), "", &Terms::parse("song").unwrap(), 100, 4);
         assert_eq!((found.len(), truncated, scanned), (4, true, 4));
-        let (found, truncated, scanned) = walk(&root, r.clone(), "", &Terms::parse("song").unwrap(), 100, 100);
+        let (found, truncated, scanned) = walk(&root, r, "", &Terms::parse("song").unwrap(), 100, 100);
         assert_eq!((found.len(), truncated, scanned), (10, false, 10));
         let _ = std::fs::remove_dir_all(&d);
     }

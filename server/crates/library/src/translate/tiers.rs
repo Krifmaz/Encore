@@ -233,7 +233,7 @@ mod tests {
         let t = tiers();
         assert_eq!(deepl_state(&t, 12_340, None), "DeepL: 12\u{a0}340 of 400\u{a0}000 characters this month");
         assert_eq!(deepl_state(&Tiers { deepl_budget: 0, ..t.clone() }, 5, None), "DeepL: 5 characters this month (no limit)");
-        assert_eq!(deepl_state(&Tiers { deepl_key: String::new(), ..t.clone() }, 0, None), "DeepL: no API key – add one under Settings → Library → Translated titles");
+        assert_eq!(deepl_state(&Tiers { deepl_key: String::new(), ..t }, 0, None), "DeepL: no API key – add one under Settings → Library → Translated titles");
         assert_eq!(deepl_state(&Tiers { deepl: false, ..t.clone() }, 0, None), "DeepL: off");
         assert!(deepl_state(&t, 0, Some(&deepl::Error::Key)).contains("refused"));
         assert_eq!(deepl_state(&t, 400_000, Some(&deepl::Error::Budget)), "DeepL: 400\u{a0}000 of 400\u{a0}000 characters this month – paused: this month's DeepL budget is used up");

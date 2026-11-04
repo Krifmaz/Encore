@@ -159,7 +159,7 @@ pub fn album_request_for(st: &impl Ctx, mbid: Option<&str>, artist: &str, title:
                               AND (mbid=? OR lower(artist)=lower(?) OR CAST(json_extract(detail, '$.ext.deezer') AS TEXT)=? OR json_extract(detail, '$.ext.upc')=?)
                               ORDER BY id", p![mbid, artist, deezer, upc])?;
     let same_ext = |row: &Row| {
-        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or_else(|_| json!({}));
         let theirs = d["ext"]["deezer"].as_i64().map(|x| x.to_string()).or_else(|| d["ext"]["deezer"].as_str().map(String::from));
         (deezer.is_some() && theirs == deezer) || (upc.is_some() && d["ext"]["upc"].as_str() == upc)
     };
@@ -193,7 +193,7 @@ fn same_song_requested(st: &impl Ctx, b: &NewRequest, artist: Option<&str>) -> A
                              p![format!("%{}%", word.to_lowercase())])?;
     let mut stale = None;
     for r in rows {
-        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
         let mbid = Some(r.s("mbid")).filter(|m| !m.is_empty()).or_else(|| d["recording"].as_str().map(String::from));
         let theirs = describe(&r.s("title"), &r.s("artist"), d["length"].as_f64(), d["isrc"].as_str(), mbid.as_deref());
         if compare(&want, &theirs, true).matched {
@@ -306,7 +306,7 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
             };
             let mut nb = b.clone();
             nb.mbid = None;
-            let mut merged = b.ext.clone().filter(|e| e.is_object()).unwrap_or(json!({}));
+            let mut merged = b.ext.clone().filter(|e| e.is_object()).unwrap_or_else(|| json!({}));
             for (k, v) in ext.as_object().into_iter().flatten() {
                 if merged[k].is_null() {
                     merged[k] = v.clone();
@@ -360,7 +360,7 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
         match b.kind.as_str() {
             "track" => stale = stale.or(same_song_requested(st, b, artist)?),
             "album" => {
-                let ext = b.ext.clone().unwrap_or(json!({}));
+                let ext = b.ext.clone().unwrap_or_else(|| json!({}));
                 if let (Some(a), Some(t)) = (artist, title) {
                     if let Some(id) = album_request_for(st, nz(&b.mbid), a, t, &ext).map_err(|e| err(500, e.to_string()))? {
                         stale = stale.or(dup(st, "SELECT id, status FROM requests WHERE id=?", p![id])?);
@@ -435,7 +435,7 @@ pub fn create_or_reuse(st: &impl Ctx, u: &Row, b: &NewRequest, parent: Option<i6
     let what = title.or(artist).or(nz(&b.url)).unwrap_or("");
     if let Some(old) = twin {
         let id = old.i("id");
-        let old_detail: Value = serde_json::from_str(&old.s("detail")).unwrap_or(json!({}));
+        let old_detail: Value = serde_json::from_str(&old.s("detail")).unwrap_or_else(|_| json!({}));
         let detail = detail_for_retry(&old_detail, &old.s("status"), &old.s("message"), detail);
         st.db().execute(
             // (a completed request taken over may have been asked for by another catalogue: the new ask's

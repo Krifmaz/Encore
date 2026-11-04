@@ -272,8 +272,8 @@ mod tests {
         assert!(cadenza_band(&json!({ "type": "allpass", "freq": 80 })).is_none());
         // every preset band maps
         for p in EQ_PRESETS {
-            let bands: Vec<_> = p.bands.iter().map(band_json).filter_map(|b| cadenza_band(&b)).collect();
-            assert_eq!(bands.len(), p.bands.len(), "{}", p.id);
+            let bands = p.bands.iter().map(band_json).filter_map(|b| cadenza_band(&b)).count();
+            assert_eq!(bands, p.bands.len(), "{}", p.id);
         }
         let eq = cadenza_eq::Equalizer::new(48_000, 2, &[pk]);
         assert!((eq.response_db(1000.0) - 6.0).abs() < 1e-9);

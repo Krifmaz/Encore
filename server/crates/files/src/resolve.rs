@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(Target::new(&root, "inner/x").unwrap().open_parent().map(|_| ()).unwrap_err().detail, THROUGH_LINK);
         // the link itself can be acted on (renamed, moved, trashed): its parent is a real folder
         let (dir, name) = Target::new(&root, "escape").unwrap().open_parent().unwrap();
-        assert_eq!((dir.path.clone(), name.as_str()), (std::fs::canonicalize(&r).unwrap(), "escape"));
+        assert_eq!((dir.path, name.as_str()), (std::fs::canonicalize(&r).unwrap(), "escape"));
         assert!(Target::new(&root, "").unwrap().open_parent().is_err(), "the root itself can't be moved");
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -57,16 +57,16 @@ fn the_hotfix_channel_takes_the_highest_of_releases_and_hotfixes() {
         { "tag_name": "v0.35.2" },
         { "tag_name": "hotfix-0.35.1.9", "prerelease": true },
     ]);
-    let r = pick_newest(&list, 0.0).unwrap();
+    let r = pick_newest(&list, Channel::Hotfix, 0.0).unwrap();
     assert_eq!((r["tag"].as_str(), r["latest"].as_str(), r["hotfix"].as_bool()), (Some("hotfix-0.35.2.17"), Some("0.35.2.17"), Some(true)),
                "the draft and the other prerelease don't count");
     // a full release after the hotfixes is newer than all of them
     let list = json!([{ "tag_name": "v0.35.3" }, { "tag_name": "hotfix-0.35.2.17", "prerelease": true }]);
-    assert_eq!(pick_newest(&list, 0.0).unwrap()["latest"], json!("0.35.3"));
+    assert_eq!(pick_newest(&list, Channel::Hotfix, 0.0).unwrap()["latest"], json!("0.35.3"));
     assert!(is_newer("0.35.3", "0.35.2.17", false));
     assert!(is_newer("0.35.2.17", "0.35.2", false));
     assert!(!is_newer("0.35.2", "0.35.2.17", false), "the stable channel does not go back from a hotfix");
-    assert!(pick_newest(&json!([]), 0.0).is_none());
+    assert!(pick_newest(&json!([]), Channel::Hotfix, 0.0).is_none());
     assert_eq!(check_tag("0.35.2.17").as_deref(), Ok("0.35.2.17"));
 }
 
@@ -189,4 +189,35 @@ fn a_restart_finds_every_process_below_the_server() {
     let me = std::process::id() as i32;
     let found = descendants(me, &processes());
     assert!(!found.contains(&me));
+}
+
+/// The stable channel takes the highest full release from the list, not GitHub's "Latest": the hotfix built while
+/// v0.42.6 was on its way was numbered 0.42.5.191 and marked Latest, and servers on it never saw 0.42.6.
+#[test]
+fn the_highest_release_wins_over_githubs_latest() {
+    // GitHub's list as it stood on 2026-10-29 (newest first; the hotfix is a normal release, the "Latest")
+    let list = json!([
+        { "tag_name": "v0.42.6" },
+        { "tag_name": "v0.42.5" },
+        { "tag_name": "hotfix-0.42.5.191" },
+        { "tag_name": "hotfix-0.42.3.183" },
+    ]);
+    for channel in [Channel::Stable, Channel::Hotfix] {
+        let r = pick_newest(&list, channel, 0.0).unwrap();
+        assert_eq!(r["latest"], json!("0.42.6"), "{channel:?}");
+        assert!(is_newer(r["latest"].as_str().unwrap(), "0.42.5.191", false), "0.42.6 is offered to a server on 0.42.5.191");
+    }
+    // a hotfix after the newest full release (a normal release, as CI publishes them) reaches both channels
+    let list = json!([{ "tag_name": "hotfix-0.42.6.195" }, { "tag_name": "v0.42.6" }]);
+    assert_eq!(pick_newest(&list, Channel::Stable, 0.0).unwrap()["latest"], json!("0.42.6.195"));
+    assert_eq!(pick_newest(&list, Channel::Hotfix, 0.0).unwrap()["latest"], json!("0.42.6.195"));
+    // a hotfix prerelease only reaches the hotfix channel; a beta and a draft reach neither
+    let list = json!([
+        { "tag_name": "hotfix-0.42.6.196", "prerelease": true },
+        { "tag_name": "v0.43.0-beta", "prerelease": true },
+        { "tag_name": "v0.43.0", "draft": true },
+        { "tag_name": "v0.42.6" },
+    ]);
+    assert_eq!(pick_newest(&list, Channel::Stable, 0.0).unwrap()["latest"], json!("0.42.6"));
+    assert_eq!(pick_newest(&list, Channel::Hotfix, 0.0).unwrap()["latest"], json!("0.42.6.196"));
 }

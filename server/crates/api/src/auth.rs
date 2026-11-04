@@ -223,7 +223,7 @@ pub fn public_user(st: &AppState, u: &Row) -> Value {
     m.insert("totp_enabled".into(), json!(u.b("totp_enabled")));
     m.insert("perms".into(), Value::Object(perms_of(st, u)));
     m.insert("is_admin".into(), json!(is_admin(u)));
-    m.insert("prefs".into(), serde_json::from_str(&u.s("prefs")).unwrap_or(json!({})));
+    m.insert("prefs".into(), serde_json::from_str(&u.s("prefs")).unwrap_or_else(|_| json!({})));
     Value::Object(m)
 }
 

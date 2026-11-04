@@ -157,7 +157,7 @@ fn task_row<'a>(task: &'a Value) -> El<'a, Message> {
     let enabled = fmt::truthy(task, "enabled");
     let running = fmt::truthy(task, "running");
     let minutes = fmt::f(task, "minutes");
-    let (k1, k2, k3) = (key.clone(), key.clone(), key.clone());
+    let (k1, k2, k3) = (key.clone(), key.clone(), key);
     let mut name = row![t(fmt::s(task, "name")).size(14).font(theme::semibold())].spacing(6).align_y(Alignment::Center);
     if locked {
         name = name.push(t("🔒").size(12));

@@ -18,6 +18,8 @@ class LikesRepository(private val api: EncoreApi, private val scope: CoroutineSc
     private val _liked = MutableStateFlow<Set<Long>>(emptySet())
     val liked: StateFlow<Set<Long>> = _liked.asStateFlow()
     private var lastRefresh = 0L
+    /** When the heart was last tapped here: a Liked Songs that loads right after may not have that tap yet ([adopt]). */
+    private var lastToggle = 0L
 
     /** At most once a minute unless forced (PLAN §5 freshness budget). */
     fun refresh(force: Boolean = false) {
@@ -42,12 +44,29 @@ class LikesRepository(private val api: EncoreApi, private val scope: CoroutineSc
 
     fun isLiked(id: Long): Boolean = id in _liked.value
 
+    /**
+     * Liked Songs just loaded with [ids], its songs in the library: they are the liked songs. A song of Liked Songs
+     * found in the library after the last [refresh] (a download that finished, a re-check that matched it) used to
+     * show an empty heart until the next refresh, though the page listed it as liked. The likes still waiting in the
+     * outbox count, as in [refresh]; nothing changes (and nothing reloads) when the set is already the same.
+     */
+    fun adopt(ids: Set<Long>) {
+        // a tap in the last seconds may not have reached the server when the page loaded: keep the tap
+        if (System.currentTimeMillis() - lastToggle < 10_000L) return
+        scope.launch {
+            val next = withContext(Dispatchers.IO) { OfflineMode.withPending(ids).also { OfflineMode.keepLikes(it) } }
+            if (next != _liked.value) _liked.value = next
+            lastRefresh = System.currentTimeMillis()
+        }
+    }
+
     /** The server took the song out of Liked Songs on its own (a dislike, DislikesRepository): the hearts follow. */
     fun forget(id: Long) {
         _liked.value = _liked.value - id
     }
 
     fun toggle(id: Long) {
+        lastToggle = System.currentTimeMillis()
         val was = id in _liked.value
         _liked.value = if (was) _liked.value - id else _liked.value + id
         scope.launch {
