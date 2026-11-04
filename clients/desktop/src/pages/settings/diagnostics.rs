@@ -9,16 +9,17 @@ use crate::pages::{Ctx, El};
 use crate::theme::{self, Badge, Btn};
 use crate::widgets::drop_zone::{self, DropZone, Outcome};
 use crate::widgets::{self, badge, btn, btn_icon, btn_sm, modal, small_muted, t, Icon};
-use iced::widget::{column, container, mouse_area, row, space};
+use iced::widget::{column, container, mouse_area, row};
 use iced::{Alignment, Length, Task};
+use kit_iced::diagnostics as kit;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// The [`State::open`] key of the folded "Where settings come from" list (the checks use `check-N`, crashes their ids).
+/// The kit's fold key of the folded "Where settings come from" list (the checks use `check-N`, crashes `crash-N`).
 const SOURCES: &str = "settings-sources";
 
-const KIND: [(&str, &str); 3] = [("service", "Connections"), ("path", "Folders & permissions"), ("tool", "Tools in the container")];
+/// The line under the page's title.
+const HELP: &str = "Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.";
 
 #[derive(Clone, Debug)]
 pub enum Dialog {
@@ -28,17 +29,12 @@ pub enum Dialog {
 
 #[derive(Debug, Default)]
 pub struct State {
-    /// `/system/diagnostics`, None while running.
-    data: Option<Value>,
-    /// Encore's VPN for Soulseek as one more connection check (`/system/vpn`).
-    vpn: Option<Value>,
-    running: bool,
-    error: String,
+    /// The checks (`/system/diagnostics`), the run, and the raw answers and full reports that are unfolded;
+    /// Encore's VPN for Soulseek (`/system/vpn`) is its one more connection check.
+    kit: kit::State,
     backups: Option<Value>,
     backups_busy: bool,
     crashes: Option<Value>,
-    /// Raw answers and full reports that are unfolded.
-    open: HashSet<String>,
     dialog: Option<Dialog>,
     /// Backups dragged onto the window for *Upload a backup…*.
     drop: DropZone,
@@ -46,11 +42,10 @@ pub struct State {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Run,
+    /// The kit's page: Run checks, Copy report, a fold, Copy of one check or one crash report.
+    Diag(kit::Msg),
     Checks(Result<Value, ApiError>),
     Vpn(Result<Value, ApiError>),
-    CopyReport,
-    Toggle(String),
     Backups(Result<Value, ApiError>),
     BackupNow,
     BackedUp(Result<Value, ApiError>),
@@ -69,8 +64,6 @@ pub enum Message {
     ClearCrashes,
     Cleared(Result<Value, ApiError>),
     CloseDialog,
-    /// Copy one failed check or one crash report in full.
-    CopyText(String),
 }
 
 /// The VPN for Soulseek line: "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago",
@@ -141,15 +134,27 @@ fn load_crashes(ctx: &Ctx) -> Task<Message> {
 }
 
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
-    state.data = None;
-    state.vpn = None;
-    state.running = true;
-    state.error.clear();
+    let checks = state.kit.open();
     state.backups = None;
     state.crashes = None;
-    state.open.clear();
     state.dialog = None;
-    Task::batch([run(ctx), load_backups(ctx), load_crashes(ctx)])
+    let checks = act(state, checks, ctx);
+    Task::batch([checks, load_backups(ctx), load_crashes(ctx)])
+}
+
+/// What the kit's page asks for: run the checks, copy the report (with the VPN), copy one text.
+fn act(state: &State, action: kit::Action, ctx: &mut Ctx) -> Task<Message> {
+    match action {
+        kit::Action::Run => return run(ctx),
+        kit::Action::CopyReport => {
+            if let Some(d) = state.kit.answer() {
+                ctx.copy(report_of(d, state.kit.all()));
+                ctx.toast_ok("Copied to clipboard");
+            }
+        }
+        kit::Action::Copy(text) => ctx.copy_text(text),
+    }
+    Task::none()
 }
 
 /// `(label, value)` rows of the Server block (`machine` in the diagnostics answer).
@@ -189,53 +194,44 @@ pub fn server_rows(s: &Value) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The plain-text report the Copy report button puts on the clipboard.
+/// The plain-text report the Copy report button puts on the clipboard, of the answer's checks alone
+/// (Copy report adds the VPN's: [`report_of`]).
+#[cfg(test)]
 pub fn report(last: &Value) -> String {
-    let mut lines = vec![format!("Encore {} diagnostics (uid {})", fmt::s(last, "version"), fmt::s(last, "uid"))];
-    for c in fmt::items(&last["checks"]) {
-        let ok = fmt::truthy(&c, "ok");
-        let status = if fmt::truthy(&c, "status") { format!(" → HTTP {}", fmt::s(&c, "status")) } else { String::new() };
-        let ms = if c.get("ms").is_some_and(|m| !m.is_null()) { format!(" ({} ms)", fmt::s(&c, "ms")) } else { String::new() };
-        let body = if fmt::truthy(&c, "body") && !ok {
-            format!("\n     body: {}", fmt::s(&c, "body").chars().take(300).collect::<String>())
-        } else {
-            String::new()
-        };
-        lines.push(format!(
-            "{} {} – {}{status}{ms}\n     {}{body}",
-            if ok { "OK  " } else { "FAIL" },
-            fmt::s(&c, "name"),
-            fmt::s(&c, "request"),
-            fmt::s(&c, "detail")
-        ));
-    }
+    report_of(last, &kit::checks(last))
+}
+
+/// [`report`] over these checks (the answer's and the VPN's): the kit's lines of every check, then
+/// Download folders, Server and Settings.
+fn report_of<'c>(last: &Value, checks: impl IntoIterator<Item = &'c kit::Check>) -> String {
+    let mut sections = vec![];
     let folders = fmt::items(&last["download_folders"]["roots"]);
     if !folders.is_empty() {
-        lines.push(String::new());
-        lines.push("Download folders:".into());
-        for r in &folders {
-            let (what, detail, when) = folder_lines(r);
-            lines.push(format!("{} {what}\n     {detail} ({when})", if fmt::truthy(r, "ok") { "OK  " } else { "FAIL" }));
-        }
+        let lines = folders
+            .iter()
+            .map(|r| {
+                let (what, detail, when) = folder_lines(r);
+                format!("{} {what}\n     {detail} ({when})", if fmt::truthy(r, "ok") { "OK  " } else { "FAIL" })
+            })
+            .collect();
+        sections.push(kit::Section { title: "Download folders".into(), lines });
     }
     if last["machine"].is_object() {
-        lines.push(String::new());
-        lines.push("Server:".into());
-        for (k, v) in server_rows(&last["machine"]) {
-            lines.push(format!("  {k}: {v}"));
-        }
+        sections.push(kit::Section { title: "Server".into(), lines: kit::fact_lines(&server_rows(&last["machine"])) });
     }
-    lines.push(String::new());
-    lines.push("Settings:".into());
-    for s in fmt::items(&last["settings"]) {
-        lines.push(format!(
-            "  {} = {}  [{}]",
-            fmt::s(&s, "key"),
-            super::vs(&s["value"]),
-            if s["source"].as_str() == Some("env") { format!("env {}", fmt::s(&s, "env")) } else { "saved".to_string() }
-        ));
-    }
-    lines.join("\n")
+    let settings = fmt::items(&last["settings"])
+        .iter()
+        .map(|s| {
+            format!(
+                "  {} = {}  [{}]",
+                fmt::s(s, "key"),
+                super::vs(&s["value"]),
+                if s["source"].as_str() == Some("env") { format!("env {}", fmt::s(s, "env")) } else { "saved".to_string() }
+            )
+        })
+        .collect();
+    sections.push(kit::Section { title: "Settings".into(), lines: settings });
+    kit::report(&format!("Encore {} diagnostics (uid {})", fmt::s(last, "version"), fmt::s(last, "uid")), checks, &sections)
 }
 
 /// A download folder in words, as the web's `folder_lines` (servers since 0.33, backlog item 17): (what
@@ -293,25 +289,7 @@ fn folder_item<'a>(r: &Value) -> El<'a, Message> {
         Badge::Warn => p.warn,
         _ => p.ok,
     };
-    column![
-        container(row![container(dot_in(colour)).padding([6, 0]), body].spacing(12).align_y(Alignment::Start)).padding([10, 14]),
-        widgets::divider(),
-    ]
-    .into()
-}
-
-/// One check in full for Copy, as the web's dialog has it: the name, the request, what it said
-/// and the whole raw answer (the report keeps 300 characters of it).
-pub fn check_text(c: &Value) -> String {
-    let detail = match &c["soulseek"] {
-        s if s.is_object() => super::tools::session_text_elsewhere(&if fmt::truthy(c, "detail") { fmt::s(c, "detail") } else { super::tools::session_text(s) }),
-        _ => fmt::s(c, "detail"),
-    };
-    [fmt::s(c, "name"), fmt::s(c, "request"), detail, fmt::s(c, "body")]
-        .into_iter()
-        .filter(|x| !x.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    kit::dot_row(colour, body)
 }
 
 /// One app crash report in full for Copy (the web's `crash_text`): what, where and when, then the
@@ -346,36 +324,25 @@ fn crash_kind(k: &str) -> Option<&'static str> {
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     match msg {
-        Message::Run => {
-            state.running = true;
-            state.error.clear();
-            return run(ctx);
+        Message::Diag(m) => {
+            if let Some(a) = state.kit.update(m) {
+                return act(state, a, ctx);
+            }
         }
-        Message::Checks(Ok(d)) => {
-            state.running = false;
-            state.data = Some(d);
-        }
-        Message::Checks(Err(e)) => {
-            state.running = false;
-            state.error = e.message;
-        }
-        Message::Vpn(Ok(v)) => state.vpn = Some(vpn_row(&v)),
-        Message::Vpn(Err(_)) => state.vpn = None,
-        Message::CopyReport => {
-            if let Some(d) = &state.data {
-                let mut all = d.clone();
-                if let (Some(v), Some(a)) = (&state.vpn, all.get_mut("checks").and_then(|c| c.as_array_mut())) {
-                    a.push(v.clone());
+        Message::Checks(r) => {
+            state.kit.checked(r.map_err(|e| e.message));
+            // the Soulseek session (servers since 0.29): the card's sentence, in the words of the page
+            for c in state.kit.checks_mut() {
+                let soulseek = &c.raw["soulseek"];
+                if soulseek.is_object() {
+                    use super::tools::{session_text, session_text_elsewhere};
+                    let detail = if fmt::truthy(&c.raw, "detail") { fmt::s(&c.raw, "detail") } else { session_text(soulseek) };
+                    c.shown = session_text_elsewhere(&detail);
                 }
-                ctx.copy(report(&all));
-                ctx.toast_ok("Copied to clipboard");
             }
         }
-        Message::Toggle(k) => {
-            if !state.open.remove(&k) {
-                state.open.insert(k);
-            }
-        }
+        Message::Vpn(Ok(v)) => state.kit.set_extra(vec![kit::Check::from_value(&vpn_row(&v))]),
+        Message::Vpn(Err(_)) => state.kit.set_extra(Vec::new()),
         Message::Backups(Ok(b)) => state.backups = Some(b),
         Message::Backups(Err(e)) => state.backups = Some(json!({ "error": e.message })),
         Message::BackupNow => {
@@ -494,146 +461,34 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             return load_crashes(ctx);
         }
         Message::CloseDialog => state.dialog = None,
-        Message::CopyText(text) => ctx.copy_text(text),
     }
     Task::none()
 }
 
-fn dot<'a>(ok: bool) -> El<'a, Message> {
-    let p = theme::look();
-    dot_in(if ok { p.ok } else { p.err })
-}
-
-/// A status dot in `colour`.
-fn dot_in<'a>(colour: iced::Color) -> El<'a, Message> {
-    container(space().width(8).height(8))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(colour)),
-            border: iced::Border {
-                color: iced::Color::TRANSPARENT,
-                width: 0.0,
-                radius: 99.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
-}
-
-/// A folded "Raw response" / "Full report" block.
-fn details<'a>(state: &'a State, key: String, summary: &'static str, text: &'a str) -> El<'a, Message> {
-    let open = state.open.contains(&key);
-    let mut c = column![super::link_muted(if open { format!("▾ {summary}") } else { format!("▸ {summary}") }, Message::Toggle(key))].spacing(6);
-    if open {
-        c = c.push(
-            container(t(text).size(12).font(theme::mono()))
-                .padding(10)
-                .width(Length::Fill)
-                .style(theme::panel2),
-        );
-    }
-    c.into()
-}
-
-fn check_item<'a>(state: &'a State, c: &'a Value, i: usize) -> El<'a, Message> {
-    let p = theme::look();
-    let ok = fmt::truthy(c, "ok");
-    let mut head = row![t(fmt::s(c, "name")).size(14).font(theme::bold())].spacing(8).align_y(Alignment::Center);
-    if fmt::truthy(c, "status") {
-        head = head.push(badge(format!("HTTP {}", fmt::s(c, "status")), if ok { Badge::Ok } else { Badge::Err }));
-    }
-    if c.get("ms").is_some_and(|m| !m.is_null()) {
-        head = head.push(widgets::faint(format!("{} ms", fmt::s(c, "ms"))).size(12));
-    }
-    if !ok {
-        head = head.push(widgets::details::copy_btn(Message::CopyText(check_text(c))));
-    }
-    let mut body = column![head].spacing(3).width(Length::Fill);
-    if fmt::truthy(c, "request") {
-        body = body.push(widgets::faint(fmt::s(c, "request")).size(12).font(theme::mono()));
-    }
-    // the Soulseek session (servers since 0.29): the card's sentence and what is waiting
-    let soulseek = &c["soulseek"];
-    if soulseek.is_object() {
-        use super::tools::{now, session_details, session_text, session_text_elsewhere};
-        let detail = if fmt::truthy(c, "detail") { fmt::s(c, "detail") } else { session_text(soulseek) };
-        body = body.push(t(session_text_elsewhere(&detail)).size(12.5).color(if ok { p.muted } else { p.err }));
-        let more = session_details(soulseek, now());
-        if !more.is_empty() {
-            body = body.push(widgets::faint(more).size(12));
-        }
-    } else if fmt::truthy(c, "detail") {
-        body = body.push(t(fmt::s(c, "detail")).size(12.5).color(if ok { p.muted } else { p.err }));
-    }
-    if let Some(raw) = c["body"].as_str().filter(|b| !b.is_empty()) {
-        body = body.push(details(state, format!("check-{i}"), "Raw response", raw));
-    }
-    column![
-        container(row![container(dot(ok)).padding([6, 0]), body].spacing(12).align_y(Alignment::Start)).padding([10, 14]),
-        widgets::divider(),
-    ]
-    .into()
-}
-
 pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let p = ctx.look;
-    let head = widgets::page_head(
-        "Diagnostics",
-        Some(help("Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.").into()),
-        vec![
-            btn_icon(Icon::Copy, "Copy report", Btn::Default, state.data.as_ref().map(|_| Message::CopyReport)).into(),
-            btn_icon(Icon::Refresh, if state.running { "Checking…" } else { "Run checks" }, Btn::Primary, (!state.running).then_some(Message::Run)).into(),
-        ],
-    );
+    let head = kit::head(&state.kit, HELP).map(Message::Diag);
     let mut page = column![head].spacing(16).width(Length::Fill);
-    if !state.error.is_empty() {
-        page = page.push(widgets::error_box(&state.error));
+    if !state.kit.error().is_empty() {
+        page = page.push(widgets::error_box(state.kit.error()));
     }
-    match &state.data {
+    match state.kit.answer() {
         Some(d) => {
-            let checks: &'a [Value] = d["checks"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
-            let bad = checks.iter().chain(state.vpn.iter()).filter(|c| !fmt::truthy(c, "ok")).count();
             page = page.push(
-                widgets::card(
-                    row![
-                        badge(
-                            if bad > 0 { format!("{bad} problem{}", if bad > 1 { "s" } else { "" }) } else { "All good".to_string() },
-                            if bad > 0 { Badge::Err } else { Badge::Ok }
-                        ),
-                        help(format!("Encore {} · running as uid {} · {}", fmt::s(d, "version"), fmt::s(d, "uid"), fmt::date(fmt::f(d, "time")))),
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill),
+                kit::summary(&state.kit, format!("Encore {} · running as uid {} · {}", fmt::s(d, "version"), fmt::s(d, "uid"), fmt::date(fmt::f(d, "time"))))
+                    .map(Message::Diag),
             );
             if d["machine"].is_object() {
                 page = page.push(widgets::section_head("Server", Some(help("What Encore sees of the machine it runs on").into())));
-                let mut rows = column![];
-                for (k, v) in server_rows(&d["machine"]) {
-                    rows = rows.push(
-                        container(row![small_muted(k).width(220), t(v).size(13)].spacing(10).align_y(Alignment::Start)).padding([8, 14]),
-                    );
-                }
-                page = page.push(widgets::card_flat(rows).width(Length::Fill));
+                page = page.push(kit::facts(server_rows(&d["machine"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect()));
             }
-            let mut i = 0usize;
-            for (k, title) in KIND {
-                let mut group: Vec<&'a Value> = checks.iter().filter(|c| fmt::s(c, "kind") == k).collect();
-                if k == "service" {
-                    if let Some(v) = &state.vpn {
-                        group.push(v);
-                    }
-                }
-                if group.is_empty() {
-                    continue;
-                }
-                page = page.push(widgets::section_head(title, None));
-                let mut list = column![];
-                for c in group {
-                    list = list.push(check_item(state, c, i));
-                    i += 1;
-                }
-                page = page.push(widgets::card_flat(list).width(Length::Fill));
+            // the Soulseek session (servers since 0.29): what is waiting, under the card's sentence
+            let more = |c: &kit::Check| {
+                let s = &c.raw["soulseek"];
+                s.is_object().then(|| super::tools::session_details(s, super::tools::now()))
+            };
+            for e in kit::groups(&state.kit, &kit::KINDS, more) {
+                page = page.push(e.map(Message::Diag));
             }
             let folders = fmt::items(&d["download_folders"]["roots"]);
             if !folders.is_empty() {
@@ -649,20 +504,20 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             }
             // the settings list is long, so it starts folded: the whole heading toggles it, as on the web and Android
             let sources = fmt::items(&d["settings"]);
-            let sources_open = state.open.contains(SOURCES);
+            let sources_open = state.kit.is_open(SOURCES);
             let toggle = format!("{} {}", if sources_open { "▾" } else { "▸" }, if sources_open { "Hide".to_string() } else { format!("Show {} settings", sources.len()) });
             page = page.push(
                 mouse_area(widgets::section_head(
                     "Where settings come from",
                     Some(
-                        row![help("Environment variables always win over values saved in Encore"), super::link_muted(toggle, Message::Toggle(SOURCES.into()))]
+                        row![help("Environment variables always win over values saved in Encore"), super::link_muted(toggle, Message::Diag(kit::Msg::Toggle(SOURCES.into())))]
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .into(),
                     ),
                 ))
                 .interaction(iced::mouse::Interaction::Pointer)
-                .on_press(Message::Toggle(SOURCES.into())),
+                .on_press(Message::Diag(kit::Msg::Toggle(SOURCES.into()))),
             );
             let mut rows = column![];
             for s in sources.iter().filter(|_| sources_open) {
@@ -689,7 +544,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             }
         }
         None => {
-            if state.running {
+            if state.kit.running() {
                 page = page.push(widgets::skeleton_rows(5));
             }
         }
@@ -771,7 +626,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     row![
                         t(first).size(14).font(theme::bold()),
                         badge(label, Badge::Plain),
-                        widgets::details::copy_btn(Message::CopyText(crash_text(cr))),
+                        widgets::details::copy_btn(Message::Diag(kit::Msg::Copy(crash_text(cr)))),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -780,12 +635,9 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .spacing(3)
                 .width(Length::Fill);
                 if !text.is_empty() {
-                    body = body.push(details(state, format!("crash-{i}"), "Full report", text));
+                    body = body.push(kit::fold(&state.kit, format!("crash-{i}"), "Full report", text).map(Message::Diag));
                 }
-                col = col.push(column![
-                    container(row![container(dot(false)).padding([6, 0]), body].spacing(12).align_y(Alignment::Start)).padding([10, 14]),
-                    widgets::divider(),
-                ]);
+                col = col.push(kit::dot_row(theme::look().err, body));
             }
             col.into()
         }
@@ -875,10 +727,6 @@ mod tests {
         assert_eq!(rows[0].1, "unknown");
         assert_eq!(rows[2].1, "not set");
         assert_eq!(crash_kind("anr"), Some("Not responding"));
-        // Copy takes one check whole, the raw answer included
-        let long = "x".repeat(900);
-        let c = json!({ "name": "MusicBrainz", "ok": false, "request": "GET x", "detail": "timeout", "body": long });
-        assert_eq!(check_text(&c), format!("MusicBrainz\nGET x\ntimeout\n{long}"));
         let cr = json!({ "kind": "anr", "first_line": "ANR in app", "device": "Pixel", "app_version": "0.30", "time": 1_792_427_497.0, "text": "trace\n" });
         assert_eq!(crash_text(&cr), "ANR in app\nNot responding\nPixel · 0.30\n2026-10-19 16:31 UTC\n\ntrace");
     }

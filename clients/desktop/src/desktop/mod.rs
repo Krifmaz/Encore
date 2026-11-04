@@ -398,7 +398,7 @@ pub fn on_tick(app: &mut App) -> Task<AppMsg> {
     updater::set_enabled(app.config.check_updates && !touring() && app.tour.is_none());
     if let Some(v) = updater::announce() {
         app.toast(
-            format!("Encore {v} is ready to install. Settings → This computer → Updates."),
+            kit_iced::update::ready_words("Encore", &v),
             ToastKind::Ok,
         );
     }

@@ -19,7 +19,6 @@
 
 use super::{send, Message};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -31,31 +30,15 @@ pub const LATEST: &str = "https://api.github.com/repos/Krifmaz/Encore/releases?p
 pub const RELEASES: &str = "https://github.com/Krifmaz/Encore/releases";
 /// Every file the updater fetches is under this.
 pub const DOWNLOADS: &str = "https://github.com/Krifmaz/Encore/releases/download/";
-/// The checksum file of a release.
-const SUMS: [&str; 2] = ["SHA256SUMS", "SHA256SUMS.txt"];
 /// How often the background check runs.
 const EVERY: Duration = Duration::from_secs(6 * 3600);
 
-/// A release file.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Asset {
-    pub name: String,
-    pub url: String,
-    pub size: u64,
-}
+pub use kit_iced::update::{full_release, hash_file, verify, Asset, Phase, Release};
+#[cfg(test)]
+use kit_iced::update::parse_sums;
 
-/// A newer release.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Release {
-    pub version: String,
-    /// The release page.
-    pub page: String,
-    pub notes: String,
-    /// The file for this computer, when the release has one.
-    pub asset: Option<Asset>,
-    /// The release's SHA256SUMS, when it has one.
-    pub sums: Option<String>,
-}
+/// Where the releases live: the kit's update rules read them with these.
+const FEED: kit_iced::update::Feed = kit_iced::update::Feed { app: "Encore", page: RELEASES, downloads: DOWNLOADS };
 
 /// How this copy of Encore can be replaced.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,24 +53,6 @@ pub enum Kind {
     Bundle(PathBuf),
     /// The browser does it (a .deb, a build from source).
     Manual,
-}
-
-/// Where the updater is.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Phase {
-    #[default]
-    Idle,
-    Checking,
-    UpToDate,
-    Available(Release),
-    Downloading {
-        version: String,
-        got: u64,
-        total: u64,
-    },
-    Verifying(String),
-    Installing(String),
-    Failed(String),
 }
 
 /// What an install did.
@@ -136,32 +101,10 @@ pub fn announce() -> Option<String> {
     Some(v)
 }
 
-/// The words for a phase.
+/// The words for a phase (Settings → This computer draws them through the kit's Updates block).
+#[cfg(test)]
 pub fn describe(p: &Phase) -> String {
-    match p {
-        Phase::Idle => String::new(),
-        Phase::Checking => "Looking for a new version…".into(),
-        Phase::UpToDate => "Encore is up to date.".into(),
-        Phase::Available(r) => format!("Encore {} is ready to install.", r.version),
-        Phase::Downloading {
-            version,
-            got,
-            total,
-        } if *total > 0 => format!(
-            "Downloading Encore {version}: {} of {}…",
-            crate::fmt::size(*got as f64),
-            crate::fmt::size(*total as f64)
-        ),
-        Phase::Downloading { version, got, .. } => {
-            format!(
-                "Downloading Encore {version}: {}…",
-                crate::fmt::size(*got as f64)
-            )
-        }
-        Phase::Verifying(_) => "Checking the download…".into(),
-        Phase::Installing(v) => format!("Installing Encore {v}. Encore starts again by itself."),
-        Phase::Failed(e) => e.clone(),
-    }
+    kit_iced::update::describe(p, FEED.app)
 }
 
 /// How this copy can be replaced.
@@ -215,137 +158,7 @@ pub fn asset_name(version: &str, kind: &Kind) -> Option<String> {
 /// A newer release than `current` in the GitHub answer (None when there is none), with the file
 /// for this computer and the checksum file, both only from the project's release downloads.
 pub fn newest(release: &Value, current: &str, kind: &Kind) -> Result<Option<Release>, String> {
-    let tag = release
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if tag.is_empty() {
-        let why = release
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("no release found");
-        return Err(format!("Couldn't check for updates: {why}"));
-    }
-    if release.get("draft").and_then(Value::as_bool) == Some(true)
-        || release.get("prerelease").and_then(Value::as_bool) == Some(true)
-    {
-        return Ok(None);
-    }
-    let version = tag.trim().trim_start_matches(['v', 'V']).to_string();
-    let newer = match (
-        semver::Version::parse(&version),
-        semver::Version::parse(current),
-    ) {
-        (Ok(a), Ok(b)) => a > b,
-        _ => false,
-    };
-    if !newer {
-        return Ok(None);
-    }
-    let assets: Vec<Asset> = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .map(|x| Asset {
-                    name: x
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    url: x
-                        .get("browser_download_url")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    size: x.get("size").and_then(Value::as_u64).unwrap_or(0),
-                })
-                .filter(|x| !x.name.is_empty() && x.url.starts_with(DOWNLOADS))
-                .collect()
-        })
-        .unwrap_or_default();
-    let want = asset_name(&version, kind);
-    let asset = want
-        .as_ref()
-        .and_then(|w| assets.iter().find(|a| &a.name == w).cloned());
-    // A release published without the desktop apps (a server-only release) carries no file
-    // for this computer: there is nothing to update to yet.
-    if want.is_some() && asset.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(Release {
-        page: release
-            .get("html_url")
-            .and_then(Value::as_str)
-            .filter(|u| u.starts_with("https://github.com/"))
-            .unwrap_or(RELEASES)
-            .to_string(),
-        notes: release
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        asset,
-        sums: assets
-            .iter()
-            .find(|a| SUMS.contains(&a.name.as_str()))
-            .map(|a| a.url.clone()),
-        version,
-    }))
-}
-
-/// `SHA256SUMS` (sha256sum format: `<hex>  <name>`, or `<hex> *<name>`) → name → hex.
-pub fn parse_sums(text: &str) -> HashMap<String, String> {
-    text.lines()
-        .filter_map(|l| {
-            let (hash, name) = l.trim().split_once(char::is_whitespace)?;
-            let name = name.trim_start().trim_start_matches('*').trim();
-            (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) && !name.is_empty())
-                .then(|| {
-                    (
-                        name.trim_start_matches("./").to_string(),
-                        hash.to_ascii_lowercase(),
-                    )
-                })
-        })
-        .collect()
-}
-
-/// Whether a downloaded file may be used: it must be listed in the release's SHA256SUMS (`sums`)
-/// with exactly this SHA-256. A release without one is never installed (release.yml always
-/// writes it, so its absence means a broken or hand-edited release).
-pub fn verify(sums: Option<&str>, name: &str, sha256_hex: &str) -> Result<(), String> {
-    let Some(text) = sums else {
-        return Err(format!(
-            "The release has no SHA256SUMS, so {name} could not be checked and was not installed."
-        ));
-    };
-    let want = parse_sums(text).remove(name).ok_or_else(|| {
-        format!("{name} is not listed in the release's SHA256SUMS, so it was not installed.")
-    })?;
-    if !want.eq_ignore_ascii_case(sha256_hex) {
-        return Err(format!(
-            "The download does not match the release's SHA256SUMS, so it was not installed (got {sha256_hex}, expected {want})."
-        ));
-    }
-    Ok(())
-}
-
-/// The SHA-256 of a file, as lowercase hex.
-pub fn hash_file(p: &Path) -> Result<String, String> {
-    use sha2::Digest;
-    use std::io::Read;
-    let mut f = std::fs::File::open(p).map_err(|e| e.to_string())?;
-    let mut h = sha2::Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    kit_iced::update::newest(release, current, &FEED, |v| asset_name(v, kind))
 }
 
 fn client() -> Result<reqwest::Client, String> {
@@ -395,22 +208,6 @@ async fn fetch_latest() -> Result<Value, String> {
         .await
         .map_err(|e| format!("Couldn't check for updates: {e}"))?;
     full_release(&list).ok_or_else(|| "Couldn't check for updates: no release found".into())
-}
-
-/// The newest full release (tag v<major>.<minor>.<patch>, not a draft or prerelease) of GitHub's release list,
-/// which is newest first. Hotfixes (hotfix-<version>) are the server's only.
-pub fn full_release(list: &Value) -> Option<Value> {
-    list.as_array()?
-        .iter()
-        .find(|r| {
-            let tag = r.get("tag_name").and_then(Value::as_str).unwrap_or("").trim();
-            r.get("draft").and_then(Value::as_bool) != Some(true)
-                && r.get("prerelease").and_then(Value::as_bool) != Some(true)
-                && tag
-                    .strip_prefix('v')
-                    .is_some_and(|v| v.split('.').count() == 3 && semver::Version::parse(v).is_ok())
-        })
-        .cloned()
 }
 
 /// Look for a newer version now.

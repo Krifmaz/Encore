@@ -1600,25 +1600,8 @@ pub fn request_row<'a>(ctx: &Ctx<'a>, l: &List, r: &Value) -> El<'a, Msg> {
 pub fn storage_banner<'a>(ctx: &Ctx<'a>, l: &List) -> Option<El<'a, Msg>> {
     let admin = ctx.is_admin();
     let texts: Vec<String> = [storage_text(&l.storage, admin), downloads_text(&l.storage, admin)].into_iter().flatten().collect();
-    if texts.is_empty() {
-        return None;
-    }
-    let text = texts.join("\n");
-    let p = ctx.look;
-    let mut r = row![
-        icon(Icon::Download, 18.0, p.warn),
-        t(text).size(13.5).width(Length::Fill).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
-    if admin {
-        r = r.push(btn_sm(
-            if l.checking { "Checking…" } else { "Check again" },
-            Btn::Default,
-            (!l.checking).then_some(Msg::CheckStorage),
-        ));
-    }
-    Some(container(r).padding([12, 16]).width(Length::Fill).style(theme::warn_box).into())
+    // the kit's notice banner: the sentences in the amber box, Check again for admins
+    kit_iced::notice::banner(Icon::Download, texts, admin.then_some((l.checking, Msg::CheckStorage)))
 }
 
 /// The row's Download now, with what it does as its tooltip (`on` None while busy).

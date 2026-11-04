@@ -1594,12 +1594,12 @@ dependencies = [
  "hound",
  "iced",
  "image",
+ "kit-iced",
  "log",
  "open",
  "percent-encoding",
  "reqwest",
  "rfd",
- "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -3089,6 +3089,28 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "kit-iced"
+version = "0.1.0"
+source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
+dependencies = [
+ "iced",
+ "kit-rules",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "kit-rules"
+version = "0.1.0"
+source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ksni"
