@@ -1600,7 +1600,6 @@ dependencies = [
  "percent-encoding",
  "reqwest",
  "rfd",
- "semver",
  "serde",
  "serde_json",
  "sha2",
