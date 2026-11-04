@@ -754,9 +754,9 @@ dependencies = [
  "anyhow",
  "encore-core",
  "encore-db",
+ "kit-server-settings",
  "regex",
  "serde_json",
- "toml",
 ]
 
 [[package]]
@@ -1739,8 +1739,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "kit-server-core",
- "serde",
  "serde_json",
+ "toml",
  "tracing",
 ]
 
