@@ -669,7 +669,7 @@ class EncorePlaybackService : MediaLibraryService() {
                 PlayerErrors.Action.STREAM -> {
                     // the downloaded copy would not play: this session the song streams from the server, from the same spot
                     resolver.copyFailed(t.id)
-                    app.encore.android.ui.components.Toasts.show("This download would not play – playing the song from the server", "info")
+                    dev.krifmaz.kit.compose.toasts.Toasts.show("This download would not play – playing the song from the server", "info")
                     current.reopen(t, rung = null, dsp = null, offsetSec = groupSpot(spot, resolver.reopenVariant(t, null, null, 0.0)), prepareFirst = true)
                 }
                 PlayerErrors.Action.NO_DSP -> {

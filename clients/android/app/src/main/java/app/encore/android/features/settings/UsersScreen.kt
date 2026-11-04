@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -95,7 +96,7 @@ fun UsersScreen(nav: Nav, meId: Long, onBack: () -> Unit, onOpenInvites: () -> U
         defaults = try { withContext(Dispatchers.IO) { api.adminSettings() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
     }
     fun patch(id: String, body: JsonObject, after: () -> Unit = {}) {
-        scope.serverCall(ok = "Saved", onError = { msg -> app.encore.android.ui.components.Toasts.show(msg, "err"); version += 1 }, after = { _: Unit -> version += 1; after() }) {
+        scope.serverCall(ok = "Saved", onError = { msg -> dev.krifmaz.kit.compose.toasts.Toasts.show(msg, "err"); version += 1 }, after = { _: Unit -> version += 1; after() }) {
             api.patchUser(id, body)
         }
     }

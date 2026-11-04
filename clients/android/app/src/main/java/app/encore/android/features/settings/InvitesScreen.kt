@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -92,7 +93,7 @@ fun InvitesScreen(nav: Nav, onBack: () -> Unit) {
             SegRow(modes, s?.str("signup_mode").orEmpty(), enabled = s != null && !locked) { m ->
                 scope.serverCall(after = { r: JsonObject ->
                     settings = r
-                    app.encore.android.ui.components.Toasts.show("Sign-ups: ${modes.first { it.first == m }.second}", "ok")
+                    dev.krifmaz.kit.compose.toasts.Toasts.show("Sign-ups: ${modes.first { it.first == m }.second}", "ok")
                 }) { api.putSettings(JsonObject(mapOf("signup_mode" to JsonPrimitive(m)))) }
             }
             if (s != null && locked) EnvLockedNote(SchemaRules.envVar(s, "signup_mode"), Modifier)
