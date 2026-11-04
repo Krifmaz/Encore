@@ -14,7 +14,7 @@
 
 use super::{outbox, AtBoot};
 use crate::api::{ApiError, ApiResult};
-use crate::ui::{esc, icon, toast};
+use crate::ui::toast;
 use crate::{api, app, dom};
 use serde_json::Value;
 use std::cell::Cell;
@@ -183,8 +183,7 @@ fn allowed(path: &str) -> bool { path == PAGE }
 pub fn shell_ready() {
     if !active() { return; }
     dom::add_class(&dom::body(), "offline-mode");
-    // the failed calls at boot already put up "The Encore server isn't answering"
-    if let Some(b) = dom::by_id("conn-banner") { b.remove(); }
+    // the failed calls at boot already put up "The Encore server isn't answering": the banner below takes it away
     banner();
     disable_shell();
     dom::interval_forever(RETRY_MS, || dom::spawn(retry(false)));
@@ -197,19 +196,10 @@ pub fn shell_ready() {
     }
 }
 
+/// The banner (`#offline-banner`, the first child of `body`): [`BANNER`] or [`BANNER_ENDED`] with Retry. Drawn
+/// by the kit (`kit_leptos::offline`), which also takes the connection banner away.
 fn banner() {
-    if dom::by_id("offline-banner").is_some() { return; }
-    let b = dom::create("div");
-    b.set_id("offline-banner");
-    b.set_class_name("offline-banner");
-    let _ = b.set_attribute("role", "status");
-    let text = if grace_ended() { BANNER_ENDED } else { BANNER };
-    dom::set_html(&b, &format!(r#"{}<span>{}</span><button class="btn sm" type="button" id="offline-retry">Retry</button>"#, icon("offline"), esc(text)));
-    if let Some(btn) = dom::qs_in(&b, "#offline-retry") {
-        dom::on_forever(&btn, "click", |_| dom::spawn(retry(true)));
-    }
-    let body = dom::body();
-    let _ = body.insert_before(&b, body.first_child().as_ref());
+    kit_leptos::offline::show_banner(grace_ended(), std::rc::Rc::new(|| dom::spawn(retry(true))));
 }
 
 /// Everything in the sidebar but Downloads (and signing out: without the server it is finished at the next
@@ -241,11 +231,9 @@ pub fn back_online_text(plays: usize, likes: usize) -> String {
     if sent.is_empty() { "Back online".into() } else { format!("Back online – {sent} sent") }
 }
 
+/// The banner's button while a retry runs: switched off, "Trying…" (then "Retry" again).
 fn retry_button(busy: bool) {
-    if let Some(b) = dom::by_id("offline-retry") {
-        dom::set_disabled(&b, busy);
-        dom::set_text(&b, if busy { "Trying…" } else { "Retry" });
-    }
+    kit_leptos::offline::set_trying(busy);
 }
 
 /// Try the server again; when it answers, send what waits in the outbox and reload into the normal app.

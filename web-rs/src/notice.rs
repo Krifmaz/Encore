@@ -5,17 +5,10 @@
 //! so the banner goes soon after the folder is fixed); Check again probes every folder at once. Nothing for
 //! other users, and nothing from a server without the probe. A Check again here or on the storage banner of
 //! the Requests and Downloader pages updates both banners (`encore:storage-checked`, [`keep`]).
+use crate::app;
 use crate::json::J;
-use crate::ui::{esc, icon, toast};
-use crate::{api, app, dom};
+use crate::ui::{esc, icon};
 use serde_json::Value;
-use std::cell::{Cell, RefCell};
-
-thread_local! {
-    /// The last `downloads` answer.
-    static LAST: RefCell<Value> = const { RefCell::new(Value::Null) };
-    static STARTED: Cell<bool> = const { Cell::new(false) };
-}
 
 /// The banner for the `downloads` part of the storage answer: the server's sentence ("The downloads folder
 /// /downloads is read-only – check the disk (dmesg, fsck) or the mount") with Check again; nothing while
@@ -33,58 +26,23 @@ pub fn check_toast(d: &Value) -> (&'static str, &'static str) {
     else { ("The downloads folders can be written", "ok") }
 }
 
-fn failing() -> bool { LAST.with(|l| l.borrow().g("ok") == &Value::Bool(false)) }
-
-/// Draw the banner into the shell's `#server-notice` (after the shell is drawn again too).
+/// Draw the banner into the shell's `#server-notice`: the kit's banner (`kit_leptos::notice`), drawn with
+/// [`banner_html`]'s markup and drawn again after every answer.
 pub fn paint() {
-    let Some(slot) = dom::by_id("server-notice") else { return };
-    let html = if app::is_admin() { LAST.with(|l| banner_html(&l.borrow())) } else { String::new() };
-    dom::set_html(&slot, &html);
+    kit_leptos::notice::mount();
 }
 
 /// Keep the `downloads` part of a storage answer and draw the banner again (also after the Requests and
 /// Downloader pages' Check again, which probes the download folders too).
 pub fn keep(s: &Value) {
-    LAST.with(|l| *l.borrow_mut() = s.g("downloads").clone());
-    paint();
+    kit_leptos::notice::keep(s);
 }
 
-async fn load() {
-    // offline, or an older server: the banner keeps what it last knew
-    if let Ok(s) = api::get("/requests/storage").await { keep(&s); }
-}
-
-/// Start asking (admins, once per page load).
+/// Start asking (admins, once per page load): GET /api/requests/storage now, then every minute (every 15 s
+/// while a folder fails); Check again posts /api/requests/storage/check and says how it went ([`check_toast`]'s
+/// words), then tells the Requests and Downloader pages (`encore:requests-changed`, `encore:storage-checked`).
 pub fn start() {
-    if !app::is_admin() || STARTED.with(|s| s.replace(true)) { return; }
-    dom::spawn(load());
-    let ticks = Cell::new(0u32);
-    dom::interval_forever(15_000, move || {
-        ticks.set(ticks.get().wrapping_add(1));
-        if failing() || ticks.get().is_multiple_of(4) { dom::spawn(load()); }
-    });
-    dom::on_forever(&dom::document(), "click", |e| {
-        let Some(b) = dom::closest(e, "[data-notice-check]") else { return };
-        dom::set_disabled(&b, true);
-        dom::set_html(&b, r#"<span class="spinner" style="width:12px;height:12px"></span> Checking…"#);
-        dom::spawn(async move {
-            match api::post_empty("/requests/storage/check").await {
-                Ok(s) => {
-                    keep(&s);
-                    let (msg, kind) = check_toast(s.g("downloads"));
-                    toast(msg, kind);
-                    dom::dispatch("encore:requests-changed", None);
-                    // the page's storage banner draws itself again too
-                    dom::dispatch("encore:storage-checked", None);
-                }
-                Err(err) => {
-                    toast(&err.message, "err");
-                    dom::set_disabled(&b, false);
-                    dom::set_html(&b, &format!("{}Check again", icon("refresh")));
-                }
-            }
-        });
-    });
+    kit_leptos::notice::start(kit_leptos::notice::NoticeSource::encore_downloads(), app::is_admin());
 }
 
 #[cfg(test)]

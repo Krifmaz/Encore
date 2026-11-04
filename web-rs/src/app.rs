@@ -1,8 +1,8 @@
 //! Port of web/js/app.js: the session, the hash router, the shell (sidebar + main), banners and boot.
 
-use crate::dom::{self, by_id, document, qs, qsa, set_html};
+use crate::dom::{self, by_id, document, qs, set_html};
 use crate::json::J;
-use crate::ui::{self, esc, icon, toast};
+use crate::ui::{self, esc, toast};
 use crate::{api, appearance, pages, player, remote};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -163,86 +163,18 @@ pub fn avatar_html(u: &Value, size: u32) -> String {
     }
 }
 
-fn nav_link(href: &str, ic: &str, label: &str, extra: &str) -> String {
-    format!(r##"<a href="#{href}" data-nav="{href}">{ic}<span>{label}</span>{extra}</a>"##)
-}
-
+/// `renderShell()`: the frame (shell.rs, drawn by Leptos) and what comes with every draw of it: the notice
+/// banner, the storage meter (every 5 min), the Bug reports badge, and the document's right-click and click
+/// listeners. As before, each draw adds those listeners and the meter's timer again (DECISIONS: kept as it was).
 fn render_shell() {
-    let Some(u) = user() else { return };
-    let admin = is_admin_user(&u);
-    let info = info();
-    let app_name_raw = { let n = info.s("app_name"); if n.is_empty() { "Encore".to_string() } else { n } };
-    let app_name = esc(&app_name_raw);
-    dom::set_title(&app_name_raw);
-    let app = by_id("app").expect("#app");
-    set_html(&app, &format!(r##"
-    <div class="shell">
-      <aside class="sidebar" id="sidebar">
-        <a class="brand" href="#/">{logo}{app_name}</a>
-        <nav class="nav">
-          {home}
-          {search}
-          {foryou}
-          {library}
-          {downloads_nav}
-          {requests}
-          {playlists}
-          {download}
-          {soulseek}
-          {leaderboard}
-        </nav>
-        <div id="storage-mini" style="flex:none"></div>
-        <nav class="nav nav-under">
-          {bugs}
-        </nav>
-        <div class="sidebar-foot" style="margin-top:0">
-          <a href="#/settings?s=account" class="row grow" style="min-width:0">
-            {avatar}
-            <div class="grow"><div class="ellipsis" style="font-weight:650">{username}</div><div class="small faint">{role}</div></div>
-          </a>
-          <a class="btn ghost icon" href="#/settings" title="Settings" aria-label="Settings">{settings}</a>
-          <button class="btn ghost icon" id="logout-btn" title="Sign out">{logout}</button>
-        </div>
-      </aside>
-      <main class="main">
-        <button class="btn ghost icon mobile-only" id="menu-btn" style="margin:-6px 0 10px -6px">{menu}</button>
-        <div id="server-notice"></div>
-        <div id="view"></div>
-      </main>
-    </div>"##,
-        logo = appearance::logo(30),
-        home = nav_link("/", &icon("home"), "Home", ""),
-        search = nav_link("/search", &icon("search"), "Discover", ""),
-        foryou = nav_link("/for-you", &icon("spark"), "For you", ""),
-        library = nav_link("/library", &icon("library"), "Library", ""),
-        downloads_nav = if pages::downloads::enabled() { nav_link("/downloads", &icon("saved"), "Downloads", "") } else { String::new() },
-        requests = nav_link("/requests", &icon("inbox"), "Requests", r#"<span class="badge warn hidden" id="pending-badge"></span>"#),
-        playlists = nav_link("/playlists", &icon("list"), "Playlists", ""),
-        download = nav_link("/download", &icon("download"), "Downloader", ""),
-        soulseek = if has_feature("soulseek") { nav_link("/soulseek", &icon("users"), "Soulseek", "") } else { String::new() },
-        leaderboard = nav_link("/leaderboard", &icon("activity"), "Leaderboard", ""),
-        bugs = nav_link("/bug-reports", &icon("bug"), "Bug reports", r#"<span class="badge warn hidden" id="bugs-badge"></span>"#),
-        avatar = avatar_html(&u, 32),
-        username = esc(&u.s("username")),
-        role = if u.s("role") == "owner" { "Owner" } else if admin { "Admin" } else { "Member" },
-        settings = icon("settings"), logout = icon("logout"), menu = icon("menu"),
-    ));
+    if user().is_none() { return; }
+    crate::shell::render();
     // the admin's banner of a downloads folder that can't be written, on every page (notice.rs)
     crate::notice::paint();
-    if let Some(b) = qs("#logout-btn") {
-        dom::on_forever(&b, "click", |_| dom::spawn(async {
-            // a sign-out the server does not confirm is finished at the next start that reaches it (offline/mode.rs)
-            crate::offline::mode::sign_out().await;
-            dom::reload();
-        }));
-    }
     let meter = || { if let Some(el) = qs("#storage-mini") { pages::storage::sidebar_meter(el); } };
     meter();
     dom::interval_forever(5 * 60 * 1000, meter);
     dom::spawn(refresh_bugs_badge());
-    if let Some(b) = qs("#menu-btn") {
-        dom::on_forever(&b, "click", |e| { e.stop_propagation(); if let Some(sb) = qs("#sidebar") { let _ = sb.class_list().toggle("open"); } });
-    }
     // Right-click (or a long press on a phone) opens the same menu as the row's ⋯ button, at the pointer:
     // climb from what was clicked to the first element that holds exactly one ⋯ button (a track row, a
     // request, the album header, the player bar), and press it. Text fields and the open menu keep the
@@ -307,6 +239,8 @@ pub fn route() { dom::spawn(route_async()); }
 
 async fn route_async() {
     dom::clear_page();
+    // the dialogs of the page before go (a confirm dialog that was open answers no)
+    kit_leptos::modal::close_all();
     if let Some(m) = by_id("modal-root") { set_html(&m, ""); }
     let (path, query) = parse_hash();
     let path = crate::offline::mode::route_path(path);
@@ -322,10 +256,7 @@ async fn route_async() {
     if qs("#view").is_none() { render_shell(); }
     if !path.starts_with("/bug-reports") { PREV_HASH.with(|h| *h.borrow_mut() = dom::hash()); }
     if let Some(sb) = qs("#sidebar") { dom::remove_class(&sb, "open"); }
-    for a in qsa("[data-nav]") {
-        let href = dom::data(&a, "nav");
-        dom::toggle_class(&a, "active", if href == "/" { path == "/" } else { path == href || path.starts_with(&format!("{href}/")) });
-    }
+    crate::shell::set_route(&path);
     // every navigation renders into a fresh container, so a slow page that finishes after the user
     // has moved on writes into a detached element instead of clobbering the current page
     let view = dom::create("div");
@@ -399,10 +330,8 @@ pub async fn refresh_user() {
 fn conn_banner(on: bool, text: &str) {
     // offline mode has its own banner
     if on && crate::offline::mode::active() { return; }
-    let b = by_id("conn-banner");
-    if !on { if let Some(b) = b { b.remove(); } return; }
-    let b = match b { Some(b) => b, None => { let b = dom::create("div"); b.set_id("conn-banner"); let _ = dom::body().append_child(&b); b } };
-    set_html(&b, &format!(r#"{}<span>{}</span>"#, icon("x"), esc(text)));
+    // `<div id="conn-banner">` × and the reason, the last child of `body`: drawn by the kit
+    kit_leptos::offline::conn_banner(on, text);
 }
 
 /// Module-load work of app.js: listeners, service worker, boot.

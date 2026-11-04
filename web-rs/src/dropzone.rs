@@ -16,12 +16,9 @@
 //! Pages with drag and drop of their own (the file manager) handle the event first and call `preventDefault()`;
 //! the listeners here then stay out of the way.
 
-use crate::dom;
-use crate::ui::toast;
 use js_sys::{Array, Reflect};
-use std::cell::Cell;
-use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{Element, Event, File, HtmlInputElement};
+use wasm_bindgen::JsValue;
+use web_sys::Event;
 
 /// The class every zone on screen carries while files are dragged over the window.
 pub const READY_CLASS: &str = "drop-ready";
@@ -97,132 +94,14 @@ pub fn refused_message(refused: &[String], accept: &str, multiple: bool, kept: u
 
 // ---- finding the zone and its input ----------------------------------------------------------------------------
 
-/// The zone an element sits in: the nearest `[data-dropzone]`, or a `<label>` holding a file input, that has an
-/// input to feed. Returns (zone, input).
-fn zone_of(start: &Element) -> Option<(Element, HtmlInputElement)> {
-    let mut el = Some(start.clone());
-    while let Some(cur) = el {
-        if let Some(id) = cur.get_attribute("data-dropzone") {
-            let input = if id.trim().is_empty() { dom::qs_in(&cur, "input[type=file]") } else { dom::by_id(id.trim()) };
-            if let Some(i) = input.and_then(|i| i.dyn_into::<HtmlInputElement>().ok()) { return Some((cur, i)); }
-        } else if cur.tag_name().eq_ignore_ascii_case("label") {
-            if let Some(i) = dom::qs_in(&cur, "input[type=file]").and_then(|i| i.dyn_into::<HtmlInputElement>().ok()) { return Some((cur, i)); }
-        }
-        el = cur.parent_element();
-    }
-    None
-}
-
-/// The zone under an event's target, if any.
-fn zone_at(e: &Event) -> Option<(Element, HtmlInputElement)> { dom::target_el(e).and_then(|t| zone_of(&t)) }
-
-/// Whether an input may take a drop now (not disabled, not opted out with `data-no-drop`).
-fn usable(input: &HtmlInputElement) -> bool { !input.disabled() && !input.has_attribute("data-no-drop") }
-
-/// Every zone on screen: the marked elements and the labels around file inputs (left out when their input
-/// opted out or is disabled).
-fn all_zones() -> Vec<Element> {
-    let mut out = dom::qsa("[data-dropzone]");
-    for i in dom::qsa("label input[type=file]") {
-        if let Some(l) = i.closest("label").ok().flatten() {
-            if !out.contains(&l) { out.push(l); }
-        }
-    }
-    out.retain(|z| zone_of(z).is_some_and(|(_, i)| usable(&i)));
-    out
-}
-
-thread_local! {
-    /// How deep the drag is inside the window: `dragenter` adds one, `dragleave` takes one (they come in pairs
-    /// for every element crossed), so 0 means the files left the window.
-    static DEPTH: Cell<i32> = const { Cell::new(0) };
-}
-
-/// Shows (or takes away) the `drop-ready` outline on every zone on screen.
-fn set_ready(on: bool) {
-    let zones = if on { all_zones() } else { dom::qsa(&format!(".{READY_CLASS}, .{OVER_CLASS}")) };
-    for z in zones {
-        dom::toggle_class(&z, READY_CLASS, on);
-        if !on { dom::remove_class(&z, OVER_CLASS); }
-    }
-}
-
-/// Moves the `drop-over` highlight to `zone` (or takes it off everywhere).
-fn set_over(zone: Option<&Element>) {
-    for z in dom::qsa(&format!(".{OVER_CLASS}")) {
-        if Some(&z) != zone { dom::remove_class(&z, OVER_CLASS); }
-    }
-    if let Some(z) = zone { dom::add_class(z, OVER_CLASS); }
-}
-
-/// The drag ended (dropped, cancelled or left the window): every highlight goes.
-fn reset() {
-    DEPTH.with(|d| d.set(0));
-    set_ready(false);
-}
-
-/// Puts `files` into `input` and fires its `change` event, as if they had been picked.
-fn hand_over(input: &HtmlInputElement, files: &[File]) {
-    let Ok(dt) = web_sys::DataTransfer::new() else { return };
-    for f in files { let _ = dt.items().add_with_file(f); }
-    input.set_files(dt.files().as_ref());
-    let init = web_sys::EventInit::new();
-    init.set_bubbles(true);
-    if let Ok(ev) = Event::new_with_event_init_dict("change", &init) { let _ = input.dispatch_event(&ev); }
-}
-
-/// The files a drop carries (`dataTransfer.files`; folders are left out, they have no type and no size).
-fn dropped_files(e: &Event) -> Vec<File> {
-    let list = get(&get(e.as_ref(), "dataTransfer"), "files");
-    let n = get(&list, "length").as_f64().unwrap_or(0.0) as u32;
-    (0..n).filter_map(|i| Reflect::get_u32(&list, i).ok()?.dyn_into::<File>().ok()).collect()
-}
-
-/// A drop on a zone: check the files like the input's chooser does and hand the good ones to it.
-fn drop_on(input: &HtmlInputElement, files: Vec<File>) {
-    let accept = input.accept();
-    let (keep, refused) = choose(files, &accept, input.multiple(), |f| f.name(), |f| f.type_());
-    let msg = refused_message(&refused, &accept, input.multiple(), keep.len());
-    if !msg.is_empty() { toast(&msg, if keep.is_empty() { "err" } else { "" }); }
-    if !keep.is_empty() { hand_over(input, &keep); }
-}
-
-/// Starts drag and drop for the whole app (called once at start-up). The listeners sit on the document for
-/// the whole session, so zones drawn later – pages, dialogs, cards – work without any setup of their own.
+/// Starts drag and drop for the whole app (called once at start-up): the kit's listeners
+/// (`kit_leptos::dropzone::init`), the ones this module installed. They sit on the document for the whole
+/// session, so zones drawn later – pages, dialogs, cards – work without any setup of their own: every usable
+/// zone gets [`READY_CLASS`] while files are dragged over the window, the one under the pointer also
+/// [`OVER_CLASS`], and a drop is checked like the input's chooser ([`choose`], [`refused_message`]) and handed
+/// to the input as if the files had been picked.
 pub fn init() {
-    dom::on_forever(&dom::document(), "dragenter", |e| {
-        if !has_files(e) { return; }
-        let first = DEPTH.with(|d| { d.set(d.get() + 1); d.get() == 1 });
-        if first { set_ready(true); }
-    });
-    dom::on_forever(&dom::document(), "dragleave", |e| {
-        if !has_files(e) { return; }
-        let left = DEPTH.with(|d| { d.set((d.get() - 1).max(0)); d.get() == 0 });
-        if left { reset(); }
-    });
-    dom::on_forever(&dom::document(), "dragover", |e| {
-        if !has_files(e) { return; }
-        // a page with its own drop handling (the file manager) already answered
-        if e.default_prevented() { set_over(None); return; }
-        dom::prevent(e);
-        match zone_at(e).filter(|(_, i)| usable(i)) {
-            Some((zone, _)) => { set_drop_effect(e, "copy"); set_over(Some(&zone)); }
-            None => { set_drop_effect(e, "none"); set_over(None); }
-        }
-    });
-    dom::on_forever(&dom::document(), "drop", |e| {
-        if !has_files(e) { return; }
-        let handled = e.default_prevented();
-        // never let the browser open a file dropped beside a zone (it would leave Encore)
-        dom::prevent(e);
-        let target = zone_at(e);
-        reset();
-        if handled { return; }
-        let Some((_, input)) = target else { return };
-        if !usable(&input) { toast("Uploading isn't possible right now", "err"); return; }
-        drop_on(&input, dropped_files(e));
-    });
-    dom::on_forever(&dom::document(), "dragend", |_| reset());
+    kit_leptos::dropzone::init();
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@
 //! copy manually".
 
 use crate::dom;
-use crate::ui::{self, esc, icon, ModalOpts};
+use crate::ui::{esc, icon};
 
 /// `data-details="…" data-details-title="…"`: a click on the element opens the whole text in [`show`]. The text is
 /// kept in the attribute (escaped), so it is the text the element stood for when the page drew it.
@@ -34,10 +34,10 @@ pub fn footer_html(text: &str) -> String {
     format!(r#"<button class="btn" data-close>Close</button><button class="btn primary" data-copy-text="{}">{}Copy</button>"#, esc(text), icon("copy"))
 }
 
-/// The dialog with the whole text: wrapped, selectable, with Copy and Close.
+/// The dialog with the whole text: wrapped, selectable, with Copy and Close ("Details" when the title is
+/// blank). Drawn by the kit (`kit_leptos::details`) with [`body_html`] and [`footer_html`]'s markup.
 pub fn show(title: &str, text: &str) {
-    let title = if title.trim().is_empty() { "Details" } else { title };
-    ui::modal(ModalOpts::new(&esc(title), &body_html(text)).footer(&footer_html(text)).wide(true));
+    kit_leptos::details::show(title, text);
 }
 
 /// Whether the user has text selected on the page: a click that ends a selection (dragging over a status line to
@@ -54,26 +54,9 @@ pub fn selecting() -> bool {
 
 /// The click listener for every page: `[data-copy-text]` copies, `[data-details]` opens the whole text, an error
 /// toast's `[data-toast-close]` closes it. Links and buttons inside a `[data-details]` element keep their own action.
+/// The kit's listener (`kit_leptos::details::init`), the same one this module installed.
 pub fn init() {
-    dom::on_forever(&dom::document(), "click", |e| {
-        // an error toast's Close (ui.rs `error_toast`)
-        if let Some(b) = dom::closest(e, "[data-toast-close]") {
-            if let Some(t) = dom::closest_of(&b, ".toast") { t.remove(); }
-            return;
-        }
-        if let Some(b) = dom::closest(e, "[data-copy-text]") {
-            dom::stop(e);
-            ui::copy_text(&b.get_attribute("data-copy-text").unwrap_or_default());
-            return;
-        }
-        let Some(el) = dom::closest(e, "[data-details]") else { return };
-        if let Some(inner) = dom::closest(e, "a, button, input, select, textarea, summary") {
-            let node: &web_sys::Node = inner.as_ref();
-            if inner != el && el.contains(Some(node)) { return; }
-        }
-        if selecting() { return; }
-        show(&el.get_attribute("data-details-title").unwrap_or_default(), &el.get_attribute("data-details").unwrap_or_default());
-    });
+    kit_leptos::details::init();
 }
 
 #[cfg(test)]

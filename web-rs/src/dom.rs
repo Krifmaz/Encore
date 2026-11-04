@@ -125,6 +125,11 @@ pub fn keep(x: impl Any + 'static) { PAGE.with(|p| p.borrow_mut().push(Box::new(
 pub fn keep_forever(x: impl Any + 'static) { APP.with(|p| p.borrow_mut().push(Box::new(x))); }
 /// The JS `onLeave`: only while the view is still on screen, otherwise clean up right away (drop).
 pub fn keep_for(view: &Element, x: impl Any + 'static) { if view.is_connected() { keep(x) } else { drop(x) } }
+/// Draws a Leptos view (a kit component) as the last child of `el`, kept while the page is on screen: the next
+/// page's [`clear_page`] drops it, which takes it off and stops its signals and effects.
+pub fn mount_view<V: leptos::prelude::IntoView + 'static>(el: &Element, f: impl FnOnce() -> V + 'static) {
+    if let Some(m) = kit_leptos::rt::mount(el, f) { keep_for(el, m) }
+}
 pub fn clear_page() { PAGE.with(|p| p.borrow_mut().clear()); }
 
 /// `el.addEventListener(ev, f)` for the current page.

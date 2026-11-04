@@ -302,32 +302,18 @@ fn reload() {
     crate::sw::apply_update();
 }
 
-/// The persistent toast (it stays until the page reloads): the news, why it waits, and Reload.
+/// The persistent toast (it stays until the page reloads): the news, why it waits, and Reload (switched off
+/// once pressed). Drawn by the kit in `#toasts` (`id="sw-update"`), after the toasts already there.
 fn show_toast(held: Option<&str>) {
-    let Some(host) = dom::by_id("toasts") else { return };
-    if dom::by_id("sw-update").is_some() { return; }
-    let el = dom::create("div");
-    el.set_id("sw-update");
-    el.set_class_name("toast");
-    let _ = el.set_attribute("role", "status");
-    let _ = el.set_attribute("style", "display:flex;align-items:center;gap:12px");
-    dom::set_html(&el, &format!(r#"<span class="grow">{}<span class="small muted" data-update-why style="display:block"></span></span><button class="btn sm primary" type="button">{}</button>"#, READY_TEXT, RELOAD_LABEL));
-    if let Some(btn) = dom::qs_in(&el, "button") {
-        let b = btn.clone();
-        dom::on_forever(&btn, "click", move |_| {
-            dom::set_disabled(&b, true);
-            if gate(|g| g.pressed()) == Act::Reload { reload(); }
-        });
-    }
-    let _ = host.append_child(&el);
-    if !gate(|g| g.is_manual()) { set_reason(held); }
+    let shown = kit_leptos::toasts::show_update(READY_TEXT, RELOAD_LABEL, std::rc::Rc::new(|| {
+        if gate(|g| g.pressed()) == Act::Reload { reload(); }
+    }));
+    if shown && !gate(|g| g.is_manual()) { set_reason(held); }
 }
 
 /// The toast's second line: what the reload waits for (empty once nothing holds the page).
 fn set_reason(held: Option<&str>) {
-    let Some(el) = dom::qs("#sw-update [data-update-why]") else { return };
-    let text = held.unwrap_or("");
-    if dom::text_of(&el) != text { dom::set_text(&el, text); }
+    kit_leptos::toasts::set_update_reason(held);
 }
 
 #[cfg(test)]

@@ -28,6 +28,34 @@ pub fn card_body(id: &str, fields_html: &str) -> String {
         slsk = if id == "slskd" { soulseek_status_block() } else { String::new() })
 }
 
+/// [`card_body`]'s extras of card `id` as (before the fields, after them): the same HTML around the kit's fields.
+pub fn card_extras(id: &str) -> (String, String) {
+    let before = if id == "youtube" { crate::pages::youtube::youtube_block() } else { String::new() };
+    let tidal = if id == "streamrip" { tidal_block() + &streamrip_config_block() } else { String::new() };
+    let cadenza = if id == "cadenza" { cadenza_cache_block() + &engine_settings_block() } else { String::new() };
+    let slsk = if id == "slskd" { soulseek_status_block() } else { String::new() };
+    (before, format!("{tidal}{cadenza}\n      {slsk}"))
+}
+
+/// [`vpn_block`] drawn by Leptos around the kit's `vpn_` fields (the same markup, line breaks included).
+pub fn vpn_block_view(inner: leptos::prelude::AnyView) -> leptos::prelude::AnyView {
+    use leptos::prelude::*;
+    view! {
+        <div {..()} class="card flat mt" id="vpn-block" style="padding:12px 14px">
+            {"\n    "}<b>"VPN for Soulseek"</b>
+            {"\n    "}<div class="form-grid mt">{inner}</div>
+            {"\n    "}
+            <div {..()} class="row between wrap mt" style="gap:8px">
+                {"\n      "}<div {..()} class="small muted" id="vpn-state" style="min-width:0">"Checking…"</div>
+                {"\n      "}<button class="btn sm" id="vpn-test" type="button">{kit_leptos::html::raw(icon("refresh"))}"Test VPN"</button>
+                {"\n    "}
+            </div>
+            {"\n  "}
+        </div>
+    }
+    .into_any()
+}
+
 /// Wires the extras of a card (see [`card_body`]; the VPN block is part of Soulseek's fields).
 pub fn bind_card(hub: &Rc<Hub>, g: &Rc<Group>, card: &Element) {
     match g.id.as_str() {
@@ -42,10 +70,10 @@ pub fn bind_card(hub: &Rc<Hub>, g: &Rc<Group>, card: &Element) {
 // Settings → Soulseek → VPN for Soulseek: the WireGuard fields, the tunnel's state (polled every 5 s while the card is open) and Test VPN.
 pub fn vpn_block(inner: &str) -> String {
     format!(r##"<div class="card flat mt" id="vpn-block" style="padding:12px 14px">
-    <b>VPN for Soulseek</b>
+    <b>"VPN for Soulseek"</b>
     <div class="form-grid mt">{inner}</div>
     <div class="row between wrap mt" style="gap:8px">
-      <div class="small muted" id="vpn-state" style="min-width:0">Checking…</div>
+      <div class="small muted" id="vpn-state" style="min-width:0">"Checking…"</div>
       <button class="btn sm" id="vpn-test" type="button">{refresh}Test VPN</button>
     </div>
   </div>"##, refresh = icon("refresh"))

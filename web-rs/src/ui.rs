@@ -1,7 +1,7 @@
 //! Port of web/js/ui.js: escaping, the icon set, toasts, modals, formatting, badges, the ⋯ menu and the
 //! show/hide eye on secrets. Same HTML, same class names.
 
-use crate::dom::{self, body, by_id, closest, create, document, keep, on, qs_in, qsa_in, set_html, EventListener};
+use crate::dom::{self, body, closest, create, document, keep, on, qs_in, qsa_in, set_html, EventListener};
 use crate::json::J;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -86,60 +86,25 @@ pub fn icon_attr(name: &str, attrs: &str) -> String { icon(name).replacen("<svg"
 
 /// The words when the clipboard refuses: the toast says what to do instead, so it has no Copy of its own.
 pub const COPY_FAILED: &str = "Copy failed – select and copy manually";
-/// At most this many error toasts stay on screen; a new one pushes out the oldest.
-const ERROR_TOASTS: usize = 3;
 
 /// `toast(msg, type)`. An error toast (`err`) stays until it is closed and has a Copy button, so a long error can
-/// be read in full and pasted into a bug report (R1); the same error twice in a row is shown once.
+/// be read in full and pasted into a bug report (R1); the same error twice in a row is shown once; at most three
+/// stay on screen (a new one pushes out the oldest). Any other toast fades from 3.8 s and goes at 4.2 s. Drawn by the kit
+/// (`kit_leptos::toasts`) into `#toasts`, one view per toast, with the markup this module drew by hand
+/// ([`error_toast_html`] is that markup, kept as the reference the tests hold the kit to).
 pub fn toast(msg: &str, kind: &str) {
-    if kind == "err" && msg != COPY_FAILED { return error_toast(msg); }
-    let el = create("div");
-    el.set_class_name(&format!("toast {kind}"));
-    el.set_text_content(Some(msg));
-    if let Some(t) = by_id("toasts") { let _ = t.append_child(&el); }
-    let e1 = el.clone();
-    let e2 = el;
-    keep_app(gloo_timers::callback::Timeout::new(3800, move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
-    keep_app(gloo_timers::callback::Timeout::new(4200, move || e2.remove()));
+    kit_leptos::toasts::toast(msg, kind);
 }
-fn keep_app(x: impl std::any::Any + 'static) { dom::keep_forever(x) }
 
 /// A toast with one button (`label`, "Undo") that stays `ms`: a click runs `f` once and the toast goes.
 pub fn toast_action(msg: &str, label: &str, ms: u32, f: impl FnOnce() + 'static) {
-    let Some(t) = by_id("toasts") else { return };
-    let el = create("div");
-    el.set_class_name("toast act");
-    set_html(&el, &format!(r#"<div class="toast-text">{}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-toast-action>{}</button></div>"#, esc(msg), esc(label)));
-    let _ = t.append_child(&el);
-    let f = Rc::new(RefCell::new(Some(f)));
-    if let Some(b) = qs_in(&el, "[data-toast-action]") {
-        let el2 = el.clone();
-        on(&b, "click", move |_| { el2.remove(); if let Some(f) = f.borrow_mut().take() { f(); } });
-    }
-    let (e1, e2) = (el.clone(), el);
-    keep_app(gloo_timers::callback::Timeout::new(ms.saturating_sub(400), move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
-    keep_app(gloo_timers::callback::Timeout::new(ms, move || e2.remove()));
+    kit_leptos::toasts::toast_action(msg, label, ms, f);
 }
 
 /// The error toast's HTML: the whole message, Copy and Close.
 pub fn error_toast_html(msg: &str) -> String {
     format!(r#"<div class="toast-text">{m}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-copy-text="{m}">{copy}Copy</button><button type="button" class="btn sm ghost icon" data-toast-close title="Close" aria-label="Close">{x}</button></div>"#,
         m = esc(msg), copy = icon("copy"), x = icon("x"))
-}
-
-fn error_toast(msg: &str) {
-    let Some(t) = by_id("toasts") else { return };
-    let open = qsa_in(&t, ".toast.err.stays");
-    // the same error again (a retry that failed the same way): the one on screen stays, nothing piles up
-    if open.iter().any(|e| dom::data(e, "msg") == msg) { return; }
-    for old in open.iter().take((open.len() + 1).saturating_sub(ERROR_TOASTS)) { old.remove(); }
-    let el = create("div");
-    el.set_class_name("toast err stays");
-    let _ = el.set_attribute("role", "alert");
-    dom::set_data(&el, "msg", msg);
-    // Copy and Close are handled by the page's one click listener (details.rs `init`)
-    set_html(&el, &error_toast_html(msg));
-    let _ = t.append_child(&el);
 }
 
 /// A modal on screen: `el` is the `.modal`, `close()` removes it.
@@ -168,61 +133,29 @@ impl<'a> ModalOpts<'a> {
     pub fn wide(mut self, w: bool) -> Self { self.wide = w; self }
 }
 
-/// `modal({ title, body, footer, wide })` – title/body/footer are HTML, exactly like the JS.
+/// `modal({ title, body, footer, wide })` – title/body/footer are HTML, exactly like the JS. Drawn by the kit
+/// (`kit_leptos::modal`): a `.modal-bg` appended to `#modal-root` at once, closed by Escape, a press on the
+/// backdrop or any `[data-close]`.
 pub fn modal(o: ModalOpts) -> Modal {
-    let root = by_id("modal-root").expect("#modal-root");
-    let bg = create("div");
-    bg.set_class_name("modal-bg");
-    let foot = if o.footer.is_empty() { String::new() } else { format!(r#"<div class="modal-foot">{}</div>"#, o.footer) };
-    set_html(&bg, &format!(r#"<div class="modal {}" role="dialog" aria-modal="true">
-    <div class="modal-head"><h2>{}</h2><button class="btn ghost icon" data-close aria-label="Close">{}</button></div>
-    <div class="modal-body">{}</div>
-    {}
-  </div>"#, if o.wide { "wide" } else { "" }, o.title, icon("x"), o.body, foot));
-    let _ = root.append_child(&bg);
-    let el = qs_in(&bg, ".modal").expect(".modal");
-    let key_listener: Rc<RefCell<Option<EventListener>>> = Rc::new(RefCell::new(None));
-    let bg2 = bg.clone();
-    let kl = key_listener.clone();
-    let close_fn: Rc<dyn Fn()> = Rc::new(move || { bg2.remove(); kl.borrow_mut().take(); });
-    let c = close_fn.clone();
-    *key_listener.borrow_mut() = Some(dom::listen(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
-    let c = close_fn.clone();
-    let bg3 = bg.clone();
-    on(&bg, "mousedown", move |e| { let is_bg = e.target().map(|t| { let bt: &web_sys::EventTarget = bg3.as_ref(); &t == bt }).unwrap_or(false); if is_bg { c(); } });
-    for b in qsa_in(&bg, "[data-close]") { let c = close_fn.clone(); on(&b, "click", move |_| c()); }
-    keep(key_listener);
-    Modal { el, bg, close_fn }
+    let m = kit_leptos::modal::open(kit_leptos::modal::ModalOpts::new(o.title, o.body).footer(o.footer).wide(o.wide));
+    let (Some(el), Some(bg)) = (m.el(), m.bg()) else { panic!("#modal-root") };
+    Modal { el, bg, close_fn: Rc::new(move || m.close()) }
+}
+
+/// The modal from a kit dialog (the details dialog, What's new): the same handle the hand-written pages use.
+pub fn modal_of(m: kit_leptos::modal::Modal) -> Option<Modal> {
+    let (el, bg) = (m.el()?, m.bg()?);
+    Some(Modal { el, bg, close_fn: Rc::new(move || m.close()) })
 }
 
 /// `confirmDialog(title, text, okLabel, danger)` – resolves to true on OK, false when dismissed.
 pub async fn confirm_dialog(title: &str, text: &str, ok_label: &str, danger: bool) -> bool {
-    confirm_dialog_html(title, &format!(r#"<p class="muted" style="margin:0">{}</p>"#, esc(text)), ok_label, danger).await
+    kit_leptos::modal::confirm_dialog(title, text, ok_label, danger).await
 }
 
 /// [`confirm_dialog`] with a body that is HTML already (escaped by the caller).
 pub async fn confirm_dialog_html(title: &str, body: &str, ok_label: &str, danger: bool) -> bool {
-    let (tx, rx) = futures::channel::oneshot::channel::<bool>();
-    let tx = Rc::new(RefCell::new(Some(tx)));
-    let m = modal(ModalOpts::new(&esc(title), body)
-        .footer(&format!(r#"<button class="btn" data-close>Cancel</button><button class="btn {}" data-ok>{}</button>"#, if danger { "danger" } else { "primary" }, esc(ok_label))));
-    if let Some(ok) = m.qs("[data-ok]") {
-        let m2 = m.clone();
-        let tx2 = tx.clone();
-        on(&ok, "click", move |_| { m2.close(); if let Some(t) = tx2.borrow_mut().take() { let _ = t.send(true); } });
-    }
-    // dismissed (Escape, backdrop, Cancel): the modal leaves the DOM without OK
-    let el = m.el.clone();
-    let tx3 = tx.clone();
-    let obs = web_sys::MutationObserver::new(wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(move |_m, o: web_sys::MutationObserver| {
-        if !el.is_connected() { o.disconnect(); if let Some(t) = tx3.borrow_mut().take() { let _ = t.send(false); } }
-    }).into_js_value().unchecked_ref()).ok();
-    if let (Some(o), Some(root)) = (obs, by_id("modal-root")) {
-        let init = web_sys::MutationObserverInit::new();
-        init.set_child_list(true);
-        let _ = o.observe_with_options(&root, &init);
-    }
-    rx.await.unwrap_or(false)
+    kit_leptos::modal::confirm_dialog_html(title, body, ok_label, danger).await
 }
 
 pub mod fmt {

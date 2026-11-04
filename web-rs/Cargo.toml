@@ -19,6 +19,16 @@ implicit_clone = "warn"
 inefficient_to_string = "warn"
 
 [dependencies]
+# ---- the kit (Krifmaz/kit): the shell's toasts, dialogs, banners and Settings' components (DESIGN.md §10) ----
+# KIT-PIN: a path to the kit's worktree while its changes are open; becomes
+# `kit-leptos = { git = "https://github.com/Krifmaz/kit", rev = "<main sha>" }` once they are merged.
+kit-leptos = { path = "/home/claude/wt/kit-b2/crates/kit-leptos" }
+# Leptos itself, at the kit's exact pin (Leptos is before 1.0: upgraded deliberately, together with the kit);
+# client-side rendering only
+leptos = { version = "=0.8.23", features = ["csr"] }
+# Leptos views are `Send`; a closure that holds the page's `Rc`s goes into one wrapped (the app is one thread)
+send_wrapper = "0.6"
+# ---- end of the kit ----
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -57,3 +67,8 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[dev-dependencies]
+# native tests render Leptos views to strings (`to_html`); resolver 2 keeps `ssr` out of the wasm build
+leptos = { version = "=0.8.23", features = ["csr", "ssr"] }
+kit-leptos = { path = "/home/claude/wt/kit-b2/crates/kit-leptos", features = ["ssr"] }

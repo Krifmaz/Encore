@@ -6,7 +6,12 @@
 //! buttons and Test are wired here. The source cards of Downloads are plugin cards since 0.32 (plugins.rs).
 
 use super::fields::{Field, Group};
-use super::schema_form::{bind_show_when, form_html, form_values};
+use super::schema_form::{form_html, form_values};
+use kit_leptos::html::{raw, seq};
+use kit_leptos::schema_form::schema::{Field as KitField, Group as KitGroup};
+use kit_leptos::schema_form::{FieldBlock, SettingsCard};
+use leptos::prelude::*;
+use std::sync::Arc;
 use super::{apps, general, show, tasks, test_result, Hub};
 use crate::api::{self, ApiError};
 use crate::dom;
@@ -90,11 +95,12 @@ pub async fn show_page(hub: &Rc<Hub>, id: &str) {
     let cards = page_cards(&page.groups, &values);
     // Downloads (the page with the Download pipeline card) ends with How requests are fulfilled
     let downloads = schema.holds(&page.id, "pipeline");
-    let mut html = if page.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
-    html.push_str(&cards_html(&cards, &values, hub.reveal, focus.as_deref()));
-    if downloads { html.push_str(&apps::pipeline_help()); }
-    if page.id == "general" { html.push_str(&general::api_card(&hub.panel).await); html.push_str(&general::about_card().await); }
-    dom::set_html(&hub.panel, &html);
+    let before = if page.id == "tasks" { r##"<div id="tasks-host" style="margin-bottom:16px"></div>"##.to_string() } else { String::new() };
+    let mut after = if downloads { apps::pipeline_help() } else { String::new() };
+    if page.id == "general" { after.push_str(&general::api_card(&hub.panel).await); after.push_str(&general::about_card().await); }
+    let cards = kit_cards(hub.kit_schema.get(), &cards);
+    let (reveal, focus2) = (hub.reveal, focus.clone());
+    super::mount_panel(&hub.panel, move || leptos::view! { {raw(before)}{cards_view(cards, values, reveal, focus2.as_deref())}{raw(after)} });
     if page.id == "tasks" { if let Some(host) = dom::qs_in(&hub.panel, "#tasks-host") { dom::spawn(tasks::render_tasks(host)); } }
     if let Some(f) = focus { if let Some(c) = dom::qs_in(&hub.panel, &format!(r#"[data-sec="{f}"]"#)) { c.scroll_into_view(); } }
     for card in dom::qsa_in(&hub.panel, "[data-sec]") {
@@ -103,11 +109,44 @@ pub async fn show_page(hub: &Rc<Hub>, id: &str) {
     }
 }
 
-/// Save, clear, the eye and copy buttons, Test, the `when` rules and the card's extras.
+/// The kit's cards and fields for [`page_cards`]' (in the same order).
+fn kit_cards(schema: &kit_leptos::schema_form::Schema, cards: &[(&Group, Vec<&Field>)]) -> Vec<(Arc<KitGroup>, Vec<KitField>)> {
+    cards.iter().filter_map(|(g, fields)| {
+        let kg = schema.group(&g.id)?;
+        let kf = fields.iter().filter_map(|f| kg.field(&f.key).cloned()).collect();
+        Some((kg, kf))
+    }).collect()
+}
+
+/// [`cards_html`] drawn by the kit: the part headings and each card (`kit_leptos::schema_form::SettingsCard`)
+/// with the card's extras of apps.rs ([`apps::card_body`]) around its fields and the VPN block in place, node
+/// for node the same page. The cards are wired by [`bind_card`] once they are on the page.
+fn cards_view(cards: Vec<(Arc<KitGroup>, Vec<KitField>)>, values: Value, reveal: bool, focus: Option<&str>) -> AnyView {
+    let focus = focus.filter(|f| cards.iter().any(|(g, _)| g.id == *f)).map(str::to_string);
+    let n = cards.len();
+    let mut part: Option<String> = None;
+    let mut out: Vec<AnyView> = Vec::new();
+    for (i, (g, fields)) in cards.into_iter().enumerate() {
+        if part.as_deref() != Some(g.part.as_str()) {
+            part = Some(g.part.clone());
+            if !g.part.is_empty() { out.push(leptos::view! { <div {..()} class="nav-label" style="padding:18px 4px 8px">{g.part.clone()}</div> }.into_any()); }
+        }
+        let open = (i == 0 && focus.is_none()) || n == 1 || focus.as_deref() == Some(g.id.as_str());
+        let (before, after) = apps::card_extras(&g.id);
+        let block = FieldBlock { prefix: "vpn_".into(), draw: Arc::new(apps::vpn_block_view) };
+        out.push(leptos::view! {
+            <SettingsCard group=g fields=fields values=values.clone() reveal=reveal open=open
+                before=Some(raw(before).into_any()) extra=Some(raw(after).into_any()) block=block/>
+        }.into_any());
+    }
+    seq(out)
+}
+
+/// Save, clear, the eye and copy buttons, Test and the card's extras (the kit's fields show and hide the
+/// fields with a `when` rule themselves).
 fn bind_card(hub: &Rc<Hub>, g: Rc<Group>, card: &Element, page: &str) {
     let Some(out) = dom::qs_in(card, "[data-out]") else { return };
     apps::bind_card(hub, &g, card);
-    bind_show_when(card);
     let paint: Rc<dyn Fn(&Value)> = { let out = out.clone(); Rc::new(move |r: &Value| dom::set_html(&out, &test_result(r))) };
     if let Some(b) = dom::qs_in(card, "[data-save]") {
         let (hub2, g2, card2) = (hub.clone(), g.clone(), card.clone());

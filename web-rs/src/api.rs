@@ -198,3 +198,22 @@ mod tests {
         assert!(!proxy_answer(200, false, "<!doctype html>"));
     }
 }
+
+/// The kit's components (notice banner, What's new, Settings, Diagnostics) call the server through this
+/// client, so their calls carry the same headers and raise the same connection events as the pages'.
+pub struct KitBackend;
+
+fn kit_error(e: ApiError) -> kit_leptos::api::ApiError {
+    kit_leptos::api::ApiError { status: e.status, message: e.message, data: e.data }
+}
+
+impl kit_leptos::api::Backend for KitBackend {
+    fn call(&self, method: &str, path: &str, body: Option<Value>) -> kit_leptos::api::ApiFuture {
+        let (method, path) = (method.to_string(), path.to_string());
+        Box::pin(async move { request(&method, &path, body).await.map_err(kit_error) })
+    }
+    fn post_form(&self, path: &str, form: web_sys::FormData) -> kit_leptos::api::ApiFuture {
+        let path = path.to_string();
+        Box::pin(async move { post_form(&path, form).await.map_err(kit_error) })
+    }
+}

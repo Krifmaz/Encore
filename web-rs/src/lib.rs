@@ -23,6 +23,7 @@ pub mod player;
 pub mod remote;
 pub mod scrubber;
 pub mod settings;
+pub mod shell;
 pub mod sw;
 pub mod ui;
 pub mod update;
@@ -36,6 +37,10 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(on_panic));
+    // the kit's components call the server through api.rs, as the pages do
+    kit_leptos::api::set_backend(api::KitBackend);
+    // the toasts are drawn by the kit into index.html's #toasts (ui::toast)
+    kit_leptos::toasts::mount();
     ui::init();
     details::init();
     appearance::init();

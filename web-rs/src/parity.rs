@@ -167,6 +167,28 @@ fn read_all(dir: &Path, ext: &str) -> String {
     out
 }
 
+/// The sources of the kit's crates web-rs builds with (kit-leptos, kit-rules), wherever cargo has them – a path
+/// while a kit change is open, cargo's git checkout once it is pinned to a commit – as one string.
+fn kit_sources() -> String {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let out = std::process::Command::new(cargo)
+        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(out.status.success(), "cargo metadata: {}", String::from_utf8_lossy(&out.stderr));
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("cargo metadata answers JSON");
+    let mut text = String::new();
+    for name in ["kit-leptos", "kit-rules"] {
+        let pkg = meta["packages"].as_array().into_iter().flatten().find(|p| p["name"] == name).unwrap_or_else(|| panic!("{name} is a dependency"));
+        let manifest = Path::new(pkg["manifest_path"].as_str().expect("manifest_path"));
+        let src = manifest.parent().expect("crate folder").join("src");
+        text.push_str(&read_all(&src, "rs"));
+    }
+    assert!(text.len() > 50_000, "the kit's sources read");
+    text
+}
+
 #[test]
 fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     let repo = repo();
@@ -179,7 +201,10 @@ fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     // answers with
     let catalog = read_all(&repo.join("server/crates/plugins/catalog"), "toml");
     assert!(catalog.contains("[plugin]"), "server/crates/plugins/catalog/*.toml read");
-    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table + &catalog;
+    // since the shell and Settings are drawn by the kit (Krifmaz/kit: kit-leptos on kit-rules), the words those
+    // components show are the kit's constants, Encore's words moved there unchanged: they count too
+    let kit = kit_sources();
+    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table + &catalog + &kit;
     assert!(rs_raw.len() > 100_000, "web-rs sources read");
     let rs_norm = without_placeholders(&rs_raw);
     let rs_decoded = collapse(&decode_entities(&rs_norm));
