@@ -104,10 +104,7 @@ impl SignIns {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         m.retain(|_, x| alive(x));
         let oldest = |m: &HashMap<String, Pending>, uid: Option<i64>| {
-            m.iter()
-                .filter(|(_, x)| uid.is_none_or(|u| x.user_id == u))
-                .min_by_key(|(_, x)| x.started)
-                .map(|(k, _)| k.clone())
+            m.iter().filter(|(_, x)| uid.is_none_or(|u| x.user_id == u)).min_by_key(|(_, x)| x.started).map(|(k, _)| k.clone())
         };
         if m.values().filter(|x| x.user_id == p.user_id).count() >= PER_USER {
             if let Some(k) = oldest(&m, Some(p.user_id)) {
@@ -137,17 +134,9 @@ impl SignIns {
 
     /// Keeps `state` for `user_id`'s sign-in with `service`, started now.
     pub fn keep(&self, state: &str, user_id: i64, service: &str, device: &str, verifier: &str) {
-        self.put(
-            format!("state:{state}"),
-            Pending {
-                user_id,
-                service: service.to_string(),
-                device: device.to_string(),
-                verifier: verifier.to_string(),
-                started: Instant::now(),
-                linked: None,
-            },
-        );
+        self.put(format!("state:{state}"), Pending {
+            user_id, service: service.to_string(), device: device.to_string(), verifier: verifier.to_string(), started: Instant::now(), linked: None,
+        });
     }
 
     /// The sign-in of `state`, taken: a second call with it finds nothing. None when unknown or older than
@@ -173,29 +162,19 @@ impl SignIns {
         if key.is_empty() {
             return None;
         }
-        self.take(&format!("confirm:{key}"))
-            .filter(|p| p.linked.is_some())
+        self.take(&format!("confirm:{key}")).filter(|p| p.linked.is_some())
     }
 
     /// The sign-in of `state` without taking it (tests).
     #[cfg(test)]
     pub fn peek(&self, state: &str) -> Option<Pending> {
-        self.0
-            .lock()
-            .unwrap()
-            .get(&format!("state:{state}"))
-            .cloned()
+        self.0.lock().unwrap().get(&format!("state:{state}")).cloned()
     }
 
     /// How many sign-ins `user_id` has going (tests).
     #[cfg(test)]
     pub fn count_for(&self, user_id: i64) -> usize {
-        self.0
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|p| p.user_id == user_id && alive(p))
-            .count()
+        self.0.lock().unwrap().values().filter(|p| p.user_id == user_id && alive(p)).count()
     }
 
     /// Makes the sign-in of `state` (or a confirmation page's) `secs` older (tests of the expiry).
@@ -204,10 +183,7 @@ impl SignIns {
         let mut m = self.0.lock().unwrap();
         for k in [format!("state:{key}"), format!("confirm:{key}")] {
             if let Some(p) = m.get_mut(&k) {
-                p.started = p
-                    .started
-                    .checked_sub(Duration::from_secs(secs))
-                    .unwrap_or(p.started);
+                p.started = p.started.checked_sub(Duration::from_secs(secs)).unwrap_or(p.started);
             }
         }
     }
@@ -229,39 +205,18 @@ pub fn service_label(service: &str) -> &str {
 /// sent ("Pixel 9 Pro"): that is free text the starter chooses, and the confirmation page shows this to
 /// someone else, beside its warning.
 pub fn device_of(st: &AppState, headers: &HeaderMap) -> String {
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let s = auth::session_key(headers).and_then(|k| {
-        st.db
-            .one("SELECT user_agent FROM sessions WHERE token=?", p![k])
-            .ok()
-            .flatten()
-    });
+    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let s = auth::session_key(headers).and_then(|k| st.db.one("SELECT user_agent FROM sessions WHERE token=?", p![k]).ok().flatten());
     match s {
-        Some(s) if !s.s("user_agent").is_empty() => {
-            crate::routes::auth::device_name(&s.s("user_agent"))
-        }
+        Some(s) if !s.s("user_agent").is_empty() => crate::routes::auth::device_name(&s.s("user_agent")),
         _ => crate::routes::auth::device_name(&ua),
     }
 }
 
 /// The start call of a sign-in: a new state for `uid` and `service` (with a PKCE verifier for Spotify and
 /// Tidal), handed to `url` to build the service's sign-in address. Nothing is kept when `url` fails.
-pub fn start(
-    st: &AppState,
-    uid: i64,
-    service: &str,
-    headers: &HeaderMap,
-    url: impl FnOnce(&str, &str) -> anyhow::Result<String>,
-) -> anyhow::Result<String> {
-    let verifier = if matches!(service, "spotify" | "tidal") {
-        connections::pkce_verifier()
-    } else {
-        String::new()
-    };
+pub fn start(st: &AppState, uid: i64, service: &str, headers: &HeaderMap, url: impl FnOnce(&str, &str) -> anyhow::Result<String>) -> anyhow::Result<String> {
+    let verifier = if matches!(service, "spotify" | "tidal") { connections::pkce_verifier() } else { String::new() };
     let state = new_state();
     // the address first: a missing Client ID or Public URL leaves no state behind
     let address = url(&state, &verifier)?;
@@ -278,16 +233,10 @@ pub const TEST_CODE: &str = "test-account:";
 async fn exchange(st: &AppState, p: &Pending, code: &str) -> Result<Linked, String> {
     #[cfg(test)]
     if let Some(account) = code.strip_prefix(TEST_CODE) {
-        return Ok(Linked {
-            account: account.to_string(),
-            data: serde_json::json!({ "access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 3600, "sk": "test-sk", "user": account }),
-        });
+        return Ok(Linked { account: account.to_string(), data: serde_json::json!({ "access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 3600, "sk": "test-sk", "user": account }) });
     }
     if code.is_empty() {
-        return Err(format!(
-            "{} sent no sign-in code. Try again",
-            service_label(&p.service)
-        ));
+        return Err(format!("{} sent no sign-in code. Try again", service_label(&p.service)));
     }
     let r = match p.service.as_str() {
         "spotify" | "tidal" => connections::oauth_exchange(st, &p.service, code, &p.verifier).await,
@@ -295,24 +244,14 @@ async fn exchange(st: &AppState, p: &Pending, code: &str) -> Result<Linked, Stri
         "musicbrainz" => crate::contribute::mb_exchange(st, code).await,
         _ => Err(anyhow::anyhow!("Unknown service")),
     };
-    r.map(|(account, data)| Linked { account, data })
-        .map_err(|e| e.to_string())
+    r.map(|(account, data)| Linked { account, data }).map_err(|e| e.to_string())
 }
 
 /// Links `l` to the user who started `p`: the user's connection, or for MusicBrainz the server's account (the
 /// user must still be an admin). Returns the user's name.
 fn link(st: &AppState, p: &Pending, l: &Linked) -> Result<String, String> {
-    let u = st
-        .db
-        .one(
-            "SELECT * FROM users WHERE id=? AND disabled=0",
-            p![p.user_id],
-        )
-        .ok()
-        .flatten()
-        .ok_or_else(|| {
-            "The Encore user who started this sign-in no longer exists or is disabled".to_string()
-        })?;
+    let u = st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![p.user_id]).ok().flatten()
+        .ok_or_else(|| "The Encore user who started this sign-in no longer exists or is disabled".to_string())?;
     match p.service.as_str() {
         "musicbrainz" => crate::contribute::mb_link(st, &u, &l.account, &l.data)?,
         s => {
@@ -326,34 +265,15 @@ fn link(st: &AppState, p: &Pending, l: &Linked) -> Result<String, String> {
 /// as. `error`: the service's `error=` (the person said no). `code`: the code (Last.fm: the token). `web`: a
 /// browser that is signed in to Encore goes back to the web app's page with the outcome; any other browser gets
 /// a page of its own.
-pub async fn callback(
-    st: &AppState,
-    browser: Option<Row>,
-    service: &str,
-    state: &str,
-    error: &str,
-    code: &str,
-    web: impl Fn(Result<(), String>) -> Response,
-) -> Response {
+pub async fn callback(st: &AppState, browser: Option<Row>, service: &str, state: &str, error: &str, code: &str,
+                      web: impl Fn(Result<(), String>) -> Response) -> Response {
     // single use: taken before anything else, whatever comes of it
     let pending = store(st).take_state(state).filter(|p| p.service == service);
-    let fail = |msg: String| {
-        if browser.is_some() {
-            web(Err(msg))
-        } else {
-            error_page(&msg)
-        }
-    };
+    let fail = |msg: String| if browser.is_some() { web(Err(msg)) } else { error_page(&msg) };
     if !error.is_empty() {
-        return fail(if error == "access_denied" {
-            "You did not allow Encore. Try again and approve the access".to_string()
-        } else {
-            error.replace('_', " ")
-        });
+        return fail(if error == "access_denied" { "You did not allow Encore. Try again and approve the access".to_string() } else { error.replace('_', " ") });
     }
-    let Some(p) = pending else {
-        return fail(EXPIRED.to_string());
-    };
+    let Some(p) = pending else { return fail(EXPIRED.to_string()) };
     let linked = match exchange(st, &p, code).await {
         Ok(l) => l,
         Err(e) => return fail(e),
@@ -361,21 +281,9 @@ pub async fn callback(
     if browser.as_ref().is_some_and(|u| u.i("id") == p.user_id) {
         return web(link(st, &p, &linked).map(|_| ()));
     }
-    let owner = st
-        .db
-        .one("SELECT username FROM users WHERE id=?", p![p.user_id])
-        .ok()
-        .flatten()
-        .map(|u| u.s("username"))
-        .unwrap_or_default();
+    let owner = st.db.one("SELECT username FROM users WHERE id=?", p![p.user_id]).ok().flatten().map(|u| u.s("username")).unwrap_or_default();
     let key = store(st).hold(p.clone(), linked.clone());
-    confirm_page(
-        &p,
-        &linked,
-        &owner,
-        browser.as_ref().map(|u| u.s("username")),
-        &key,
-    )
+    confirm_page(&p, &linked, &owner, browser.as_ref().map(|u| u.s("username")), &key)
 }
 
 /// The sign-in confirmation route.
@@ -395,23 +303,15 @@ struct ConfirmForm {
 
 /// The confirmation page's answer: Link or Cancel.
 async fn confirm(State(st): State<AppState>, Form(f): Form<ConfirmForm>) -> Response {
-    let Some(p) = store(&st).take_confirm(&f.confirm) else {
-        return error_page(EXPIRED);
-    };
-    let Some(l) = p.linked.clone() else {
-        return error_page(EXPIRED);
-    };
+    let Some(p) = store(&st).take_confirm(&f.confirm) else { return error_page(EXPIRED) };
+    let Some(l) = p.linked.clone() else { return error_page(EXPIRED) };
     let svc = service_label(&p.service).to_string();
     if f.answer != "link" {
         return page(StatusCode::OK, "Nothing was linked", &format!("<h1>Nothing was linked</h1><p>The {} account was not linked. You can close this page.</p>", e(&svc)));
     }
     match link(&st, &p, &l) {
         Ok(user) => {
-            let what = if p.service == "musicbrainz" {
-                "this Encore server".to_string()
-            } else {
-                format!("the Encore user “{}”", e(&user))
-            };
+            let what = if p.service == "musicbrainz" { "this Encore server".to_string() } else { format!("the Encore user “{}”", e(&user)) };
             page(StatusCode::OK, &format!("{svc} account linked"), &format!("<h1>{} account linked</h1><p>The {} account “{}” is now linked to {what}. You can close this page and go back to Encore.</p>",
                 e(&svc), e(&svc), e(&l.account)))
         }
@@ -420,13 +320,7 @@ async fn confirm(State(st): State<AppState>, Form(f): Form<ConfirmForm>) -> Resp
 }
 
 /// "Link the Spotify account “alex” to the Encore user “sam”?", who started it and where, and Link / Cancel.
-fn confirm_page(
-    p: &Pending,
-    l: &Linked,
-    owner: &str,
-    browser_user: Option<String>,
-    key: &str,
-) -> Response {
+fn confirm_page(p: &Pending, l: &Linked, owner: &str, browser_user: Option<String>, key: &str) -> Response {
     let svc = e(service_label(&p.service));
     let device: String = p.device.chars().take(40).collect();
     let (acct, owner_e, device) = (e(&l.account), e(owner), e(&device));
@@ -435,17 +329,12 @@ fn confirm_page(
     } else {
         format!("Link the {svc} account “{acct}” to the Encore user “{owner_e}”?")
     };
-    let mut body = format!(
-        "<h1>{question}</h1><p>The Encore user “{owner_e}” started this sign-in on “{device}”.</p>"
-    );
+    let mut body = format!("<h1>{question}</h1><p>The Encore user “{owner_e}” started this sign-in on “{device}”.</p>");
     if p.service == "musicbrainz" {
         body.push_str("<p>Encore then sends ISRCs to MusicBrainz as this account.</p>");
     }
     if let Some(b) = browser_user {
-        body.push_str(&format!(
-            "<p>This browser is signed in to Encore as “{}”, not as “{owner_e}”.</p>",
-            e(&b)
-        ));
+        body.push_str(&format!("<p>This browser is signed in to Encore as “{}”, not as “{owner_e}”.</p>", e(&b)));
     }
     body.push_str(&format!(r#"<p class="warn">Only link it if you started this sign-in yourself. If someone else sent you the sign-in link, choose Cancel.</p>
 <form method="post" action="/api/sign-in/confirm"><input type="hidden" name="confirm" value="{key}">
@@ -461,13 +350,10 @@ fn error_page(msg: &str) -> Response {
 
 /// A small page of its own (no web app around it), never framed, cached or sent on as a referrer.
 fn page(status: StatusCode, title: &str, body: &str) -> Response {
-    let html = format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    let html = format!(r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title><meta name="referrer" content="no-referrer">
 <style>body{{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}}main{{max-width:520px}}h1{{font-size:1.4em}}p{{color:#bbb}}p.warn{{color:#e8c37a}}button{{font:inherit;padding:10px 18px;border-radius:8px;border:0;background:#ba478f;color:#fff;cursor:pointer;margin:6px 8px 0 0}}button.plain{{background:#333}}</style></head>
-<body><main>{body}</main></body></html>"#,
-        title = e(title)
-    );
+<body><main>{body}</main></body></html>"#, title = e(title));
     let mut r = (status, Html(html)).into_response();
     let h = r.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

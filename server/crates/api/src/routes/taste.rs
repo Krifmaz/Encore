@@ -22,8 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The song columns a recommendation answer has (what the players queue).
-const SONG_COLS: &str =
-    "id, title, artist, album, album_id, format, bitrate, duration, genre, year";
+const SONG_COLS: &str = "id, title, artist, album, album_id, format, bitrate, duration, genre, year";
 /// Co-listening is made again at most this often (it reads every listener's plays of the last year).
 const CO_LISTEN_EVERY: Duration = Duration::from_secs(10 * 60);
 /// The plays co-listening reads: the last year's, at most this many of the newest.
@@ -56,14 +55,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/taste/profile", get(profile))
         .route("/api/taste/skip", post(skip))
         .route("/api/taste/dislikes", get(dislikes))
-        .route(
-            "/api/taste/dislikes/tracks/{id}",
-            put(dislike_track).delete(undislike_track),
-        )
-        .route(
-            "/api/taste/dislikes/artists/{name}",
-            put(dislike_artist).delete(undislike_artist),
-        )
+        .route("/api/taste/dislikes/tracks/{id}", put(dislike_track).delete(undislike_track))
+        .route("/api/taste/dislikes/artists/{name}", put(dislike_artist).delete(undislike_artist))
 }
 
 // ---- the model's inputs -----------------------------------------------------------------------------
@@ -77,38 +70,16 @@ fn catalog(st: &AppState) -> ApiResult<Arc<Catalog>> {
         }
     }
     // each song once (not the copies of a song, encore_library::twins), with every artist it credits
-    let rows = st.db.query(
-        &format!(
-            "SELECT id, artist, artist_credit, album_id, genre, year FROM tracks WHERE {}",
-            encore_library::twins::SHOWN
-        ),
-        p![],
-    )?;
-    let songs = rows
-        .into_iter()
-        .map(|r| {
-            let mut artists: Vec<String> = serde_json::from_str::<Value>(&r.s("artist_credit"))
-                .ok()
-                .and_then(|v| {
-                    v.as_array().map(|a| {
-                        a.iter()
-                            .filter_map(|c| c["name"].as_str().map(str::to_string))
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            if artists.is_empty() {
-                artists.push(r.s("artist"));
-            }
-            SongIn {
-                id: r.i("id"),
-                artists,
-                album_id: r.s("album_id"),
-                genre: r.s("genre"),
-                year: r.s("year"),
-            }
-        })
-        .collect();
+    let rows = st.db.query(&format!("SELECT id, artist, artist_credit, album_id, genre, year FROM tracks WHERE {}", encore_library::twins::SHOWN), p![])?;
+    let songs = rows.into_iter().map(|r| {
+        let mut artists: Vec<String> = serde_json::from_str::<Value>(&r.s("artist_credit")).ok()
+            .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect()))
+            .unwrap_or_default();
+        if artists.is_empty() {
+            artists.push(r.s("artist"));
+        }
+        SongIn { id: r.i("id"), artists, album_id: r.s("album_id"), genre: r.s("genre"), year: r.s("year") }
+    }).collect();
     let c = Arc::new(Catalog::build(songs));
     st.web.taste.lock().unwrap().catalog = Some((version, c.clone()));
     Ok(c)
@@ -124,13 +95,7 @@ fn co_listen(st: &AppState, cat: &Arc<Catalog>) -> ApiResult<Arc<CoListen>> {
     }
     let plays = st.db.query("SELECT user_id, track_id, played_at FROM plays WHERE track_id IS NOT NULL AND played_at > ? ORDER BY played_at DESC LIMIT ?",
         p![now() - 365.0 * 86400.0, CO_LISTEN_PLAYS])?;
-    let co = Arc::new(CoListen::build(
-        cat,
-        plays
-            .iter()
-            .map(|r| (r.i("user_id"), r.i("track_id"), r.f("played_at")))
-            .collect(),
-    ));
+    let co = Arc::new(CoListen::build(cat, plays.iter().map(|r| (r.i("user_id"), r.i("track_id"), r.f("played_at"))).collect()));
     st.web.taste.lock().unwrap().co = Some((cat.clone(), Instant::now(), co.clone()));
     Ok(co)
 }
@@ -138,14 +103,7 @@ fn co_listen(st: &AppState, cat: &Arc<Catalog>) -> ApiResult<Arc<CoListen>> {
 /// What user `uid` told the server: plays, Liked Songs, their own playlists' songs, skips and dislikes.
 fn signals(st: &AppState, uid: i64) -> ApiResult<Signals> {
     let t = now();
-    let ids = |sql: &str, params: Vec<Value>| -> ApiResult<Vec<i64>> {
-        Ok(st
-            .db
-            .query(sql, params)?
-            .iter()
-            .map(|r| r.i("id"))
-            .collect())
-    };
+    let ids = |sql: &str, params: Vec<Value>| -> ApiResult<Vec<i64>> { Ok(st.db.query(sql, params)?.iter().map(|r| r.i("id")).collect()) };
     Ok(Signals {
         plays: st.db.query("SELECT track_id, played_at FROM plays WHERE user_id=? AND track_id IS NOT NULL AND played_at > ? ORDER BY played_at DESC LIMIT ?",
             p![uid, t - 400.0 * 86400.0, PROFILE_PLAYS])?.iter().map(|r| (r.i("track_id"), r.f("played_at"))).collect(),
@@ -170,9 +128,7 @@ fn model(st: &AppState, uid: i64) -> ApiResult<(Arc<Catalog>, Arc<CoListen>, Pro
 
 /// A random source seeded from the clock (each call draws differently).
 fn rng() -> Rng {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     Rng::new(t.as_nanos() as u64 ^ rand::random::<u64>())
 }
 
@@ -186,34 +142,17 @@ fn songs(st: &AppState, ids: &[i64]) -> ApiResult<Value> {
 /// Every song user `uid` must never be offered: disliked songs and the songs whose main artist they disliked.
 /// The plain shuffle (routes::library) leaves these out too.
 pub(super) fn disliked_song_ids(st: &AppState, uid: i64) -> ApiResult<HashSet<i64>> {
-    let rows = st
-        .db
-        .query("SELECT ref, kind FROM dislikes WHERE user_id=?", p![uid])?;
+    let rows = st.db.query("SELECT ref, kind FROM dislikes WHERE user_id=?", p![uid])?;
     if rows.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut out: HashSet<i64> = rows
-        .iter()
-        .filter(|r| r.s("kind") == "track")
-        .filter_map(|r| r.s("ref").parse().ok())
-        .collect();
-    let artists: Vec<String> = rows
-        .iter()
-        .filter(|r| r.s("kind") == "artist")
-        .map(|r| r.s("ref"))
-        .collect();
+    let mut out: HashSet<i64> = rows.iter().filter(|r| r.s("kind") == "track").filter_map(|r| r.s("ref").parse().ok()).collect();
+    let artists: Vec<String> = rows.iter().filter(|r| r.s("kind") == "artist").map(|r| r.s("ref")).collect();
     if !artists.is_empty() {
         let cat = catalog(st)?;
         for name in artists {
-            let Some(a) = cat.artist_index(&name) else {
-                continue;
-            };
-            out.extend(
-                cat.artist_songs[a as usize]
-                    .iter()
-                    .filter(|i| cat.songs[**i].artists[0] == a)
-                    .map(|i| cat.songs[*i].id),
-            );
+            let Some(a) = cat.artist_index(&name) else { continue };
+            out.extend(cat.artist_songs[a as usize].iter().filter(|i| cat.songs[**i].artists[0] == a).map(|i| cat.songs[*i].id));
         }
     }
     Ok(out)
@@ -221,10 +160,7 @@ pub(super) fn disliked_song_ids(st: &AppState, uid: i64) -> ApiResult<HashSet<i6
 
 /// Takes back user `uid`'s dislike of song `id` (a like does: routes::library).
 pub(super) fn forget_dislike(st: &AppState, uid: i64, id: i64) -> ApiResult<()> {
-    st.db.execute(
-        "DELETE FROM dislikes WHERE user_id=? AND kind='track' AND ref=?",
-        p![uid, id.to_string()],
-    )?;
+    st.db.execute("DELETE FROM dislikes WHERE user_id=? AND kind='track' AND ref=?", p![uid, id.to_string()])?;
     Ok(())
 }
 
@@ -256,11 +192,7 @@ struct ShuffleBody {
 /// more often, just-played songs wait, artists are spread out), never a disliked song or artist. Over the whole
 /// library, one genre (`genre`), several (`genres`: a genre shuffle) or a given list (`ids`). Answers the songs,
 /// with their loudness.
-async fn shuffle(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<ShuffleBody>,
-) -> ApiResult<Json<Value>> {
+async fn shuffle(State(st): State<AppState>, User(u): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (cat, _, profile) = model(st, u.i("id"))?;
         let scope = if let Some(ids) = &b.ids {
@@ -272,26 +204,19 @@ async fn shuffle(
             }
             Scope::Genres(found)
         } else if let Some(g) = b.genre.as_deref().filter(|g| !g.trim().is_empty()) {
-            Scope::Genre(
-                cat.genre_index(g)
-                    .ok_or_else(|| err(404, "No songs of that genre"))?,
-            )
+            Scope::Genre(cat.genre_index(g).ok_or_else(|| err(404, "No songs of that genre"))?)
         } else {
             Scope::All
         };
         // a list being shuffled comes back whole (less the disliked songs); a library shuffle in pages
-        let n = match &scope {
-            Scope::Songs(v) => v.len().min(5000),
-            _ => b.limit.unwrap_or(50).clamp(1, MAX_SONGS),
-        };
+        let n = match &scope { Scope::Songs(v) => v.len().min(5000), _ => b.limit.unwrap_or(50).clamp(1, MAX_SONGS) };
         let ids = profile.shuffle(&cat, &scope, n, &exclude_set(&b.exclude), &mut rng());
         if matches!(scope, Scope::Songs(_)) {
             // a long list: the ids alone (the player has the songs already)
             return Ok(Json(json!(ids)));
         }
         Ok(Json(songs(st, &ids)?))
-    })
-    .await
+    }).await
 }
 
 /// `GET /api/taste/mixes` query.
@@ -305,11 +230,7 @@ struct MixesQ {
 /// GET /api/taste/mixes: the "For you" mixes – Your mix, Fresh finds, Rediscover, a mix for each favourite genre
 /// and a radio for each favourite artist – `{cold, mixes: [{id, title, subtitle, covers: [album ids], tracks}]}`.
 /// `cold` says the listener hasn't played, liked or disliked anything yet (the mixes are plain shuffles).
-async fn mixes(
-    State(st): State<AppState>,
-    User(u): User,
-    Query(q): Query<MixesQ>,
-) -> ApiResult<Json<Value>> {
+async fn mixes(State(st): State<AppState>, User(u): User, Query(q): Query<MixesQ>) -> ApiResult<Json<Value>> {
     let (cold, list) = st.blocking(move |st| {
         let (cat, co, profile) = model(st, u.i("id"))?;
         let list = profile.mixes(&cat, &co, q.limit.unwrap_or(30).clamp(5, 100), &mut rng());
@@ -346,26 +267,13 @@ struct MixBody {
 
 /// POST /api/taste/mix: one mix made fresh (to play it, or to keep it going when the queue runs out). 404 for a
 /// genre or artist the library doesn't have.
-async fn mix(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<MixBody>,
-) -> ApiResult<Json<Value>> {
+async fn mix(State(st): State<AppState>, User(u): User, Json(b): Json<MixBody>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (cat, co, profile) = model(st, u.i("id"))?;
-        let ids = profile
-            .mix(
-                &cat,
-                &co,
-                &b.id,
-                b.limit.unwrap_or(50).clamp(1, MAX_SONGS),
-                &exclude_set(&b.exclude),
-                &mut rng(),
-            )
+        let ids = profile.mix(&cat, &co, &b.id, b.limit.unwrap_or(50).clamp(1, MAX_SONGS), &exclude_set(&b.exclude), &mut rng())
             .ok_or_else(|| err(404, "No such mix"))?;
         Ok(Json(songs(st, &ids)?))
-    })
-    .await
+    }).await
 }
 
 /// `GET /api/taste/like-this/{id}` query.
@@ -380,31 +288,14 @@ struct LikeThisQ {
 
 /// GET /api/taste/like-this/{id}: songs of the library like this one – its artist and the artists heard with it,
 /// shared genres, a close era – leaning to the listener's taste, never a disliked one.
-async fn like_this(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<i64>,
-    Query(q): Query<LikeThisQ>,
-) -> ApiResult<Json<Value>> {
+async fn like_this(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<LikeThisQ>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (cat, co, profile) = model(st, u.i("id"))?;
         let seed = cat.index(id).ok_or_else(|| err(404, "Track not found"))?;
-        let ex: Vec<i64> = q
-            .exclude
-            .split(',')
-            .filter_map(|x| x.trim().parse().ok())
-            .collect();
-        let ids = profile.like_this(
-            &cat,
-            &co,
-            seed,
-            q.limit.unwrap_or(25).clamp(1, MAX_SONGS),
-            &exclude_set(&ex),
-            &mut rng(),
-        );
+        let ex: Vec<i64> = q.exclude.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        let ids = profile.like_this(&cat, &co, seed, q.limit.unwrap_or(25).clamp(1, MAX_SONGS), &exclude_set(&ex), &mut rng());
         Ok(Json(songs(st, &ids)?))
-    })
-    .await
+    }).await
 }
 
 /// GET /api/taste/genres: the library's genres (from the songs' tags, untagged songs counted under their artist's
@@ -451,64 +342,31 @@ struct SkipBody {
 
 /// POST /api/taste/skip: the listener pressed Next before the song's play counted. A skip in the first second or
 /// two is not counted (the listener was flicking through), and neither is one of a song the library doesn't have.
-async fn skip(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<SkipBody>,
-) -> ApiResult<Json<Value>> {
-    let secs = if b.seconds.is_finite() {
-        b.seconds.clamp(0.0, 7200.0)
-    } else {
-        0.0
-    };
-    if secs < 2.0
-        || st
-            .db
-            .one("SELECT 1 FROM tracks WHERE id=?", p![b.track_id])?
-            .is_none()
-    {
+async fn skip(State(st): State<AppState>, User(u): User, Json(b): Json<SkipBody>) -> ApiResult<Json<Value>> {
+    let secs = if b.seconds.is_finite() { b.seconds.clamp(0.0, 7200.0) } else { 0.0 };
+    if secs < 2.0 || st.db.one("SELECT 1 FROM tracks WHERE id=?", p![b.track_id])?.is_none() {
         return Ok(Json(json!({ "ok": true, "counted": false })));
     }
-    st.db.execute(
-        "INSERT INTO skips (user_id, track_id, seconds, skipped_at) VALUES (?,?,?,?)",
-        p![u.i("id"), b.track_id, secs, now()],
-    )?;
+    st.db.execute("INSERT INTO skips (user_id, track_id, seconds, skipped_at) VALUES (?,?,?,?)", p![u.i("id"), b.track_id, secs, now()])?;
     // skips older than the window count for nothing: the table keeps only those
-    st.db.execute(
-        "DELETE FROM skips WHERE user_id=? AND skipped_at < ?",
-        p![u.i("id"), now() - taste::SKIP_WINDOW],
-    )?;
+    st.db.execute("DELETE FROM skips WHERE user_id=? AND skipped_at < ?", p![u.i("id"), now() - taste::SKIP_WINDOW])?;
     Ok(Json(json!({ "ok": true, "counted": true })))
 }
 
 /// GET /api/taste/dislikes: what the listener disliked, newest first – `{tracks: [{id, name, created_at}],
 /// artists: [{name, created_at}]}` – for the players' dislike buttons and the page that takes dislikes back.
 async fn dislikes(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    let rows = st.db.query(
-        "SELECT kind, ref, name, created_at FROM dislikes WHERE user_id=? ORDER BY created_at DESC",
-        p![u.i("id")],
-    )?;
+    let rows = st.db.query("SELECT kind, ref, name, created_at FROM dislikes WHERE user_id=? ORDER BY created_at DESC", p![u.i("id")])?;
     let tracks: Vec<Value> = rows.iter().filter(|r| r.s("kind") == "track")
         .map(|r| json!({ "id": r.s("ref").parse::<i64>().unwrap_or(0), "name": r.s("name"), "created_at": r.f("created_at") })).collect();
-    let artists: Vec<Value> = rows
-        .iter()
-        .filter(|r| r.s("kind") == "artist")
-        .map(|r| json!({ "name": r.s("name"), "created_at": r.f("created_at") }))
-        .collect();
+    let artists: Vec<Value> = rows.iter().filter(|r| r.s("kind") == "artist").map(|r| json!({ "name": r.s("name"), "created_at": r.f("created_at") })).collect();
     Ok(Json(json!({ "tracks": tracks, "artists": artists })))
 }
 
 /// PUT /api/taste/dislikes/tracks/{id}: dislike a song – it is never queued by a shuffle, a mix or "More like
 /// this" again, what sounds like it comes up less, and it leaves Liked Songs (a dislike is the opposite of a like).
-async fn dislike_track(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
-    let t = st
-        .db
-        .one("SELECT artist, title FROM tracks WHERE id=?", p![id])?
-        .ok_or_else(|| err(404, "Track not found"))?;
+async fn dislike_track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let t = st.db.one("SELECT artist, title FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
     let uid = u.i("id");
     st.db.execute("INSERT OR REPLACE INTO dislikes (user_id, kind, ref, name, created_at) VALUES (?, 'track', ?, ?, ?)",
         p![uid, id.to_string(), format!("{} – {}", t.s("artist"), t.s("title")), now()])?;
@@ -517,22 +375,14 @@ async fn dislike_track(
 }
 
 /// DELETE /api/taste/dislikes/tracks/{id}: take a song's dislike back.
-async fn undislike_track(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn undislike_track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     forget_dislike(&st, u.i("id"), id)?;
     Ok(Json(json!({ "disliked": false })))
 }
 
 /// PUT /api/taste/dislikes/artists/{name}: "Don't play this artist" – none of the artist's own songs is queued by
 /// a shuffle or a mix again (songs it only features on just come up less).
-async fn dislike_artist(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn dislike_artist(State(st): State<AppState>, User(u): User, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let name = name.trim().to_string();
     if name.is_empty() || name.len() > 300 {
         return Err(err(422, "Which artist?"));
@@ -543,15 +393,8 @@ async fn dislike_artist(
 }
 
 /// DELETE /api/taste/dislikes/artists/{name}: play an artist again.
-async fn undislike_artist(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
-    st.db.execute(
-        "DELETE FROM dislikes WHERE user_id=? AND kind='artist' AND ref=?",
-        p![u.i("id"), taste::artist_key(&name)],
-    )?;
+async fn undislike_artist(State(st): State<AppState>, User(u): User, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    st.db.execute("DELETE FROM dislikes WHERE user_id=? AND kind='artist' AND ref=?", p![u.i("id"), taste::artist_key(&name)])?;
     Ok(Json(json!({ "disliked": false })))
 }
 

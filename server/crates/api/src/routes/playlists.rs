@@ -1,23 +1,23 @@
 //! /api/playlists, /api/connections, /api/sync
-use super::library;
-use super::playlist_collab::{self, Role};
-use super::playlist_links::{self, is_linked, read_only};
-use crate::auth::{MaybeUser, User};
 use crate::enrich::enrich_now;
+use crate::auth::{MaybeUser, User};
 use crate::signin;
+use super::library;
+use super::playlist_links::{self, is_linked, read_only};
+use super::playlist_collab::{self, Role};
+use encore_db::{now, Row, RowExt};
+use encore_core::error::{err, ApiResult};
+use encore_requests::sources::links;
 use crate::state::AppState;
+use encore_sync::Adapter;
+use encore_sync::playlists;
+use encore_sync::connections;
+use encore_db::p;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use encore_core::error::{err, ApiResult};
-use encore_db::p;
-use encore_db::{now, Row, RowExt};
-use encore_requests::sources::links;
-use encore_sync::connections;
-use encore_sync::playlists;
-use encore_sync::Adapter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -28,50 +28,29 @@ pub fn router() -> Router<AppState> {
         .route("/api/playlists/preview", post(preview))
         .route("/api/playlists/import", post(import))
         .route("/api/playlists/merge", post(merge))
-        .route(
-            "/api/playlists/{pid}",
-            get(detail).patch(patch).delete(remove),
-        )
+        .route("/api/playlists/{pid}", get(detail).patch(patch).delete(remove))
         .route("/api/playlists/{pid}/dedupe", post(dedupe))
         .route("/api/playlists/{pid}/rematch", post(rematch))
-        .route(
-            "/api/playlists/{pid}/request-missing",
-            post(request_missing),
-        )
+        .route("/api/playlists/{pid}/request-missing", post(request_missing))
         .route("/api/playlists/{pid}/refresh", post(refresh))
         .route("/api/playlists/{pid}/tracks", post(add_tracks))
-        .route(
-            "/api/playlists/{pid}/items/{iid}",
-            delete(remove_item).patch(match_item),
-        )
+        .route("/api/playlists/{pid}/items/{iid}", delete(remove_item).patch(match_item))
         .route("/api/playlists/{pid}/move", post(move_item))
         .route("/api/playlists/{pid}/sync", post(sync_me))
         .route("/api/playlists/{pid}/share", post(share).delete(unshare))
         .route("/api/connections", get(list_connections))
         .route("/api/connections/plex/check", post(plex_check))
         .route("/api/connections/ytmusic/check", post(ytmusic_check))
-        .route(
-            "/api/connections/{service}",
-            post(connect).patch(patch_connection).delete(disconnect),
-        )
+        .route("/api/connections/{service}", post(connect).patch(patch_connection).delete(disconnect))
         .route("/api/connections/{service}/callback", get(callback))
-        .route(
-            "/api/connections/{service}/playlists",
-            get(remote_playlists),
-        )
-        .route(
-            "/api/connections/{service}/playlists/{rid}/import",
-            post(import_remote),
-        )
+        .route("/api/connections/{service}/playlists", get(remote_playlists))
+        .route("/api/connections/{service}/playlists/{rid}/import", post(import_remote))
         .route("/api/sync", post(sync_me_all))
 }
 
 /// One of the user's playlists: their own, Liked Songs, or someone else's added from a link (kind `linked`).
 pub(super) fn own(st: &AppState, pid: i64, u: &Row) -> ApiResult<Row> {
-    st.db
-        .one("SELECT * FROM playlists WHERE id=?", p![pid])?
-        .filter(|p| p.i("user_id") == u.i("id"))
-        .ok_or_else(|| err(404, "Playlist not found"))
+    st.db.one("SELECT * FROM playlists WHERE id=?", p![pid])?.filter(|p| p.i("user_id") == u.i("id")).ok_or_else(|| err(404, "Playlist not found"))
 }
 
 /// [`own`] for a route that changes the playlist: someone else's playlist added from a link is read-only (403).
@@ -100,34 +79,17 @@ fn bad(e: anyhow::Error) -> encore_core::error::ApiError {
 async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         playlists::get_liked(st, u.i("id")).map_err(bad)?;
-        let mut rows = st.db.query(
-            "SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC",
-            p![u.i("id")],
-        )?;
+        let mut rows = st.db.query("SELECT * FROM playlists WHERE user_id=? ORDER BY kind='liked' DESC, updated_at DESC", p![u.i("id")])?;
         // collaborative playlists the user joined sit among their own, by when they last changed
         let joined = playlist_collab::joined_rows(st, u.i("id"))?;
         let theirs: std::collections::HashSet<i64> = joined.iter().map(|r| r.i("id")).collect();
         if !joined.is_empty() {
             rows.extend(joined);
-            rows.sort_by(|a, b| {
-                (b.s("kind") == "liked")
-                    .cmp(&(a.s("kind") == "liked"))
-                    .then(
-                        b.f("updated_at")
-                            .partial_cmp(&a.f("updated_at"))
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                    )
-            });
+            rows.sort_by(|a, b| (b.s("kind") == "liked").cmp(&(a.s("kind") == "liked"))
+                .then(b.f("updated_at").partial_cmp(&a.f("updated_at")).unwrap_or(std::cmp::Ordering::Equal)));
         }
-        let links: std::collections::HashMap<String, String> = st
-            .db
-            .query(
-                "SELECT ref, token FROM shares WHERE user_id=? AND kind='playlist'",
-                p![u.i("id")],
-            )?
-            .into_iter()
-            .map(|r| (r.s("ref"), r.s("token")))
-            .collect();
+        let links: std::collections::HashMap<String, String> = st.db.query("SELECT ref, token FROM shares WHERE user_id=? AND kind='playlist'", p![u.i("id")])?
+            .into_iter().map(|r| (r.s("ref"), r.s("token"))).collect();
         let added = playlist_links::added_by_all(st, u.i("id"))?;
         let mine: Vec<Row> = rows.iter().filter(|r| !is_linked(r)).cloned().collect();
         let mut summaries = playlists::summaries(st, &mine).into_iter();
@@ -144,9 +106,7 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
                 v["collab"] = playlist_collab::collab_json(st, row, Role::Collaborator)?;
             } else {
                 let pid = row.i("id").to_string();
-                v["share"] = links.get(&pid).map_or(Value::Null, |t| {
-                    share_with_count(st, t, added.get(t).copied().unwrap_or(0))
-                });
+                v["share"] = links.get(&pid).map_or(Value::Null, |t| share_with_count(st, t, added.get(t).copied().unwrap_or(0)));
                 v["collab"] = playlist_collab::collab_json(st, row, Role::Owner)?;
             }
             v.as_object_mut().map(|o| o.remove("invite_token"));
@@ -155,8 +115,7 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
             list.push(v);
         }
         Ok(Json(json!(list)))
-    })
-    .await
+    }).await
 }
 
 /// A share link as the owner's list and detail show it: `{token, path, url, added_by}`.
@@ -168,47 +127,27 @@ fn share_with_count(st: &AppState, token: &str, added_by: i64) -> Value {
 
 /// A playlist's share link (`{token, path, url, added_by}`), or null when it isn't shared.
 fn share_of(st: &AppState, pid: i64, uid: i64) -> ApiResult<Value> {
-    Ok(
-        match st.db.one(
-            "SELECT token FROM shares WHERE kind='playlist' AND ref=? AND user_id=?",
-            p![pid.to_string(), uid],
-        )? {
-            Some(r) => share_with_count(
-                st,
-                &r.s("token"),
-                playlist_links::added_by(st, &r.s("token"))?,
-            ),
-            None => Value::Null,
-        },
-    )
+    Ok(match st.db.one("SELECT token FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])? {
+        Some(r) => share_with_count(st, &r.s("token"), playlist_links::added_by(st, &r.s("token"))?),
+        None => Value::Null,
+    })
 }
 
 /// Ends a playlist's share link for good: sharing it again makes a new one.
 fn unshare_now(st: &AppState, pid: i64, uid: i64) -> ApiResult<()> {
-    st.db.execute(
-        "DELETE FROM shares WHERE kind='playlist' AND ref=? AND user_id=?",
-        p![pid.to_string(), uid],
-    )?;
+    st.db.execute("DELETE FROM shares WHERE kind='playlist' AND ref=? AND user_id=?", p![pid.to_string(), uid])?;
     Ok(())
 }
 
 /// Share: a public link that always shows the playlist as it is now (Liked Songs too; only its owner may
 /// share it). Asking again gives the same link: `{token, path, url}`.
-async fn share(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn share(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     own_writable(&st, pid, &u)?;
     library::share_link(&st, u.i("id"), "playlist", 0, &pid.to_string())
 }
 
 /// Stop sharing: the link stops working for everyone who has it. A playlist that isn't shared answers ok too.
-async fn unshare(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn unshare(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     own_writable(&st, pid, &u)?;
     unshare_now(&st, pid, u.i("id"))?;
     Ok(Json(json!({ "ok": true })))
@@ -238,18 +177,12 @@ struct ImportBody {
 async fn fetch_source(st: &AppState, b: &ImportBody, uid: i64) -> ApiResult<Value> {
     match b.text.as_deref().filter(|t| !t.trim().is_empty()) {
         Some(t) => links::parse_text(t).map_err(bad),
-        None => links::fetch_as(st, b.url.as_deref().unwrap_or(""), Some(uid))
-            .await
-            .map_err(bad),
+        None => links::fetch_as(st, b.url.as_deref().unwrap_or(""), Some(uid)).await.map_err(bad),
     }
 }
 
 /// POST /api/playlists/preview: the source's songs matched against the library, without saving anything.
-async fn preview(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<ImportBody>,
-) -> ApiResult<Json<Value>> {
+async fn preview(State(st): State<AppState>, User(u): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
     let data = fetch_source(&st, &b, u.i("id")).await?;
     // matching every song against the library (its index is kept while the songs are unchanged) on the
     // blocking pool
@@ -282,63 +215,27 @@ fn import_now(st: &AppState, u: &Row, b: ImportBody, data: Value) -> ApiResult<V
     let mut res = match b.into {
         Some(pid) => {
             let pl = editable(st, pid, u)?;
-            let (added, dupes) =
-                playlists::add_tracks(st, pl.i("id"), &tracks, &source).map_err(bad)?;
+            let (added, dupes) = playlists::add_tracks(st, pl.i("id"), &tracks, &source).map_err(bad)?;
             json!({ "id": pid, "added": added, "duplicates_skipped": dupes })
         }
         None => {
-            let name = b
-                .name
-                .clone()
-                .filter(|n| !n.trim().is_empty())
-                .or(data["name"].as_str().map(String::from))
-                .unwrap_or("Imported playlist".into());
-            playlists::create(
-                st,
-                u.i("id"),
-                &name,
-                &tracks,
-                &source,
-                b.url.as_deref(),
-                data["description"].as_str().unwrap_or(""),
-                data["cover"].as_str(),
-                b.follow && b.url.is_some(),
-            )
-            .map_err(bad)?
+            let name = b.name.clone().filter(|n| !n.trim().is_empty()).or(data["name"].as_str().map(String::from)).unwrap_or("Imported playlist".into());
+            playlists::create(st, u.i("id"), &name, &tracks, &source, b.url.as_deref(), data["description"].as_str().unwrap_or(""), data["cover"].as_str(),
+                b.follow && b.url.is_some()).map_err(bad)?
         }
     };
     if b.request_missing {
-        let rep = encore_requests::missing::request_missing(
-            st,
-            u,
-            res["id"].as_i64().unwrap_or(0),
-            false,
-            b.album_mode,
-        )
-        .map_err(bad)?;
+        let rep = encore_requests::missing::request_missing(st, u, res["id"].as_i64().unwrap_or(0), false, b.album_mode).map_err(bad)?;
         res["requested"] = json!(rep.requested);
         res["in_progress"] = json!(rep.in_progress);
         res["failed"] = json!(rep.failed);
     }
-    st.db.log(
-        "info",
-        &format!(
-            "{} imported '{}' from {source} ({} tracks, {} duplicates skipped)",
-            u.s("username"),
-            data["name"].as_str().unwrap_or(""),
-            tracks.len(),
-            res["duplicates_skipped"]
-        ),
-    );
+    st.db.log("info", &format!("{} imported '{}' from {source} ({} tracks, {} duplicates skipped)", u.s("username"), data["name"].as_str().unwrap_or(""), tracks.len(), res["duplicates_skipped"]));
     Ok(res)
 }
 
 /// POST /api/playlists/import: import a link or pasted text as a playlist.
-async fn import(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<ImportBody>,
-) -> ApiResult<Json<Value>> {
+async fn import(State(st): State<AppState>, User(u): User, Json(b): Json<ImportBody>) -> ApiResult<Json<Value>> {
     Ok(Json(import_inner(&st, &u, b).await?))
 }
 
@@ -359,45 +256,22 @@ struct Patch {
 }
 
 /// POST /api/playlists: make a playlist ("New playlist" unless named).
-async fn create(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<Patch>,
-) -> ApiResult<Json<Value>> {
-    let name = b
-        .name
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or("New playlist".into());
+async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
+    let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or("New playlist".into());
     st.blocking(move |st| {
-        let mut res = playlists::create(
-            st,
-            u.i("id"),
-            &name,
-            &[],
-            "manual",
-            None,
-            b.description.as_deref().unwrap_or(""),
-            None,
-            false,
-        )
-        .map_err(bad)?;
+        let mut res = playlists::create(st, u.i("id"), &name, &[], "manual", None, b.description.as_deref().unwrap_or(""), None, false).map_err(bad)?;
         // New playlist's Collaborative box: on from the start, with its invite link to hand out
         if b.collaborative == Some(true) {
             let pl = own(st, res["id"].as_i64().unwrap_or(0), &u)?;
             res["invite_link"] = playlist_collab::invite_link(st, &pl)?;
         }
         Ok(Json(res))
-    })
-    .await
+    }).await
 }
 
 /// One playlist with its songs, read and enriched on the blocking pool. Someone else's playlist added from a
 /// link shows that playlist as it is now (`playlist_links::linked_detail`).
-async fn detail(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn detail(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (pl, role) = playlist_collab::member(st, pid, &u)?;
         if is_linked(&pl) {
@@ -426,42 +300,21 @@ async fn detail(
 }
 
 /// PATCH /api/playlists/{pid}: change a playlist.
-async fn patch(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-    Json(b): Json<Patch>,
-) -> ApiResult<Json<Value>> {
+async fn patch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Patch>) -> ApiResult<Json<Value>> {
     let pl = own_writable(&st, pid, &u)?;
     let mut sets: Vec<(&str, Value)> = vec![];
     if let (Some(n), false) = (b.name, pl.s("kind") == "liked") {
-        sets.push((
-            "name",
-            json!(if n.trim().is_empty() {
-                pl.s("name")
-            } else {
-                n.trim().to_string()
-            }),
-        ));
+        sets.push(("name", json!(if n.trim().is_empty() { pl.s("name") } else { n.trim().to_string() })));
     }
     if let Some(d) = b.description {
         sets.push(("description", json!(d)));
     }
     if let Some(f) = b.follow {
-        sets.push((
-            "follow",
-            json!((f && !pl.s("source_url").is_empty()) as i64),
-        ));
+        sets.push(("follow", json!((f && !pl.s("source_url").is_empty()) as i64)));
     }
     if let Some(t) = b.sync_targets {
         let src = pl.s("source");
-        let ok: Vec<String> = t
-            .into_iter()
-            .filter(|x| {
-                ["jellyfin", "plex", "navidrome", "listenbrainz", "ytmusic"].contains(&x.as_str())
-                    && *x != src
-            })
-            .collect();
+        let ok: Vec<String> = t.into_iter().filter(|x| ["jellyfin", "plex", "navidrome", "listenbrainz", "ytmusic"].contains(&x.as_str()) && *x != src).collect();
         sets.push(("sync_targets", json!(json!(ok).to_string())));
     }
     if let Some(c) = b.collaborative {
@@ -469,13 +322,7 @@ async fn patch(
     }
     if !sets.is_empty() {
         sets.push(("updated_at", json!(now())));
-        let sql = format!(
-            "UPDATE playlists SET {} WHERE id=?",
-            sets.iter()
-                .map(|(k, _)| format!("{k}=?"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let sql = format!("UPDATE playlists SET {} WHERE id=?", sets.iter().map(|(k, _)| format!("{k}=?")).collect::<Vec<_>>().join(", "));
         let mut params: Vec<Value> = sets.into_iter().map(|(_, v)| v).collect();
         params.push(json!(pid));
         st.db.execute(&sql, params)?;
@@ -489,17 +336,10 @@ async fn patch(
 
 /// Delete a playlist. For someone else's playlist added from a link this is Remove from my playlists: only
 /// the entry goes (it has no items, and the owner's playlist and link are untouched).
-async fn remove(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn remove(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     // for a member of someone's collaborative playlist this is Leave: the playlist stays the owner's
     if let (_, Role::Collaborator) = playlist_collab::member(&st, pid, &u)? {
-        st.db.execute(
-            "DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?",
-            p![pid, u.i("id")],
-        )?;
+        st.db.execute("DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?", p![pid, u.i("id")])?;
         return Ok(Json(json!({ "ok": true })));
     }
     let pl = own(&st, pid, &u)?;
@@ -507,14 +347,10 @@ async fn remove(
         return Err(err(400, "Liked Songs can't be deleted"));
     }
     if is_linked(&pl) {
-        st.db.execute(
-            "DELETE FROM playlists WHERE id=? AND kind='linked'",
-            p![pid],
-        )?;
+        st.db.execute("DELETE FROM playlists WHERE id=? AND kind='linked'", p![pid])?;
         return Ok(Json(json!({ "ok": true })));
     }
-    st.db
-        .execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
+    st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
     unshare_now(&st, pid, u.i("id"))?;
     playlist_collab::forget(&st, pid)?;
@@ -522,68 +358,41 @@ async fn remove(
 }
 
 /// Matching against the library (its index of every song) and the writes run on the blocking pool.
-async fn dedupe(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn dedupe(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         editable(st, pid, &u)?;
         playlists::rematch(st, Some(pid), false);
         Ok(Json(json!({ "removed": playlists::dedupe(st, pid) })))
-    })
-    .await
+    }).await
 }
 
 /// POST /api/playlists/{pid}/rematch: match the playlist's missing songs against the library again.
-async fn rematch(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn rematch(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         editable(st, pid, &u)?;
-        Ok(Json(
-            json!({ "matched": playlists::rematch(st, Some(pid), false) }),
-        ))
-    })
-    .await
+        Ok(Json(json!({ "matched": playlists::rematch(st, Some(pid), false) })))
+    }).await
 }
 
 /// POST /api/playlists/{pid}/request-missing: request the songs the library doesn't have.
-async fn request_missing(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-    body: Option<Json<Value>>,
-) -> ApiResult<Json<Value>> {
+async fn request_missing(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
     let mode = body.and_then(|b| b["album_mode"].as_str().map(String::from));
     // every song of the playlist is looked up: on the blocking pool
     st.blocking(move |st| {
         own_writable(st, pid, &u)?;
         encore_requests::create::quota(st, &u, 1)?;
         // {requested, in_progress, failed: [{title, reason}]}
-        Ok(Json(json!(encore_requests::missing::request_missing(
-            st, &u, pid, false, mode
-        )
-        .map_err(bad)?)))
-    })
-    .await
+        Ok(Json(json!(encore_requests::missing::request_missing(st, &u, pid, false, mode).map_err(bad)?)))
+    }).await
 }
 
 /// POST /api/playlists/{pid}/refresh: read the playlist's source again.
-async fn refresh(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn refresh(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     let pl = own_writable(&st, pid, &u)?;
     if pl.s("source_url").is_empty() {
         return Err(err(400, "This playlist has no source to refresh from"));
     }
-    let (added, dupes) = playlists::refresh_followed(&st, &pl)
-        .await
-        .map_err(|e| err(502, e.to_string()))?;
+    let (added, dupes) = playlists::refresh_followed(&st, &pl).await.map_err(|e| err(502, e.to_string()))?;
     Ok(Json(json!({ "added": added, "duplicates_skipped": dupes })))
 }
 
@@ -595,31 +404,18 @@ struct AddTracks {
 }
 
 /// POST /api/playlists/{pid}/tracks: add songs to a playlist.
-async fn add_tracks(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-    Json(b): Json<AddTracks>,
-) -> ApiResult<Json<Value>> {
+async fn add_tracks(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<AddTracks>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         editable(st, pid, &u)?;
         let (added, dupes) = playlists::add_library_tracks(st, pid, &b.track_ids).map_err(bad)?;
         Ok(Json(json!({ "added": added, "duplicates_skipped": dupes })))
-    })
-    .await
+    }).await
 }
 
 /// DELETE /api/playlists/{pid}/items/{iid}: take a song off a playlist.
-async fn remove_item(
-    State(st): State<AppState>,
-    User(u): User,
-    Path((pid, iid)): Path<(i64, i64)>,
-) -> ApiResult<Json<Value>> {
+async fn remove_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>) -> ApiResult<Json<Value>> {
     editable(&st, pid, &u)?;
-    st.db.execute(
-        "DELETE FROM playlist_items WHERE id=? AND playlist_id=?",
-        p![iid, pid],
-    )?;
+    st.db.execute("DELETE FROM playlist_items WHERE id=? AND playlist_id=?", p![iid, pid])?;
     playlists::renumber(&st, pid);
     Ok(Json(json!({ "ok": true })))
 }
@@ -633,55 +429,28 @@ struct MatchBody {
 
 /// Link an item to a library song by hand (or unlink it), for one the matching got wrong or couldn't find
 /// (`playlists::set_match`). → {ok, duplicates_removed}
-async fn match_item(
-    State(st): State<AppState>,
-    User(u): User,
-    Path((pid, iid)): Path<(i64, i64)>,
-    Json(b): Json<MatchBody>,
-) -> ApiResult<Json<Value>> {
+async fn match_item(State(st): State<AppState>, User(u): User, Path((pid, iid)): Path<(i64, i64)>, Json(b): Json<MatchBody>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         own_writable(st, pid, &u)?;
-        let (found, dropped) =
-            playlists::set_match(st, pid, iid, b.track_id.filter(|t| *t > 0)).map_err(bad)?;
+        let (found, dropped) = playlists::set_match(st, pid, iid, b.track_id.filter(|t| *t > 0)).map_err(bad)?;
         if !found {
             return Err(err(404, "Item not found"));
         }
         Ok(Json(json!({ "ok": true, "duplicates_removed": dropped })))
-    })
-    .await
+    }).await
 }
 
 /// POST /api/playlists/{pid}/move: move a song (`{item_id, to}`) to another place.
-async fn move_item(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
+async fn move_item(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     editable(&st, pid, &u)?;
-    let mut ids: Vec<i64> = playlists::items(&st, pid)
-        .iter()
-        .map(|r| r.i("id"))
-        .collect();
-    let iid = b["item_id"]
-        .as_i64()
-        .or(b["item_id"].as_str().and_then(|x| x.parse().ok()))
-        .unwrap_or(0);
-    let to = b["to"]
-        .as_i64()
-        .or(b["to"].as_str().and_then(|x| x.parse().ok()))
-        .unwrap_or(0)
-        .max(0) as usize;
-    let Some(at) = ids.iter().position(|i| *i == iid) else {
-        return Err(err(404, "Item not found"));
-    };
+    let mut ids: Vec<i64> = playlists::items(&st, pid).iter().map(|r| r.i("id")).collect();
+    let iid = b["item_id"].as_i64().or(b["item_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
+    let to = b["to"].as_i64().or(b["to"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0).max(0) as usize;
+    let Some(at) = ids.iter().position(|i| *i == iid) else { return Err(err(404, "Item not found")) };
     ids.remove(at);
     ids.insert(to.min(ids.len()), iid);
     for (pos, i) in ids.iter().enumerate() {
-        st.db.execute(
-            "UPDATE playlist_items SET position=? WHERE id=?",
-            p![pos, i],
-        )?;
+        st.db.execute("UPDATE playlist_items SET position=? WHERE id=?", p![pos, i])?;
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -703,11 +472,7 @@ struct MergeBody {
 }
 
 /// POST /api/playlists/merge: merge playlists into a new one (or into an existing one).
-async fn merge(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<MergeBody>,
-) -> ApiResult<Json<Value>> {
+async fn merge(State(st): State<AppState>, User(u): User, Json(b): Json<MergeBody>) -> ApiResult<Json<Value>> {
     let into = b.into.filter(|i| *i != 0);
     let sources = b.ids.iter().filter(|i| Some(**i) != into).count();
     if into.is_some() && sources == 0 {
@@ -716,32 +481,16 @@ async fn merge(
     if into.is_none() && b.ids.len() < 2 {
         return Err(err(400, "Pick at least two playlists"));
     }
-    let name = if b.name.trim().is_empty() {
-        "Merged playlist".to_string()
-    } else {
-        b.name.trim().to_string()
-    };
+    let name = if b.name.trim().is_empty() { "Merged playlist".to_string() } else { b.name.trim().to_string() };
     st.blocking(move |st| {
         if let Some(pid) = into {
             editable(st, pid, &u)?;
         }
         // someone else's playlist added from a link is not the user's to merge (or delete with it): a copy is
         for pid in &b.ids {
-            if let Some(pl) = st.db.one(
-                "SELECT * FROM playlists WHERE id=? AND user_id=? AND kind='linked'",
-                p![pid, u.i("id")],
-            )? {
-                let owner = playlist_links::LinkSnapshot::of(&pl)
-                    .map(|s| s.owner)
-                    .filter(|o| !o.is_empty())
-                    .unwrap_or_else(|| "someone else".into());
-                return Err(err(
-                    403,
-                    format!(
-                        "“{}” is {owner}'s playlist. Save a copy to merge it.",
-                        pl.s("name")
-                    ),
-                ));
+            if let Some(pl) = st.db.one("SELECT * FROM playlists WHERE id=? AND user_id=? AND kind='linked'", p![pid, u.i("id")])? {
+                let owner = playlist_links::LinkSnapshot::of(&pl).map(|s| s.owner).filter(|o| !o.is_empty()).unwrap_or_else(|| "someone else".into());
+                return Err(err(403, format!("“{}” is {owner}'s playlist. Save a copy to merge it.", pl.s("name"))));
             }
         }
         let res = match into {
@@ -750,16 +499,8 @@ async fn merge(
         };
         if b.delete_sources {
             for pid in b.ids.iter().filter(|i| Some(**i) != into) {
-                if st
-                    .db
-                    .one(
-                        "SELECT kind FROM playlists WHERE id=? AND user_id=?",
-                        p![pid, u.i("id")],
-                    )?
-                    .is_some_and(|p| p.s("kind") != "liked")
-                {
-                    st.db
-                        .execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
+                if st.db.one("SELECT kind FROM playlists WHERE id=? AND user_id=?", p![pid, u.i("id")])?.is_some_and(|p| p.s("kind") != "liked") {
+                    st.db.execute("DELETE FROM playlist_items WHERE playlist_id=?", p![pid])?;
                     st.db.execute("DELETE FROM playlists WHERE id=?", p![pid])?;
                     unshare_now(st, *pid, u.i("id"))?;
                     playlist_collab::forget(st, *pid)?;
@@ -767,16 +508,11 @@ async fn merge(
             }
         }
         Ok(Json(res))
-    })
-    .await
+    }).await
 }
 
 /// POST /api/playlists/{pid}/sync: sync one playlist to the user's services now.
-async fn sync_me(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(pid): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn sync_me(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
     own_writable(&st, pid, &u)?;
     let mut log = vec![];
     let mut s = encore_sync::sync_user(&st, u.i("id"), &mut log).await;
@@ -796,25 +532,17 @@ async fn sync_me_all(State(st): State<AppState>, User(u): User) -> ApiResult<Jso
 
 /// GET /api/connections: the user's connected services and which ones the server can connect.
 async fn list_connections(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    let have: serde_json::Map<String, Value> = connections::list_for(&st, u.i("id"))
-        .iter()
-        .map(|c| (c.s("service"), connections::public(c)))
-        .collect();
+    let have: serde_json::Map<String, Value> = connections::list_for(&st, u.i("id")).iter().map(|c| (c.s("service"), connections::public(c))).collect();
     let has = |k: &str| !st.cfg.str(k).is_empty();
     let avail = json!({ "jellyfin": has("jellyfin_url"), "plex": has("plex_url"), "navidrome": has("navidrome_url"), "spotify": has("spotify_client_id"),
         "tidal": has("tidal_client_id"), "deezer": true, "listenbrainz": true, "ytmusic": true, "lastfm": has("lastfm_api_key") });
     // which services can sign in with a redirect/device flow (an admin-side OAuth client exists); without one the UI
     // goes straight to the alternative (pasted headers) instead of calling the start route and showing its error
     let available_oauth = json!({ "ytmusic": has("ytmusic_client_id") && has("ytmusic_client_secret"), "spotify": has("spotify_client_id"), "tidal": has("tidal_client_id") });
-    let services: serde_json::Map<String, Value> = connections::SERVICES
-        .iter()
-        .map(|(k, l, kind)| (k.to_string(), json!({ "label": l, "kind": kind })))
-        .collect();
+    let services: serde_json::Map<String, Value> = connections::SERVICES.iter().map(|(k, l, kind)| (k.to_string(), json!({ "label": l, "kind": kind }))).collect();
     let sync_state = st.jobs.get("sync");
-    Ok(Json(
-        json!({ "connections": have, "available": avail, "available_oauth": available_oauth, "services": services,
-        "sync": { "running": sync_state["running"], "last": sync_state["last"] }, "base_url": st.cfg.str("base_url") }),
-    ))
+    Ok(Json(json!({ "connections": have, "available": avail, "available_oauth": available_oauth, "services": services,
+        "sync": { "running": sync_state["running"], "last": sync_state["last"] }, "base_url": st.cfg.str("base_url") })))
 }
 
 /// `POST /api/connections/{service}` body: what the service signs in with.
@@ -834,42 +562,17 @@ struct ConnectBody {
 }
 
 /// POST /api/connections/{service}: connect a service (or start its sign-in).
-async fn connect(
-    State(st): State<AppState>,
-    User(u): User,
-    headers: HeaderMap,
-    Path(service): Path<String>,
-    Json(b): Json<ConnectBody>,
-) -> ApiResult<Json<Value>> {
+async fn connect(State(st): State<AppState>, User(u): User, headers: HeaderMap, Path(service): Path<String>, Json(b): Json<ConnectBody>) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let s = |o: &Option<String>| o.clone().unwrap_or_default().trim().to_string();
     let res = match service.as_str() {
-        "jellyfin" => {
-            connections::connect_jellyfin(
-                &st,
-                uid,
-                &s(&b.username),
-                &b.password.clone().unwrap_or_default(),
-            )
-            .await
-        }
-        "navidrome" => {
-            connections::connect_navidrome(
-                &st,
-                uid,
-                &s(&b.username),
-                &b.password.clone().unwrap_or_default(),
-            )
-            .await
-        }
+        "jellyfin" => connections::connect_jellyfin(&st, uid, &s(&b.username), &b.password.clone().unwrap_or_default()).await,
+        "navidrome" => connections::connect_navidrome(&st, uid, &s(&b.username), &b.password.clone().unwrap_or_default()).await,
         "listenbrainz" => connections::connect_listenbrainz(&st, uid, &s(&b.token)).await,
         "lastfm" => match s(&b.username) {
             n if !n.is_empty() => connections::connect_lastfm(&st, uid, &n).await,
             // the sign-in's single-use state rides in the callback address (crate::signin)
-            _ => signin::start(&st, uid, "lastfm", &headers, |state, _| {
-                connections::lastfm_start(&st, state)
-            })
-            .map(|url| json!({ "url": url })),
+            _ => signin::start(&st, uid, "lastfm", &headers, |state, _| connections::lastfm_start(&st, state)).map(|url| json!({ "url": url })),
         },
         "deezer" => connections::connect_deezer(&st, uid, &s(&b.profile)).await,
         "plex" => connections::plex_pin_start(&st).await,
@@ -877,41 +580,22 @@ async fn connect(
             Some(h) => connections::ytmusic_connect_browser(&st, uid, h).await,
             None => connections::ytmusic_oauth_start(&st).await,
         },
-        "spotify" | "tidal" => signin::start(&st, uid, &service, &headers, |state, verifier| {
-            connections::oauth_url(&st, &service, state, verifier)
-        })
-        .map(|url| json!({ "url": url })),
+        "spotify" | "tidal" => signin::start(&st, uid, &service, &headers, |state, verifier| connections::oauth_url(&st, &service, state, verifier))
+            .map(|url| json!({ "url": url })),
         _ => return Err(err(404, "Unknown service")),
     };
     res.map(Json).map_err(bad)
 }
 
 /// POST /api/connections/plex/check: whether the Plex PIN sign-in has finished.
-async fn plex_check(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
-    let pin = b["pin_id"]
-        .as_i64()
-        .or(b["pin_id"].as_str().and_then(|x| x.parse().ok()))
-        .unwrap_or(0);
-    connections::plex_pin_check(&st, u.i("id"), pin)
-        .await
-        .map(Json)
-        .map_err(bad)
+async fn plex_check(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    let pin = b["pin_id"].as_i64().or(b["pin_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(0);
+    connections::plex_pin_check(&st, u.i("id"), pin).await.map(Json).map_err(bad)
 }
 
 /// POST /api/connections/ytmusic/check: whether the YouTube Music device sign-in has finished.
-async fn ytmusic_check(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
-    connections::ytmusic_oauth_check(&st, u.i("id"), b["device_code"].as_str().unwrap_or(""))
-        .await
-        .map(Json)
-        .map_err(bad)
+async fn ytmusic_check(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    connections::ytmusic_oauth_check(&st, u.i("id"), b["device_code"].as_str().unwrap_or("")).await.map(Json).map_err(bad)
 }
 
 /// `GET /api/connections/{service}/callback` query.
@@ -931,35 +615,21 @@ struct CallbackQ {
 /// Back to the Connections page with a plain-words error (the callback is a top-level navigation, so a JSON
 /// error body would be shown as a bare page).
 fn callback_error(msg: &str) -> Response {
-    Redirect::to(&format!(
-        "/#/connections?error={}",
-        urlencoding::encode(&msg.chars().take(200).collect::<String>())
-    ))
-    .into_response()
+    Redirect::to(&format!("/#/connections?error={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
 }
 
 /// Spotify, Tidal and Last.fm come back here. The account goes to the user who started the sign-in (its
 /// single-use `state`), not to whoever this browser is signed in as; a browser that is not signed in as that
 /// user is asked first (crate::signin).
-async fn callback(
-    State(st): State<AppState>,
-    MaybeUser(u): MaybeUser,
-    Path(service): Path<String>,
-    Query(q): Query<CallbackQ>,
-) -> Response {
+async fn callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(service): Path<String>, Query(q): Query<CallbackQ>) -> Response {
     if !matches!(service.as_str(), "lastfm" | "spotify" | "tidal") {
         return callback_error("Unknown service");
     }
-    let code = if service == "lastfm" {
-        &q.token
-    } else {
-        &q.code
-    };
+    let code = if service == "lastfm" { &q.token } else { &q.code };
     signin::callback(&st, u, &service, &q.state, &q.error, code, |r| match r {
         Ok(()) => Redirect::to(&format!("/#/connections?connected={service}")).into_response(),
         Err(e) => callback_error(&e),
-    })
-    .await
+    }).await
 }
 
 /// `PATCH /api/connections/{service}` body.
@@ -975,18 +645,10 @@ struct ConnPatch {
 }
 
 /// PATCH /api/connections/{service}: change what is synced with a service.
-async fn patch_connection(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(service): Path<String>,
-    Json(b): Json<ConnPatch>,
-) -> ApiResult<Json<Value>> {
+async fn patch_connection(State(st): State<AppState>, User(u): User, Path(service): Path<String>, Json(b): Json<ConnPatch>) -> ApiResult<Json<Value>> {
     let c = connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
     if let Some(v) = b.sync_likes {
-        st.db.execute(
-            "UPDATE connections SET sync_likes=? WHERE id=?",
-            p![v as i64, c.i("id")],
-        )?;
+        st.db.execute("UPDATE connections SET sync_likes=? WHERE id=?", p![v as i64, c.i("id")])?;
     }
     if let Some(v) = b.scrobble {
         let mut d: Value = serde_json::from_str(&c.s("data")).unwrap_or(json!({}));
@@ -994,93 +656,38 @@ async fn patch_connection(
         connections::update_data(&st, c.i("id"), &d);
     }
     if let Some(v) = b.sync_playlists {
-        st.db.execute(
-            "UPDATE connections SET sync_playlists=? WHERE id=?",
-            p![v as i64, c.i("id")],
-        )?;
+        st.db.execute("UPDATE connections SET sync_playlists=? WHERE id=?", p![v as i64, c.i("id")])?;
     }
     Ok(Json(json!({ "ok": true })))
 }
 
 /// DELETE /api/connections/{service}: disconnect a service and forget its sync state.
-async fn disconnect(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(service): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn disconnect(State(st): State<AppState>, User(u): User, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     if let Some(c) = connections::get(&st, u.i("id"), &service) {
-        st.db.execute(
-            "DELETE FROM sync_state WHERE connection_id=?",
-            p![c.i("id")],
-        )?;
-        st.db
-            .execute("DELETE FROM connections WHERE id=?", p![c.i("id")])?;
+        st.db.execute("DELETE FROM sync_state WHERE connection_id=?", p![c.i("id")])?;
+        st.db.execute("DELETE FROM connections WHERE id=?", p![c.i("id")])?;
     }
     Ok(Json(json!({ "ok": true })))
 }
 
 /// GET /api/connections/{service}/playlists: the playlists on the connected service.
-async fn remote_playlists(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(service): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn remote_playlists(State(st): State<AppState>, User(u): User, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     let c = connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
-    Adapter::new(&st, c)
-        .playlists()
-        .await
-        .map(|v| Json(json!(v)))
-        .map_err(|e| err(502, e.to_string().chars().take(300).collect::<String>()))
+    Adapter::new(&st, c).playlists().await.map(|v| Json(json!(v))).map_err(|e| err(502, e.to_string().chars().take(300).collect::<String>()))
 }
 
 /// POST /api/connections/{service}/playlists/{rid}/import: import one of the service's playlists.
-async fn import_remote(
-    State(st): State<AppState>,
-    User(u): User,
-    Path((service, rid)): Path<(String, String)>,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
+async fn import_remote(State(st): State<AppState>, User(u): User, Path((service, rid)): Path<(String, String)>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     connections::get(&st, u.i("id"), &service).ok_or_else(|| err(404, "Not connected"))?;
-    let name = b["name"]
-        .as_str()
-        .filter(|n| !n.is_empty())
-        .unwrap_or("Imported playlist")
-        .to_string();
+    let name = b["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("Imported playlist").to_string();
     let follow = b["follow"].as_bool().unwrap_or(false);
     if let Some(url) = b["url"].as_str().filter(|x| !x.is_empty()) {
-        return Ok(Json(
-            import_inner(
-                &st,
-                &u,
-                ImportBody {
-                    url: Some(url.into()),
-                    name: Some(name),
-                    follow,
-                    ..Default::default()
-                },
-            )
-            .await?,
-        ));
+        return Ok(Json(import_inner(&st, &u, ImportBody { url: Some(url.into()), name: Some(name), follow, ..Default::default() }).await?));
     }
-    let res = playlists::create(
-        &st,
-        u.i("id"),
-        &name,
-        &[],
-        &service,
-        Some(&format!("{service}:{rid}")),
-        "",
-        None,
-        follow,
-    )
-    .map_err(bad)?;
+    let res = playlists::create(&st, u.i("id"), &name, &[], &service, Some(&format!("{service}:{rid}")), "", None, follow).map_err(bad)?;
     let pl = own(&st, res["id"].as_i64().unwrap_or(0), &u)?;
-    let (added, dupes) = playlists::refresh_followed(&st, &pl)
-        .await
-        .map_err(|e| err(502, e.to_string()))?;
-    Ok(Json(
-        json!({ "id": pl.i("id"), "added": added, "duplicates_skipped": dupes }),
-    ))
+    let (added, dupes) = playlists::refresh_followed(&st, &pl).await.map_err(|e| err(502, e.to_string()))?;
+    Ok(Json(json!({ "id": pl.i("id"), "added": added, "duplicates_skipped": dupes })))
 }
 
 #[cfg(test)]

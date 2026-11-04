@@ -68,10 +68,7 @@ pub struct Perf {
 
 impl Default for Perf {
     fn default() -> Self {
-        Perf {
-            inner: Default::default(),
-            since: encore_db::now(),
-        }
+        Perf { inner: Default::default(), since: encore_db::now() }
     }
 }
 
@@ -116,14 +113,7 @@ impl Perf {
             if g.slow.len() >= SLOW_KEPT {
                 g.slow.pop_front();
             }
-            g.slow.push_back(Slow {
-                at: encore_db::now(),
-                method: method.to_string(),
-                path: shown_path(path, route),
-                route: route.to_string(),
-                status,
-                ms,
-            });
+            g.slow.push_back(Slow { at: encore_db::now(), method: method.to_string(), path: shown_path(path, route), route: route.to_string(), status, ms });
         }
     }
 
@@ -160,11 +150,7 @@ const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OP
 
 /// The method as the table counts it (see [`METHODS`]).
 fn method_key(method: &str) -> &str {
-    METHODS
-        .iter()
-        .copied()
-        .find(|m| *m == method)
-        .unwrap_or("OTHER")
+    METHODS.iter().copied().find(|m| *m == method).unwrap_or("OTHER")
 }
 
 /// The timing middleware (on the API's routes; the web app's files are not timed).
@@ -172,19 +158,12 @@ pub async fn layer(State(perf): State<Perf>, req: Request, next: Next) -> Respon
     let start = Instant::now();
     let method = method_key(req.method().as_str()).to_string();
     let path = req.uri().path().to_string();
-    let route = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| path.clone());
+    let route = req.extensions().get::<MatchedPath>().map(|m| m.as_str().to_string()).unwrap_or_else(|| path.clone());
     let resp = next.run(req).await;
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let status = resp.status().as_u16();
     if ms >= SLOW_MS {
-        tracing::warn!(
-            "slow request: {method} {} {status} {ms:.0} ms",
-            shown_path(&path, &route)
-        );
+        tracing::warn!("slow request: {method} {} {status} {ms:.0} ms", shown_path(&path, &route));
     }
     perf.record(&method, &path, &route, status, ms);
     resp
@@ -198,78 +177,32 @@ mod tests {
     fn routes_get_their_p50_and_p95_and_slow_calls_are_kept() {
         let p = Perf::default();
         for i in 1..=100 {
-            p.record(
-                "GET",
-                "/api/library/albums",
-                "/api/library/albums",
-                200,
-                i as f64,
-            );
+            p.record("GET", "/api/library/albums", "/api/library/albums", 200, i as f64);
         }
         p.record("GET", "/api/share/abc123", "/api/share/{token}", 200, 400.0);
         p.record("POST", "/api/library/scan", "/api/library/scan", 409, 251.0);
         let r = p.report();
-        let albums = r["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["route"] == "/api/library/albums")
-            .unwrap()
-            .clone();
-        assert_eq!(
-            (
-                albums["count"].as_u64(),
-                albums["p50_ms"].as_f64(),
-                albums["p95_ms"].as_f64(),
-                albums["max_ms"].as_f64()
-            ),
-            (Some(100), Some(50.0), Some(95.0), Some(100.0))
-        );
+        let albums = r["routes"].as_array().unwrap().iter().find(|x| x["route"] == "/api/library/albums").unwrap().clone();
+        assert_eq!((albums["count"].as_u64(), albums["p50_ms"].as_f64(), albums["p95_ms"].as_f64(), albums["max_ms"].as_f64()), (Some(100), Some(50.0), Some(95.0), Some(100.0)));
         assert_eq!(albums["slow"], 0);
         // slowest p95 first
         assert_eq!(r["routes"][0]["route"], "/api/share/{token}");
         // newest slow call first; a share token is not shown
         let slow = r["slow"].as_array().unwrap();
         assert_eq!(slow.len(), 2);
-        assert_eq!(
-            (
-                slow[0]["method"].as_str(),
-                slow[0]["path"].as_str(),
-                slow[0]["status"].as_u64()
-            ),
-            (Some("POST"), Some("/api/library/scan"), Some(409))
-        );
+        assert_eq!((slow[0]["method"].as_str(), slow[0]["path"].as_str(), slow[0]["status"].as_u64()), (Some("POST"), Some("/api/library/scan"), Some(409)));
         assert_eq!(slow[1]["path"], "/api/share/{token}");
         // only the newest SLOW_KEPT are kept, and only the newest SAMPLES times per route
         for _ in 0..SLOW_KEPT + 10 {
             p.record("GET", "/api/x", "/api/x", 200, 300.0);
         }
         for _ in 0..SAMPLES {
-            p.record(
-                "GET",
-                "/api/library/albums",
-                "/api/library/albums",
-                200,
-                1.0,
-            );
+            p.record("GET", "/api/library/albums", "/api/library/albums", 200, 1.0);
         }
         let r = p.report();
         assert_eq!(r["slow"].as_array().unwrap().len(), SLOW_KEPT);
-        let albums = r["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["route"] == "/api/library/albums")
-            .unwrap()
-            .clone();
-        assert_eq!(
-            (
-                albums["samples"].as_u64(),
-                albums["p95_ms"].as_f64(),
-                albums["count"].as_u64()
-            ),
-            (Some(SAMPLES as u64), Some(1.0), Some(100 + SAMPLES as u64))
-        );
+        let albums = r["routes"].as_array().unwrap().iter().find(|x| x["route"] == "/api/library/albums").unwrap().clone();
+        assert_eq!((albums["samples"].as_u64(), albums["p95_ms"].as_f64(), albums["count"].as_u64()), (Some(SAMPLES as u64), Some(1.0), Some(100 + SAMPLES as u64)));
     }
 
     /// Made-up methods share one row: the table can't be grown by sending new method names.
@@ -279,47 +212,16 @@ mod tests {
         use axum::routing::get;
         use tower::ServiceExt;
         let perf = Perf::default();
-        let app = axum::Router::new()
-            .route("/api/health", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(perf.clone(), layer));
+        let app = axum::Router::new().route("/api/health", get(|| async { "ok" })).layer(axum::middleware::from_fn_with_state(perf.clone(), layer));
         for m in ["GET", "M1", "M2", "M3", "POST", "DELETE"] {
-            let req = axum::http::Request::builder()
-                .method(m)
-                .uri("/api/health")
-                .body(Body::empty())
-                .unwrap();
+            let req = axum::http::Request::builder().method(m).uri("/api/health").body(Body::empty()).unwrap();
             let _ = app.clone().oneshot(req).await.unwrap();
         }
         let r = perf.report();
-        let mut rows: Vec<String> = r["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| {
-                format!(
-                    "{} {}",
-                    x["method"].as_str().unwrap(),
-                    x["route"].as_str().unwrap()
-                )
-            })
-            .collect();
+        let mut rows: Vec<String> = r["routes"].as_array().unwrap().iter().map(|x| format!("{} {}", x["method"].as_str().unwrap(), x["route"].as_str().unwrap())).collect();
         rows.sort();
-        assert_eq!(
-            rows,
-            [
-                "DELETE /api/health",
-                "GET /api/health",
-                "OTHER /api/health",
-                "POST /api/health"
-            ]
-        );
-        let other = r["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["method"] == "OTHER")
-            .unwrap()
-            .clone();
+        assert_eq!(rows, ["DELETE /api/health", "GET /api/health", "OTHER /api/health", "POST /api/health"]);
+        let other = r["routes"].as_array().unwrap().iter().find(|x| x["method"] == "OTHER").unwrap().clone();
         assert_eq!(other["count"], 3);
     }
 

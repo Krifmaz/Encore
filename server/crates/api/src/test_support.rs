@@ -9,9 +9,9 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use encore_db::{p, Row};
 use serde_json::Value;
+use tower::ServiceExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tower::ServiceExt;
 
 /// A server on its own config folder.
 pub struct TestServer {
@@ -29,11 +29,7 @@ static SEQ: AtomicUsize = AtomicUsize::new(0);
 impl TestServer {
     /// A new, empty config folder under the system's temp folder (named after `name`).
     pub fn new(name: &str) -> TestServer {
-        let dir = std::env::temp_dir().join(format!(
-            "encore-{name}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
+        let dir = std::env::temp_dir().join(format!("encore-{name}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&dir);
         TestServer::in_dir(&dir)
     }
@@ -42,16 +38,9 @@ impl TestServer {
     /// variable reaches its settings.
     pub fn in_dir(dir: &Path) -> TestServer {
         std::fs::create_dir_all(dir).unwrap();
-        let st = AppState::open_with(dir, dir.join("static"), |db| {
-            encore_config::Config::load_with(db, |_| None)
-        })
-        .unwrap();
+        let st = AppState::open_with(dir, dir.join("static"), |db| encore_config::Config::load_with(db, |_| None)).unwrap();
         let plugins = crate::builtins::register(&st);
-        TestServer {
-            st,
-            dir: dir.to_path_buf(),
-            _plugins: plugins,
-        }
+        TestServer { st, dir: dir.to_path_buf(), _plugins: plugins }
     }
 
     /// The same with these catalog plugins installed and switched on, as an upgraded server has them adopted
@@ -107,10 +96,7 @@ impl TestServer {
 /// A new account `name` with `role` ("user", "admin" …) and the password `a-long-password-1`: its row.
 pub fn user(st: &AppState, name: &str, role: &str) -> Row {
     let id = crate::auth::create_user(st, name, "a-long-password-1", role, None, None).unwrap();
-    st.db
-        .one("SELECT * FROM users WHERE id=?", p![id])
-        .unwrap()
-        .unwrap()
+    st.db.one("SELECT * FROM users WHERE id=?", p![id]).unwrap().unwrap()
 }
 
 /// An answer of the router, read whole.
@@ -126,11 +112,7 @@ pub struct Resp {
 impl Resp {
     /// A header's value ("" when there is none).
     pub fn h(&self, name: &str) -> String {
-        self.headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string()
+        self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
     }
     /// The body as JSON (null when it is not JSON).
     pub fn json(&self) -> Value {
@@ -144,18 +126,8 @@ impl Resp {
 
 /// One request the way the web app makes it (`x-requested-with: encore`), as the user whose session `cookie`
 /// is ("" for none), with a JSON body when there is one and the extra `headers`.
-pub async fn send(
-    app: &Router,
-    method: &str,
-    uri: &str,
-    cookie: &str,
-    body: Option<Value>,
-    headers: &[(&str, &str)],
-) -> Resp {
-    let mut b = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("x-requested-with", "encore");
+pub async fn send(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<Value>, headers: &[(&str, &str)]) -> Resp {
+    let mut b = Request::builder().method(method).uri(uri).header("x-requested-with", "encore");
     if !cookie.is_empty() {
         b = b.header("cookie", cookie);
     }
@@ -172,44 +144,19 @@ pub async fn send(
     let resp = app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body = axum::body::to_bytes(resp.into_body(), 64 << 20)
-        .await
-        .unwrap()
-        .to_vec();
-    Resp {
-        status,
-        headers,
-        body,
-    }
+    let body = axum::body::to_bytes(resp.into_body(), 64 << 20).await.unwrap().to_vec();
+    Resp { status, headers, body }
 }
 
 /// [`send`] without extra headers → (status, the JSON answer, the `set-cookie` header).
-pub async fn call(
-    app: &Router,
-    method: &str,
-    uri: &str,
-    cookie: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value, String) {
+pub async fn call(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<Value>) -> (StatusCode, Value, String) {
     let r = send(app, method, uri, cookie, body, &[]).await;
     (r.status, r.json(), r.h("set-cookie"))
 }
 
 /// The catalog plugins of the download sources and their download clients.
-pub const SOURCE_PLUGINS: [&str; 12] = [
-    "ytdlp",
-    "streamrip",
-    "slskd",
-    "torznab",
-    "qbittorrent",
-    "transmission",
-    "deluge",
-    "rtorrent",
-    "torrent-blackhole",
-    "sabnzbd",
-    "nzbget",
-    "usenet-blackhole",
-];
+pub const SOURCE_PLUGINS: [&str; 12] =
+    ["ytdlp", "streamrip", "slskd", "torznab", "qbittorrent", "transmission", "deluge", "rtorrent", "torrent-blackhole", "sabnzbd", "nzbget", "usenet-blackhole"];
 
 /// Install and switch on every source's and client's plugin on `st` ([`SOURCE_PLUGINS`]; rows only).
 pub fn with_sources(st: &AppState) {
@@ -236,10 +183,7 @@ impl TempState {
     /// A state on a new folder named after `name`.
     pub fn new(name: &str) -> TempState {
         let ts = TestServer::new(name);
-        TempState {
-            st: ts.st.clone(),
-            dir: ts.dir.clone(),
-        }
+        TempState { st: ts.st.clone(), dir: ts.dir.clone() }
     }
 }
 

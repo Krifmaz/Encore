@@ -13,22 +13,8 @@ use std::path::Path;
 /// A short FLAC with a title (false when there is no ffmpeg here).
 fn flac(path: &Path, title: &str) -> bool {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::process::Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=2",
-            "-metadata",
-        ])
-        .arg(format!("title={title}"))
-        .arg(path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-metadata"])
+        .arg(format!("title={title}")).arg(path).status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// The tags to write: a new title.
@@ -43,21 +29,14 @@ fn server(name: &str) -> (TestServer, std::path::PathBuf) {
     let ts = TestServer::new(&format!("rofile-{name}"));
     let lib = ts.dir.join("music");
     std::fs::create_dir_all(&lib).unwrap();
-    ts.st
-        .cfg
-        .set_many(&json!({ "library_path": lib.to_string_lossy() }));
+    ts.st.cfg.set_many(&json!({ "library_path": lib.to_string_lossy() }));
     fsx::roots::add([&lib]);
     (ts, lib)
 }
 
 /// Files left behind by a rewrite (`.encore-rewrite-*`) in `dir`.
 fn leftovers(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(".encore-"))
-        .collect()
+    std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with(".encore-")).collect()
 }
 
 /// The pool takes the new copy over the old name: the file is tagged at its own path, a warning says the
@@ -73,25 +52,10 @@ fn a_read_only_file_is_tagged_anew_at_its_own_path() {
     let got = encore_library::tagger::tag_file(&ts.st, &song, &title("♾️"), None).unwrap();
     fault::clear(&song);
     assert_eq!(got, song);
-    assert_eq!(
-        encore_media::tags::read_tags(&song.to_string_lossy()).s("title"),
-        "♾️"
-    );
+    assert_eq!(encore_media::tags::read_tags(&song.to_string_lossy()).s("title"), "♾️");
     assert!(leftovers(song.parent().unwrap()).is_empty());
-    let logged = ts
-        .st
-        .db
-        .query(
-            "SELECT message FROM activity WHERE level='warning'",
-            encore_db::p![],
-        )
-        .unwrap();
-    assert!(
-        logged
-            .iter()
-            .any(|r| r.s("message").contains("written anew on a writable disk")),
-        "{logged:?}"
-    );
+    let logged = ts.st.db.query("SELECT message FROM activity WHERE level='warning'", encore_db::p![]).unwrap();
+    assert!(logged.iter().any(|r| r.s("message").contains("written anew on a writable disk")), "{logged:?}");
     ts.remove();
 }
 
@@ -109,15 +73,8 @@ fn a_read_only_file_that_cant_be_replaced_gets_a_name_of_its_own() {
     let got = encore_library::tagger::tag_file(&ts.st, &song, &title("♾️"), None).unwrap();
     fault::clear(&song);
     assert_eq!(got, lib.join("Coldplay/Singles/Coldplay - Infinity.flac"));
-    assert_eq!(
-        encore_media::tags::read_tags(&got.to_string_lossy()).s("title"),
-        "♾️"
-    );
-    assert_eq!(
-        encore_media::tags::read_tags(&song.to_string_lossy()).s("title"),
-        "old",
-        "the old file stays as it was"
-    );
+    assert_eq!(encore_media::tags::read_tags(&got.to_string_lossy()).s("title"), "♾️");
+    assert_eq!(encore_media::tags::read_tags(&song.to_string_lossy()).s("title"), "old", "the old file stays as it was");
     assert!(leftovers(song.parent().unwrap()).is_empty());
     ts.remove();
 }
@@ -133,9 +90,7 @@ async fn an_import_over_a_read_only_file_keeps_both() {
         return ts.remove();
     }
     fault::fail(&old, "rename", 30);
-    let placed = encore_library::tagger::place_all(&ts.st, &[(new.clone(), old.clone())], false)
-        .await
-        .unwrap();
+    let placed = encore_library::tagger::place_all(&ts.st, &[(new.clone(), old.clone())], false).await.unwrap();
     fault::clear(&old);
     assert_eq!(placed, [lib.join("A/Song (2).flac")]);
     assert!(old.is_file() && placed[0].is_file() && !new.exists());
@@ -151,19 +106,8 @@ fn narrow_pins_the_error_on_the_file_only_when_the_folder_is_fine() {
     let dir = lib.join("Coldplay/Singles");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("Coldplay - ♾.opus");
-    let erofs = |p: &Path| {
-        StepError::new(
-            Step::Import,
-            "write",
-            p,
-            None,
-            std::io::Error::from_raw_os_error(30),
-        )
-    };
-    assert!(
-        erofs(&file).is_storage(),
-        "before the look, EROFS in the library is storage"
-    );
+    let erofs = |p: &Path| StepError::new(Step::Import, "write", p, None, std::io::Error::from_raw_os_error(30));
+    assert!(erofs(&file).is_storage(), "before the look, EROFS in the library is storage");
     let e = fsx::narrow(erofs(&file));
     assert!(!e.is_storage());
     assert_eq!(e.only_file.as_ref().unwrap().dir, dir);
@@ -176,13 +120,7 @@ fn narrow_pins_the_error_on_the_file_only_when_the_folder_is_fine() {
     fault::clear(&dir);
     assert!(e.is_storage() && e.only_file.is_none(), "{e}");
     // another errno (a permission) is not looked at again
-    let eacces = fsx::narrow(StepError::new(
-        Step::Import,
-        "write",
-        &file,
-        None,
-        std::io::Error::from_raw_os_error(13),
-    ));
+    let eacces = fsx::narrow(StepError::new(Step::Import, "write", &file, None, std::io::Error::from_raw_os_error(13)));
     assert!(eacces.only_file.is_none());
     ts.remove();
 }
@@ -192,33 +130,15 @@ fn narrow_pins_the_error_on_the_file_only_when_the_folder_is_fine() {
 fn file_names_setting_writes_emoji_as_words() {
     let (ts, lib) = server("names");
     let mut v = Row::new();
-    for (k, x) in [
-        ("artist", "Coldplay"),
-        ("albumartist", "Coldplay"),
-        ("album", "Music of the Spheres"),
-        ("year", "2021"),
-        ("title", "♾️"),
-        ("track", "11"),
-    ] {
+    for (k, x) in [("artist", "Coldplay"), ("albumartist", "Coldplay"), ("album", "Music of the Spheres"), ("year", "2021"), ("title", "♾️"), ("track", "11")] {
         v.insert(k.into(), json!(x));
     }
-    let path = |st: &crate::state::AppState, v: &Row| {
-        encore_library::tagger::render_path(st, v, ".flac", false)
-    };
-    assert_eq!(
-        path(&ts.st, &v),
-        lib.join("Coldplay/Music of the Spheres (2021)/11 - ♾️.flac")
-    );
+    let path = |st: &crate::state::AppState, v: &Row| encore_library::tagger::render_path(st, v, ".flac", false);
+    assert_eq!(path(&ts.st, &v), lib.join("Coldplay/Music of the Spheres (2021)/11 - ♾️.flac"));
     ts.st.cfg.set_many(&json!({ "file_names": "words" }));
-    assert_eq!(
-        path(&ts.st, &v),
-        lib.join("Coldplay/Music of the Spheres (2021)/11 - Infinity.flac")
-    );
+    assert_eq!(path(&ts.st, &v), lib.join("Coldplay/Music of the Spheres (2021)/11 - Infinity.flac"));
     v.insert("title".into(), json!("❤️"));
-    assert_eq!(
-        path(&ts.st, &v),
-        lib.join("Coldplay/Music of the Spheres (2021)/11 - Red Heart.flac")
-    );
+    assert_eq!(path(&ts.st, &v), lib.join("Coldplay/Music of the Spheres (2021)/11 - Red Heart.flac"));
     ts.remove();
 }
 
@@ -233,14 +153,9 @@ async fn a_refused_name_is_written_in_words() {
     let dest = lib.join("Coldplay/Singles/Coldplay - ♾.flac");
     let part = lib.join("Coldplay/Singles/Coldplay - ♾.flac.encore-part");
     fault::fail(&part, "*", 84);
-    let placed = encore_library::tagger::place_all(&ts.st, &[(src.clone(), dest.clone())], false)
-        .await
-        .unwrap();
+    let placed = encore_library::tagger::place_all(&ts.st, &[(src.clone(), dest.clone())], false).await.unwrap();
     fault::clear(&part);
-    assert_eq!(
-        placed,
-        [lib.join("Coldplay/Singles/Coldplay - Infinity.flac")]
-    );
+    assert_eq!(placed, [lib.join("Coldplay/Singles/Coldplay - Infinity.flac")]);
     assert!(placed[0].is_file() && !dest.exists() && !src.exists());
     assert!(leftovers(&lib.join("Coldplay/Singles")).is_empty());
     ts.remove();

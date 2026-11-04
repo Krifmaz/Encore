@@ -1,8 +1,11 @@
 //! /api/auth: sign in (password + optional authenticator code, or an emailed link), sign up, sessions,
 //! password reset, 2FA, profile picture and personal preferences.
 use crate::auth::{self, ClientInfo, MaybeUser, User};
-use crate::email;
+use encore_db::{now, RowExt};
+use encore_core::error::{err, ApiResult};
 use crate::state::AppState;
+use crate::email;
+use encore_db::p;
 use axum::extract::{Multipart, Path, State};
 use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Response};
@@ -10,9 +13,6 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
-use encore_core::error::{err, ApiResult};
-use encore_db::p;
-use encore_db::{now, RowExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -40,10 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/2fa/setup", post(totp_setup))
         .route("/api/auth/2fa/enable", post(totp_enable))
         .route("/api/auth/2fa/disable", post(totp_disable))
-        .route(
-            "/api/auth/avatar",
-            post(upload_avatar).delete(delete_avatar),
-        )
+        .route("/api/auth/avatar", post(upload_avatar).delete(delete_avatar))
         .route("/api/users/{id}/avatar", get(avatar))
 }
 
@@ -69,21 +66,7 @@ fn time_dur(secs: i64) -> cookie::time::Duration {
 /// GET /api/auth/info: what the server offers before signing in (features, sign-up mode, the API level).
 async fn info(State(st): State<AppState>) -> Json<Value> {
     // "surround" (0.35): the Surround library (its tab, the album pages' Stereo/Surround links, /api/surround/…)
-    let mut features = vec![
-        "owner",
-        "totp",
-        "email_login",
-        "logout_all",
-        "avatar",
-        "theme",
-        "remote",
-        "rename",
-        "reveal",
-        "app_tokens",
-        "engine_token",
-        "surround",
-        "addresses",
-    ];
+    let mut features = vec!["owner", "totp", "email_login", "logout_all", "avatar", "theme", "remote", "rename", "reveal", "app_tokens", "engine_token", "surround", "addresses"];
     if encore_requests::sources::slskd::enabled(&st) {
         features.push("soulseek"); // the Soulseek page (search, browse, transfers)
     }
@@ -125,17 +108,9 @@ pub(crate) fn addresses_json(st: &AppState) -> Value {
 
 /// An invite that exists, isn't expired and has uses left; 400 otherwise.
 fn valid_invite(st: &AppState, code: &str) -> ApiResult<encore_db::Row> {
-    let inv = st
-        .db
-        .one("SELECT * FROM invites WHERE code=?", p![code.trim()])?;
+    let inv = st.db.one("SELECT * FROM invites WHERE code=?", p![code.trim()])?;
     match inv {
-        Some(i)
-            if i.i("uses") < i.i("max_uses")
-                && (i.get("expires_at").map(|v| v.is_null()).unwrap_or(true)
-                    || i.f("expires_at") > now()) =>
-        {
-            Ok(i)
-        }
+        Some(i) if i.i("uses") < i.i("max_uses") && (i.get("expires_at").map(|v| v.is_null()).unwrap_or(true) || i.f("expires_at") > now()) => Ok(i),
         _ => Err(err(400, "Invite code is invalid or expired")),
     }
 }
@@ -166,49 +141,18 @@ struct AppDevice {
 /// The TOTP (SHA-1, 6 digits, 30 s) of a base32 secret.
 fn totp_for(secret_b32: &str, account: &str, issuer: &str) -> Option<TOTP> {
     let bytes = Secret::Encoded(secret_b32.to_string()).to_bytes().ok()?;
-    TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        bytes,
-        Some(issuer.to_string()),
-        account.to_string(),
-    )
-    .ok()
+    TOTP::new(Algorithm::SHA1, 6, 1, 30, bytes, Some(issuer.to_string()), account.to_string()).ok()
 }
 
 /// Browsers get a cookie and the user; the app (`app` field) gets `{user, token}` and no cookie.
-fn start_session(
-    st: &AppState,
-    jar: CookieJar,
-    c: &ClientInfo,
-    uid: i64,
-    app: Option<&AppDevice>,
-) -> ApiResult<(CookieJar, Json<Value>)> {
-    let u = st
-        .db
-        .one("SELECT * FROM users WHERE id=?", p![uid])?
-        .ok_or_else(|| err(404, "User not found"))?;
+fn start_session(st: &AppState, jar: CookieJar, c: &ClientInfo, uid: i64, app: Option<&AppDevice>) -> ApiResult<(CookieJar, Json<Value>)> {
+    let u = st.db.one("SELECT * FROM users WHERE id=?", p![uid])?.ok_or_else(|| err(404, "User not found"))?;
     if let Some(a) = app {
-        let token = auth::create_app_session(
-            st,
-            uid,
-            &c.ua,
-            &c.ip,
-            &a.device_id,
-            a.device_name.as_deref().unwrap_or(""),
-        )?;
-        return Ok((
-            jar,
-            Json(json!({ "user": auth::public_user(st, &u), "token": token })),
-        ));
+        let token = auth::create_app_session(st, uid, &c.ua, &c.ip, &a.device_id, a.device_name.as_deref().unwrap_or(""))?;
+        return Ok((jar, Json(json!({ "user": auth::public_user(st, &u), "token": token }))));
     }
     let (token, max_age) = auth::create_session(st, uid, &c.ua, &c.ip)?;
-    Ok((
-        jar.add(session_cookie(token, max_age, c.https)),
-        Json(auth::public_user(st, &u)),
-    ))
+    Ok((jar.add(session_cookie(token, max_age, c.https)), Json(auth::public_user(st, &u))))
 }
 
 /// A missing device id is a client bug: say so before anything is created.
@@ -220,37 +164,20 @@ fn check_app(app: &Option<AppDevice>) -> ApiResult<()> {
 }
 
 /// POST /api/auth/login: sign in (10 tries per address in 5 minutes).
-async fn login(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    jar: CookieJar,
-    Json(b): Json<Login>,
-) -> ApiResult<(CookieJar, Json<Value>)> {
+async fn login(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Login>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let key = format!("login:{}", c.ip);
     if st.limits.limited(&key, 10, 300.0, false) {
         return Err(err(429, "Too many attempts – wait a few minutes"));
     }
-    let user = st.db.one(
-        "SELECT * FROM users WHERE username=? COLLATE NOCASE",
-        p![b.username.trim()],
-    )?;
+    let user = st.db.one("SELECT * FROM users WHERE username=? COLLATE NOCASE", p![b.username.trim()])?;
     let user = match user {
-        Some(u) if auth::verify_password_off(b.password.clone(), u.s("password_hash")).await => {
-            Some(u)
-        }
+        Some(u) if auth::verify_password_off(b.password.clone(), u.s("password_hash")).await => Some(u),
         _ => None,
     };
     let Some(user) = user else {
         st.limits.record(&key);
-        st.db.log(
-            "warning",
-            &format!(
-                "Failed login for '{}' from {}",
-                b.username.chars().take(32).collect::<String>(),
-                c.ip
-            ),
-        );
+        st.db.log("warning", &format!("Failed login for '{}' from {}", b.username.chars().take(32).collect::<String>(), c.ip));
         return Err(err(401, "Invalid username or password"));
     };
     if user.b("disabled") {
@@ -259,22 +186,12 @@ async fn login(
     if user.b("totp_enabled") {
         let code = b.code.unwrap_or_default().replace(' ', "");
         if code.is_empty() {
-            return Err(
-                err(401, "Enter the 6-digit code from your authenticator app")
-                    .with(json!({ "two_factor": true })),
-            );
+            return Err(err(401, "Enter the 6-digit code from your authenticator app").with(json!({ "two_factor": true })));
         }
-        let ok = totp_for(
-            &user.s("totp_secret"),
-            &user.s("username"),
-            &st.cfg.str("app_name"),
-        )
-        .and_then(|t| t.check_current(&code).ok())
-        .unwrap_or(false);
+        let ok = totp_for(&user.s("totp_secret"), &user.s("username"), &st.cfg.str("app_name")).and_then(|t| t.check_current(&code).ok()).unwrap_or(false);
         if !ok {
             st.limits.record(&key);
-            return Err(err(401, "That code didn't match – try the newest one")
-                .with(json!({ "two_factor": true })));
+            return Err(err(401, "That code didn't match – try the newest one").with(json!({ "two_factor": true })));
         }
     }
     start_session(&st, jar, &c, user.i("id"), b.app.as_ref())
@@ -296,18 +213,10 @@ struct Signup {
 }
 
 /// POST /api/auth/signup: make an account, as the sign-up mode allows, and sign it in.
-async fn signup(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    jar: CookieJar,
-    Json(b): Json<Signup>,
-) -> ApiResult<(CookieJar, Json<Value>)> {
+async fn signup(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<Signup>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let mode = st.cfg.str("signup_mode");
-    if st
-        .limits
-        .limited(&format!("signup:{}", c.ip), 5, 3600.0, true)
-    {
+    if st.limits.limited(&format!("signup:{}", c.ip), 5, 3600.0, true) {
         return Err(err(429, "Too many sign-ups from this address"));
     }
     if mode == "closed" {
@@ -315,95 +224,45 @@ async fn signup(
     }
     let invite = b.invite.as_deref().filter(|s| !s.trim().is_empty());
     let inv = if mode == "invite" || invite.is_some() {
-        let Some(code) = invite else {
-            return Err(err(403, "An invite code is required"));
-        };
+        let Some(code) = invite else { return Err(err(403, "An invite code is required")) };
         Some(valid_invite(&st, code)?)
     } else {
         None
     };
     // invites can never create an owner
-    let role = inv
-        .as_ref()
-        .map(|i| i.s("role"))
-        .filter(|r| r == "admin")
-        .unwrap_or_else(|| "user".into());
-    let email = b
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let role = inv.as_ref().map(|i| i.s("role")).filter(|r| r == "admin").unwrap_or_else(|| "user".into());
+    let email = b.email.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     // on the blocking pool: the password's bcrypt hash takes a quarter of a second of CPU
-    let (username, password, invite_id) = (
-        b.username.trim().to_string(),
-        b.password.clone(),
-        inv.as_ref().map(|i| i.i("id")),
-    );
-    let uid = st
-        .blocking(move |st| {
-            auth::create_user(st, &username, &password, &role, email.as_deref(), invite_id)
-        })
-        .await?;
+    let (username, password, invite_id) = (b.username.trim().to_string(), b.password.clone(), inv.as_ref().map(|i| i.i("id")));
+    let uid = st.blocking(move |st| auth::create_user(st, &username, &password, &role, email.as_deref(), invite_id)).await?;
     if let Some(i) = &inv {
-        st.db
-            .execute("UPDATE invites SET uses=uses+1 WHERE id=?", p![i.i("id")])?;
+        st.db.execute("UPDATE invites SET uses=uses+1 WHERE id=?", p![i.i("id")])?;
     }
     let limit = st.cfg.int("default_request_limit");
     if limit > 0 {
-        st.db.execute(
-            "UPDATE users SET request_limit=? WHERE id=?",
-            p![limit, uid],
-        )?;
+        st.db.execute("UPDATE users SET request_limit=? WHERE id=?", p![limit, uid])?;
     }
-    st.db.log(
-        "info",
-        &format!("New user signed up: {}", b.username.trim()),
-    );
+    st.db.log("info", &format!("New user signed up: {}", b.username.trim()));
     start_session(&st, jar, &c, uid, b.app.as_ref())
 }
 
 /// POST /api/auth/logout: end this session (the app token or the cookie).
-async fn logout(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> ApiResult<(CookieJar, Json<Value>)> {
+async fn logout(State(st): State<AppState>, headers: HeaderMap, jar: CookieJar) -> ApiResult<(CookieJar, Json<Value>)> {
     if let Some(t) = auth::bearer(&headers) {
-        st.db.execute(
-            "DELETE FROM sessions WHERE token=? AND kind='app'",
-            p![auth::app_token_key(&t)],
-        )?;
+        st.db.execute("DELETE FROM sessions WHERE token=? AND kind='app'", p![auth::app_token_key(&t)])?;
         return Ok((jar, Json(json!({ "ok": true }))));
     }
     if let Some(t) = jar.get(auth::COOKIE) {
-        st.db.execute(
-            "DELETE FROM sessions WHERE token=? AND kind='web'",
-            p![t.value()],
-        )?;
+        st.db.execute("DELETE FROM sessions WHERE token=? AND kind='web'", p![t.value()])?;
     }
-    Ok((
-        jar.remove(Cookie::build(auth::COOKIE).path("/")),
-        Json(json!({ "ok": true })),
-    ))
+    Ok((jar.remove(Cookie::build(auth::COOKIE).path("/")), Json(json!({ "ok": true }))))
 }
 
 /// Sign out on every device, this one included.
-async fn logout_all(
-    State(st): State<AppState>,
-    User(u): User,
-    jar: CookieJar,
-) -> ApiResult<(CookieJar, Json<Value>)> {
-    st.db
-        .execute("DELETE FROM sessions WHERE user_id=?", p![u.i("id")])?;
-    st.db.log(
-        "info",
-        &format!("{} signed out everywhere", u.s("username")),
-    );
-    Ok((
-        jar.remove(Cookie::build(auth::COOKIE).path("/")),
-        Json(json!({ "ok": true })),
-    ))
+async fn logout_all(State(st): State<AppState>, User(u): User, jar: CookieJar) -> ApiResult<(CookieJar, Json<Value>)> {
+    st.db.execute("DELETE FROM sessions WHERE user_id=?", p![u.i("id")])?;
+    st.db.log("info", &format!("{} signed out everywhere", u.s("username")));
+    Ok((jar.remove(Cookie::build(auth::COOKIE).path("/")), Json(json!({ "ok": true }))))
 }
 
 /// GET /api/auth/me: the signed-in user, their permissions and their request quota.
@@ -427,50 +286,23 @@ struct Profile {
 }
 
 /// Your email address (for password-reset links) and/or a new username.
-async fn profile(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<Profile>,
-) -> ApiResult<Json<Value>> {
+async fn profile(State(st): State<AppState>, User(u): User, Json(b): Json<Profile>) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let mut out = json!({ "email": u.s("email"), "username": u.s("username") });
-    if let Some(name) = b
-        .username
-        .map(|n| n.trim().to_string())
-        .filter(|n| *n != u.s("username"))
-    {
+    if let Some(name) = b.username.map(|n| n.trim().to_string()).filter(|n| *n != u.s("username")) {
         auth::validate_username(&name)?;
-        if st
-            .db
-            .one(
-                "SELECT id FROM users WHERE lower(username)=lower(?) AND id!=?",
-                p![name, uid],
-            )?
-            .is_some()
-        {
+        if st.db.one("SELECT id FROM users WHERE lower(username)=lower(?) AND id!=?", p![name, uid])?.is_some() {
             return Err(err(409, "That username is taken"));
         }
-        st.db
-            .execute("UPDATE users SET username=? WHERE id=?", p![name, uid])?;
-        st.db
-            .log("info", &format!("{} is now called {name}", u.s("username")));
+        st.db.execute("UPDATE users SET username=? WHERE id=?", p![name, uid])?;
+        st.db.log("info", &format!("{} is now called {name}", u.s("username")));
         out["username"] = json!(name);
     }
     if let Some(em) = b.email.map(|e| e.trim().to_string()) {
         if !em.is_empty() && (!em.contains('@') || em.len() > 200 || em.contains(' ')) {
             return Err(err(400, "That doesn't look like an email address"));
         }
-        st.db.execute(
-            "UPDATE users SET email=? WHERE id=?",
-            p![
-                if em.is_empty() {
-                    None
-                } else {
-                    Some(em.clone())
-                },
-                uid
-            ],
-        )?;
+        st.db.execute("UPDATE users SET email=? WHERE id=?", p![if em.is_empty() { None } else { Some(em.clone()) }, uid])?;
         out["email"] = json!(em);
     }
     Ok(Json(out))
@@ -482,27 +314,18 @@ async fn get_prefs(User(u): User) -> Json<Value> {
 }
 
 /// PUT /api/auth/prefs: merge preferences into the user's.
-async fn put_prefs(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
+async fn put_prefs(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let mut prefs: Value = serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}));
     if let (Some(p), Some(n)) = (prefs.as_object_mut(), b.as_object()) {
         for (k, v) in n {
-            if v.is_null() {
-                p.remove(k);
-            } else {
-                p.insert(k.clone(), v.clone());
-            }
+            if v.is_null() { p.remove(k); } else { p.insert(k.clone(), v.clone()); }
         }
     }
     let s = prefs.to_string();
     if s.len() > 20_000 {
         return Err(err(400, "Preferences too large"));
     }
-    st.db
-        .execute("UPDATE users SET prefs=? WHERE id=?", p![s, u.i("id")])?;
+    st.db.execute("UPDATE users SET prefs=? WHERE id=?", p![s, u.i("id")])?;
     Ok(Json(prefs))
 }
 
@@ -516,29 +339,15 @@ struct PasswordChange {
 }
 
 /// POST /api/auth/password: change the password (the other sessions end).
-async fn change_password(
-    State(st): State<AppState>,
-    User(u): User,
-    headers: HeaderMap,
-    Json(b): Json<PasswordChange>,
-) -> ApiResult<Json<Value>> {
-    let full = st
-        .db
-        .one("SELECT * FROM users WHERE id=?", p![u.i("id")])?
-        .ok_or_else(|| err(404, "User not found"))?;
+async fn change_password(State(st): State<AppState>, User(u): User, headers: HeaderMap, Json(b): Json<PasswordChange>) -> ApiResult<Json<Value>> {
+    let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if !auth::verify_password_off(b.current.clone(), full.s("password_hash")).await {
         return Err(err(400, "Current password is incorrect"));
     }
     auth::validate_credentials(&full.s("username"), &b.new)?;
-    st.db.execute(
-        "UPDATE users SET password_hash=? WHERE id=?",
-        p![auth::hash_password_off(b.new.clone()).await, u.i("id")],
-    )?;
+    st.db.execute("UPDATE users SET password_hash=? WHERE id=?", p![auth::hash_password_off(b.new.clone()).await, u.i("id")])?;
     let cur = auth::session_key(&headers).unwrap_or_default();
-    st.db.execute(
-        "DELETE FROM sessions WHERE user_id=? AND token != ?",
-        p![u.i("id"), cur],
-    )?;
+    st.db.execute("DELETE FROM sessions WHERE user_id=? AND token != ?", p![u.i("id"), cur])?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -551,11 +360,7 @@ fn session_id(token: &str) -> String {
 }
 
 /// GET /api/auth/sessions: the user's sessions, the current one marked.
-async fn sessions(
-    State(st): State<AppState>,
-    User(u): User,
-    headers: HeaderMap,
-) -> ApiResult<Json<Value>> {
+async fn sessions(State(st): State<AppState>, User(u): User, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let cur = auth::session_key(&headers).unwrap_or_default();
     let rows = st.db.query(
         "SELECT token, created_at, expires_at, user_agent, ip, kind, device_name, last_seen_at FROM sessions WHERE user_id=? AND expires_at >= ? ORDER BY COALESCE(last_seen_at, created_at) DESC",
@@ -573,41 +378,12 @@ async fn sessions(
 
 /// "Chrome on Windows", "Encore app on Android" – instead of a raw user-agent string.
 pub fn device_name(ua: &str) -> String {
-    let os = if ua.contains("Android") {
-        "Android"
-    } else if ua.contains("iPhone") || ua.contains("iPad") {
-        "iOS"
-    } else if ua.contains("Windows") {
-        "Windows"
-    } else if ua.contains("Mac OS") {
-        "macOS"
-    } else if ua.contains("Linux") {
-        "Linux"
-    } else {
-        ""
-    };
-    let app = if ua.contains("EncoreAndroid") {
-        "Encore app"
-    } else if ua.contains("Electron") || ua.contains("EncoreDesktop") {
-        "Encore desktop"
-    } else if ua.contains("Edg/") {
-        "Edge"
-    } else if ua.contains("Firefox/") {
-        "Firefox"
-    } else if ua.contains("Chrome/") {
-        "Chrome"
-    } else if ua.contains("Safari/") {
-        "Safari"
-    } else if ua.is_empty() {
-        "Unknown device"
-    } else {
-        "Browser"
-    };
-    if os.is_empty() {
-        app.to_string()
-    } else {
-        format!("{app} on {os}")
-    }
+    let os = if ua.contains("Android") { "Android" } else if ua.contains("iPhone") || ua.contains("iPad") { "iOS" } else if ua.contains("Windows") { "Windows" }
+        else if ua.contains("Mac OS") { "macOS" } else if ua.contains("Linux") { "Linux" } else { "" };
+    let app = if ua.contains("EncoreAndroid") { "Encore app" } else if ua.contains("Electron") || ua.contains("EncoreDesktop") { "Encore desktop" }
+        else if ua.contains("Edg/") { "Edge" } else if ua.contains("Firefox/") { "Firefox" } else if ua.contains("Chrome/") { "Chrome" }
+        else if ua.contains("Safari/") { "Safari" } else if ua.is_empty() { "Unknown device" } else { "Browser" };
+    if os.is_empty() { app.to_string() } else { format!("{app} on {os}") }
 }
 
 /// `POST /api/auth/app-token` body.
@@ -623,42 +399,23 @@ struct AppTokenBody {
 /// A signed-in session (cookie or bearer) asks for an app token for a named device – the desktop app uses
 /// it for the Cadenza engine built into it. The token is an ordinary app session (kind 'app', sliding
 /// expiry) listed under Account → sessions; asking again for the same device replaces the previous one.
-async fn app_token(
-    State(st): State<AppState>,
-    User(u): User,
-    c: ClientInfo,
-    Json(b): Json<AppTokenBody>,
-) -> ApiResult<Json<Value>> {
+async fn app_token(State(st): State<AppState>, User(u): User, c: ClientInfo, Json(b): Json<AppTokenBody>) -> ApiResult<Json<Value>> {
     let device_id = b.device_id.trim().to_string();
     let n = device_id.chars().count();
     if n == 0 || n > 64 {
         return Err(err(400, "device_id must be 1 to 64 characters"));
     }
-    let token = auth::create_app_session(
-        &st,
-        u.i("id"),
-        &c.ua,
-        &c.ip,
-        &device_id,
-        b.device_name.as_deref().unwrap_or(""),
-    )?;
+    let token = auth::create_app_session(&st, u.i("id"), &c.ua, &c.ip, &device_id, b.device_name.as_deref().unwrap_or(""))?;
     Ok(Json(json!({ "token": token, "device_id": device_id })))
 }
 
 /// DELETE /api/auth/sessions/{sid}: end one of the user's sessions (by its short id).
-async fn revoke_session(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(sid): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn revoke_session(State(st): State<AppState>, User(u): User, Path(sid): Path<String>) -> ApiResult<Json<Value>> {
     // a short id can't match a whole session family: ids are 10 (web) or 17 ("sha256:…", app) characters
     if sid.chars().count() < 10 {
         return Err(err(400, "Unknown session"));
     }
-    st.db.execute(
-        "DELETE FROM sessions WHERE user_id=? AND substr(token,1,?)=?",
-        p![u.i("id"), sid.chars().count() as i64, sid],
-    )?;
+    st.db.execute("DELETE FROM sessions WHERE user_id=? AND substr(token,1,?)=?", p![u.i("id"), sid.chars().count() as i64, sid])?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -682,65 +439,27 @@ fn find_by_login(st: &AppState, key: &str) -> ApiResult<Option<encore_db::Row>> 
 /// The address links in emails point to: the base URL setting, else the one the request came to.
 fn base_url(st: &AppState, c: &ClientInfo) -> String {
     let b = st.cfg.str("base_url");
-    if b.is_empty() {
-        c.base_url.clone()
-    } else {
-        b.trim_end_matches('/').to_string()
-    }
+    if b.is_empty() { c.base_url.clone() } else { b.trim_end_matches('/').to_string() }
 }
 
 /// POST /api/auth/forgot: email a password reset link (the answer never says whether the account exists).
-async fn forgot(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    Json(b): Json<LoginKey>,
-) -> ApiResult<Json<Value>> {
+async fn forgot(State(st): State<AppState>, c: ClientInfo, Json(b): Json<LoginKey>) -> ApiResult<Json<Value>> {
     if !email::enabled(&st) {
-        return Err(err(
-            400,
-            "Password reset by email isn't set up – ask your admin to reset it",
-        ));
+        return Err(err(400, "Password reset by email isn't set up – ask your admin to reset it"));
     }
-    if st
-        .limits
-        .limited(&format!("forgot:{}", c.ip), 5, 900.0, true)
-    {
+    if st.limits.limited(&format!("forgot:{}", c.ip), 5, 900.0, true) {
         return Err(err(429, "Too many attempts – wait a few minutes"));
     }
     if let Some(u) = find_by_login(&st, b.login.trim())? {
         let token = encore_core::ids::random_token(32);
-        st.db.execute(
-            "INSERT OR REPLACE INTO password_resets VALUES (?,?,?)",
-            p![
-                u.i("id"),
-                encore_core::ids::sha256_hex(&token),
-                now() + 3600.0
-            ],
-        )?;
-        let link = format!(
-            "{}/#/reset?token={}.{}",
-            base_url(&st, &c),
-            u.i("id"),
-            token
-        );
+        st.db.execute("INSERT OR REPLACE INTO password_resets VALUES (?,?,?)", p![u.i("id"), encore_core::ids::sha256_hex(&token), now() + 3600.0])?;
+        let link = format!("{}/#/reset?token={}.{}", base_url(&st, &c), u.i("id"), token);
         let body = format!("Hi {},\n\nOpen this link within an hour to choose a new password:\n{link}\n\nIf you didn't ask for this, ignore this email – your password stays the same.", u.s("username"));
-        if let Err(e) = email::send(
-            &st,
-            &u.s("email"),
-            &format!("Reset your {} password", st.cfg.str("app_name")),
-            &body,
-        )
-        .await
-        {
-            st.db.log(
-                "error",
-                &format!("Password reset email to {} failed: {e}", u.s("username")),
-            );
+        if let Err(e) = email::send(&st, &u.s("email"), &format!("Reset your {} password", st.cfg.str("app_name")), &body).await {
+            st.db.log("error", &format!("Password reset email to {} failed: {e}", u.s("username")));
         }
     }
-    Ok(Json(
-        json!({ "ok": true, "message": "If that account has an email address, a reset link is on its way." }),
-    ))
+    Ok(Json(json!({ "ok": true, "message": "If that account has an email address, a reset link is on its way." })))
 }
 
 /// `POST /api/auth/reset` body.
@@ -754,91 +473,41 @@ struct ResetBody {
 
 /// POST /api/auth/reset: set a new password with a reset link's token.
 async fn reset(State(st): State<AppState>, Json(b): Json<ResetBody>) -> ApiResult<Json<Value>> {
-    let bad = || {
-        err(
-            400,
-            "This reset link is invalid or expired – request a new one",
-        )
-    };
+    let bad = || err(400, "This reset link is invalid or expired – request a new one");
     let (uid, token) = b.token.split_once('.').ok_or_else(bad)?;
     let uid: i64 = uid.parse().map_err(|_| bad())?;
-    let saved = st
-        .db
-        .one(
-            "SELECT digest, expires_at FROM password_resets WHERE user_id=?",
-            p![uid],
-        )?
-        .ok_or_else(bad)?;
-    if saved.f("expires_at") < now()
-        || !auth::ct_eq(&saved.s("digest"), &encore_core::ids::sha256_hex(token))
-    {
+    let saved = st.db.one("SELECT digest, expires_at FROM password_resets WHERE user_id=?", p![uid])?.ok_or_else(bad)?;
+    if saved.f("expires_at") < now() || !auth::ct_eq(&saved.s("digest"), &encore_core::ids::sha256_hex(token)) {
         return Err(bad());
     }
-    let u = st
-        .db
-        .one("SELECT id, username FROM users WHERE id=?", p![uid])?
-        .ok_or_else(bad)?;
+    let u = st.db.one("SELECT id, username FROM users WHERE id=?", p![uid])?.ok_or_else(bad)?;
     auth::validate_credentials(&u.s("username"), &b.password)?;
-    st.db.execute(
-        "UPDATE users SET password_hash=? WHERE id=?",
-        p![auth::hash_password_off(b.password.clone()).await, uid],
-    )?;
-    st.db
-        .execute("DELETE FROM sessions WHERE user_id=?", p![uid])?;
-    st.db
-        .execute("DELETE FROM password_resets WHERE user_id=?", p![uid])?;
-    st.db.log(
-        "info",
-        &format!("{} reset their password by email", u.s("username")),
-    );
+    st.db.execute("UPDATE users SET password_hash=? WHERE id=?", p![auth::hash_password_off(b.password.clone()).await, uid])?;
+    st.db.execute("DELETE FROM sessions WHERE user_id=?", p![uid])?;
+    st.db.execute("DELETE FROM password_resets WHERE user_id=?", p![uid])?;
+    st.db.log("info", &format!("{} reset their password by email", u.s("username")));
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Passwordless sign-in: email a one-time link (15 minutes). Accounts with an authenticator app still
 /// need their code, so the link is a replacement for the password only.
-async fn email_link(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    Json(b): Json<LoginKey>,
-) -> ApiResult<Json<Value>> {
+async fn email_link(State(st): State<AppState>, c: ClientInfo, Json(b): Json<LoginKey>) -> ApiResult<Json<Value>> {
     if !email::enabled(&st) || !st.cfg.bool("email_login") {
         return Err(err(400, "Signing in by email isn't turned on"));
     }
-    if st
-        .limits
-        .limited(&format!("emaillink:{}", c.ip), 5, 900.0, true)
-    {
+    if st.limits.limited(&format!("emaillink:{}", c.ip), 5, 900.0, true) {
         return Err(err(429, "Too many attempts – wait a few minutes"));
     }
     if let Some(u) = find_by_login(&st, b.login.trim())?.filter(|u| !u.b("disabled")) {
         let token = encore_core::ids::random_token(32);
-        st.db.execute(
-            "INSERT INTO login_links VALUES (?,?,?)",
-            p![
-                encore_core::ids::sha256_hex(&token),
-                u.i("id"),
-                now() + 900.0
-            ],
-        )?;
+        st.db.execute("INSERT INTO login_links VALUES (?,?,?)", p![encore_core::ids::sha256_hex(&token), u.i("id"), now() + 900.0])?;
         let link = format!("{}/#/magic?token={token}", base_url(&st, &c));
         let body = format!("Hi {},\n\nOpen this link within 15 minutes to sign in:\n{link}\n\nIf you didn't ask for this, ignore this email.", u.s("username"));
-        if let Err(e) = email::send(
-            &st,
-            &u.s("email"),
-            &format!("Sign in to {}", st.cfg.str("app_name")),
-            &body,
-        )
-        .await
-        {
-            st.db.log(
-                "error",
-                &format!("Sign-in email to {} failed: {e}", u.s("username")),
-            );
+        if let Err(e) = email::send(&st, &u.s("email"), &format!("Sign in to {}", st.cfg.str("app_name")), &body).await {
+            st.db.log("error", &format!("Sign-in email to {} failed: {e}", u.s("username")));
         }
     }
-    Ok(Json(
-        json!({ "ok": true, "message": "If that account has an email address, a sign-in link is on its way." }),
-    ))
+    Ok(Json(json!({ "ok": true, "message": "If that account has an email address, a sign-in link is on its way." })))
 }
 
 /// `POST /api/auth/magic` body.
@@ -853,46 +522,20 @@ struct MagicBody {
 }
 
 /// POST /api/auth/magic: sign in with an email link's token.
-async fn magic(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    jar: CookieJar,
-    Json(b): Json<MagicBody>,
-) -> ApiResult<(CookieJar, Json<Value>)> {
+async fn magic(State(st): State<AppState>, c: ClientInfo, jar: CookieJar, Json(b): Json<MagicBody>) -> ApiResult<(CookieJar, Json<Value>)> {
     check_app(&b.app)?;
     let digest = encore_core::ids::sha256_hex(&b.token);
-    st.db
-        .execute("DELETE FROM login_links WHERE expires_at < ?", p![now()])?;
-    let link = st
-        .db
-        .one("SELECT user_id FROM login_links WHERE digest=?", p![digest])?
-        .ok_or_else(|| err(400, "This sign-in link is invalid or expired"))?;
-    let u = st
-        .db
-        .one(
-            "SELECT * FROM users WHERE id=? AND disabled=0",
-            p![link.i("user_id")],
-        )?
-        .ok_or_else(|| err(400, "This sign-in link is invalid or expired"))?;
+    st.db.execute("DELETE FROM login_links WHERE expires_at < ?", p![now()])?;
+    let link = st.db.one("SELECT user_id FROM login_links WHERE digest=?", p![digest])?.ok_or_else(|| err(400, "This sign-in link is invalid or expired"))?;
+    let u = st.db.one("SELECT * FROM users WHERE id=? AND disabled=0", p![link.i("user_id")])?.ok_or_else(|| err(400, "This sign-in link is invalid or expired"))?;
     if u.b("totp_enabled") {
         let code = b.code.unwrap_or_default().replace(' ', "");
-        let ok = !code.is_empty()
-            && totp_for(
-                &u.s("totp_secret"),
-                &u.s("username"),
-                &st.cfg.str("app_name"),
-            )
-            .and_then(|t| t.check_current(&code).ok())
-            .unwrap_or(false);
+        let ok = !code.is_empty() && totp_for(&u.s("totp_secret"), &u.s("username"), &st.cfg.str("app_name")).and_then(|t| t.check_current(&code).ok()).unwrap_or(false);
         if !ok {
-            return Err(
-                err(401, "Enter the 6-digit code from your authenticator app")
-                    .with(json!({ "two_factor": true })),
-            );
+            return Err(err(401, "Enter the 6-digit code from your authenticator app").with(json!({ "two_factor": true })));
         }
     }
-    st.db
-        .execute("DELETE FROM login_links WHERE digest=?", p![digest])?;
+    st.db.execute("DELETE FROM login_links WHERE digest=?", p![digest])?;
     start_session(&st, jar, &c, u.i("id"), b.app.as_ref())
 }
 
@@ -900,26 +543,14 @@ async fn magic(
 
 /// POST /api/auth/2fa/setup: a new authenticator secret and its QR link.
 async fn totp_setup(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
-    let full = st
-        .db
-        .one("SELECT * FROM users WHERE id=?", p![u.i("id")])?
-        .ok_or_else(|| err(404, "User not found"))?;
+    let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if full.b("totp_enabled") {
-        return Err(err(
-            400,
-            "Two-factor sign-in is already on – turn it off first to set up a new device",
-        ));
+        return Err(err(400, "Two-factor sign-in is already on – turn it off first to set up a new device"));
     }
     let secret = Secret::generate_secret().to_encoded().to_string();
-    st.db.execute(
-        "UPDATE users SET totp_secret=? WHERE id=?",
-        p![secret, u.i("id")],
-    )?;
-    let t = totp_for(&secret, &u.s("username"), &st.cfg.str("app_name"))
-        .ok_or_else(|| err(500, "Could not create the secret"))?;
-    Ok(Json(
-        json!({ "secret": secret, "otpauth_url": t.get_url(), "qr": t.get_qr_base64().ok() }),
-    ))
+    st.db.execute("UPDATE users SET totp_secret=? WHERE id=?", p![secret, u.i("id")])?;
+    let t = totp_for(&secret, &u.s("username"), &st.cfg.str("app_name")).ok_or_else(|| err(500, "Could not create the secret"))?;
+    Ok(Json(json!({ "secret": secret, "otpauth_url": t.get_url(), "qr": t.get_qr_base64().ok() })))
 }
 
 /// A body with an authenticator code or the password.
@@ -932,59 +563,26 @@ struct CodeBody {
 }
 
 /// POST /api/auth/2fa/enable: turn 2FA on with a code from the new secret.
-async fn totp_enable(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<CodeBody>,
-) -> ApiResult<Json<Value>> {
-    let full = st
-        .db
-        .one("SELECT * FROM users WHERE id=?", p![u.i("id")])?
-        .ok_or_else(|| err(404, "User not found"))?;
+async fn totp_enable(State(st): State<AppState>, User(u): User, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
+    let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     let code = b.code.unwrap_or_default().replace(' ', "");
-    let ok = totp_for(
-        &full.s("totp_secret"),
-        &u.s("username"),
-        &st.cfg.str("app_name"),
-    )
-    .and_then(|t| t.check_current(&code).ok())
-    .unwrap_or(false);
+    let ok = totp_for(&full.s("totp_secret"), &u.s("username"), &st.cfg.str("app_name")).and_then(|t| t.check_current(&code).ok()).unwrap_or(false);
     if !ok {
-        return Err(err(
-            400,
-            "That code didn't match – check the time on your phone and try the newest code",
-        ));
+        return Err(err(400, "That code didn't match – check the time on your phone and try the newest code"));
     }
-    st.db
-        .execute("UPDATE users SET totp_enabled=1 WHERE id=?", p![u.i("id")])?;
-    st.db.log(
-        "info",
-        &format!("{} turned on two-factor sign-in", u.s("username")),
-    );
+    st.db.execute("UPDATE users SET totp_enabled=1 WHERE id=?", p![u.i("id")])?;
+    st.db.log("info", &format!("{} turned on two-factor sign-in", u.s("username")));
     Ok(Json(json!({ "ok": true })))
 }
 
 /// POST /api/auth/2fa/disable: turn 2FA off (the password asked for).
-async fn totp_disable(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<CodeBody>,
-) -> ApiResult<Json<Value>> {
-    let full = st
-        .db
-        .one("SELECT * FROM users WHERE id=?", p![u.i("id")])?
-        .ok_or_else(|| err(404, "User not found"))?;
+async fn totp_disable(State(st): State<AppState>, User(u): User, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
+    let full = st.db.one("SELECT * FROM users WHERE id=?", p![u.i("id")])?.ok_or_else(|| err(404, "User not found"))?;
     if !auth::verify_password_off(b.password.unwrap_or_default(), full.s("password_hash")).await {
         return Err(err(400, "Password is incorrect"));
     }
-    st.db.execute(
-        "UPDATE users SET totp_enabled=0, totp_secret=NULL WHERE id=?",
-        p![u.i("id")],
-    )?;
-    st.db.log(
-        "info",
-        &format!("{} turned off two-factor sign-in", u.s("username")),
-    );
+    st.db.execute("UPDATE users SET totp_enabled=0, totp_secret=NULL WHERE id=?", p![u.i("id")])?;
+    st.db.log("info", &format!("{} turned off two-factor sign-in", u.s("username")));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -996,22 +594,10 @@ fn avatar_path(st: &AppState, id: i64) -> std::path::PathBuf {
 }
 
 /// POST /api/auth/avatar: upload a profile picture (made a square JPEG).
-async fn upload_avatar(
-    State(st): State<AppState>,
-    User(u): User,
-    mut form: Multipart,
-) -> ApiResult<Json<Value>> {
+async fn upload_avatar(State(st): State<AppState>, User(u): User, mut form: Multipart) -> ApiResult<Json<Value>> {
     let mut data = Vec::new();
-    while let Some(f) = form
-        .next_field()
-        .await
-        .map_err(|e| err(400, e.to_string()))?
-    {
-        data = f
-            .bytes()
-            .await
-            .map_err(|e| err(400, e.to_string()))?
-            .to_vec();
+    while let Some(f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
+        data = f.bytes().await.map_err(|e| err(400, e.to_string()))?.to_vec();
         if !data.is_empty() {
             break;
         }
@@ -1023,56 +609,33 @@ async fn upload_avatar(
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let img = image::load_from_memory(&data)?;
         let side = img.width().min(img.height());
-        let img = img
-            .crop_imm(
-                (img.width() - side) / 2,
-                (img.height() - side) / 2,
-                side,
-                side,
-            )
-            .resize(256, 256, image::imageops::FilterType::Lanczos3);
+        let img = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side).resize(256, 256, image::imageops::FilterType::Lanczos3);
         std::fs::create_dir_all(path.parent().unwrap())?;
-        img.to_rgb8()
-            .save_with_format(&path, image::ImageFormat::Jpeg)?;
+        img.to_rgb8().save_with_format(&path, image::ImageFormat::Jpeg)?;
         Ok(())
     })
     .await
     .map_err(|e| err(500, e.to_string()))?
     .map_err(|_| err(400, "That file isn't a picture we can read"))?;
     let t = now();
-    st.db
-        .execute("UPDATE users SET avatar_at=? WHERE id=?", p![t, u.i("id")])?;
+    st.db.execute("UPDATE users SET avatar_at=? WHERE id=?", p![t, u.i("id")])?;
     Ok(Json(json!({ "ok": true, "avatar_at": t })))
 }
 
 /// DELETE /api/auth/avatar: remove the profile picture.
 async fn delete_avatar(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let _ = std::fs::remove_file(avatar_path(&st, u.i("id")));
-    st.db
-        .execute("UPDATE users SET avatar_at=NULL WHERE id=?", p![u.i("id")])?;
+    st.db.execute("UPDATE users SET avatar_at=NULL WHERE id=?", p![u.i("id")])?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// GET /api/users/{id}/avatar: a user's profile picture (signed-in viewers).
-async fn avatar(
-    State(st): State<AppState>,
-    MaybeUser(viewer): MaybeUser,
-    Path(id): Path<i64>,
-) -> ApiResult<Response> {
+async fn avatar(State(st): State<AppState>, MaybeUser(viewer): MaybeUser, Path(id): Path<i64>) -> ApiResult<Response> {
     if viewer.is_none() {
         return Err(err(401, "Not authenticated"));
     }
-    let data = tokio::fs::read(avatar_path(&st, id))
-        .await
-        .map_err(|_| err(404, "No picture"))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/jpeg"),
-            (header::CACHE_CONTROL, "private, max-age=86400"),
-        ],
-        data,
-    )
-        .into_response())
+    let data = tokio::fs::read(avatar_path(&st, id)).await.map_err(|_| err(404, "No picture"))?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=86400")], data).into_response())
 }
 
 #[cfg(test)]

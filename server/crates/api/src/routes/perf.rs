@@ -57,63 +57,25 @@ mod tests {
             }
             app.clone().oneshot(r.body(Body::empty()).unwrap())
         };
-        assert_eq!(
-            call("/api/health", None).await.unwrap().status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            call("/api/admin/perf", None).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        assert_eq!(call("/api/health", None).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(call("/api/admin/perf", None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
         // the owner made at the first start, with the password it was given
         let first = std::fs::read_to_string(s.dir.join("initial_admin_password.txt")).unwrap();
         let (user, pass) = (first.lines().next().unwrap(), first.lines().nth(1).unwrap());
-        let login = Request::builder()
-            .method("POST")
-            .uri("/api/auth/login")
-            .header("x-requested-with", "encore")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({ "username": user, "password": pass }).to_string(),
-            ))
-            .unwrap();
+        let login = Request::builder().method("POST").uri("/api/auth/login").header("x-requested-with", "encore").header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "username": user, "password": pass }).to_string())).unwrap();
         let resp = app.clone().oneshot(login).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let cookie = resp
-            .headers()
-            .get("set-cookie")
-            .and_then(|v| v.to_str().ok())
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
+        let cookie = resp.headers().get("set-cookie").and_then(|v| v.to_str().ok()).unwrap().split(';').next().unwrap().to_string();
         let resp = call("/api/admin/perf", Some(&cookie)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1 << 20)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let health = v["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["route"] == "/api/health")
-            .expect("the health call was timed")
-            .clone();
-        assert_eq!(
-            (health["method"].as_str(), health["count"].as_u64()),
-            (Some("GET"), Some(1))
-        );
+        let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let health = v["routes"].as_array().unwrap().iter().find(|r| r["route"] == "/api/health").expect("the health call was timed").clone();
+        assert_eq!((health["method"].as_str(), health["count"].as_u64()), (Some("GET"), Some(1)));
         assert!(health["p95_ms"].as_f64().is_some());
         assert_eq!(v["slow_ms"], 250.0);
         for k in ["lists", "remote", "musicbrainz", "soulseek_browse"] {
-            assert!(
-                v["caches"][k]["max_bytes"].as_u64().unwrap_or(0) > 0,
-                "{k}: {v}"
-            );
+            assert!(v["caches"][k]["max_bytes"].as_u64().unwrap_or(0) > 0, "{k}: {v}");
         }
         assert!(v["db"]["write"]["waits"].is_u64(), "{v}");
         assert!(v["background"]["cover_pass"].is_object());
@@ -123,14 +85,7 @@ mod tests {
         // the web app's files are not timed
         let _ = call("/index.html", None).await.unwrap();
         let v = s.st.web.perf.report();
-        assert!(
-            v["routes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r["route"].as_str().unwrap_or("").starts_with("/api/")),
-            "{v}"
-        );
+        assert!(v["routes"].as_array().unwrap().iter().all(|r| r["route"].as_str().unwrap_or("").starts_with("/api/")), "{v}");
         s.remove();
     }
 }

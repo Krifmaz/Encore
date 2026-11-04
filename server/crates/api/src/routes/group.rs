@@ -44,8 +44,7 @@ pub const FULL: &str = "This group listen is full";
 /// The error past the wrong-code limits.
 pub const TOO_MANY: &str = "Too many tries. Wait a moment and try again.";
 /// The error past [`STARTS_PER_HOUR`].
-pub const STARTED_TOO_MANY: &str =
-    "You started 10 group listens in the last hour. Try again later.";
+pub const STARTED_TOO_MANY: &str = "You started 10 group listens in the last hour. Try again later.";
 /// The error for a group the caller isn't in.
 pub const NOT_IN: &str = "You aren't in this group listen";
 /// The error for a guest when the group takes accounts only.
@@ -121,24 +120,11 @@ pub fn ready(st: &AppState) {
     } else if let Err(e) = gl::clear(&st.db) {
         tracing::warn!("group listens: clearing the saved ones failed: {e}");
     }
-    let tokens = st
-        .db
-        .query(
-            "SELECT token, device_id, device_name FROM sessions WHERE kind='guest'",
-            p![],
-        )
-        .unwrap_or_default();
+    let tokens = st.db.query("SELECT token, device_id, device_name FROM sessions WHERE kind='guest'", p![]).unwrap_or_default();
     for t in tokens {
-        let alive = inner
-            .groups
-            .get(&t.s("device_id"))
-            .and_then(|g| g.member(&t.s("device_name")))
-            .is_some_and(Member::is_guest);
+        let alive = inner.groups.get(&t.s("device_id")).and_then(|g| g.member(&t.s("device_name"))).is_some_and(Member::is_guest);
         if !alive {
-            let _ = st.db.execute(
-                "DELETE FROM sessions WHERE token=? AND kind='guest'",
-                p![t.s("token")],
-            );
+            let _ = st.db.execute("DELETE FROM sessions WHERE token=? AND kind='guest'", p![t.s("token")]);
         }
     }
 }
@@ -171,14 +157,8 @@ fn end_all(st: &AppState, reason: &'static str) {
 /// The guests' tokens of a group (or of one guest) stop working.
 fn drop_guest_tokens(st: &AppState, group: &str, member: Option<&str>) {
     let r = match member {
-        Some(m) => st.db.execute(
-            "DELETE FROM sessions WHERE kind='guest' AND device_id=? AND device_name=?",
-            p![group, m],
-        ),
-        None => st.db.execute(
-            "DELETE FROM sessions WHERE kind='guest' AND device_id=?",
-            p![group],
-        ),
+        Some(m) => st.db.execute("DELETE FROM sessions WHERE kind='guest' AND device_id=? AND device_name=?", p![group, m]),
+        None => st.db.execute("DELETE FROM sessions WHERE kind='guest' AND device_id=?", p![group]),
     };
     if let Err(e) = r {
         tracing::warn!("group listens: a guest's token could not be deleted: {e}");
@@ -187,17 +167,8 @@ fn drop_guest_tokens(st: &AppState, group: &str, member: Option<&str>) {
 
 /// An account's picture as a server path, or "".
 fn avatar_of(st: &AppState, user: i64) -> String {
-    let has = st
-        .db
-        .one("SELECT avatar_at FROM users WHERE id=?", p![user])
-        .ok()
-        .flatten()
-        .is_some_and(|r| r.get("avatar_at").is_some_and(|v| !v.is_null()));
-    if has {
-        format!("/api/users/{user}/avatar")
-    } else {
-        String::new()
-    }
+    let has = st.db.one("SELECT avatar_at FROM users WHERE id=?", p![user]).ok().flatten().is_some_and(|r| r.get("avatar_at").is_some_and(|v| !v.is_null()));
+    if has { format!("/api/users/{user}/avatar") } else { String::new() }
 }
 
 /// A device id of 1 to 64 characters; 400 otherwise.
@@ -216,29 +187,14 @@ fn device_name(name: &str) -> String {
 
 /// Who added a song: this account.
 fn by_of(u: &Row) -> AddedBy {
-    AddedBy {
-        user: u.i("id"),
-        name: u.s("username"),
-        guest: false,
-    }
+    AddedBy { user: u.i("id"), name: u.s("username"), guest: false }
 }
 
 /// The account's device as a group member.
 fn member_of(st: &AppState, u: &Row, device: &str, name: &str, t: f64) -> Member {
     Member {
-        member: String::new(),
-        user: u.i("id"),
-        guest: None,
-        name: u.s("username"),
-        avatar: avatar_of(st, u.i("id")),
-        device_id: device.to_string(),
-        device_name: device_name(name),
-        joined_at: t,
-        host: false,
-        added_by: None,
-        streams: 0,
-        gone_since: Some(t),
-        expires_at: None,
+        member: String::new(), user: u.i("id"), guest: None, name: u.s("username"), avatar: avatar_of(st, u.i("id")), device_id: device.to_string(),
+        device_name: device_name(name), joined_at: t, host: false, added_by: None, streams: 0, gone_since: Some(t), expires_at: None,
     }
 }
 
@@ -266,9 +222,7 @@ impl FromRequestParts<AppState> for Who {
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
         match User::from_request_parts(parts, st).await {
             Ok(User(u)) => Ok(Who::Account(u)),
-            Err(e) if e.status == StatusCode::UNAUTHORIZED => {
-                guest_of(st, parts)?.map(Who::Guest).ok_or(e)
-            }
+            Err(e) if e.status == StatusCode::UNAUTHORIZED => guest_of(st, parts)?.map(Who::Guest).ok_or(e),
             Err(e) => Err(e),
         }
     }
@@ -278,19 +232,14 @@ impl FromRequestParts<AppState> for Who {
 fn guest_token(headers: &HeaderMap) -> Option<(String, bool)> {
     match auth::bearer(headers) {
         Some(t) => Some((t, false)),
-        None => CookieJar::from_headers(headers)
-            .get(GUEST_COOKIE)
-            .map(|c| (c.value().to_string(), true)),
+        None => CookieJar::from_headers(headers).get(GUEST_COOKIE).map(|c| (c.value().to_string(), true)),
     }
 }
 
 /// The guest session a token names (`device_id` = the group, `device_name` = the membership), while its 12
 /// hours are not over.
 fn guest_session(st: &AppState, token: &str) -> ApiResult<Option<Row>> {
-    let s = st.db.one(
-        "SELECT device_id, device_name, expires_at FROM sessions WHERE token=? AND kind='guest'",
-        p![auth::app_token_key(token)],
-    )?;
+    let s = st.db.one("SELECT device_id, device_name, expires_at FROM sessions WHERE token=? AND kind='guest'", p![auth::app_token_key(token)])?;
     Ok(s.filter(|s| s.f("expires_at") >= now()))
 }
 
@@ -300,37 +249,17 @@ fn guest_of(st: &AppState, parts: &Parts) -> ApiResult<Option<Guest>> {
     if !guests_possible(st) {
         return Ok(None);
     }
-    let Some((token, cookie)) = guest_token(&parts.headers) else {
-        return Ok(None);
-    };
-    let Some(s) = guest_session(st, &token)? else {
-        return Ok(None);
-    };
+    let Some((token, cookie)) = guest_token(&parts.headers) else { return Ok(None) };
+    let Some(s) = guest_session(st, &token)? else { return Ok(None) };
     ready(st);
-    let g = Guest {
-        group: s.s("device_id"),
-        member: s.s("device_name"),
-    };
-    let alive = st
-        .playback
-        .groups
-        .lock()
-        .groups
-        .get(&g.group)
-        .and_then(|x| x.member(&g.member))
-        .is_some_and(Member::is_guest);
+    let g = Guest { group: s.s("device_id"), member: s.s("device_name") };
+    let alive = st.playback.groups.lock().groups.get(&g.group).and_then(|x| x.member(&g.member)).is_some_and(Member::is_guest);
     if !alive {
         return Ok(None);
     }
     // a cookie needs the CSRF header on writes, as the session cookie does
-    if cookie
-        && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
-        && parts
-            .headers
-            .get("x-requested-with")
-            .and_then(|v| v.to_str().ok())
-            != Some("encore")
-    {
+    if cookie && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
+        && parts.headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("encore") {
         return Err(err(403, "Missing CSRF header"));
     }
     Ok(Some(g))
@@ -350,27 +279,14 @@ struct Viewer {
 impl Viewer {
     /// The viewer for an account's device.
     fn account(st: &AppState, u: &Row, device: &str, c: &ClientInfo) -> Viewer {
-        Viewer {
-            caller: Caller::Account {
-                user: u.i("id"),
-                device: device.to_string(),
-            },
-            user: Some(u.clone()),
-            base_url: base_url(st, c),
-        }
+        Viewer { caller: Caller::Account { user: u.i("id"), device: device.to_string() }, user: Some(u.clone()), base_url: base_url(st, c) }
     }
 
     /// The viewer for whoever is asking.
     fn of(st: &AppState, who: &Who, device: &str, c: &ClientInfo) -> Viewer {
         match who {
             Who::Account(u) => Viewer::account(st, u, device, c),
-            Who::Guest(g) => Viewer {
-                caller: Caller::Guest {
-                    member: g.member.clone(),
-                },
-                user: None,
-                base_url: base_url(st, c),
-            },
+            Who::Guest(g) => Viewer { caller: Caller::Guest { member: g.member.clone() }, user: None, base_url: base_url(st, c) },
         }
     }
 }
@@ -381,11 +297,7 @@ fn base_url(st: &AppState, c: &ClientInfo) -> String {
     if !b.trim().is_empty() {
         return b.trim().trim_end_matches('/').to_string();
     }
-    if c.base_url.ends_with("://") {
-        String::new()
-    } else {
-        c.base_url.clone()
-    }
+    if c.base_url.ends_with("://") { String::new() } else { c.base_url.clone() }
 }
 
 // ---- the state ----------------------------------------------------------------------------------------------
@@ -409,24 +321,9 @@ fn state_now(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
         if you.member.is_empty() {
             return None;
         }
-        let cached = g
-            .cache
-            .as_ref()
-            .filter(|(r, _)| *r == g.rev)
-            .map(|(_, b)| b.clone());
-        let fresh = if cached.is_none() {
-            Some(g.base_json(&boot))
-        } else {
-            None
-        };
-        (
-            cached,
-            fresh,
-            g.rev,
-            you,
-            g.code.clone(),
-            g.cap(server_max(st)),
-        )
+        let cached = g.cache.as_ref().filter(|(r, _)| *r == g.rev).map(|(_, b)| b.clone());
+        let fresh = if cached.is_none() { Some(g.base_json(&boot)) } else { None };
+        (cached, fresh, g.rev, you, g.code.clone(), g.cap(server_max(st)))
     };
     let base = match (cached, fresh) {
         (Some(b), _) => b,
@@ -443,11 +340,7 @@ fn state_now(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
         (None, None) => return None,
     };
     let mut out = (*base).clone();
-    out["invite_url"] = json!(if v.base_url.is_empty() {
-        String::new()
-    } else {
-        format!("{}/#/group/{code}", v.base_url)
-    });
+    out["invite_url"] = json!(if v.base_url.is_empty() { String::new() } else { format!("{}/#/group/{code}", v.base_url) });
     out["guests_possible"] = json!(guests_possible(st));
     out["max_members"] = json!(cap);
     out["server_max_members"] = json!(server_max(st));
@@ -466,18 +359,12 @@ fn state_now(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
 /// The group's state as `v` sees it, on the blocking pool; `None` when `v` isn't in it.
 async fn state_for(st: &AppState, id: &str, v: &Viewer) -> Option<Value> {
     let (st, id, v) = (st.clone(), id.to_string(), v.clone());
-    tokio::task::spawn_blocking(move || state_now(&st, &id, &v))
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || state_now(&st, &id, &v)).await.ok().flatten()
 }
 
 /// The answer of a route that answers the state.
 async fn answer(st: &AppState, id: &str, v: &Viewer) -> ApiResult<Json<Value>> {
-    state_for(st, id, v)
-        .await
-        .map(Json)
-        .ok_or_else(|| err(404, NOT_IN))
+    state_for(st, id, v).await.map(Json).ok_or_else(|| err(404, NOT_IN))
 }
 
 // ---- rate limits ------------------------------------------------------------------------------------------
@@ -488,18 +375,10 @@ const SIGNED_OUT_KEY: &str = "group-code:signed-out";
 /// 429 when the caller (account, address, or everyone signed out) is past its wrong codes for the hour.
 fn tries_left(st: &AppState, user: Option<i64>, ip: &str) -> ApiResult<()> {
     let by_user = match user {
-        Some(u) => st
-            .limits
-            .limited(&format!("group-code:u{u}"), FAILED_PER_USER, HOUR, false),
-        None => st
-            .limits
-            .limited(SIGNED_OUT_KEY, FAILED_SIGNED_OUT, HOUR, false),
+        Some(u) => st.limits.limited(&format!("group-code:u{u}"), FAILED_PER_USER, HOUR, false),
+        None => st.limits.limited(SIGNED_OUT_KEY, FAILED_SIGNED_OUT, HOUR, false),
     };
-    if by_user
-        || st
-            .limits
-            .limited(&format!("group-code:ip{ip}"), FAILED_PER_IP, HOUR, false)
-    {
+    if by_user || st.limits.limited(&format!("group-code:ip{ip}"), FAILED_PER_IP, HOUR, false) {
         return Err(err(429, TOO_MANY));
     }
     Ok(())
@@ -531,12 +410,8 @@ enum Out {
 /// Takes `member` out of group `id`. The host's leaving hands the group over; the last account member's
 /// leaving ends it ("ended": the guests' streams are told).
 fn take_out(inner: &mut Inner, id: &str, member: &str) -> Out {
-    let Some(g) = inner.groups.get_mut(id) else {
-        return Out::Nothing;
-    };
-    let Some(guest) = g.member(member).map(Member::is_guest) else {
-        return Out::Nothing;
-    };
+    let Some(g) = inner.groups.get_mut(id) else { return Out::Nothing };
+    let Some(guest) = g.member(member).map(Member::is_guest) else { return Out::Nothing };
     if g.remove(member) {
         inner.end(id, "ended");
         return Out::Ended;
@@ -555,22 +430,11 @@ fn after_out(st: &AppState, id: &str, member: &str, out: &Out) {
 }
 
 /// The account's device leaves every group it is in (it can be in one at a time).
-fn leave_all(
-    inner: &mut Inner,
-    user: i64,
-    device: &str,
-    except: &str,
-) -> Vec<(String, String, Out)> {
+fn leave_all(inner: &mut Inner, user: i64, device: &str, except: &str) -> Vec<(String, String, Out)> {
     let mut done = vec![];
     while let Some((id, m)) = inner.of(user, device).filter(|g| g.id != except).map(|g| {
-        let c = Caller::Account {
-            user,
-            device: device.to_string(),
-        };
-        (
-            g.id.clone(),
-            g.find(&c).map(|m| m.member.clone()).unwrap_or_default(),
-        )
+        let c = Caller::Account { user, device: device.to_string() };
+        (g.id.clone(), g.find(&c).map(|m| m.member.clone()).unwrap_or_default())
     }) {
         let out = take_out(inner, &id, &m);
         if out == Out::Nothing {
@@ -595,12 +459,7 @@ async fn list(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value
     let mut found: Vec<(f64, Value)> = {
         let mut inner = st.playback.groups.lock();
         inner.groups.values_mut().for_each(catch_up);
-        inner
-            .groups
-            .values()
-            .filter(|g| g.anyone() || g.has_account(uid))
-            .map(|g| (g.started_at, g.summary_json(uid)))
-            .collect()
+        inner.groups.values().filter(|g| g.anyone() || g.has_account(uid)).map(|g| (g.started_at, g.summary_json(uid))).collect()
     };
     found.sort_by(|a, b| b.0.total_cmp(&a.0));
     let mut v = json!(found.into_iter().map(|(_, v)| v).collect::<Vec<_>>());
@@ -619,28 +478,16 @@ struct DeviceQ {
 /// GET /api/group/code/{code}: who hosts the group behind a code (also a link-only one: the code is the
 /// secret). Without an account it answers only when a guest may join (both switches on). `guests`: whether
 /// a guest may join now.
-async fn lookup(
-    State(st): State<AppState>,
-    MaybeUser(u): MaybeUser,
-    Path(code): Path<String>,
-    c: ClientInfo,
-) -> ApiResult<Json<Value>> {
+async fn lookup(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(code): Path<String>, c: ClientInfo) -> ApiResult<Json<Value>> {
     on(&st)?;
     let uid = u.as_ref().map(|u| u.i("id"));
     tries_left(&st, uid, &c.ip)?;
     let found = {
         let mut inner = st.playback.groups.lock();
         inner.groups.values_mut().for_each(catch_up);
-        inner.by_code(&code).map(|g| {
-            (
-                g.summary_json(uid.unwrap_or(0)),
-                guests_possible(&st) && g.guests_allowed,
-            )
-        })
+        inner.by_code(&code).map(|g| (g.summary_json(uid.unwrap_or(0)), guests_possible(&st) && g.guests_allowed))
     };
-    let Some((mut v, guests)) = found.filter(|(_, guests)| uid.is_some() || *guests) else {
-        return Err(failed_try(&st, uid, &c.ip));
-    };
+    let Some((mut v, guests)) = found.filter(|(_, guests)| uid.is_some() || *guests) else { return Err(failed_try(&st, uid, &c.ip)) };
     v["guests"] = json!(guests);
     enrich(&st, u.as_ref(), &mut v).await;
     Ok(Json(v))
@@ -678,44 +525,21 @@ fn visibility(v: &str) -> ApiResult<String> {
 }
 
 /// POST /api/group: start a group listen; what plays on the host's device becomes the queue.
-async fn start(
-    State(st): State<AppState>,
-    User(u): User,
-    c: ClientInfo,
-    Json(b): Json<StartB>,
-) -> ApiResult<Json<Value>> {
+async fn start(State(st): State<AppState>, User(u): User, c: ClientInfo, Json(b): Json<StartB>) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = device(&b.device_id)?;
     let uid = u.i("id");
     // checked and counted in one step, so parallel starts can't all pass before the first is counted (a start
     // that then fails counts too)
-    if st
-        .limits
-        .limited(&format!("group-start:{uid}"), STARTS_PER_HOUR, HOUR, true)
-    {
+    if st.limits.limited(&format!("group-start:{uid}"), STARTS_PER_HOUR, HOUR, true) {
         return Err(err(429, STARTED_TOO_MANY));
     }
     let vis = visibility(&b.visibility)?;
     if b.tracks.len() > gl::START_MAX {
-        return Err(err(
-            400,
-            format!("A group listen starts with at most {} songs", gl::START_MAX),
-        ));
+        return Err(err(400, format!("A group listen starts with at most {} songs", gl::START_MAX)));
     }
-    let ids: Vec<i64> = b
-        .tracks
-        .iter()
-        .filter_map(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .collect();
-    let rows = {
-        let ids = ids.clone();
-        st.db
-            .read(move |c| Ok::<_, rusqlite::Error>(gl::rows(c, &ids)))
-            .await?
-    };
+    let ids: Vec<i64> = b.tracks.iter().filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).collect();
+    let rows = { let ids = ids.clone(); st.db.read(move |c| Ok::<_, rusqlite::Error>(gl::rows(c, &ids))).await? };
     let (t, t_ms) = (now(), now_ms());
     let me = member_of(&st, &u, &dev, &b.device_name, t);
     let (id, left) = {
@@ -723,29 +547,9 @@ async fn start(
         let left = leave_all(&mut inner, uid, &dev, "");
         let code = inner.new_code();
         let id = format!("g_{}", encore_core::ids::random_hex(10));
-        let mut g = Group::new(
-            NewGroup {
-                id: id.clone(),
-                code,
-                visibility: vis,
-                everyone_controls: b.everyone_controls,
-                guests_allowed: false,
-                max_members: gl::MAX_MEMBERS,
-            },
-            t_ms,
-        );
+        let mut g = Group::new(NewGroup { id: id.clone(), code, visibility: vis, everyone_controls: b.everyone_controls, guests_allowed: false, max_members: gl::MAX_MEMBERS }, t_ms);
         g.add(me);
-        g.set_queue(
-            &ids,
-            &rows,
-            gl::At {
-                index: b.index.max(0) as usize,
-                position: b.position,
-                playing: b.playing,
-            },
-            &by_of(&u),
-            t_ms,
-        );
+        g.set_queue(&ids, &rows, gl::At { index: b.index.max(0) as usize, position: b.position, playing: b.playing }, &by_of(&u), t_ms);
         inner.groups.insert(id.clone(), g);
         (id, left)
     };
@@ -768,22 +572,12 @@ struct JoinB {
 }
 
 /// Puts the account's device in group `id` (it leaves any other group first). Already in it: the state as it is.
-async fn join(
-    st: &AppState,
-    u: &Row,
-    id: &str,
-    dev: &str,
-    name: &str,
-    c: &ClientInfo,
-) -> ApiResult<Json<Value>> {
+async fn join(st: &AppState, u: &Row, id: &str, dev: &str, name: &str, c: &ClientInfo) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let me = member_of(st, u, dev, name, now());
     let left = {
         let mut inner = st.playback.groups.lock();
-        let caller = Caller::Account {
-            user: uid,
-            device: dev.to_string(),
-        };
+        let caller = Caller::Account { user: uid, device: dev.to_string() };
         let g = inner.groups.get(id).ok_or_else(|| err(404, NO_CODE))?;
         if g.find(&caller).is_some() {
             vec![]
@@ -806,25 +600,13 @@ async fn join(
 }
 
 /// POST /api/group/join {code}.
-async fn join_code(
-    State(st): State<AppState>,
-    User(u): User,
-    c: ClientInfo,
-    Json(b): Json<JoinB>,
-) -> ApiResult<Json<Value>> {
+async fn join_code(State(st): State<AppState>, User(u): User, c: ClientInfo, Json(b): Json<JoinB>) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = device(&b.device_id)?;
     let uid = u.i("id");
     tries_left(&st, Some(uid), &c.ip)?;
-    let id = st
-        .playback
-        .groups
-        .lock()
-        .by_code(&b.code)
-        .map(|g| g.id.clone());
-    let Some(id) = id else {
-        return Err(failed_try(&st, Some(uid), &c.ip));
-    };
+    let id = st.playback.groups.lock().by_code(&b.code).map(|g| g.id.clone());
+    let Some(id) = id else { return Err(failed_try(&st, Some(uid), &c.ip)) };
     join(&st, &u, &id, &dev, &b.device_name, &c).await
 }
 
@@ -845,25 +627,13 @@ fn device_body(body: &Bytes) -> DeviceB {
 
 /// POST /api/group/{id}/join: an "anyone" group from the list, without its code. A link-only group the
 /// account is not in answers as an unknown code does (and counts as a wrong try), so it does not leak.
-async fn join_id(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<String>,
-    c: ClientInfo,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
+async fn join_id(State(st): State<AppState>, User(u): User, Path(id): Path<String>, c: ClientInfo, body: Bytes) -> ApiResult<Json<Value>> {
     on(&st)?;
     let b = device_body(&body);
     let dev = device(&b.device_id)?;
     let uid = u.i("id");
     tries_left(&st, Some(uid), &c.ip)?;
-    let visible = st
-        .playback
-        .groups
-        .lock()
-        .groups
-        .get(&id)
-        .is_some_and(|g| g.anyone() || g.has_account(uid));
+    let visible = st.playback.groups.lock().groups.get(&id).is_some_and(|g| g.anyone() || g.has_account(uid));
     if !visible {
         return Err(failed_try(&st, Some(uid), &c.ip));
     }
@@ -886,11 +656,7 @@ struct GuestB {
 /// wrong try, so this route tells a live code from a wrong one no better than the lookup). Answers the state
 /// with `token` (also set as the `encore_guest` cookie, sent only to /api/group): it lasts until the guest
 /// leaves or is removed, the group ends, an admin turns guests off, or 12 hours have passed.
-async fn guest_join(
-    State(st): State<AppState>,
-    c: ClientInfo,
-    Json(b): Json<GuestB>,
-) -> ApiResult<Response> {
+async fn guest_join(State(st): State<AppState>, c: ClientInfo, Json(b): Json<GuestB>) -> ApiResult<Response> {
     on(&st)?;
     if !guests_possible(&st) {
         return Err(err(403, NO_GUESTS));
@@ -916,29 +682,15 @@ async fn guest_join(
             drop(inner);
             return Err(failed_try(&st, None, &c.ip));
         }
-        if st
-            .limits
-            .limited(&format!("group-guest:g{id}"), GUESTS_PER_GROUP, HOUR, false)
-        {
+        if st.limits.limited(&format!("group-guest:g{id}"), GUESTS_PER_GROUP, HOUR, false) {
             return Err(err(429, TOO_MANY));
         }
         if g.full(server_max(&st)) {
             return Err(err(409, FULL));
         }
         let member = g.add(Member {
-            member: String::new(),
-            user: 0,
-            guest: Some(encore_core::ids::random_hex(8)),
-            name,
-            avatar: String::new(),
-            device_id: String::new(),
-            device_name: String::new(),
-            joined_at: t,
-            host: false,
-            added_by: None,
-            streams: 0,
-            gone_since: Some(t),
-            expires_at: Some(t + gl::GUEST_SECS),
+            member: String::new(), user: 0, guest: Some(encore_core::ids::random_hex(8)), name, avatar: String::new(), device_id: String::new(),
+            device_name: String::new(), joined_at: t, host: false, added_by: None, streams: 0, gone_since: Some(t), expires_at: Some(t + gl::GUEST_SECS),
         });
         g.changed(t);
         (id, member)
@@ -957,20 +709,11 @@ async fn guest_join(
         after_out(&st, &id, &member, &out);
         return Err(e.into());
     }
-    let v = Viewer {
-        caller: Caller::Guest { member },
-        user: None,
-        base_url: base_url(&st, &c),
-    };
+    let v = Viewer { caller: Caller::Guest { member }, user: None, base_url: base_url(&st, &c) };
     let Json(mut state) = answer(&st, &id, &v).await?;
     state["token"] = json!(token);
-    let cookie = Cookie::build((GUEST_COOKIE, token))
-        .path("/api/group")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(c.https)
-        .max_age(cookie::time::Duration::seconds(gl::GUEST_SECS as i64))
-        .build();
+    let cookie = Cookie::build((GUEST_COOKIE, token)).path("/api/group").http_only(true).same_site(SameSite::Lax).secure(c.https)
+        .max_age(cookie::time::Duration::seconds(gl::GUEST_SECS as i64)).build();
     let mut r = Json(state).into_response();
     if let Ok(h) = HeaderValue::from_str(&cookie.to_string()) {
         r.headers_mut().append(header::SET_COOKIE, h);
@@ -979,25 +722,13 @@ async fn guest_join(
 }
 
 /// GET /api/group/current?device_id=: the group this device (or this guest) is in, else 204.
-async fn current(
-    State(st): State<AppState>,
-    who: Who,
-    Query(q): Query<DeviceQ>,
-    c: ClientInfo,
-) -> ApiResult<Response> {
+async fn current(State(st): State<AppState>, who: Who, Query(q): Query<DeviceQ>, c: ClientInfo) -> ApiResult<Response> {
     on(&st)?;
     let id = match &who {
-        Who::Account(u) => st
-            .playback
-            .groups
-            .lock()
-            .of(u.i("id"), q.device_id.trim())
-            .map(|g| g.id.clone()),
+        Who::Account(u) => st.playback.groups.lock().of(u.i("id"), q.device_id.trim()).map(|g| g.id.clone()),
         Who::Guest(g) => Some(g.group.clone()),
     };
-    let Some(id) = id else {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    };
+    let Some(id) = id else { return Ok(StatusCode::NO_CONTENT.into_response()) };
     match state_for(&st, &id, &Viewer::of(&st, &who, q.device_id.trim(), &c)).await {
         Some(v) => Ok(Json(v).into_response()),
         None => Ok(StatusCode::NO_CONTENT.into_response()),
@@ -1006,33 +737,14 @@ async fn current(
 
 /// POST /api/group/{id}/leave: this device (or guest) leaves; 204 whether it was in the group or not. A
 /// guest's token stops working.
-async fn leave(
-    State(st): State<AppState>,
-    who: Who,
-    Path(id): Path<String>,
-    Query(q): Query<DeviceQ>,
-    body: Bytes,
-) -> ApiResult<Response> {
+async fn leave(State(st): State<AppState>, who: Who, Path(id): Path<String>, Query(q): Query<DeviceQ>, body: Bytes) -> ApiResult<Response> {
     ready(&st);
     let b = device_body(&body);
-    let dev = if b.device_id.trim().is_empty() {
-        q.device_id
-    } else {
-        b.device_id
-    };
+    let dev = if b.device_id.trim().is_empty() { q.device_id } else { b.device_id };
     let member = {
         let mut inner = st.playback.groups.lock();
         let m = match &who {
-            Who::Account(u) => inner
-                .groups
-                .get(&id)
-                .and_then(|g| {
-                    g.find(&Caller::Account {
-                        user: u.i("id"),
-                        device: dev.trim().to_string(),
-                    })
-                })
-                .map(|m| m.member.clone()),
+            Who::Account(u) => inner.groups.get(&id).and_then(|g| g.find(&Caller::Account { user: u.i("id"), device: dev.trim().to_string() })).map(|m| m.member.clone()),
             Who::Guest(g) => (g.group == id).then(|| g.member.clone()),
         };
         m.map(|m| {
@@ -1045,10 +757,7 @@ async fn leave(
     }
     let mut r = StatusCode::NO_CONTENT.into_response();
     if matches!(who, Who::Guest(_)) {
-        let gone = Cookie::build((GUEST_COOKIE, ""))
-            .path("/api/group")
-            .max_age(cookie::time::Duration::ZERO)
-            .build();
+        let gone = Cookie::build((GUEST_COOKIE, "")).path("/api/group").max_age(cookie::time::Duration::ZERO).build();
         if let Ok(h) = HeaderValue::from_str(&gone.to_string()) {
             r.headers_mut().append(header::SET_COOKIE, h);
         }
@@ -1058,33 +767,15 @@ async fn leave(
 
 /// The caller's membership in group `id` (by its device), else 404.
 fn member_in(inner: &Inner, id: &str, caller: &Caller) -> ApiResult<String> {
-    inner
-        .groups
-        .get(id)
-        .and_then(|g| g.find(caller))
-        .map(|m| m.member.clone())
-        .ok_or_else(|| err(404, NOT_IN))
+    inner.groups.get(id).and_then(|g| g.find(caller)).map(|m| m.member.clone()).ok_or_else(|| err(404, NOT_IN))
 }
 
 /// POST /api/group/{id}/end: the host ends it for everyone.
-async fn end(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<String>,
-    Query(q): Query<DeviceQ>,
-    body: Bytes,
-) -> ApiResult<StatusCode> {
+async fn end(State(st): State<AppState>, User(u): User, Path(id): Path<String>, Query(q): Query<DeviceQ>, body: Bytes) -> ApiResult<StatusCode> {
     on(&st)?;
     let b = device_body(&body);
-    let dev = if b.device_id.trim().is_empty() {
-        q.device_id
-    } else {
-        b.device_id
-    };
-    let caller = Caller::Account {
-        user: u.i("id"),
-        device: dev.trim().to_string(),
-    };
+    let dev = if b.device_id.trim().is_empty() { q.device_id } else { b.device_id };
+    let caller = Caller::Account { user: u.i("id"), device: dev.trim().to_string() };
     {
         let mut inner = st.playback.groups.lock();
         member_in(&inner, &id, &caller)?;
@@ -1114,19 +805,10 @@ struct PatchB {
 }
 
 /// PATCH /api/group/{id}: the host's settings.
-async fn patch(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<String>,
-    c: ClientInfo,
-    Json(b): Json<PatchB>,
-) -> ApiResult<Json<Value>> {
+async fn patch(State(st): State<AppState>, User(u): User, Path(id): Path<String>, c: ClientInfo, Json(b): Json<PatchB>) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = b.device_id.trim().to_string();
-    let caller = Caller::Account {
-        user: u.i("id"),
-        device: dev.clone(),
-    };
+    let caller = Caller::Account { user: u.i("id"), device: dev.clone() };
     let vis = b.visibility.as_deref().map(visibility).transpose()?;
     {
         let mut inner = st.playback.groups.lock();
@@ -1158,40 +840,21 @@ async fn patch(
 /// the one playing goes) – the host, or everyone with "Everyone can control" –, enqueue and play_next (every account
 /// member). set_queue, enqueue and play_next take `"shuffle": true`: the songs are shuffled here first, and a
 /// shuffled set_queue starts at the first of them.
-async fn command(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<String>,
-    c: ClientInfo,
-    Json(b): Json<Value>,
-) -> ApiResult<Json<Value>> {
+async fn command(State(st): State<AppState>, User(u): User, Path(id): Path<String>, c: ClientInfo, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = b["device_id"].as_str().unwrap_or("").trim().to_string();
-    let caller = Caller::Account {
-        user: u.i("id"),
-        device: dev.clone(),
-    };
+    let caller = Caller::Account { user: u.i("id"), device: dev.clone() };
     let op = b["op"].as_str().unwrap_or("");
     let needs = gl::needs_control(op).ok_or_else(|| err(400, "Unknown command"))?;
-    let ids = if b.get("tracks").is_some() {
-        gl::ids(&b)?
-    } else {
-        vec![]
-    };
-    let rows = st
-        .db
-        .read(move |c| Ok::<_, rusqlite::Error>(gl::rows(c, &ids)))
-        .await?;
+    let ids = if b.get("tracks").is_some() { gl::ids(&b)? } else { vec![] };
+    let rows = st.db.read(move |c| Ok::<_, rusqlite::Error>(gl::rows(c, &ids))).await?;
     {
         let mut inner = st.playback.groups.lock();
         member_in(&inner, &id, &caller)?;
         let g = inner.groups.get_mut(&id).ok_or_else(|| err(404, NOT_IN))?;
         catch_up(g);
         if needs && !g.you(&caller).can_control {
-            return Err(err(
-                403,
-                format!("Only {} controls playback", g.host_name()),
-            ));
+            return Err(err(403, format!("Only {} controls playback", g.host_name())));
         }
         g.command(op, &b, &rows, &by_of(&u), now_ms())?;
         g.changed(now());
@@ -1201,39 +864,22 @@ async fn command(
 
 /// DELETE /api/group/{id}/members/{member}?device_id=: "Remove from the group" (guests only; the host and
 /// admins, who are in the group). The guest's token stops working and its stream gets `ended` "removed".
-async fn remove_member(
-    State(st): State<AppState>,
-    User(u): User,
-    Path((id, member)): Path<(String, String)>,
-    Query(q): Query<DeviceQ>,
-    c: ClientInfo,
-) -> ApiResult<Json<Value>> {
+async fn remove_member(State(st): State<AppState>, User(u): User, Path((id, member)): Path<(String, String)>, Query(q): Query<DeviceQ>, c: ClientInfo) -> ApiResult<Json<Value>> {
     on(&st)?;
     let dev = q.device_id.trim().to_string();
-    let caller = Caller::Account {
-        user: u.i("id"),
-        device: dev.clone(),
-    };
+    let caller = Caller::Account { user: u.i("id"), device: dev.clone() };
     let out = {
         let mut inner = st.playback.groups.lock();
         member_in(&inner, &id, &caller)?;
         let g = inner.groups.get(&id).ok_or_else(|| err(404, NOT_IN))?;
-        let target = g
-            .member(&member)
-            .ok_or_else(|| err(404, "That person isn't in the group listen any more"))?;
+        let target = g.member(&member).ok_or_else(|| err(404, "That person isn't in the group listen any more"))?;
         if !target.is_guest() {
             return Err(err(403, "Only guests can be removed from a group listen"));
         }
         if !(g.you(&caller).host || encore_config::perms::is_admin(&u)) {
-            return Err(err(
-                403,
-                "Only the host and admins can remove someone from a group listen",
-            ));
+            return Err(err(403, "Only the host and admins can remove someone from a group listen"));
         }
-        let _ = g.tx.send(Event::Ended {
-            reason: "removed",
-            member: Some(member.clone()),
-        });
+        let _ = g.tx.send(Event::Ended { reason: "removed", member: Some(member.clone()) });
         take_out(&mut inner, &id, &member)
     };
     after_out(&st, &id, &member, &out);
@@ -1253,11 +899,7 @@ struct Watching {
 impl Drop for Watching {
     fn drop(&mut self) {
         let mut inner = self.groups.lock();
-        if let Some(m) = inner
-            .groups
-            .get_mut(&self.group)
-            .and_then(|g| g.members.iter_mut().find(|m| m.member == self.member))
-        {
+        if let Some(m) = inner.groups.get_mut(&self.group).and_then(|g| g.members.iter_mut().find(|m| m.member == self.member)) {
             m.streams = m.streams.saturating_sub(1);
             if m.streams == 0 {
                 m.gone_since = Some(now());
@@ -1267,11 +909,7 @@ impl Drop for Watching {
 }
 
 /// How often an open event stream checks that its caller may still be in the group.
-const RECHECK: Duration = if cfg!(test) {
-    Duration::from_millis(100)
-} else {
-    Duration::from_secs(30)
-};
+const RECHECK: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(30) };
 
 /// One member's event stream.
 struct Feed {
@@ -1303,14 +941,10 @@ struct Feed {
 /// deleted and its session was not revoked ("Sign out everywhere"); a guest's token still works.
 fn still_allowed(st: &AppState, headers: &HeaderMap, caller: &Caller) -> bool {
     match caller {
-        Caller::Account { user, .. } => {
-            auth::current_user(st, headers).is_some_and(|u| u.i("id") == *user)
-        }
+        Caller::Account { user, .. } => auth::current_user(st, headers).is_some_and(|u| u.i("id") == *user),
         Caller::Guest { member } => {
             guests_possible(st)
-                && guest_token(headers)
-                    .and_then(|(t, _)| guest_session(st, &t).ok().flatten())
-                    .is_some_and(|s| s.s("device_name") == *member)
+                && guest_token(headers).and_then(|(t, _)| guest_session(st, &t).ok().flatten()).is_some_and(|s| s.s("device_name") == *member)
         }
     }
 }
@@ -1321,14 +955,7 @@ fn still_allowed(st: &AppState, headers: &HeaderMap, caller: &Caller) -> bool {
 /// or this device is not in it (also after being dropped). Every 30 s the stream checks its caller again: an
 /// account that was disabled or deleted or whose session was revoked, or a guest whose token stopped working,
 /// is taken out of the group and gets `ended` "removed".
-async fn events(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    who: Who,
-    Path(id): Path<String>,
-    Query(q): Query<DeviceQ>,
-    c: ClientInfo,
-) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+async fn events(State(st): State<AppState>, headers: HeaderMap, who: Who, Path(id): Path<String>, Query(q): Query<DeviceQ>, c: ClientInfo) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
     on(&st)?;
     if let Who::Guest(g) = &who {
         if g.group != id {
@@ -1339,52 +966,24 @@ async fn events(
     let (rx, member) = {
         let mut inner = st.playback.groups.lock();
         let g = inner.groups.get_mut(&id).ok_or_else(|| err(404, NOT_IN))?;
-        let mid = g
-            .find(&viewer.caller)
-            .map(|m| m.member.clone())
-            .ok_or_else(|| err(404, NOT_IN))?;
-        let m = g
-            .members
-            .iter_mut()
-            .find(|m| m.member == mid)
-            .ok_or_else(|| err(404, NOT_IN))?;
+        let mid = g.find(&viewer.caller).map(|m| m.member.clone()).ok_or_else(|| err(404, NOT_IN))?;
+        let m = g.members.iter_mut().find(|m| m.member == mid).ok_or_else(|| err(404, NOT_IN))?;
         m.streams += 1;
         m.gone_since = None;
         (g.tx.subscribe(), mid)
     };
-    let watching = Watching {
-        groups: st.playback.groups.clone(),
-        group: id.clone(),
-        member: member.clone(),
-    };
-    let first = state_for(&st, &id, &viewer)
-        .await
-        .ok_or_else(|| err(404, NOT_IN))?;
+    let watching = Watching { groups: st.playback.groups.clone(), group: id.clone(), member: member.clone() };
+    let first = state_for(&st, &id, &viewer).await.ok_or_else(|| err(404, NOT_IN))?;
     let last_rev = first["rev"].as_u64().unwrap_or(0);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let feed = Feed {
-        st,
-        id,
-        viewer,
-        member,
-        rx,
-        first: Some(first),
-        last_rev,
-        done: false,
-        headers,
-        tick,
-        _watching: watching,
-    };
+    let feed = Feed { st, id, viewer, member, rx, first: Some(first), last_rev, done: false, headers, tick, _watching: watching };
     let s = stream::unfold(feed, |mut f| async move {
         if f.done {
             return None;
         }
         if let Some(v) = f.first.take() {
-            return Some((
-                Ok(SseEvent::default().event("state").data(v.to_string())),
-                f,
-            ));
+            return Some((Ok(SseEvent::default().event("state").data(v.to_string())), f));
         }
         loop {
             let got = tokio::select! {
@@ -1410,59 +1009,37 @@ async fn events(
                 Ok(Event::State) | Err(broadcast::error::RecvError::Lagged(_)) => {
                     // the state as it is now
                     // (a device that left and joined again has a new membership: this stream was the old one's)
-                    let Some(v) = state_for(&f.st, &f.id, &f.viewer)
-                        .await
-                        .filter(|v| v["you"]["member"] == f.member.as_str())
-                    else {
+                    let Some(v) = state_for(&f.st, &f.id, &f.viewer).await.filter(|v| v["you"]["member"] == f.member.as_str()) else {
                         // a member no more, or the group is gone: the `ended` that says why may be waiting behind
                         // this change; then the stream closes
                         let reason = ended_waiting(&mut f.rx, &f.member)?;
                         f.done = true;
-                        return Some((
-                            Ok(SseEvent::default()
-                                .event("ended")
-                                .data(json!({ "reason": reason }).to_string())),
-                            f,
-                        ));
+                        return Some((Ok(SseEvent::default().event("ended").data(json!({ "reason": reason }).to_string())), f));
                     };
                     let rev = v["rev"].as_u64().unwrap_or(0);
                     if rev > f.last_rev {
                         f.last_rev = rev;
-                        return Some((
-                            Ok(SseEvent::default().event("state").data(v.to_string())),
-                            f,
-                        ));
+                        return Some((Ok(SseEvent::default().event("state").data(v.to_string())), f));
                     }
                 }
                 Ok(Event::Ended { reason, member }) => {
                     if member.as_ref().is_none_or(|m| *m == f.member) {
                         f.done = true;
-                        return Some((
-                            Ok(SseEvent::default()
-                                .event("ended")
-                                .data(json!({ "reason": reason }).to_string())),
-                            f,
-                        ));
+                        return Some((Ok(SseEvent::default().event("ended").data(json!({ "reason": reason }).to_string())), f));
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
     });
-    Ok(Sse::new(s).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    ))
+    Ok(Sse::new(s).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive")))
 }
 
 /// The reason of an `ended` for `member` (or for everyone) already in the channel, if there is one.
 fn ended_waiting(rx: &mut broadcast::Receiver<Event>, member: &str) -> Option<&'static str> {
     loop {
         match rx.try_recv() {
-            Ok(Event::Ended { reason, member: m }) if m.as_deref().is_none_or(|m| m == member) => {
-                return Some(reason)
-            }
+            Ok(Event::Ended { reason, member: m }) if m.as_deref().is_none_or(|m| m == member) => return Some(reason),
             Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             Err(_) => return None,
         }
@@ -1471,12 +1048,7 @@ fn ended_waiting(rx: &mut broadcast::Receiver<Event>, member: &str) -> Option<&'
 
 /// Whether the caller may have the queue's song `track` (or an album of it): a guest of this group, or an
 /// account in it on any device. A guest gets 401 for anything else.
-fn may_have(
-    st: &AppState,
-    who: &Who,
-    id: &str,
-    wanted: impl Fn(&gl::Entry) -> bool,
-) -> ApiResult<()> {
+fn may_have(st: &AppState, who: &Who, id: &str, wanted: impl Fn(&gl::Entry) -> bool) -> ApiResult<()> {
     let inner = st.playback.groups.lock();
     let g = inner.groups.get(id);
     let member = match who {
@@ -1493,13 +1065,7 @@ fn may_have(
 
 /// GET /api/group/{id}/tracks/{track}/stream: a song of the group's queue (the library's stream route, with
 /// the same query: `q`, `kbps`, `t`, `transcode`; server processing only for accounts allowed it).
-async fn stream_track(
-    State(st): State<AppState>,
-    who: Who,
-    Path((id, track)): Path<(String, i64)>,
-    Query(q): Query<StreamQ>,
-    req: Request,
-) -> ApiResult<Response> {
+async fn stream_track(State(st): State<AppState>, who: Who, Path((id, track)): Path<(String, i64)>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
     on(&st)?;
     may_have(&st, &who, &id, |e| e.track == track)?;
     let user = match &who {
@@ -1520,13 +1086,7 @@ struct CoverQ {
 }
 
 /// GET /api/group/{id}/albums/{album}/cover?s=&v=: the cover of an album of the group's queue.
-async fn cover(
-    State(st): State<AppState>,
-    who: Who,
-    Path((id, album)): Path<(String, String)>,
-    Query(q): Query<CoverQ>,
-    req: Request,
-) -> ApiResult<Response> {
+async fn cover(State(st): State<AppState>, who: Who, Path((id, album)): Path<(String, String)>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
     on(&st)?;
     may_have(&st, &who, &id, |e| e.row.s("album_id") == album)?;
     crate::routes::library::cover_response(&st, &album, q.s, &q.v, req).await
@@ -1569,9 +1129,7 @@ pub fn tick_once(st: &AppState, force: bool) {
         let mut inner = st.playback.groups.lock();
         let ids: Vec<String> = inner.groups.keys().cloned().collect();
         for id in ids {
-            let Some(g) = inner.groups.get_mut(&id) else {
-                continue;
-            };
+            let Some(g) = inner.groups.get_mut(&id) else { continue };
             if g.advance(t_ms) {
                 g.changed(t);
             }
@@ -1581,12 +1139,9 @@ pub fn tick_once(st: &AppState, force: bool) {
                 continue;
             }
             // (the reason its stream is told; None: dropped, it has no stream)
-            let gone: Vec<(String, Option<&'static str>)> = g
-                .members
-                .iter()
+            let gone: Vec<(String, Option<&'static str>)> = g.members.iter()
                 .filter_map(|m| {
-                    let dropped =
-                        m.streams == 0 && m.gone_since.is_some_and(|s| t - s >= gl::DROP_SECS);
+                    let dropped = m.streams == 0 && m.gone_since.is_some_and(|s| t - s >= gl::DROP_SECS);
                     if m.expires_at.is_some_and(|e| t >= e) {
                         Some((m.member.clone(), Some("expired")))
                     } else if m.is_guest() && !guests_on {
@@ -1598,10 +1153,7 @@ pub fn tick_once(st: &AppState, force: bool) {
                 .collect();
             for (m, reason) in gone {
                 if let (Some(reason), Some(g)) = (reason, inner.groups.get(&id)) {
-                    let _ = g.tx.send(Event::Ended {
-                        reason,
-                        member: Some(m.clone()),
-                    });
+                    let _ = g.tx.send(Event::Ended { reason, member: Some(m.clone()) });
                 }
                 let out = take_out(&mut inner, &id, &m);
                 let over = out == Out::Ended;
@@ -1611,10 +1163,7 @@ pub fn tick_once(st: &AppState, force: bool) {
                 }
             }
         }
-        inner
-            .groups
-            .values()
-            .any(|g| g.playing && !g.queue.is_empty())
+        inner.groups.values().any(|g| g.playing && !g.queue.is_empty())
     };
     // while a group listen plays, measuring loudness and the Translator's model wait (encore_jobs::busy); once
     // the last one stopped the Translator goes on (measuring looks again by itself)

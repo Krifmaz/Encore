@@ -1,25 +1,24 @@
 //! /api/discover extras: ListenBrainz "For you", similar artists/songs, genre pages, artist photo/bio.
-use crate::auth::User;
 use crate::enrich::{enrich, enrich_now};
+use crate::auth::User;
+use encore_db::RowExt;
+use encore_core::error::{err, ApiResult};
 use crate::state::AppState;
+use encore_http::mb;
+use encore_db::p;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use encore_core::error::{err, ApiResult};
 use encore_core::json::s;
 use encore_core::text::norm_keep_underscore;
-use encore_db::p;
-use encore_db::RowExt;
 use encore_http::lastfm::get as lastfm;
-use encore_http::mb;
 use encore_http::{coverartarchive, deezer, listenbrainz};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
 /// The ListenBrainz recommendation algorithm "For you" asks for.
-const LB_ALGO: &str =
-    "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30";
+const LB_ALGO: &str = "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30";
 /// The JSPF extension key of a playlist's ListenBrainz data.
 const JSPF_PL: &str = "https://musicbrainz.org/doc/jspf#playlist";
 /// The JSPF extension key of a track's ListenBrainz data.
@@ -40,37 +39,21 @@ pub fn router() -> Router<AppState> {
 
 /// The last path segment of a URL (an MBID out of a MusicBrainz link).
 fn last_seg(s: &str) -> String {
-    s.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    s.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
 }
 
 /// Every album artist of the library, lowercased: a DISTINCT over every song, made on a read connection once
 /// per state of the library (the cached lists of routes::library).
 async fn library_artists(st: &AppState) -> HashSet<String> {
     let names = super::library::cached_read(st, "library-artists".into(), |c| {
-        Ok(json!(c
-            .query("SELECT DISTINCT lower(albumartist) n FROM tracks", p![])
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| r.s("n"))
-            .collect::<Vec<_>>()))
-    })
-    .await;
-    names
-        .ok()
-        .and_then(|v| v.as_array().map(|a| a.iter().map(s).collect()))
-        .unwrap_or_default()
+        Ok(json!(c.query("SELECT DISTINCT lower(albumartist) n FROM tracks", p![]).unwrap_or_default().into_iter().map(|r| r.s("n")).collect::<Vec<_>>()))
+    }).await;
+    names.ok().and_then(|v| v.as_array().map(|a| a.iter().map(s).collect())).unwrap_or_default()
 }
 
 /// Cached JSON producer (errors are not cached).
 async fn cached<F, Fut>(st: &AppState, key: &str, ttl: u64, f: F) -> anyhow::Result<Value>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<Value>>,
-{
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = anyhow::Result<Value>> {
     if let Some(v) = st.cache_get(key) {
         return Ok(v);
     }
@@ -83,51 +66,27 @@ where
 
 /// A ListenBrainz playlist's kind ("weekly-exploration", "daily-jams", "weekly-jams" or "other").
 fn kind(pl: &Value) -> String {
-    let patch =
-        s(&pl["extension"][JSPF_PL]["additional_metadata"]["algorithm_metadata"]["source_patch"]);
+    let patch = s(&pl["extension"][JSPF_PL]["additional_metadata"]["algorithm_metadata"]["source_patch"]);
     if !patch.is_empty() {
         return patch;
     }
     let t = s(&pl["title"]).to_lowercase();
-    if t.contains("exploration") {
-        "weekly-exploration"
-    } else if t.contains("daily") {
-        "daily-jams"
-    } else if t.contains("weekly jams") {
-        "weekly-jams"
-    } else {
-        "other"
-    }
-    .into()
+    if t.contains("exploration") { "weekly-exploration" } else if t.contains("daily") { "daily-jams" } else if t.contains("weekly jams") { "weekly-jams" } else { "other" }.into()
 }
 
 /// A JSPF track as a song: title, artist, album, MBIDs, length and a Cover Art Archive cover.
 fn lb_track(t: &Value) -> Value {
-    let ids: Vec<String> = match &t["identifier"] {
-        Value::Array(a) => a.iter().map(s).collect(),
-        Value::String(s) => vec![s.clone()],
-        _ => vec![],
-    };
-    let rec = ids
-        .iter()
-        .find(|i| i.contains("musicbrainz.org/recording/"))
-        .map(|i| last_seg(i));
+    let ids: Vec<String> = match &t["identifier"] { Value::Array(a) => a.iter().map(s).collect(), Value::String(s) => vec![s.clone()], _ => vec![] };
+    let rec = ids.iter().find(|i| i.contains("musicbrainz.org/recording/")).map(|i| last_seg(i));
     let ext = &t["extension"][JSPF_TR];
     let add = &ext["additional_metadata"];
     let rel = Some(last_seg(&s(&ext["release_identifier"]))).filter(|s| !s.is_empty());
     let cover = if add["caa_release_mbid"].is_string() && !add["caa_id"].is_null() {
-        Some(coverartarchive::image(
-            &s(&add["caa_release_mbid"]),
-            add["caa_id"].to_string().trim_matches('"'),
-            250,
-        ))
+        Some(coverartarchive::image(&s(&add["caa_release_mbid"]), add["caa_id"].to_string().trim_matches('"'), 250))
     } else {
         rel.as_ref().map(|r| coverartarchive::cover_release(r, 250))
     };
-    let artist_mbid = ext["artist_identifiers"]
-        .as_array()
-        .and_then(|a| a.first())
-        .map(|a| last_seg(&s(a)));
+    let artist_mbid = ext["artist_identifiers"].as_array().and_then(|a| a.first()).map(|a| last_seg(&s(a)));
     let dur = t["duration"].as_f64().unwrap_or(0.0) / 1000.0;
     json!({ "title": s(&t["title"]), "artist": s(&t["creator"]), "album": s(&t["album"]), "mbid": rec, "artist_mbid": artist_mbid,
             "release_mbid": rel, "length": if dur > 0.0 { json!(dur) } else { Value::Null }, "cover": cover })
@@ -162,15 +121,8 @@ pub async fn lb_playlists(st: &AppState, user: &str) -> anyhow::Result<Vec<Value
 pub async fn lb_playlist_tracks(st: &AppState, pid: &str) -> anyhow::Result<Vec<Value>> {
     let v = cached(st, &format!("lbtr:{pid}"), 6 * 3600, || async {
         let d = encore_http::json(listenbrainz::playlist(st, pid, None)).await?;
-        Ok(json!(d["playlist"]["track"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(lb_track)
-            .collect::<Vec<_>>()))
-    })
-    .await?;
+        Ok(json!(d["playlist"]["track"].as_array().cloned().unwrap_or_default().iter().map(lb_track).collect::<Vec<_>>()))
+    }).await?;
     Ok(v.as_array().cloned().unwrap_or_default())
 }
 
@@ -178,69 +130,32 @@ pub async fn lb_playlist_tracks(st: &AppState, pid: &str) -> anyhow::Result<Vec<
 /// for the library and one for the requests of the songs it lacks (encore_library::lookup).
 pub fn annotate_tracks(st: &AppState, tracks: Vec<Value>) -> Vec<Value> {
     use encore_library::lookup;
-    let keys: Vec<(String, String, String)> = tracks
-        .iter()
-        .map(|t| (s(&t["mbid"]), s(&t["artist"]), s(&t["title"])))
-        .collect();
+    let keys: Vec<(String, String, String)> = tracks.iter().map(|t| (s(&t["mbid"]), s(&t["artist"]), s(&t["title"]))).collect();
     let libs = lookup::first_tracks(&st.db, &keys);
-    let missing: Vec<&(String, String, String)> = keys
-        .iter()
-        .zip(&libs)
-        .filter(|(_, l)| l.is_none())
-        .map(|(k, _)| k)
-        .collect();
+    let missing: Vec<&(String, String, String)> = keys.iter().zip(&libs).filter(|(_, l)| l.is_none()).map(|(k, _)| k).collect();
     let pairs: Vec<(String, String)> = missing.iter().map(|k| (k.1.clone(), k.2.clone())).collect();
     let mbids: Vec<String> = missing.iter().map(|k| k.0.clone()).collect();
     let reqs = lookup::Requests::read(&st.db, "track", &pairs, &mbids);
-    tracks
-        .into_iter()
-        .zip(libs)
-        .zip(keys)
-        .map(|((mut t, lt), (mbid, artist, title))| {
-            let req = if lt.is_none() {
-                reqs.by_mbid_or_name(&mbid, &artist, &title)
-                    .map(|r| json!(r.0))
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
-            t["library"] = lt.map(|r| json!(r)).unwrap_or(Value::Null);
-            t["request_status"] = req;
-            t
-        })
-        .collect()
+    tracks.into_iter().zip(libs).zip(keys).map(|((mut t, lt), (mbid, artist, title))| {
+        let req = if lt.is_none() { reqs.by_mbid_or_name(&mbid, &artist, &title).map(|r| json!(r.0)).unwrap_or(Value::Null) } else { Value::Null };
+        t["library"] = lt.map(|r| json!(r)).unwrap_or(Value::Null);
+        t["request_status"] = req;
+        t
+    }).collect()
 }
 
 /// The user's ListenBrainz name, when ListenBrainz is connected.
 pub fn lb_user(st: &AppState, user_id: i64) -> Option<String> {
-    let c = st
-        .db
-        .one(
-            "SELECT data FROM connections WHERE user_id=? AND service='listenbrainz'",
-            p![user_id],
-        )
-        .ok()??;
+    let c = st.db.one("SELECT data FROM connections WHERE user_id=? AND service='listenbrainz'", p![user_id]).ok()??;
     let d: Value = serde_json::from_str(&c.s("data")).ok()?;
-    d["user"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+    d["user"].as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
 /// The user's Last.fm name, when Last.fm is connected.
 fn lastfm_user(st: &AppState, user_id: i64) -> Option<String> {
-    let c = st
-        .db
-        .one(
-            "SELECT data FROM connections WHERE user_id=? AND service='lastfm'",
-            p![user_id],
-        )
-        .ok()??;
+    let c = st.db.one("SELECT data FROM connections WHERE user_id=? AND service='lastfm'", p![user_id]).ok()??;
     let d: Value = serde_json::from_str(&c.s("data")).ok()?;
-    d["user"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+    d["user"].as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
 /// Last.fm has no personal recommendations API, so: your top artists/songs of the last months →
@@ -352,25 +267,14 @@ async fn made_for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Js
 /// The Made for you answer before enrichment: the user's ListenBrainz playlists with their songs.
 async fn made_for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<Value> {
     let uid = u.i("id");
-    let Some(name) = st.blocking(move |st| Ok(lb_user(st, uid))).await? else {
-        return Ok(json!({ "connected": false, "playlists": [] }));
-    };
+    let Some(name) = st.blocking(move |st| Ok(lb_user(st, uid))).await? else { return Ok(json!({ "connected": false, "playlists": [] })) };
     let mut out = vec![];
     let mut error = Value::Null;
     match lb_playlists(&st, &name).await {
         Ok(mut pls) => {
-            let order = |k: &str| match k {
-                "daily-jams" => 0,
-                "weekly-jams" => 1,
-                "weekly-exploration" => 2,
-                _ => 9,
-            };
+            let order = |k: &str| match k { "daily-jams" => 0, "weekly-jams" => 1, "weekly-exploration" => 2, _ => 9 };
             pls.sort_by_key(|p| order(p["kind"].as_str().unwrap_or("")));
-            let results = futures_util::future::join_all(
-                pls.iter()
-                    .map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or(""))),
-            )
-            .await;
+            let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
             for (mut p, tr) in pls.into_iter().zip(results) {
                 let Ok(tr) = tr else { continue };
                 let tr = st.blocking(move |st| Ok(annotate_tracks(st, tr))).await?;
@@ -379,17 +283,11 @@ async fn made_for_you_answer(State(st): State<AppState>, User(u): User) -> ApiRe
                 let mut covers: Vec<String> = vec![];
                 for t in &tr {
                     let own = s(&t["library"]["album_id"]);
-                    let c = if !own.is_empty() {
-                        format!("/api/library/albums/{own}/cover")
-                    } else {
-                        s(&t["cover"])
-                    };
+                    let c = if !own.is_empty() { format!("/api/library/albums/{own}/cover") } else { s(&t["cover"]) };
                     if !c.is_empty() && !covers.contains(&c) {
                         covers.push(c);
                     }
-                    if covers.len() == 4 {
-                        break;
-                    }
+                    if covers.len() == 4 { break; }
                 }
                 p["owned"] = json!(owned);
                 p["total"] = json!(tr.len());
@@ -413,9 +311,7 @@ async fn for_you(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
 /// The For you answer before enrichment.
 async fn for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<Value> {
     let uid = u.i("id");
-    let (lb, lf) = st
-        .blocking(move |st| Ok((lb_user(st, uid), lastfm_user(st, uid))))
-        .await?;
+    let (lb, lf) = st.blocking(move |st| Ok((lb_user(st, uid), lastfm_user(st, uid)))).await?;
     let lf = lf.filter(|_| !st.cfg.str("lastfm_api_key").is_empty());
     if lb.is_none() && lf.is_none() {
         return Ok(json!({ "connected": false, "playlists": [] }));
@@ -426,25 +322,11 @@ async fn for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<
         match lb_playlists(&st, name).await {
             Ok(mut pls) => {
                 // For you is discovery: the Jams lists are songs you already love, so they stay on ListenBrainz
-                pls.retain(|p| {
-                    !matches!(
-                        p["kind"].as_str().unwrap_or(""),
-                        "daily-jams" | "weekly-jams"
-                    )
-                });
-                let results = futures_util::future::join_all(
-                    pls.iter()
-                        .map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or(""))),
-                )
-                .await;
+                pls.retain(|p| !matches!(p["kind"].as_str().unwrap_or(""), "daily-jams" | "weekly-jams"));
+                let results = futures_util::future::join_all(pls.iter().map(|p| lb_playlist_tracks(&st, p["id"].as_str().unwrap_or("")))).await;
                 for (mut p, tr) in pls.into_iter().zip(results) {
                     if let Ok(tr) = tr {
-                        let tr: Vec<Value> = st
-                            .blocking(move |st| Ok(annotate_tracks(st, tr)))
-                            .await?
-                            .into_iter()
-                            .filter(|t| t["library"].is_null())
-                            .collect();
+                        let tr: Vec<Value> = st.blocking(move |st| Ok(annotate_tracks(st, tr))).await?.into_iter().filter(|t| t["library"].is_null()).collect();
                         if !tr.is_empty() {
                             p["tracks"] = json!(tr);
                             out.push(p);
@@ -461,34 +343,23 @@ async fn for_you_answer(State(st): State<AppState>, User(u): User) -> ApiResult<
             Ok(mut v) => {
                 let tr: Vec<Value> = v["tracks"].as_array().cloned().unwrap_or_default();
                 let tr = st.blocking(move |st| Ok(annotate_tracks(st, tr))).await?;
-                v["tracks"] = json!(tr
-                    .into_iter()
-                    .filter(|t| t["library"].is_null())
-                    .collect::<Vec<_>>());
+                v["tracks"] = json!(tr.into_iter().filter(|t| t["library"].is_null()).collect::<Vec<_>>());
                 lastfm = v;
             }
             Err(e) => errors.push(format!("Last.fm: {e}")),
         }
     }
-    Ok(
-        json!({ "connected": true, "user": lb, "playlists": out, "lastfm": lastfm, "errors": errors }),
-    )
+    Ok(json!({ "connected": true, "user": lb, "playlists": out, "lastfm": lastfm, "errors": errors }))
 }
 
 // ---- similar artists / songs ------------------------------------------------------------------
 
+
 /// The Deezer artist with exactly this name and the most fans.
 async fn deezer_artist(st: &AppState, name: &str) -> anyhow::Result<Option<Value>> {
     let d = deezer::get(st, deezer::search(st, "artist", name, 5)).await?;
-    Ok(d["data"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|a| {
-            norm_keep_underscore(a["name"].as_str().unwrap_or("")) == norm_keep_underscore(name)
-        })
-        .max_by_key(|a| a["nb_fan"].as_i64().unwrap_or(0)))
+    Ok(d["data"].as_array().cloned().unwrap_or_default().into_iter()
+        .filter(|a| norm_keep_underscore(a["name"].as_str().unwrap_or("")) == norm_keep_underscore(name)).max_by_key(|a| a["nb_fan"].as_i64().unwrap_or(0)))
 }
 
 /// An artist's photo from Deezer. Found: kept a week; not on Deezer: asked again tomorrow;
@@ -500,9 +371,7 @@ async fn deezer_picture(st: &AppState, name: &str) -> Value {
     }
     match deezer_artist(st, name).await {
         Ok(a) => {
-            let pic = a
-                .and_then(|a| a["picture_medium"].as_str().map(String::from))
-                .filter(|p| !p.contains("/artist//"));
+            let pic = a.and_then(|a| a["picture_medium"].as_str().map(String::from)).filter(|p| !p.contains("/artist//"));
             let v = pic.map(|p| json!(p)).unwrap_or(Value::Null);
             st.cache_put(&key, v.clone(), if v.is_null() { 86400 } else { 7 * 86400 });
             v
@@ -514,22 +383,16 @@ async fn deezer_picture(st: &AppState, name: &str) -> Value {
 /// Fill in artist photos without making the page wait: known ones directly, the rest as a link the
 /// browser loads on its own (/api/discover/artist-picture), so cards appear at once and photos follow.
 async fn with_pictures(st: &AppState, items: Vec<Value>) -> Vec<Value> {
-    items
-        .into_iter()
-        .map(|mut a| {
-            if a["image"].as_str().unwrap_or("").is_empty() {
-                let name = a["name"].as_str().unwrap_or("").to_string();
-                a["image"] = match st.cache_get(&format!("dzpic:{}", norm_keep_underscore(&name))) {
-                    Some(v) => v,
-                    None => json!(format!(
-                        "/api/discover/artist-picture?name={}",
-                        urlencoding::encode(&name)
-                    )),
-                };
-            }
-            a
-        })
-        .collect()
+    items.into_iter().map(|mut a| {
+        if a["image"].as_str().unwrap_or("").is_empty() {
+            let name = a["name"].as_str().unwrap_or("").to_string();
+            a["image"] = match st.cache_get(&format!("dzpic:{}", norm_keep_underscore(&name))) {
+                Some(v) => v,
+                None => json!(format!("/api/discover/artist-picture?name={}", urlencoding::encode(&name))),
+            };
+        }
+        a
+    }).collect()
 }
 
 /// `GET /api/discover/artist-picture` query.
@@ -540,23 +403,11 @@ struct PictureQ {
 }
 
 /// The photo for one artist (a redirect to Deezer's image), or 404 – the page then shows the initial.
-async fn artist_picture(
-    State(st): State<AppState>,
-    User(_): User,
-    Query(q): Query<PictureQ>,
-) -> axum::response::Response {
+async fn artist_picture(State(st): State<AppState>, User(_): User, Query(q): Query<PictureQ>) -> axum::response::Response {
     use axum::response::IntoResponse;
     match deezer_picture(&st, &q.name).await.as_str() {
-        Some(url) => (
-            [(axum::http::header::CACHE_CONTROL, "private, max-age=86400")],
-            axum::response::Redirect::temporary(url),
-        )
-            .into_response(),
-        None => (
-            axum::http::StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-        )
-            .into_response(),
+        Some(url) => ([(axum::http::header::CACHE_CONTROL, "private, max-age=86400")], axum::response::Redirect::temporary(url)).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, [(axum::http::header::CACHE_CONTROL, "no-store")]).into_response(),
     }
 }
 
@@ -565,8 +416,7 @@ async fn mark_library(st: &AppState, mut res: Value) -> Value {
     let have = library_artists(st).await;
     if let Some(arr) = res["artists"].as_array_mut() {
         for a in arr.iter_mut() {
-            a["in_library"] =
-                json!(have.contains(&a["name"].as_str().unwrap_or("").to_lowercase()));
+            a["in_library"] = json!(have.contains(&a["name"].as_str().unwrap_or("").to_lowercase()));
         }
     }
     res
@@ -629,14 +479,8 @@ pub async fn similar_artists(st: &AppState, mbid: &str, name: &str, limit: usize
 }
 
 /// GET /api/discover/artist/{mbid}/similar: 18 similar artists, enriched.
-async fn artist_similar(
-    State(st): State<AppState>,
-    User(viewer): User,
-    Path(mbid): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let a = mb::artist(&st, &mbid)
-        .await
-        .map_err(crate::routes::discover::mb_err)?;
+async fn artist_similar(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
+    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
     let mut v = similar_artists(&st, &mbid, a["name"].as_str().unwrap_or(""), 18).await;
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
@@ -654,17 +498,9 @@ struct SimTrQ {
 }
 
 /// "More like this" for a song: Last.fm track.getSimilar, else a Deezer artist radio.
-async fn similar_tracks(
-    State(st): State<AppState>,
-    User(viewer): User,
-    Query(q): Query<SimTrQ>,
-) -> ApiResult<Json<Value>> {
+async fn similar_tracks(State(st): State<AppState>, User(viewer): User, Query(q): Query<SimTrQ>) -> ApiResult<Json<Value>> {
     let mbid = q.mbid.clone().filter(|m| !m.is_empty());
-    let key = format!(
-        "simtr:{}",
-        mbid.clone()
-            .unwrap_or_else(|| norm_keep_underscore(&format!("{}{}", q.artist, q.title)))
-    );
+    let key = format!("simtr:{}", mbid.clone().unwrap_or_else(|| norm_keep_underscore(&format!("{}{}", q.artist, q.title))));
     let (artist, title) = (q.artist.clone(), q.title.clone());
     let res = cached(&st, &key, 86400, || async {
         if !st.cfg.str("lastfm_api_key").is_empty() {
@@ -692,9 +528,7 @@ async fn similar_tracks(
         Ok(json!({ "source": "Deezer radio", "tracks": tracks }))
     }).await.map_err(|e| err(502, e.to_string()))?;
     let tracks = res["tracks"].as_array().cloned().unwrap_or_default();
-    let tracks = st
-        .blocking(move |st| Ok(annotate_tracks(st, tracks)))
-        .await?;
+    let tracks = st.blocking(move |st| Ok(annotate_tracks(st, tracks))).await?;
     let mut v = json!({ "source": res["source"], "tracks": tracks });
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
@@ -703,51 +537,20 @@ async fn similar_tracks(
 // ---- genres / tags ----------------------------------------------------------------------------
 
 /// The genres shown when Last.fm has no top tags.
-const FALLBACK_TAGS: [&str; 22] = [
-    "rock",
-    "pop",
-    "electronic",
-    "hip hop",
-    "jazz",
-    "metal",
-    "indie",
-    "folk",
-    "punk",
-    "soul",
-    "r&b",
-    "ambient",
-    "house",
-    "techno",
-    "classical",
-    "country",
-    "blues",
-    "reggae",
-    "experimental",
-    "shoegaze",
-    "drum and bass",
-    "dubstep",
-];
+const FALLBACK_TAGS: [&str; 22] = ["rock", "pop", "electronic", "hip hop", "jazz", "metal", "indie", "folk", "punk", "soul", "r&b", "ambient",
+    "house", "techno", "classical", "country", "blues", "reggae", "experimental", "shoegaze", "drum and bass", "dubstep"];
 
 /// GET /api/discover/tags: the top genres (Last.fm, cached for a week; else a fixed list).
 async fn tags(State(st): State<AppState>, User(viewer): User) -> ApiResult<Json<Value>> {
     let top = cached(&st, "toptags", 7 * 86400, || async {
         if let Ok(d) = lastfm(&st, "tag.getTopTags", &[]).await {
-            let t: Vec<String> = d["toptags"]["tag"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .map(|t| s(&t["name"]))
-                .take(40)
-                .collect();
+            let t: Vec<String> = d["toptags"]["tag"].as_array().cloned().unwrap_or_default().iter().map(|t| s(&t["name"])).take(40).collect();
             if !t.is_empty() {
                 return Ok(json!(t));
             }
         }
         Ok(json!(FALLBACK_TAGS))
-    })
-    .await
-    .unwrap_or(json!(FALLBACK_TAGS));
+    }).await.unwrap_or(json!(FALLBACK_TAGS));
     // the library's genres: a GROUP BY over every song, made on a read connection once per state of the library
     let lib = super::library::cached_read(&st, "genres".into(), |c| {
         Ok(json!(c.query("SELECT lower(genre) g, COUNT(*) n FROM tracks WHERE genre IS NOT NULL AND genre!='' GROUP BY lower(genre) ORDER BY n DESC LIMIT 30", p![])?
@@ -767,12 +570,7 @@ struct PageQ {
 }
 
 /// GET /api/discover/tag/{name}?page=: a genre's top artists (cached for a day).
-async fn tag(
-    State(st): State<AppState>,
-    User(viewer): User,
-    Path(name): Path<String>,
-    Query(q): Query<PageQ>,
-) -> ApiResult<Json<Value>> {
+async fn tag(State(st): State<AppState>, User(viewer): User, Path(name): Path<String>, Query(q): Query<PageQ>) -> ApiResult<Json<Value>> {
     let page = q.page.unwrap_or(1).max(1);
     let res = cached(&st, &format!("tag:{}:{page}", name.to_lowercase()), 86400, || async {
         if !st.cfg.str("lastfm_api_key").is_empty() {
@@ -802,13 +600,8 @@ async fn tag(
 /// The artist's photo and popular songs from Deezer.
 async fn deezer_extras(st: &AppState, name: &str) -> anyhow::Result<Value> {
     let mut out = json!({});
-    let Some(a) = deezer_artist(st, name).await? else {
-        return Ok(out);
-    };
-    if let Some(p) = a["picture_xl"]
-        .as_str()
-        .filter(|p| !p.contains("/artist//"))
-    {
+    let Some(a) = deezer_artist(st, name).await? else { return Ok(out) };
+    if let Some(p) = a["picture_xl"].as_str().filter(|p| !p.contains("/artist//")) {
         out["image"] = json!(p);
     }
     out["fans"] = a["nb_fan"].clone();
@@ -827,57 +620,25 @@ async fn wikipedia(st: &AppState, links: &Value) -> anyhow::Result<Value> {
         title = Some(urlencoding::decode(t)?.into_owned());
     } else if let Some(wd) = links["wikidata"].as_str() {
         let qid = last_seg(wd);
-        let d = encore_http::get_json(
-            st,
-            &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
-            &[],
-        )
-        .await?;
-        title = d["entities"][&qid]["sitelinks"]["enwiki"]["title"]
-            .as_str()
-            .map(String::from);
+        let d = encore_http::get_json(st, &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"), &[]).await?;
+        title = d["entities"][&qid]["sitelinks"]["enwiki"]["title"].as_str().map(String::from);
     }
-    let Some(title) = title else {
-        return Ok(json!({}));
-    };
-    let summary = encore_http::get_json(
-        st,
-        &format!(
-            "https://en.wikipedia.org/api/rest_v1/page/summary/{}",
-            urlencoding::encode(&title.replace(' ', "_"))
-        ),
-        &[],
-    )
-    .await?;
+    let Some(title) = title else { return Ok(json!({})) };
+    let summary = encore_http::get_json(st, &format!("https://en.wikipedia.org/api/rest_v1/page/summary/{}", urlencoding::encode(&title.replace(' ', "_"))), &[]).await?;
     let mut out = json!({ "bio": s(&summary["extract"]), "bio_url": summary["content_urls"]["desktop"]["page"] });
-    if let Some(src) = summary["originalimage"]["source"]
-        .as_str()
-        .or(summary["thumbnail"]["source"].as_str())
-    {
+    if let Some(src) = summary["originalimage"]["source"].as_str().or(summary["thumbnail"]["source"].as_str()) {
         out["wiki_image"] = json!(src);
     }
     Ok(out)
 }
 
 /// GET /api/discover/artist/{mbid}/extras: the artist's photo, bio and popular songs (cached for a day).
-async fn artist_extras(
-    State(st): State<AppState>,
-    User(viewer): User,
-    Path(mbid): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let a = mb::artist(&st, &mbid)
-        .await
-        .map_err(crate::routes::discover::mb_err)?;
+async fn artist_extras(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
+    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
     let name = s(&a["name"]);
     let data = cached(&st, &format!("extras:{mbid}"), 86400, || async {
         let mut d = json!({ "image": null, "bio": "", "bio_url": null, "top": [] });
-        for part in [
-            deezer_extras(&st, &name).await,
-            wikipedia(&st, &a["links"]).await,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for part in [deezer_extras(&st, &name).await, wikipedia(&st, &a["links"]).await].into_iter().flatten() {
             if let Value::Object(m) = part {
                 for (k, v) in m {
                     d[k] = v;
@@ -889,27 +650,18 @@ async fn artist_extras(
         }
         d.as_object_mut().unwrap().remove("wiki_image");
         Ok(d)
-    })
-    .await
-    .unwrap_or_default();
+    }).await.unwrap_or_default();
     // each popular song's library copy (best quality first): one query for all of them, on the blocking pool,
     // with the enrichment (encore_library::lookup::find_tracks, the batch of `find_track`)
     st.blocking(move |st| {
         let mut data = data;
         if let Some(top) = data["top"].as_array_mut() {
-            let keys: Vec<(String, String, String)> = top
-                .iter()
-                .map(|t| (String::new(), name.clone(), s(&t["title"])))
-                .collect();
-            for (t, lib) in top
-                .iter_mut()
-                .zip(encore_library::lookup::find_tracks(&st.db, &keys))
-            {
+            let keys: Vec<(String, String, String)> = top.iter().map(|t| (String::new(), name.clone(), s(&t["title"]))).collect();
+            for (t, lib) in top.iter_mut().zip(encore_library::lookup::find_tracks(&st.db, &keys)) {
                 t["library"] = lib.map(|r| json!(r)).unwrap_or(Value::Null);
             }
         }
         enrich_now(st, Some(&viewer), &mut data);
         Ok(Json(data))
-    })
-    .await
+    }).await
 }

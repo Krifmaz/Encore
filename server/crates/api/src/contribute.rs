@@ -3,16 +3,16 @@
 //! serves a small page that posts the form to musicbrainz.org/release/add, also through a signed link the
 //! phone opens without a session). The submissions themselves and the album data of a seed are
 //! encore_library::contribute.
-use crate::auth::{Admin, MaybeUser, User};
 use crate::enrich::enrich;
+use crate::auth::{Admin, MaybeUser, User};
+use encore_db::{now, RowExt};
+use encore_core::error::{err, ApiResult};
+use encore_db::p;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use encore_core::error::{err, ApiResult};
-use encore_db::p;
-use encore_db::{now, RowExt};
 use encore_http::mb;
 use encore_library::contribute::{self, SeedAlbum};
 use serde::Deserialize;
@@ -43,14 +43,7 @@ fn mb_redirect_uri(st: &AppState) -> Option<String> {
 /// A contribution table's rows counted per status.
 fn counts(st: &AppState, table: &str) -> Value {
     let mut out = json!({});
-    for r in st
-        .db
-        .query(
-            &format!("SELECT status, COUNT(*) n FROM {table} GROUP BY status"),
-            p![],
-        )
-        .unwrap_or_default()
-    {
+    for r in st.db.query(&format!("SELECT status, COUNT(*) n FROM {table} GROUP BY status"), p![]).unwrap_or_default() {
         out[r.s("status")] = json!(r.i("n"));
     }
     out
@@ -96,14 +89,10 @@ async fn run_acoustid(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<
         Ok((s, i)) => {
             let msg = format!("{s} sent, {i} imported");
             st.library.contribute.note("acoustid", true, &msg);
-            Ok(Json(
-                json!({ "ok": true, "sent": s, "imported": i, "message": msg }),
-            ))
+            Ok(Json(json!({ "ok": true, "sent": s, "imported": i, "message": msg })))
         }
         Err(e) => {
-            st.library
-                .contribute
-                .note("acoustid", false, &e.to_string());
+            st.library.contribute.note("acoustid", false, &e.to_string());
             Err(err(502, e.to_string()))
         }
     }
@@ -114,19 +103,12 @@ async fn run_isrc(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     if st.cfg.str("mb_oauth_refresh_token").is_empty() {
         return Err(err(400, "Connect a MusicBrainz account first"));
     }
-    let r = async {
-        let q = contribute::isrc_scan(&st, 40).await?;
-        let n = contribute::isrc_submit(&st).await?;
-        anyhow::Ok((q, n))
-    }
-    .await;
+    let r = async { let q = contribute::isrc_scan(&st, 40).await?; let n = contribute::isrc_submit(&st).await?; anyhow::Ok((q, n)) }.await;
     match r {
         Ok((q, n)) => {
             let msg = format!("{q} found, {n} sent");
             st.library.contribute.note("isrc", true, &msg);
-            Ok(Json(
-                json!({ "ok": true, "found": q, "sent": n, "message": msg }),
-            ))
+            Ok(Json(json!({ "ok": true, "found": q, "sent": n, "message": msg })))
         }
         Err(e) => {
             st.library.contribute.note("isrc", false, &e.to_string());
@@ -136,45 +118,18 @@ async fn run_isrc(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
 }
 
 /// POST /api/contribute/mb/connect: the MusicBrainz sign-in link.
-async fn mb_connect(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    headers: axum::http::HeaderMap,
-) -> ApiResult<Json<Value>> {
+async fn mb_connect(State(st): State<AppState>, Admin(u): Admin, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
     let cid = st.cfg.str("mb_client_id");
     if cid.is_empty() || st.cfg.str("mb_client_secret").is_empty() {
-        return Err(err(
-            400,
-            "Add the MusicBrainz application's client ID and secret first",
-        ));
+        return Err(err(400, "Add the MusicBrainz application's client ID and secret first"));
     }
-    let redirect = mb_redirect_uri(&st).ok_or_else(|| {
-        err(
-            400,
-            "Set the Public URL in Settings → General first (the sign-in needs a callback address)",
-        )
-    })?;
+    let redirect = mb_redirect_uri(&st).ok_or_else(|| err(400, "Set the Public URL in Settings → General first (the sign-in needs a callback address)"))?;
     // a single-use state for this admin (crate::signin): the callback links the account for them only
     let url = crate::signin::start(&st, u.i("id"), "musicbrainz", &headers, |state, _| {
-        let q = [
-            ("response_type", "code"),
-            ("client_id", cid.as_str()),
-            ("redirect_uri", redirect.as_str()),
-            ("scope", "submit_isrc tag rating"),
-            ("state", state),
-            ("access_type", "offline"),
-            ("approval_prompt", "force"),
-        ];
-        Ok(format!(
-            "{}/oauth2/authorize?{}",
-            mb::MAIN,
-            q.iter()
-                .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
-                .collect::<Vec<_>>()
-                .join("&")
-        ))
-    })
-    .map_err(|e| err(400, e.to_string()))?;
+        let q = [("response_type", "code"), ("client_id", cid.as_str()), ("redirect_uri", redirect.as_str()), ("scope", "submit_isrc tag rating"),
+                 ("state", state), ("access_type", "offline"), ("approval_prompt", "force")];
+        Ok(format!("{}/oauth2/authorize?{}", mb::MAIN, q.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&")))
+    }).map_err(|e| err(400, e.to_string()))?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -193,68 +148,31 @@ struct CallbackQ {
 /// Back to Settings → Contribute with a message (`mb=` or `error=`).
 fn back(msg: &str, ok: bool) -> Response {
     let k = if ok { "mb" } else { "error" };
-    Redirect::to(&format!(
-        "/#/settings?s=contribute&{k}={}",
-        urlencoding::encode(&msg.chars().take(200).collect::<String>())
-    ))
-    .into_response()
+    Redirect::to(&format!("/#/settings?s=contribute&{k}={}", urlencoding::encode(&msg.chars().take(200).collect::<String>()))).into_response()
 }
 
 /// MusicBrainz comes back here. The account is linked for the admin who started the sign-in (its single-use
 /// `state`); a browser that is not signed in as that admin is asked first (crate::signin).
-async fn mb_callback(
-    State(st): State<AppState>,
-    MaybeUser(u): MaybeUser,
-    Query(q): Query<CallbackQ>,
-) -> Response {
-    crate::signin::callback(
-        &st,
-        u,
-        "musicbrainz",
-        &q.state,
-        &q.error,
-        &q.code,
-        |r| match r {
-            Ok(()) => back("connected", true),
-            Err(e) => back(&e, false),
-        },
-    )
-    .await
+async fn mb_callback(State(st): State<AppState>, MaybeUser(u): MaybeUser, Query(q): Query<CallbackQ>) -> Response {
+    crate::signin::callback(&st, u, "musicbrainz", &q.state, &q.error, &q.code, |r| match r {
+        Ok(()) => back("connected", true),
+        Err(e) => back(&e, false),
+    }).await
 }
 
 /// The callback's code exchanged for MusicBrainz tokens → (the account's name, the token answer).
 pub async fn mb_exchange(st: &AppState, code: &str) -> anyhow::Result<(String, Value)> {
-    let redirect =
-        mb_redirect_uri(st).ok_or_else(|| anyhow::anyhow!("Set the Public URL first"))?;
-    let r = mb::oauth_token(
-        st,
-        &[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", redirect.as_str()),
-            ("client_id", &st.cfg.str("mb_client_id")),
-            ("client_secret", &st.cfg.str("mb_client_secret")),
-        ],
-    )
-    .send()
-    .await
-    .map_err(|e| anyhow::anyhow!("Could not reach MusicBrainz: {e}"))?;
+    let redirect = mb_redirect_uri(st).ok_or_else(|| anyhow::anyhow!("Set the Public URL first"))?;
+    let r = mb::oauth_token(st, &[("grant_type", "authorization_code"), ("code", code), ("redirect_uri", redirect.as_str()),
+        ("client_id", &st.cfg.str("mb_client_id")), ("client_secret", &st.cfg.str("mb_client_secret"))]).send().await
+        .map_err(|e| anyhow::anyhow!("Could not reach MusicBrainz: {e}"))?;
     let status = r.status().as_u16();
     let d: Value = r.json().await.unwrap_or(Value::Null);
     if d["access_token"].is_null() {
-        anyhow::bail!(
-            "MusicBrainz did not accept the sign-in (HTTP {status}): {}",
-            d["error_description"]
-                .as_str()
-                .or(d["error"].as_str())
-                .unwrap_or("check the client ID, secret and callback URL")
-        );
+        anyhow::bail!("MusicBrainz did not accept the sign-in (HTTP {status}): {}", d["error_description"].as_str().or(d["error"].as_str()).unwrap_or("check the client ID, secret and callback URL"));
     }
     let tok = d["access_token"].as_str().unwrap_or("");
-    let who: Value = match mb::userinfo(st, tok).send().await {
-        Ok(r) => r.json().await.unwrap_or(Value::Null),
-        Err(_) => Value::Null,
-    };
+    let who: Value = match mb::userinfo(st, tok).send().await { Ok(r) => r.json().await.unwrap_or(Value::Null), Err(_) => Value::Null };
     Ok((who["sub"].as_str().unwrap_or("").to_string(), d))
 }
 
@@ -267,18 +185,9 @@ pub fn mb_link(st: &AppState, u: &encore_db::Row, account: &str, d: &Value) -> R
     }
     st.cfg.set_many(&json!({ "mb_oauth_access_token": d["access_token"].as_str().unwrap_or(""), "mb_oauth_refresh_token": d["refresh_token"].as_str().unwrap_or(""),
         "mb_oauth_expires_at": now() + d["expires_in"].as_f64().unwrap_or(3600.0), "mb_oauth_account": account }));
-    st.db.log(
-        "info",
-        &format!(
-            "{} connected the MusicBrainz account {account} for ISRC submissions",
-            u.s("username")
-        ),
-    );
+    st.db.log("info", &format!("{} connected the MusicBrainz account {account} for ISRC submissions", u.s("username")));
     if d["refresh_token"].as_str().unwrap_or("").is_empty() {
-        return Err(
-            "MusicBrainz gave no refresh token – submissions stop after an hour. Connect again"
-                .into(),
-        );
+        return Err("MusicBrainz gave no refresh token – submissions stop after an hour. Connect again".into());
     }
     Ok(())
 }
@@ -294,19 +203,8 @@ async fn mb_disconnect(State(st): State<AppState>, Admin(_): Admin) -> Json<Valu
 /// The page the browser opens: posts the seeded form to MusicBrainz at once (a button when scripts are off).
 pub fn seed_html(a: &SeedAlbum, fields: &[(String, String)]) -> String {
     use encore_core::text::html_escape as e;
-    let inputs: String = fields
-        .iter()
-        .map(|(k, v)| {
-            format!(
-                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
-                e(k),
-                e(v)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    let inputs: String = fields.iter().map(|(k, v)| format!("<input type=\"hidden\" name=\"{}\" value=\"{}\">", e(k), e(v))).collect::<Vec<_>>().join("\n");
+    format!(r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Add to MusicBrainz</title><meta name="referrer" content="no-referrer">
 <style>body{{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}}main{{max-width:520px}}button{{font:inherit;padding:10px 18px;border-radius:8px;border:0;background:#ba478f;color:#fff;cursor:pointer}}p{{color:#bbb}}</style></head>
 <body><main><h1>Add “{title}” to MusicBrainz</h1><p>Opening the MusicBrainz release editor with the album filled in from {src}. Check every tab before you enter the edit: you are the editor, Encore only typed it in.</p>
@@ -314,14 +212,7 @@ pub fn seed_html(a: &SeedAlbum, fields: &[(String, String)]) -> String {
 {inputs}
 <button type="submit">Open the release editor</button></form></main>
 <script>document.getElementById('seed').submit();</script></body></html>"#,
-        main = mb::MAIN,
-        title = e(&a.title),
-        src = e(&if a.sources.is_empty() {
-            "Deezer/Apple".to_string()
-        } else {
-            a.sources.join(" and ")
-        })
-    )
+        main = mb::MAIN, title = e(&a.title), src = e(&if a.sources.is_empty() { "Deezer/Apple".to_string() } else { a.sources.join(" and ") }))
 }
 
 /// HMAC-SHA256 (RFC 2104) – signs seed links so the phone's browser can open them without a session.
@@ -337,15 +228,8 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         ipad[i] ^= k[i];
         opad[i] ^= k[i];
     }
-    let inner = Sha256::new()
-        .chain_update(ipad)
-        .chain_update(msg)
-        .finalize();
-    Sha256::new()
-        .chain_update(opad)
-        .chain_update(inner)
-        .finalize()
-        .into()
+    let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
+    Sha256::new().chain_update(opad).chain_update(inner).finalize().into()
 }
 
 /// How long a signed seed link works.
@@ -353,10 +237,7 @@ const SEED_LINK_SECS: i64 = 900;
 
 /// The seed link's signature: HMAC-SHA256 over the key, the query and the expiry.
 fn seed_sig(secret: &str, key: &str, q: &SeedQ, exp: i64) -> String {
-    let msg = format!(
-        "mbseed\n{key}\n{}\n{}\n{}\n{exp}",
-        q.apple, q.artist, q.artist_name
-    );
+    let msg = format!("mbseed\n{key}\n{}\n{}\n{}\n{exp}", q.apple, q.artist, q.artist_name);
     hex::encode(hmac_sha256(secret.as_bytes(), msg.as_bytes()))
 }
 
@@ -382,8 +263,7 @@ fn parse_key(key: &str, q: &SeedQ) -> Option<(Option<String>, Option<String>)> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let apple =
-        Some(q.apple.clone()).filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_digit()));
+    let apple = Some(q.apple.clone()).filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_digit()));
     match svc {
         "deezer" => Some((Some(id.to_string()), apple)),
         "apple" => Some((None, Some(id.to_string()))),
@@ -392,35 +272,19 @@ fn parse_key(key: &str, q: &SeedQ) -> Option<(Option<String>, Option<String>)> {
 }
 
 /// GET /api/contribute/mb-seed/{key}: the page that seeds the album's MusicBrainz release form (signed in, or by a signed link).
-async fn seed_page(
-    State(st): State<AppState>,
-    MaybeUser(u): MaybeUser,
-    Path(key): Path<String>,
-    Query(q): Query<SeedQ>,
-) -> ApiResult<Response> {
+async fn seed_page(State(st): State<AppState>, MaybeUser(u): MaybeUser, Path(key): Path<String>, Query(q): Query<SeedQ>) -> ApiResult<Response> {
     if u.is_none() {
         // the phone app opens this in the browser, which has no Encore session: a signed link instead
         // never longer than the 15 minutes a link is made for, and never with an empty key
         let (t, secret) = (now() as i64, st.cfg.str("api_key"));
-        let ok = !secret.is_empty()
-            && q.exp > t
-            && q.exp <= t + SEED_LINK_SECS
-            && crate::auth::ct_eq(&seed_sig(&secret, &key, &q, q.exp), &q.sig);
+        let ok = !secret.is_empty() && q.exp > t && q.exp <= t + SEED_LINK_SECS && crate::auth::ct_eq(&seed_sig(&secret, &key, &q, q.exp), &q.sig);
         if !ok {
-            return Err(err(
-                401,
-                "This link has expired – open Add to MusicBrainz again from Encore",
-            ));
+            return Err(err(401, "This link has expired – open Add to MusicBrainz again from Encore"));
         }
     }
     let (deezer, apple) = parse_key(&key, &q).ok_or_else(|| err(400, "Unknown album"))?;
-    let artist = (
-        q.artist_name.as_str(),
-        Some(q.artist.as_str()).filter(|a| !a.is_empty()),
-    );
-    let a = contribute::load_seed(&st, deezer.as_deref(), apple.as_deref(), artist)
-        .await
-        .map_err(|e| err(502, format!("Could not load the album: {e}")))?;
+    let artist = (q.artist_name.as_str(), Some(q.artist.as_str()).filter(|a| !a.is_empty()));
+    let a = contribute::load_seed(&st, deezer.as_deref(), apple.as_deref(), artist).await.map_err(|e| err(502, format!("Could not load the album: {e}")))?;
     let fields = contribute::seed_fields(&a);
     let mut resp = Html(seed_html(&a, &fields)).into_response();
     // the form posts to musicbrainz.org; nothing else is loaded
@@ -443,17 +307,8 @@ struct LinkBody {
 }
 
 /// A link to the seed page that works for 15 minutes without signing in (the phone opens it in the browser).
-async fn seed_link(
-    State(st): State<AppState>,
-    User(_): User,
-    Json(b): Json<LinkBody>,
-) -> ApiResult<Json<Value>> {
-    let q = SeedQ {
-        apple: b.apple,
-        artist: b.artist,
-        artist_name: b.artist_name,
-        ..Default::default()
-    };
+async fn seed_link(State(st): State<AppState>, User(_): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+    let q = SeedQ { apple: b.apple, artist: b.artist, artist_name: b.artist_name, ..Default::default() };
     parse_key(&b.key, &q).ok_or_else(|| err(400, "Unknown album"))?;
     let secret = st.cfg.str("api_key");
     if secret.is_empty() {
@@ -461,13 +316,8 @@ async fn seed_link(
     }
     let exp = now() as i64 + SEED_LINK_SECS;
     let sig = seed_sig(&secret, &b.key, &q, exp);
-    let url = format!(
-        "/api/contribute/mb-seed/{}?apple={}&artist={}&artist_name={}&exp={exp}&sig={sig}",
-        urlencoding::encode(&b.key),
-        urlencoding::encode(&q.apple),
-        urlencoding::encode(&q.artist),
-        urlencoding::encode(&q.artist_name)
-    );
+    let url = format!("/api/contribute/mb-seed/{}?apple={}&artist={}&artist_name={}&exp={exp}&sig={sig}", urlencoding::encode(&b.key),
+        urlencoding::encode(&q.apple), urlencoding::encode(&q.artist), urlencoding::encode(&q.artist_name));
     Ok(Json(json!({ "url": url })))
 }
 
@@ -475,9 +325,7 @@ async fn seed_link(
 mod tests {
     use super::*;
     use encore_library::acoustid::queue_acoustid;
-    use encore_library::contribute::{
-        seed_fields, SeedTrack, LINK_FREE_STREAMING, LINK_PURCHASE_DOWNLOAD, LINK_STREAMING,
-    };
+    use encore_library::contribute::{seed_fields, SeedTrack, LINK_FREE_STREAMING, LINK_PURCHASE_DOWNLOAD, LINK_STREAMING};
 
     const MBID: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
 
@@ -490,16 +338,8 @@ mod tests {
         queue_acoustid(&st, Some(1), &sure);
         queue_acoustid(&st, Some(1), &sure);
         queue_acoustid(&st, Some(2), &sure); // same fingerprint + recording from another copy: still once
-        queue_acoustid(
-            &st,
-            Some(3),
-            &json!({ "status": "verified", "detail": "audio matches “A – B”" }),
-        ); // a title match: nothing to send
-        queue_acoustid(
-            &st,
-            Some(4),
-            &json!({ "status": "mismatch", "submit": { "mbid": MBID, "fingerprint": "AQAB", "duration": 100 } }),
-        );
+        queue_acoustid(&st, Some(3), &json!({ "status": "verified", "detail": "audio matches “A – B”" })); // a title match: nothing to send
+        queue_acoustid(&st, Some(4), &json!({ "status": "mismatch", "submit": { "mbid": MBID, "fingerprint": "AQAB", "duration": 100 } }));
         let rows = st.db.query("SELECT * FROM contrib_acoustid", p![]).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].i("duration"), 201);
@@ -510,46 +350,19 @@ mod tests {
     fn album() -> SeedAlbum {
         SeedAlbum {
             title: "Days Before Rodeo".into(),
-            artists: vec![
-                ("Travis Scott".into(), Some(MBID.into())),
-                ("Young Thug".into(), None),
-            ],
+            artists: vec![("Travis Scott".into(), Some(MBID.into())), ("Young Thug".into(), None)],
             types: vec!["album".into()],
             date: "2014-08-18".into(),
             label: "Grand Hustle".into(),
             catalog_number: String::new(),
             barcode: "0602547012345".into(),
             tracks: vec![
-                SeedTrack {
-                    title: "The Prayer".into(),
-                    artist: "Travis Scott & Young Thug".into(),
-                    length_ms: Some(184000),
-                    disc: 1,
-                    number: 1,
-                },
-                SeedTrack {
-                    title: "Mamacita".into(),
-                    artist: "Rich Homie Quan".into(),
-                    length_ms: Some(220500),
-                    disc: 1,
-                    number: 2,
-                },
-                SeedTrack {
-                    title: "Bonus".into(),
-                    artist: String::new(),
-                    length_ms: None,
-                    disc: 2,
-                    number: 1,
-                },
+                SeedTrack { title: "The Prayer".into(), artist: "Travis Scott & Young Thug".into(), length_ms: Some(184000), disc: 1, number: 1 },
+                SeedTrack { title: "Mamacita".into(), artist: "Rich Homie Quan".into(), length_ms: Some(220500), disc: 1, number: 2 },
+                SeedTrack { title: "Bonus".into(), artist: String::new(), length_ms: None, disc: 2, number: 1 },
             ],
-            urls: vec![
-                ("https://www.deezer.com/album/1".into(), LINK_FREE_STREAMING),
-                ("https://music.apple.com/album/2".into(), LINK_STREAMING),
-                (
-                    "https://music.apple.com/album/2".into(),
-                    LINK_PURCHASE_DOWNLOAD,
-                ),
-            ],
+            urls: vec![("https://www.deezer.com/album/1".into(), LINK_FREE_STREAMING), ("https://music.apple.com/album/2".into(), LINK_STREAMING),
+                       ("https://music.apple.com/album/2".into(), LINK_PURCHASE_DOWNLOAD)],
             sources: vec!["Deezer".into(), "Apple Music".into()],
         }
     }
@@ -577,14 +390,8 @@ mod tests {
         assert_eq!(get("mediums.0.format"), Some("Digital Media"));
         assert_eq!(get("mediums.0.track.0.name"), Some("The Prayer"));
         assert_eq!(get("mediums.0.track.0.length"), Some("184000"));
-        assert_eq!(
-            get("mediums.0.track.0.artist_credit.names.0.mbid"),
-            Some(MBID)
-        ); // the album's credit
-        assert_eq!(
-            get("mediums.0.track.1.artist_credit.names.0.name"),
-            Some("Rich Homie Quan")
-        );
+        assert_eq!(get("mediums.0.track.0.artist_credit.names.0.mbid"), Some(MBID)); // the album's credit
+        assert_eq!(get("mediums.0.track.1.artist_credit.names.0.name"), Some("Rich Homie Quan"));
         assert!(get("mediums.0.track.1.artist_credit.names.0.mbid").is_none());
         assert_eq!(get("mediums.1.track.0.name"), Some("Bonus"));
         assert!(get("mediums.1.track.0.length").is_none());
@@ -604,34 +411,15 @@ mod tests {
     #[test]
     fn signed_links() {
         // RFC 4231 test case 2
-        assert_eq!(
-            hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-        let q = SeedQ {
-            artist: MBID.into(),
-            artist_name: "Travis Scott".into(),
-            ..Default::default()
-        };
+        assert_eq!(hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        let q = SeedQ { artist: MBID.into(), artist_name: "Travis Scott".into(), ..Default::default() };
         let a = seed_sig("secret", "deezer-1", &q, 100);
         assert_eq!(a, seed_sig("secret", "deezer-1", &q, 100));
         assert_ne!(a, seed_sig("secret", "deezer-2", &q, 100));
         assert_ne!(a, seed_sig("secret", "deezer-1", &q, 101));
         assert_ne!(a, seed_sig("other", "deezer-1", &q, 100));
-        assert_eq!(
-            parse_key(
-                "deezer-12",
-                &SeedQ {
-                    apple: "34".into(),
-                    ..Default::default()
-                }
-            ),
-            Some((Some("12".into()), Some("34".into())))
-        );
-        assert_eq!(
-            parse_key("apple-34", &SeedQ::default()),
-            Some((None, Some("34".into())))
-        );
+        assert_eq!(parse_key("deezer-12", &SeedQ { apple: "34".into(), ..Default::default() }), Some((Some("12".into()), Some("34".into()))));
+        assert_eq!(parse_key("apple-34", &SeedQ::default()), Some((None, Some("34".into()))));
         assert_eq!(parse_key("bandcamp-1", &SeedQ::default()), None);
         assert_eq!(parse_key("deezer-1x", &SeedQ::default()), None);
     }

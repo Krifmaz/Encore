@@ -1,21 +1,21 @@
 //! /api/system: connection tests, downloader queues, database backups; /api/discover/probe.
-use crate::auth::{Admin, User};
-use crate::email;
 use crate::enrich::enrich;
+use crate::auth::{Admin, User};
+use encore_db::backup;
+use encore_db::RowExt;
+use encore_core::error::{err, ApiError, ApiResult};
+use encore_requests::sources::{slskd, streamrip, torznab, ytdlp};
 use crate::state::AppState;
+use crate::email;
+use encore_library::acoustid;
+use encore_requests::notify;
+use encore_db::p;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::header;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use encore_core::error::{err, ApiError, ApiResult};
-use encore_db::backup;
-use encore_db::p;
-use encore_db::RowExt;
-use encore_library::acoustid;
-use encore_requests::notify;
-use encore_requests::sources::{slskd, streamrip, torznab, ytdlp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -27,18 +27,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/soulseek", get(soulseek_status))
         .route("/api/system/soulseek/reconnect", post(soulseek_reconnect))
         .route("/api/system/vpn/test", post(vpn_test))
-        .route(
-            "/api/system/streamrip/tidal-login",
-            post(tidal_login_start).get(tidal_login_status),
-        )
-        .route(
-            "/api/system/streamrip/tidal-tokens",
-            post(tidal_tokens_save).delete(tidal_tokens_clear),
-        )
-        .route(
-            "/api/system/streamrip/reset-config",
-            post(streamrip_reset_config),
-        )
+        .route("/api/system/streamrip/tidal-login", post(tidal_login_start).get(tidal_login_status))
+        .route("/api/system/streamrip/tidal-tokens", post(tidal_tokens_save).delete(tidal_tokens_clear))
+        .route("/api/system/streamrip/reset-config", post(streamrip_reset_config))
         .route("/api/system/downloads", get(downloads))
         .route("/api/system/downloads/slskd/clear", post(clear_slskd))
         .route("/api/system/tools", get(tools_list))
@@ -46,81 +37,45 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/tools/{id}/update", post(tools_update))
         .route("/api/system/tools/{id}/reset", post(tools_reset))
         .route("/api/system/backups", get(backups).post(backup_now))
-        .route(
-            "/api/system/backups/upload",
-            post(backup_upload).layer(DefaultBodyLimit::max(4 << 30)),
-        )
+        .route("/api/system/backups/upload", post(backup_upload).layer(DefaultBodyLimit::max(4 << 30)))
         .route("/api/system/backups/{name}", get(backup_download))
         .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
         // Encore's own updates and "Restart server" (update.rs)
-        .route(
-            "/api/system/update",
-            get(super::update::get_update).post(super::update::post_update),
-        )
+        .route("/api/system/update", get(super::update::get_update).post(super::update::post_update))
         .route("/api/system/restart", post(super::update::post_restart))
 }
 
 // ---- the old Download tools card: answered from the plugins for one more release ---------------
 
 /// What is installed and what the last check found (no network).
-async fn tools_list(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
-    Ok(Json(
-        tokio::task::spawn_blocking(move || encore_system::tools::cached(&st))
-            .await
-            .map_err(|e| err(500, e.to_string()))?,
-    ))
+async fn tools_list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
+    Ok(Json(tokio::task::spawn_blocking(move || encore_system::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
 /// "Check for updates".
-async fn tools_check(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
+async fn tools_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
     Ok(Json(encore_system::tools::check(&st).await))
 }
 
 /// "Update to X" / "Install": the plugin's update, or its install when it is not installed.
-async fn tools_update(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(id): Path<String>,
-) -> ApiResult<Json<encore_system::tools::ToolInfo>> {
+async fn tools_update(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<encore_system::tools::ToolInfo>> {
     if !encore_system::tools::IDS.contains(&id.as_str()) {
         return Err(err(404, "Unknown tool"));
     }
-    st.db.log(
-        "info",
-        &format!(
-            "{} started an update of {}",
-            u.s("username"),
-            encore_system::tools::label(&id)
-        ),
-    );
-    encore_system::tools::update(&st, &id)
-        .await
-        .map(Json)
-        .map_err(|e| err(400, e.to_string()))
+    st.db.log("info", &format!("{} started an update of {}", u.s("username"), encore_system::tools::label(&id)));
+    encore_system::tools::update(&st, &id).await.map(Json).map_err(|e| err(400, e.to_string()))
 }
 
 /// "Use the bundled version" / "Use the built-in engine" (Cadenza) / "Remove slskd": removes the plugin (its own
 /// install; adopted folders and settings stay).
-async fn tools_reset(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
+async fn tools_reset(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Vec<encore_system::tools::ToolInfo>>> {
     if !encore_system::tools::IDS.contains(&id.as_str()) {
         return Err(err(404, "Unknown tool"));
     }
     let st2 = st.clone();
     let id2 = id.clone();
-    encore_system::tools::reset(&st2, &id2)
-        .await
-        .map_err(|e| err(400, e.to_string()))?;
+    encore_system::tools::reset(&st2, &id2).await.map_err(|e| err(400, e.to_string()))?;
     let what = match id.as_str() {
         "cadenza" => "went back to the built-in Cadenza engine".to_string(),
         "slskd" => "removed slskd".to_string(),
@@ -128,11 +83,7 @@ async fn tools_reset(
         _ => format!("removed the {} plugin", encore_system::tools::label(&id)),
     };
     st.db.log("info", &format!("{} {what}", u.s("username")));
-    Ok(Json(
-        tokio::task::spawn_blocking(move || encore_system::tools::cached(&st))
-            .await
-            .map_err(|e| err(500, e.to_string()))?,
-    ))
+    Ok(Json(tokio::task::spawn_blocking(move || encore_system::tools::cached(&st)).await.map_err(|e| err(500, e.to_string()))?))
 }
 
 // ---- database backups (Settings → Diagnostics → Backups) ----------------------------------------
@@ -150,17 +101,8 @@ async fn backups(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<
 /// "Back up now".
 async fn backup_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     let db = st.db.clone();
-    let b = tokio::task::spawn_blocking(move || db.backup(backup::Kind::Scheduled))
-        .await
-        .map_err(|e| err(500, e.to_string()))??;
-    st.db.log(
-        "info",
-        &format!(
-            "{} backed up the database to backups/{}",
-            u.s("username"),
-            b.name
-        ),
-    );
+    let b = tokio::task::spawn_blocking(move || db.backup(backup::Kind::Scheduled)).await.map_err(|e| err(500, e.to_string()))??;
+    st.db.log("info", &format!("{} backed up the database to backups/{}", u.s("username"), b.name));
     backup::prune(st.data_dir());
     let mut out = backups_json(&st);
     out["created"] = b.json();
@@ -168,48 +110,32 @@ async fn backup_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Js
 }
 
 /// The backup file itself, for safekeeping somewhere else.
-async fn backup_download(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Path(name): Path<String>,
-) -> ApiResult<Response> {
+async fn backup_download(State(st): State<AppState>, Admin(_): Admin, Path(name): Path<String>) -> ApiResult<Response> {
     if !backup::valid_name(&name) {
         return Err(err(400, "Not a backup name"));
     }
     // the backups folder or the spill folder on the music disk
     let path = backup::find(st.data_dir(), &name).ok_or_else(|| err(404, "No such backup"))?;
-    let f = tokio::fs::File::open(&path)
-        .await
-        .map_err(|_| err(404, "No such backup"))?;
+    let f = tokio::fs::File::open(&path).await.map_err(|_| err(404, "No such backup"))?;
     let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
     let body = Body::from_stream(tokio_util::io::ReaderStream::new(f));
     Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.sqlite3")
         .header(header::CONTENT_LENGTH, len)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{name}\""),
-        )
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
         .body(body)
         .map_err(|e| err(500, e.to_string()))
 }
 
 /// Replace the database with a backup: a safety copy of the current one is taken first.
-async fn backup_restore(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn backup_restore(State(st): State<AppState>, Admin(u): Admin, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     if !backup::valid_name(&name) {
         return Err(err(400, "Not a backup name"));
     }
     // the backups folder or the spill folder on the music disk
     let path = backup::find(st.data_dir(), &name).ok_or_else(|| err(404, "No such backup"))?;
     let db = st.db.clone();
-    let safety = tokio::task::spawn_blocking(move || db.restore(&path))
-        .await
-        .map_err(|e| err(500, e.to_string()))?
-        .map_err(|e| err(400, e.to_string()))?;
+    let safety = tokio::task::spawn_blocking(move || db.restore(&path)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e.to_string()))?;
     // everything cached from the old database is stale now
     st.cfg.reload()?;
     st.cache.clear();
@@ -217,19 +143,8 @@ async fn backup_restore(
     // kept searches name requests by id, and the ids may point at other requests now
     st.requests.search_cache.clear(st.data_dir());
     crate::auth::ensure_owner(&st)?;
-    st.db.log(
-        "warning",
-        &format!(
-            "{} restored the database from backups/{} (the data from before is in backups/{})",
-            u.s("username"),
-            name,
-            safety.name
-        ),
-    );
-    tracing::info!(
-        "database restored from backups/{name} by {}",
-        u.s("username")
-    );
+    st.db.log("warning", &format!("{} restored the database from backups/{} (the data from before is in backups/{})", u.s("username"), name, safety.name));
+    tracing::info!("database restored from backups/{name} by {}", u.s("username"));
     let mut out = backups_json(&st);
     out["ok"] = json!(true);
     out["safety"] = safety.json();
@@ -237,11 +152,7 @@ async fn backup_restore(
 }
 
 /// "Upload a backup…": the file is kept as a backup once it proves to be a sound SQLite database.
-async fn backup_upload(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    mut form: Multipart,
-) -> ApiResult<Json<Value>> {
+async fn backup_upload(State(st): State<AppState>, Admin(u): Admin, mut form: Multipart) -> ApiResult<Json<Value>> {
     let dir = backup::dir(st.data_dir());
     std::fs::create_dir_all(&dir).map_err(|e| err(500, e.to_string()))?;
     let tmp = dir.join(format!("upload-{}.part", encore_core::ids::random_hex(8)));
@@ -250,14 +161,8 @@ async fn backup_upload(
     // every way out of the streaming loop with an error removes the .part file (prune never would)
     let streamed: Result<(), ApiError> = async {
         use tokio::io::AsyncWriteExt;
-        let mut out = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| err(500, e.to_string()))?;
-        while let Some(mut f) = form
-            .next_field()
-            .await
-            .map_err(|e| err(400, e.to_string()))?
-        {
+        let mut out = tokio::fs::File::create(&tmp).await.map_err(|e| err(500, e.to_string()))?;
+        while let Some(mut f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
             if size > 0 {
                 break;
             }
@@ -266,9 +171,7 @@ async fn backup_upload(
                     head.extend_from_slice(&chunk[..chunk.len().min(16 - head.len())]);
                 }
                 size += chunk.len() as u64;
-                out.write_all(&chunk)
-                    .await
-                    .map_err(|e| err(500, e.to_string()))?;
+                out.write_all(&chunk).await.map_err(|e| err(500, e.to_string()))?;
             }
         }
         out.flush().await.map_err(|e| err(500, e.to_string()))?;
@@ -282,23 +185,14 @@ async fn backup_upload(
     }
     if size == 0 || head.len() < 16 || head.as_slice() != backup::SQLITE_HEADER {
         let _ = std::fs::remove_file(&tmp);
-        return Err(err(
-            400,
-            "That file isn't a SQLite database (an Encore backup is encore-….db)",
-        ));
+        return Err(err(400, "That file isn't a SQLite database (an Encore backup is encore-….db)"));
     }
     let check = tmp.clone();
-    let version = match tokio::task::spawn_blocking(move || backup::validate_file(&check))
-        .await
-        .map_err(|e| err(500, e.to_string()))?
-    {
+    let version = match tokio::task::spawn_blocking(move || backup::validate_file(&check)).await.map_err(|e| err(500, e.to_string()))? {
         Ok(v) => v,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            return Err(err(
-                400,
-                format!("That database doesn't pass SQLite's integrity check: {e}"),
-            ));
+            return Err(err(400, format!("That database doesn't pass SQLite's integrity check: {e}")));
         }
     };
     let name = backup::file_name(backup::Kind::Uploaded, encore_db::now());
@@ -309,13 +203,7 @@ async fn backup_upload(
     if let Ok(d) = std::fs::File::open(&dir) {
         let _ = d.sync_all();
     }
-    st.db.log(
-        "info",
-        &format!(
-            "{} uploaded a database backup as backups/{name}",
-            u.s("username")
-        ),
-    );
+    st.db.log("info", &format!("{} uploaded a database backup as backups/{name}", u.s("username")));
     tracing::info!("backup uploaded as backups/{name} ({size} bytes, schema {version})");
     let mut out = backups_json(&st);
     out["created"] = json!({ "name": name, "size": size, "time": encore_db::now(), "kind": backup::Kind::Uploaded.label(), "schema": version });
@@ -361,25 +249,15 @@ pub(crate) fn server_block(st: &AppState) -> Value {
 /// (bytes, "cgroup" | "total"): the container's memory limit when one is set (cgroup v2, then v1), else
 /// the machine's memory; None when neither can be read (not Linux).
 fn memory_limit() -> (Option<u64>, &'static str) {
-    let read = |p: &str| {
-        std::fs::read_to_string(p)
-            .ok()
-            .map(|s| s.trim().to_string())
-    };
+    let read = |p: &str| std::fs::read_to_string(p).ok().map(|s| s.trim().to_string());
     // "max" (v2) or a number near 2^63 (v1) means no limit
-    let limit = read("/sys/fs/cgroup/memory.max")
-        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|n| *n < 1 << 60);
+    let limit = read("/sys/fs/cgroup/memory.max").or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .and_then(|s| s.parse::<u64>().ok()).filter(|n| *n < 1 << 60);
     if let Some(n) = limit {
         return (Some(n), "cgroup");
     }
     let total = read("/proc/meminfo").and_then(|m| {
-        m.lines()
-            .find(|l| l.starts_with("MemTotal:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|k| k.parse::<u64>().ok())
-            .map(|k| k * 1024)
+        m.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok()).map(|k| k * 1024)
     });
     (total, "total")
 }
@@ -392,44 +270,23 @@ mod server_block_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("music")).unwrap();
         let st = crate::test_support::state_in(&dir);
-        st.cfg
-            .set_many(&serde_json::json!({ "library_path": dir.join("music").to_string_lossy() }));
+        st.cfg.set_many(&serde_json::json!({ "library_path": dir.join("music").to_string_lossy() }));
         let b = super::server_block(&st);
         assert!(b["cpus"].as_u64().unwrap_or(0) >= 1);
-        assert_eq!(
-            b["config"]["path"],
-            serde_json::json!(dir.to_string_lossy())
-        );
-        assert_eq!(
-            b["music"]["path"],
-            serde_json::json!(dir.join("music").to_string_lossy())
-        );
+        assert_eq!(b["config"]["path"], serde_json::json!(dir.to_string_lossy()));
+        assert_eq!(b["music"]["path"], serde_json::json!(dir.join("music").to_string_lossy()));
         if cfg!(target_os = "linux") {
             assert!(b["memory"].as_u64().unwrap_or(0) > 0, "{b}");
             assert!(["cgroup", "total"].contains(&b["memory_source"].as_str().unwrap()));
-            assert!(
-                b["config"]["fs"].is_string() && b["config"]["network"].is_boolean(),
-                "{b}"
-            );
+            assert!(b["config"]["fs"].is_string() && b["config"]["network"].is_boolean(), "{b}");
         }
         assert!(b["database_bytes"].as_u64().unwrap_or(0) > 0);
         assert_eq!(b["translations_on"], serde_json::json!(false));
-        assert_eq!(
-            b["db_readers"].as_u64().unwrap(),
-            st.db.readers_in_effect().0 as u64
-        );
+        assert_eq!(b["db_readers"].as_u64().unwrap(), st.db.readers_in_effect().0 as u64);
         assert!(["env", "default", "network"].contains(&b["db_readers_source"].as_str().unwrap()));
         // the owner turns translations on: the block says so at once (no restart, no cache lag)
-        st.db
-            .execute(
-                "UPDATE users SET prefs=? WHERE role='owner'",
-                encore_db::p![r#"{"translate_mode":"under","translate_lang":"en"}"#],
-            )
-            .unwrap();
-        assert_eq!(
-            super::server_block(&st)["translations_on"],
-            serde_json::json!(true)
-        );
+        st.db.execute("UPDATE users SET prefs=? WHERE role='owner'", encore_db::p![r#"{"translate_mode":"under","translate_lang":"en"}"#]).unwrap();
+        assert_eq!(super::server_block(&st)["translations_on"], serde_json::json!(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -447,18 +304,12 @@ async fn soulseek_status(State(st): State<AppState>, User(u): User) -> ApiResult
 
 /// Reconnect now (the Soulseek card's button): refused with "Wait N s" within 30 s of the last attempt,
 /// else the reconnect schedule starts over and the supervisor connects at once.
-async fn soulseek_reconnect(
-    State(st): State<AppState>,
-    Admin(me): Admin,
-) -> ApiResult<Json<Value>> {
+async fn soulseek_reconnect(State(st): State<AppState>, Admin(me): Admin) -> ApiResult<Json<Value>> {
     if let Some(why) = slskd::not_ready(&st) {
         return Err(err(400, why));
     }
     if st.requests.slskd.state() != "running" {
-        return Err(err(
-            400,
-            "The Soulseek engine is starting – it connects as soon as it is up",
-        ));
+        return Err(err(400, "The Soulseek engine is starting – it connects as soon as it is up"));
     }
     use encore_requests::slskd_session::Refused;
     match st.requests.slskd.session().reconnect_now() {
@@ -470,10 +321,7 @@ async fn soulseek_reconnect(
             return Err(err(429, format!("Wait {n} s")).with(json!({ "wait": n })));
         }
     }
-    st.db.log(
-        "info",
-        &format!("{} pressed Reconnect now for Soulseek", me.s("username")),
-    );
+    st.db.log("info", &format!("{} pressed Reconnect now for Soulseek", me.s("username")));
     Ok(Json(encore_requests::slskd_session::status(&st)))
 }
 
@@ -493,9 +341,7 @@ async fn vpn_test(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
 async fn tidal_login_start(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     match streamrip::tidal_login_start(&st).await {
         Ok(v) => Ok(Json(v)),
-        Err(e) => Ok(Json(
-            json!({ "status": "failed", "message": e.to_string(), "signed_in": streamrip::tidal_signed_in(&st) }),
-        )),
+        Err(e) => Ok(Json(json!({ "status": "failed", "message": e.to_string(), "signed_in": streamrip::tidal_signed_in(&st) }))),
     }
 }
 
@@ -513,63 +359,34 @@ struct TidalTokens {
 }
 
 /// "Paste tokens instead": the `[tidal]` section of a streamrip config signed in on another computer.
-async fn tidal_tokens_save(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<TidalTokens>,
-) -> ApiResult<Json<Value>> {
+async fn tidal_tokens_save(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TidalTokens>) -> ApiResult<Json<Value>> {
     if b.toml.trim().is_empty() {
-        return Err(err(
-            400,
-            "Paste the [tidal] section of streamrip's config.toml first",
-        ));
+        return Err(err(400, "Paste the [tidal] section of streamrip's config.toml first"));
     }
     if !streamrip::tidal_toml_has_token(&b.toml) {
         return Err(err(400, streamrip::TIDAL_NO_TOKEN_MSG));
     }
     // from here on an error is the server's (config file not writable), not a bad paste
-    let v = streamrip::tidal_tokens_save(&st, &b.toml)
-        .await
-        .map_err(|e| err(500, format!("{e:#}")))?;
-    st.db.log(
-        "info",
-        &format!("{} pasted Tidal tokens for streamrip", u.s("username")),
-    );
+    let v = streamrip::tidal_tokens_save(&st, &b.toml).await.map_err(|e| err(500, format!("{e:#}")))?;
+    st.db.log("info", &format!("{} pasted Tidal tokens for streamrip", u.s("username")));
     Ok(Json(v))
 }
 
 /// "Sign out of Tidal": blanks every token in streamrip's config.
 async fn tidal_tokens_clear(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
-    let v = streamrip::tidal_sign_out(&st)
-        .await
-        .map_err(|e| err(500, format!("{e:#}")))?;
-    st.db.log(
-        "info",
-        &format!("{} signed streamrip out of Tidal", u.s("username")),
-    );
+    let v = streamrip::tidal_sign_out(&st).await.map_err(|e| err(500, format!("{e:#}")))?;
+    st.db.log("info", &format!("{} signed streamrip out of Tidal", u.s("username")));
     Ok(Json(v))
 }
 
 /// Settings → streamrip → "Reset streamrip config": a fresh config.toml from streamrip's defaults; the old
 /// file is kept as a backup and its Tidal sign-in, Deezer ARL and Qobuz login are carried over.
-async fn streamrip_reset_config(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-) -> ApiResult<Json<Value>> {
+async fn streamrip_reset_config(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     if streamrip::binary(&st).is_none() {
         return Err(err(400, streamrip::NOT_INSTALLED_MSG));
     }
-    let c = streamrip::reset_config(&st)
-        .await
-        .map_err(|e| err(500, format!("{e:#}")))?;
-    st.db.log(
-        "info",
-        &format!(
-            "{} reset streamrip's config ({})",
-            u.s("username"),
-            c.message()
-        ),
-    );
+    let c = streamrip::reset_config(&st).await.map_err(|e| err(500, format!("{e:#}")))?;
+    st.db.log("info", &format!("{} reset streamrip's config ({})", u.s("username"), c.message()));
     Ok(Json(c.json()))
 }
 
@@ -579,11 +396,7 @@ fn msg(ok: bool, m: impl Into<String>) -> Value {
 }
 
 /// POST /api/system/test/{service}: test a service's settings (admins).
-async fn test(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(service): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn test(State(st): State<AppState>, Admin(u): Admin, Path(service): Path<String>) -> ApiResult<Json<Value>> {
     match run_test(&st, &service, Some(&u)).await {
         Ok(v) => Ok(Json(v)),
         Err(e) if e.to_string() == "__unknown" => Err(err(404, "Unknown service")),
@@ -595,11 +408,7 @@ async fn test(
 /// A settings section's test (`{ok, message}`), as the admin `u` (the email test writes to them); the builtin
 /// plugins' Test buttons run the same ones (crate::builtins). Err("__unknown") for a service there is no test
 /// for.
-pub async fn run_test(
-    st: &AppState,
-    service: &str,
-    u: Option<&encore_db::Row>,
-) -> anyhow::Result<Value> {
+pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) -> anyhow::Result<Value> {
     let st = st.clone();
     async {
         Ok(match service {
@@ -773,9 +582,7 @@ async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResul
     if slskd::enabled(&st) {
         match slskd::all_downloads(&st).await {
             Ok(v) => out["slskd"] = json!(v),
-            Err(e) => {
-                out["errors"]["slskd"] = json!(e.to_string().chars().take(200).collect::<String>())
-            }
+            Err(e) => out["errors"]["slskd"] = json!(e.to_string().chars().take(200).collect::<String>()),
         }
     }
     // torrent / Usenet downloads Encore is waiting on
@@ -786,9 +593,7 @@ async fn downloads(State(st): State<AppState>, Admin(viewer): Admin) -> ApiResul
 
 /// POST /api/system/downloads/slskd/clear: take the finished downloads off slskd's list.
 async fn clear_slskd(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    slskd::clear_completed(&st)
-        .await
-        .map_err(|e| err(502, e.to_string()))?;
+    slskd::clear_completed(&st).await.map_err(|e| err(502, e.to_string()))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -800,20 +605,8 @@ struct ProbeQ {
 }
 
 /// GET /api/discover/probe?url=: what yt-dlp reads from a link, enriched.
-async fn probe(
-    State(st): State<AppState>,
-    User(viewer): User,
-    Query(q): Query<ProbeQ>,
-) -> ApiResult<Json<Value>> {
-    let mut info = ytdlp::probe(&st, &q.url).await.map_err(|e| {
-        err(
-            400,
-            format!(
-                "Unsupported or unreachable URL: {}",
-                e.to_string().chars().take(200).collect::<String>()
-            ),
-        )
-    })?;
+async fn probe(State(st): State<AppState>, User(viewer): User, Query(q): Query<ProbeQ>) -> ApiResult<Json<Value>> {
+    let mut info = ytdlp::probe(&st, &q.url).await.map_err(|e| err(400, format!("Unsupported or unreachable URL: {}", e.to_string().chars().take(200).collect::<String>())))?;
     info["source"] = json!("ytdlp");
     enrich(&st, Some(&viewer), &mut info).await;
     Ok(Json(info))

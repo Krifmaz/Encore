@@ -23,18 +23,9 @@ use serde_json::{json, Value};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/surround/albums", get(albums))
-        .route(
-            "/api/surround/sweep",
-            get(sweep_state).post(sweep_start).delete(sweep_stop),
-        )
-        .route(
-            "/api/library/albums/{id}/surround",
-            get(album_state).post(album_fetch),
-        )
-        .route(
-            "/api/library/tracks/{id}/surround",
-            get(track_state).post(track_fetch),
-        )
+        .route("/api/surround/sweep", get(sweep_state).post(sweep_start).delete(sweep_stop))
+        .route("/api/library/albums/{id}/surround", get(album_state).post(album_fetch))
+        .route("/api/library/tracks/{id}/surround", get(track_state).post(track_fetch))
 }
 
 /// `GET /api/surround/albums` query.
@@ -52,27 +43,17 @@ struct ListQ {
 }
 
 /// GET /api/surround/albums: the surround albums.
-async fn albums(
-    State(st): State<AppState>,
-    User(_): User,
-    Query(q): Query<ListQ>,
-) -> ApiResult<Json<Value>> {
+async fn albums(State(st): State<AppState>, User(_): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let limit = if q.limit <= 0 { 100 } else { q.limit };
         let albums = surround::albums(&st.db, &q.sort, &q.q, limit, q.offset);
-        Ok(Json(
-            json!({ "albums": albums, "stats": surround::stats(&st.db) }),
-        ))
+        Ok(Json(json!({ "albums": albums, "stats": surround::stats(&st.db) })))
     })
     .await
 }
 
 /// GET /api/library/albums/{id}/surround: whether an album has a surround copy, or one can be fetched.
-async fn album_state(
-    State(st): State<AppState>,
-    User(_): User,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn album_state(State(st): State<AppState>, User(_): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if surround::is_album(&id) {
         return Err(err(400, "This is a Surround album already"));
     }
@@ -80,25 +61,16 @@ async fn album_state(
 }
 
 /// POST /api/library/albums/{id}/surround: fetch an album's surround copy (admins).
-async fn album_fetch(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn album_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     if surround::is_album(&id) {
         return Err(err(400, "This is a Surround album already"));
     }
-    let rid =
-        encore_requests::surround::request_album(&st, encore_db::RowExt::i(&u, "id"), &id).await?;
+    let rid = encore_requests::surround::request_album(&st, encore_db::RowExt::i(&u, "id"), &id).await?;
     Ok(Json(json!({ "request_id": rid })))
 }
 
 /// GET /api/library/tracks/{id}/surround: whether a song has a surround copy, or one can be fetched.
-async fn track_state(
-    State(st): State<AppState>,
-    User(_): User,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn track_state(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     if surround::is_track(id) {
         return Err(err(400, "This is a Surround song already"));
     }
@@ -106,16 +78,11 @@ async fn track_state(
 }
 
 /// POST /api/library/tracks/{id}/surround: fetch a song's surround copy (admins).
-async fn track_fetch(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn track_fetch(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     if surround::is_track(id) {
         return Err(err(400, "This is a Surround song already"));
     }
-    let rid =
-        encore_requests::surround::request_track(&st, encore_db::RowExt::i(&u, "id"), id).await?;
+    let rid = encore_requests::surround::request_track(&st, encore_db::RowExt::i(&u, "id"), id).await?;
     Ok(Json(json!({ "request_id": rid })))
 }
 
@@ -129,10 +96,7 @@ async fn sweep_state(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<J
 
 /// POST /api/surround/sweep: look for the Dolby Atmos version of every stereo album and fetch the ones Apple
 /// Music has (admins), in the background. 202 once started.
-async fn sweep_start(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+async fn sweep_start(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
     if !encore_requests::sources::gamdl::atmos_ready(&st) {
         return Err(err(409, "Dolby Atmos versions need the gamdl plugin with a wrapper-v2 server (Settings → Plugins → gamdl)"));
     }
@@ -146,10 +110,7 @@ async fn sweep_start(
             tracing::info!("surround sweep: {e}");
         }
     });
-    Ok((
-        axum::http::StatusCode::ACCEPTED,
-        Json(json!({ "started": true })),
-    ))
+    Ok((axum::http::StatusCode::ACCEPTED, Json(json!({ "started": true }))))
 }
 
 /// DELETE /api/surround/sweep: stop the running sweep after the album it is on (admins).

@@ -1,20 +1,20 @@
 //! /api/picker: search one source by hand, then download exactly the chosen result.
 use crate::auth::{self, User};
-use crate::routes::requests::get_owned;
-use crate::state::AppState;
-use axum::extract::State;
-use axum::routing::{get, post};
-use axum::{Json, Router};
-use encore_core::audio::LOSSLESS;
-use encore_core::error::{err, ApiError, ApiResult};
-use encore_db::p;
 use encore_db::RowExt;
-use encore_http::{deezer, tidal, ytmusic};
+use encore_core::error::{err, ApiError, ApiResult};
 use encore_library::matcher::{compare, describe};
+use crate::routes::requests::get_owned;
 use encore_requests::create::{quota, NewRequest};
+use encore_http::{deezer, tidal, ytmusic};
 use encore_requests::search_cache;
 use encore_requests::sources::{gamdl, slskd, streamrip, torznab, ytdlp, zotify};
+use crate::state::AppState;
+use encore_db::p;
 use encore_requests::worker;
+use axum::extract::State;
+use encore_core::audio::LOSSLESS;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -39,11 +39,7 @@ const SOURCES: [(&str, &str, &str); 6] = [
 
 /// A source's display name; "" for an unknown id.
 fn source_name(id: &str) -> &'static str {
-    SOURCES
-        .iter()
-        .find(|s| s.0 == id)
-        .map(|s| s.1)
-        .unwrap_or("")
+    SOURCES.iter().find(|s| s.0 == id).map(|s| s.1).unwrap_or("")
 }
 
 /// What a source can do right now. `state`: ready | sign_in (a login is missing) | not_connected (set up, but
@@ -60,11 +56,7 @@ pub struct SourceState {
 
 /// A source state.
 fn state(state: &'static str, hint: impl Into<String>, section: &'static str) -> SourceState {
-    SourceState {
-        state,
-        hint: hint.into(),
-        section,
-    }
+    SourceState { state, hint: hint.into(), section }
 }
 
 /// The settings link for a section, as the web UI addresses it, and its label.
@@ -92,18 +84,10 @@ fn plugin_state(st: &AppState, id: &str) -> Option<SourceState> {
     let m = plugin_of(id)?;
     let name = &m.plugin.name;
     if !st.plugins.installed(m.id()) {
-        return Some(state(
-            "not_installed",
-            format!("Install the {name} plugin under Settings → Plugins"),
-            "plugins",
-        ));
+        return Some(state("not_installed", format!("Install the {name} plugin under Settings → Plugins"), "plugins"));
     }
     if !st.plugins.enabled(m.id()) {
-        return Some(state(
-            "off",
-            format!("The {name} plugin is switched off"),
-            "plugins",
-        ));
+        return Some(state("off", format!("The {name} plugin is switched off"), "plugins"));
     }
     None
 }
@@ -113,34 +97,18 @@ fn plugin_state(st: &AppState, id: &str) -> Option<SourceState> {
 fn streamrip_state(st: &AppState, id: &str) -> SourceState {
     let name = source_name(id);
     if !st.cfg.bool("streamrip_enabled") {
-        return state(
-            "off",
-            format!("{name} downloads need streamrip switched on"),
-            "streamrip",
-        );
+        return state("off", format!("{name} downloads need streamrip switched on"), "streamrip");
     }
     if streamrip::binary(st).is_none() {
         return state("not_installed", streamrip::NOT_INSTALLED_MSG, "plugins");
     }
     if !streamrip::services(st).iter().any(|s| s == id) {
-        return state(
-            "off",
-            format!("{name} is not in the download pipeline"),
-            "pipeline",
-        );
+        return state("off", format!("{name} is not in the download pipeline"), "pipeline");
     }
     match id {
-        "deezer" if !streamrip::deezer_arl_set(st) => {
-            state("sign_in", "Deezer needs an ARL cookie", "streamrip")
-        }
-        "tidal" if !streamrip::tidal_signed_in(st) => {
-            state("sign_in", "Sign in to Tidal", "streamrip")
-        }
-        "qobuz" if streamrip::qobuz_login(st).is_none() => state(
-            "sign_in",
-            "Sign in to Qobuz (user id and token)",
-            "streamrip",
-        ),
+        "deezer" if !streamrip::deezer_arl_set(st) => state("sign_in", "Deezer needs an ARL cookie", "streamrip"),
+        "tidal" if !streamrip::tidal_signed_in(st) => state("sign_in", "Sign in to Tidal", "streamrip"),
+        "qobuz" if streamrip::qobuz_login(st).is_none() => state("sign_in", "Sign in to Qobuz (user id and token)", "streamrip"),
         _ => state("ready", "", "streamrip"),
     }
 }
@@ -166,78 +134,34 @@ pub fn source_state(st: &AppState, id: &str) -> SourceState {
                 // the engine runs; the session may not (Encore's reconnect schedule says when it is back)
                 let c = st.requests.slskd.session().snapshot();
                 use encore_requests::slskd_session::State;
-                if c.checked.is_some()
-                    && matches!(c.state, State::Waiting | State::Stopped | State::Connecting)
-                {
-                    return state(
-                        "not_connected",
-                        format!(
-                            "Soulseek isn't connected – {}",
-                            encore_requests::slskd_session::when_text(&c)
-                        ),
-                        "slskd",
-                    );
+                if c.checked.is_some() && matches!(c.state, State::Waiting | State::Stopped | State::Connecting) {
+                    return state("not_connected", format!("Soulseek isn't connected – {}", encore_requests::slskd_session::when_text(&c)), "slskd");
                 }
                 return state("ready", "", "slskd");
             }
-            state(
-                "not_connected",
-                slskd::not_ready(st)
-                    .unwrap_or_else(|| "Soulseek is starting – try again in a moment".into()),
-                "slskd",
-            )
+            state("not_connected", slskd::not_ready(st).unwrap_or_else(|| "Soulseek is starting – try again in a moment".into()), "slskd")
         }
         "torznab" => {
             if !st.cfg.bool("torznab_enabled") {
                 return state("off", "Torrents & Usenet are off", "torznab");
             }
             if st.cfg.str("prowlarr_url").is_empty() || st.cfg.str("prowlarr_api_key").is_empty() {
-                return state(
-                    "sign_in",
-                    "Prowlarr needs its address and API key",
-                    "torznab",
-                );
+                return state("sign_in", "Prowlarr needs its address and API key", "torznab");
             }
             if !(torznab::qbit_ready(st) || torznab::sab_ready(st)) {
-                return state(
-                    "not_connected",
-                    "No torrent or Usenet client is set up",
-                    "torznab",
-                );
+                return state("not_connected", "No torrent or Usenet client is set up", "torznab");
             }
             state("ready", "", "torznab")
         }
         "qobuz" | "tidal" | "deezer" => streamrip_state(st, id),
         // through the registry like a plugin program's source, after their own sign-ins
-        "zotify" if !zotify::signed_in(st) => state(
-            "sign_in",
-            "Sign in to Spotify: Test on the zotify card",
-            "plugins",
-        ),
-        "zotify" if !zotify::search_ready(st) => state(
-            "sign_in",
-            "Spotify search needs your developer app: Test on the zotify card",
-            "plugins",
-        ),
-        "gamdl" if !gamdl::signed_in(st) => state(
-            "sign_in",
-            "Apple Music needs your media-user-token (gamdl card)",
-            "plugins",
-        ),
-        "ytmusic" => {
-            if ytdlp::enabled(st) {
-                state("ready", "", "ytdlp")
-            } else {
-                state("off", "YouTube Music is off (yt-dlp)", "ytdlp")
-            }
-        }
+        "zotify" if !zotify::signed_in(st) => state("sign_in", "Sign in to Spotify: Test on the zotify card", "plugins"),
+        "zotify" if !zotify::search_ready(st) => state("sign_in", "Spotify search needs your developer app: Test on the zotify card", "plugins"),
+        "gamdl" if !gamdl::signed_in(st) => state("sign_in", "Apple Music needs your media-user-token (gamdl card)", "plugins"),
+        "ytmusic" => if ytdlp::enabled(st) { state("ready", "", "ytdlp") } else { state("off", "YouTube Music is off (yt-dlp)", "ytdlp") },
         other => match encore_requests::sources::plugin::find(st, other) {
             Some(p) if p.enabled => state("ready", "", "plugins"),
-            Some(p) => state(
-                "off",
-                format!("The {} plugin is switched off", p.name),
-                "plugins",
-            ),
+            Some(p) => state("off", format!("The {} plugin is switched off", p.name), "plugins"),
             None => state("off", "Unknown source", "pipeline"),
         },
     }
@@ -254,9 +178,7 @@ pub fn available(st: &AppState) -> Vec<Value> {
     };
     let mut out: Vec<Value> = SOURCES.iter().map(|(id, name, _)| row(id, name)).collect();
     for p in st.plugins.plugin_sources() {
-        if p.kinds.iter().any(|k| k == "track" || k == "album")
-            && !out.iter().any(|x| x["id"] == p.picker)
-        {
+        if p.kinds.iter().any(|k| k == "track" || k == "album") && !out.iter().any(|x| x["id"] == p.picker) {
             out.push(row(&p.picker, &p.name));
         }
     }
@@ -267,9 +189,7 @@ pub fn available(st: &AppState) -> Vec<Value> {
 /// hint for that one tab instead of a failed search.
 fn state_error(id: &str, s: &SourceState) -> ApiError {
     let (settings, label) = settings_link(s.section);
-    err(409, s.hint.clone()).with(
-        json!({ "source": id, "state": s.state, "settings": settings, "settings_label": label }),
-    )
+    err(409, s.hint.clone()).with(json!({ "source": id, "state": s.state, "settings": settings, "settings_label": label }))
 }
 
 /// What someone who isn't an admin sees of a source that can't search: no link to a Server settings page
@@ -279,11 +199,7 @@ fn state_error(id: &str, s: &SourceState) -> ApiError {
 fn without_settings_link(hint: &str, x: &mut Value) -> String {
     x["settings"] = json!("");
     x["settings_label"] = json!("");
-    if hint.is_empty() {
-        String::new()
-    } else {
-        format!("{hint} – ask an admin")
-    }
+    if hint.is_empty() { String::new() } else { format!("{hint} – ask an admin") }
 }
 
 /// On the blocking pool: whether streamrip is installed asks its program for its version (a Python start) the
@@ -298,48 +214,25 @@ async fn sources(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
                 s["hint"] = json!(without_settings_link(&hint, s));
             }
         }
-        Ok(Json(
-            json!({ "sources": list, "allowed": auth::can(st, &u, "pick") }),
-        ))
-    })
-    .await
+        Ok(Json(json!({ "sources": list, "allowed": auth::can(st, &u, "pick") })))
+    }).await
 }
 
 /// The quality shown for a result: "FLAC 24-bit/96kHz", "MP3 320k".
 fn quality(fmt: &str, bitrate: i64, depth: i64, rate: i64) -> String {
     let f = fmt.to_lowercase();
     if LOSSLESS.contains(&f.as_str()) {
-        let bits = if depth > 0 {
-            format!(" {depth}-bit")
-        } else {
-            String::new()
-        };
-        let khz = if rate > 0 && rate != 44100 {
-            format!("/{}kHz", rate as f64 / 1000.0)
-        } else {
-            String::new()
-        };
+        let bits = if depth > 0 { format!(" {depth}-bit") } else { String::new() };
+        let khz = if rate > 0 && rate != 44100 { format!("/{}kHz", rate as f64 / 1000.0) } else { String::new() };
         return format!("{}{bits}{khz}", f.to_uppercase());
     }
-    if bitrate > 0 {
-        format!("{} {bitrate}k", f.to_uppercase())
-    } else {
-        f.to_uppercase()
-    }
+    if bitrate > 0 { format!("{} {bitrate}k", f.to_uppercase()) } else { f.to_uppercase() }
 }
 
 /// How well a result matches what is wanted (0 when it doesn't match), to two decimals.
 fn score(want_t: &str, want_a: &str, t: &str, a: &str, len: Option<f64>, got: Option<f64>) -> f64 {
-    let v = compare(
-        &describe(want_t, want_a, len, None, None),
-        &describe(t, a, got, None, None),
-        true,
-    );
-    if v.matched {
-        (v.score * 100.0).round() / 100.0
-    } else {
-        0.0
-    }
+    let v = compare(&describe(want_t, want_a, len, None, None), &describe(t, a, got, None, None), true);
+    if v.matched { (v.score * 100.0).round() / 100.0 } else { 0.0 }
 }
 
 /// The share of `needle`'s words in `hay`, the better of two readings of both: the plain words and the
@@ -347,8 +240,7 @@ fn score(want_t: &str, want_a: &str, t: &str, a: &str, len: Option<f64>, got: Op
 /// [`torznab::match_words`]); a name written as one word counts (AC/DC as "ACDC"). 0 for a needle
 /// without words.
 fn contains(hay: &str, needle: &str) -> f64 {
-    if encore_core::text::ascii_words(needle).is_empty() && torznab::match_words(needle).is_empty()
-    {
+    if encore_core::text::ascii_words(needle).is_empty() && torznab::match_words(needle).is_empty() {
         return 0.0;
     }
     torznab::share(hay, needle)
@@ -396,40 +288,20 @@ fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
 
 /// The search box holds other words than the picker was opened with ("artist title"): typed by hand.
 fn typed(b: &SearchBody) -> bool {
-    b.query.as_deref().map(str::trim).is_some_and(|q| {
-        !q.is_empty()
-            && search_cache::words(q) != search_cache::words(&format!("{} {}", b.artist, b.title))
-    })
+    b.query.as_deref().map(str::trim).is_some_and(|q| !q.is_empty() && search_cache::words(q) != search_cache::words(&format!("{} {}", b.artist, b.title)))
 }
 
 /// The words Soulseek is asked: typed words as typed (symbols that stand for letters spelled out first,
 /// Ke$ha → Kesha, the other symbols out), else the request's names as the worker searches them
 /// (`slskd::query_text`, without anything in brackets), so the picker finds what the worker found.
 fn slskd_text(b: &SearchBody, q: &str) -> String {
-    let typed_words = || {
-        torznab::fold_symbols(q)
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c.is_whitespace() || c == '\'' {
-                    c
-                } else {
-                    ' '
-                }
-            })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    let typed_words = || torznab::fold_symbols(q).chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() || c == '\'' { c } else { ' ' }).collect::<String>()
+        .split_whitespace().collect::<Vec<_>>().join(" ");
     if typed(b) {
         return typed_words();
     }
     let t = slskd::query_text(&[&b.artist, &b.title]);
-    if t.is_empty() {
-        typed_words()
-    } else {
-        t
-    }
+    if t.is_empty() { typed_words() } else { t }
 }
 
 /// The request the picker was opened for, as far as its kept searches go.
@@ -454,28 +326,13 @@ impl ForRequest {
     /// From a request row (`get_owned`).
     pub fn of(r: &Value) -> ForRequest {
         let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
-        ForRequest {
-            id: r["id"].as_i64().unwrap_or(0),
-            created_at: r["created_at"].as_f64().unwrap_or(0.0),
-            kind: s("kind"),
-            artist: s("artist"),
-            title: s("title"),
-            album: s("album"),
-        }
+        ForRequest { id: r["id"].as_i64().unwrap_or(0), created_at: r["created_at"].as_f64().unwrap_or(0.0), kind: s("kind"), artist: s("artist"), title: s("title"), album: s("album") }
     }
 
     /// The keys of the request's own attempts' searches (`kind`: slskd or torznab).
     fn keys(&self, kind: &str) -> Vec<String> {
-        search_cache::worker_texts(&self.kind, &self.artist, &self.title, &self.album)
-            .iter()
-            .map(|t| {
-                if kind == "slskd" {
-                    search_cache::slskd_key(t)
-                } else {
-                    search_cache::torznab_key(t, &["3000"])
-                }
-            })
-            .collect()
+        search_cache::worker_texts(&self.kind, &self.artist, &self.title, &self.album).iter()
+            .map(|t| if kind == "slskd" { search_cache::slskd_key(t) } else { search_cache::torznab_key(t, &["3000"]) }).collect()
     }
 }
 
@@ -499,13 +356,7 @@ pub struct Answer {
 impl Answer {
     /// An answer of a live search.
     fn live(items: Vec<Value>, query: String) -> Answer {
-        Answer {
-            items,
-            cached_at: None,
-            query,
-            can_search: true,
-            notice: None,
-        }
+        Answer { items, cached_at: None, query, can_search: true, notice: None }
     }
 
     /// `{items, from: cache|live, cached_at, found: "Found at 14:02", query, can_search, notice}`.
@@ -521,23 +372,13 @@ impl Answer {
 /// newest answer with results of the request it was opened for (`mine`: id, created_at, the keys of its
 /// own attempts' searches), e.g. the worker's album search that fell back to the album's name alone.
 /// On the blocking pool.
-fn kept_for(
-    st: &AppState,
-    kind: &str,
-    key: &str,
-    mine: Option<(i64, f64, Vec<String>)>,
-) -> Option<search_cache::Found> {
-    let (cache, dir, now) = (
-        &st.requests.search_cache,
-        st.data_dir(),
-        encore_core::time::now(),
-    );
+fn kept_for(st: &AppState, kind: &str, key: &str, mine: Option<(i64, f64, Vec<String>)>) -> Option<search_cache::Found> {
+    let (cache, dir, now) = (&st.requests.search_cache, st.data_dir(), encore_core::time::now());
     let own = cache.get(dir, key, now);
     if own.as_ref().is_some_and(|f| !f.results.is_empty()) {
         return own;
     }
-    mine.and_then(|(id, since, keys)| cache.get_for_request(dir, kind, Some(id), &keys, since, now))
-        .or(own)
+    mine.and_then(|(id, since, keys)| cache.get_for_request(dir, kind, Some(id), &keys, since, now)).or(own)
 }
 
 /// What Soulseek rows are matched against: the words typed in the box when they are other words than the picker
@@ -545,11 +386,7 @@ fn kept_for(
 /// looked for in the whole path ("Artist/Album/03 - Song.flac"), since typed words often name the artist, which
 /// a file's own name leaves to its folders.
 fn slskd_want<'a>(b: &'a SearchBody, q: &'a str) -> (&'a str, bool) {
-    if typed(b) || b.title.trim().is_empty() {
-        (q, true)
-    } else {
-        (b.title.as_str(), false)
-    }
+    if typed(b) || b.title.trim().is_empty() { (q, true) } else { (b.title.as_str(), false) }
 }
 
 /// Picker rows from slskd's answers (live, or kept): per folder for an album, per file for a song, scored
@@ -559,123 +396,40 @@ fn slskd_rows(b: &SearchBody, q: &str, responses: &[Value]) -> Vec<Value> {
     let mut out = vec![];
     for resp in responses {
         let user = resp["username"].as_str().unwrap_or("").to_string();
-        let (free, queue, speed) = (
-            resp["hasFreeUploadSlot"].as_bool().unwrap_or(false),
-            resp["queueLength"].as_f64().unwrap_or(0.0),
-            resp["uploadSpeed"].as_f64().unwrap_or(0.0),
-        );
-        let audio: Vec<Value> = resp["files"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| {
-                encore_core::audio::DOWNLOAD_EXTS
-                    .contains(&slskd::ext(f["filename"].as_str().unwrap_or("")).as_str())
-            })
-            .collect();
+        let (free, queue, speed) = (resp["hasFreeUploadSlot"].as_bool().unwrap_or(false), resp["queueLength"].as_f64().unwrap_or(0.0), resp["uploadSpeed"].as_f64().unwrap_or(0.0));
+        let audio: Vec<Value> = resp["files"].as_array().cloned().unwrap_or_default().into_iter().filter(|f| encore_core::audio::DOWNLOAD_EXTS.contains(&slskd::ext(f["filename"].as_str().unwrap_or("")).as_str())).collect();
         let mut groups: Vec<(String, Vec<Value>)> = vec![];
         for f in audio {
             let name = f["filename"].as_str().unwrap_or("").replace('\\', "/");
-            let key = if b.kind == "album" {
-                name.rsplit_once('/')
-                    .map(|x| x.0.to_string())
-                    .unwrap_or_default()
-            } else {
-                name
-            };
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, v)) => v.push(f),
-                None => groups.push((key, vec![f])),
-            }
+            let key = if b.kind == "album" { name.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default() } else { name };
+            match groups.iter_mut().find(|(k, _)| *k == key) { Some((_, v)) => v.push(f), None => groups.push((key, vec![f])) }
         }
         for (d, mut files) in groups {
-            let exts: std::collections::HashSet<String> = files
-                .iter()
-                .map(|f| slskd::ext(f["filename"].as_str().unwrap_or("")))
-                .collect();
-            let fmt = if exts.len() == 1 {
-                exts.into_iter().next().unwrap()
-            } else {
-                "mixed".into()
-            };
+            let exts: std::collections::HashSet<String> = files.iter().map(|f| slskd::ext(f["filename"].as_str().unwrap_or(""))).collect();
+            let fmt = if exts.len() == 1 { exts.into_iter().next().unwrap() } else { "mixed".into() };
             let parts: Vec<&str> = d.split('/').collect();
-            let name = if b.kind == "track" {
-                parts.last().unwrap_or(&"").to_string()
-            } else {
-                parts[parts.len().saturating_sub(2)..].join("/")
-            };
+            let name = if b.kind == "track" { parts.last().unwrap_or(&"").to_string() } else { parts[parts.len().saturating_sub(2)..].join("/") };
             // typed words are looked for in the whole path, the title in the folder's or file's own name
             let rel = contains(if whole_path { &d } else { &name }, want);
             if rel < 0.4 {
                 continue;
             }
-            let br = files
-                .iter()
-                .map(|f| f["bitRate"].as_i64().unwrap_or(0))
-                .min()
-                .unwrap_or(0);
-            let depth = files
-                .iter()
-                .map(|f| f["bitDepth"].as_i64().unwrap_or(0))
-                .min()
-                .unwrap_or(0);
-            let rate = files
-                .iter()
-                .map(|f| f["sampleRate"].as_i64().unwrap_or(0))
-                .max()
-                .unwrap_or(0);
+            let br = files.iter().map(|f| f["bitRate"].as_i64().unwrap_or(0)).min().unwrap_or(0);
+            let depth = files.iter().map(|f| f["bitDepth"].as_i64().unwrap_or(0)).min().unwrap_or(0);
+            let rate = files.iter().map(|f| f["sampleRate"].as_i64().unwrap_or(0)).max().unwrap_or(0);
             let lossless = LOSSLESS.contains(&fmt.as_str());
-            let mut sc = rel * 40.0
-                + contains(&d, &b.artist) * 10.0
-                + if lossless {
-                    30.0
-                } else if br >= 320 {
-                    15.0
-                } else {
-                    5.0
-                };
-            sc += if depth >= 24 { 6.0 } else { 0.0 } + if free { 8.0 } else { 0.0 }
-                - queue.min(50.0) / 5.0;
+            let mut sc = rel * 40.0 + contains(&d, &b.artist) * 10.0 + if lossless { 30.0 } else if br >= 320 { 15.0 } else { 5.0 };
+            sc += if depth >= 24 { 6.0 } else { 0.0 } + if free { 8.0 } else { 0.0 } - queue.min(50.0) / 5.0;
             if let (true, Some(tc)) = (b.kind == "album", b.track_count) {
-                sc += if files.len() == tc {
-                    15.0
-                } else if files.len() < tc {
-                    -10.0
-                } else {
-                    0.0
-                };
+                sc += if files.len() == tc { 15.0 } else if files.len() < tc { -10.0 } else { 0.0 };
             }
-            if let (true, Some(l), Some(fl)) =
-                (b.kind == "track", b.length, files[0]["length"].as_f64())
-            {
+            if let (true, Some(l), Some(fl)) = (b.kind == "track", b.length, files[0]["length"].as_f64()) {
                 sc += if (fl - l).abs() < 5.0 { 10.0 } else { -10.0 };
             }
             files.sort_by_key(|f| f["filename"].as_str().unwrap_or("").to_string());
-            let info = [
-                user.clone(),
-                if free {
-                    "free slot".into()
-                } else {
-                    format!("queue {queue}")
-                },
-                if speed > 0.0 {
-                    format!("{:.1} MB/s", speed / 1e6)
-                } else {
-                    String::new()
-                },
-            ]
-            .into_iter()
-            .filter(|x| !x.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ");
-            let dir = if b.kind == "track" {
-                d.rsplit_once('/')
-                    .map(|x| x.0.to_string())
-                    .unwrap_or_default()
-            } else {
-                d.clone()
-            };
+            let info = [user.clone(), if free { "free slot".into() } else { format!("queue {queue}") }, if speed > 0.0 { format!("{:.1} MB/s", speed / 1e6) } else { String::new() }]
+                .into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+            let dir = if b.kind == "track" { d.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default() } else { d.clone() };
             out.push(json!({ "source": "slskd", "key": format!("{user}|{d}"), "title": name, "subtitle": d.replace('/', " / "),
                 "quality": quality(&fmt, br, depth, rate), "lossless": lossless, "tracks": files.len(),
                 "size": files.iter().map(|f| f["size"].as_i64().unwrap_or(0)).sum::<i64>(),
@@ -684,12 +438,7 @@ fn slskd_rows(b: &SearchBody, q: &str, responses: &[Value]) -> Vec<Value> {
                     "files": files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"] })).collect::<Vec<_>>() } }));
         }
     }
-    out.sort_by(|a, b| {
-        b["score"]
-            .as_f64()
-            .partial_cmp(&a["score"].as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
     out.truncate(150);
     out
 }
@@ -700,13 +449,7 @@ fn slskd_rows(b: &SearchBody, q: &str, responses: &[Value]) -> Vec<Value> {
 /// download waits for Soulseek), then without "Search again". Otherwise it searches through the gate (one
 /// search at a time, 3 s apart, never while disconnected) as a task of its own: a picker closed meanwhile
 /// doesn't stop it, it is kept, and a second picker asking the same words waits for the same search.
-async fn slskd_answer(
-    st: &AppState,
-    b: &SearchBody,
-    q: &str,
-    s: &SourceState,
-    req: Option<&ForRequest>,
-) -> ApiResult<Answer> {
+async fn slskd_answer(st: &AppState, b: &SearchBody, q: &str, s: &SourceState, req: Option<&ForRequest>) -> ApiResult<Answer> {
     let ready = s.state == "ready";
     if !ready && (s.state != "not_connected" || b.fresh) {
         return Err(state_error("slskd", s));
@@ -717,38 +460,19 @@ async fn slskd_answer(
     }
     let key = search_cache::slskd_key(&text);
     if !b.fresh {
-        let mine = req
-            .filter(|_| !typed(b))
-            .map(|r| (r.id, r.created_at, r.keys("slskd")));
+        let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("slskd")));
         let k = key.clone();
         // an answer with no results is searched again while Soulseek can search: who is online changes, and a
         // search made while the session was shaky would otherwise read as "nothing on Soulseek" for an hour
-        let kept = st
-            .blocking(move |st| Ok(kept_for(st, "slskd", &k, mine)))
-            .await?
-            .filter(|f| !ready || !f.results.is_empty());
+        let kept = st.blocking(move |st| Ok(kept_for(st, "slskd", &k, mine))).await?.filter(|f| !ready || !f.results.is_empty());
         if let Some(f) = kept {
             // the words after "Found at 14:02 for …": the box's own when the kept search is the one they make
             // (brackets and symbols aside), the other search's when it came from the request's own attempts
-            let query = if f.key == key {
-                q.to_string()
-            } else {
-                f.query.clone()
-            };
+            let query = if f.key == key { q.to_string() } else { f.query.clone() };
             let items = slskd_rows(b, q, &f.results);
             // can't search: why; else, when nothing is shown, why not
-            let notice = if !ready {
-                Some(s.hint.clone())
-            } else {
-                slskd_notice(b, q, &f.query, &f.results, &items)
-            };
-            return Ok(Answer {
-                items,
-                cached_at: Some(f.searched_at),
-                query,
-                can_search: ready,
-                notice,
-            });
+            let notice = if !ready { Some(s.hint.clone()) } else { slskd_notice(b, q, &f.query, &f.results, &items) };
+            return Ok(Answer { items, cached_at: Some(f.searched_at), query, can_search: ready, notice });
         }
     }
     if !ready {
@@ -756,40 +480,20 @@ async fn slskd_answer(
     }
     let rid = req.map(|r| r.id);
     let (st2, text2, key2) = (st.clone(), text.clone(), key.clone());
-    let found = st
-        .requests
-        .search_cache
-        .single(&key, async move {
-            match slskd::search_kept(&st2, &text2, slskd::Who::Person, rid, |_| {}).await {
-                Ok(results) => Ok(search_cache::Found {
-                    key: key2,
-                    query: text2,
-                    searched_at: encore_core::time::now(),
-                    request_id: rid,
-                    results,
-                }),
-                Err(e) => Err(search_cache::Failure::of(&e)),
-            }
-        })
-        .await
-        .map_err(|f| search_error(st, "slskd", f.into_error()))?;
+    let found = st.requests.search_cache.single(&key, async move {
+        match slskd::search_kept(&st2, &text2, slskd::Who::Person, rid, |_| {}).await {
+            Ok(results) => Ok(search_cache::Found { key: key2, query: text2, searched_at: encore_core::time::now(), request_id: rid, results }),
+            Err(e) => Err(search_cache::Failure::of(&e)),
+        }
+    }).await.map_err(|f| search_error(st, "slskd", f.into_error()))?;
     let items = slskd_rows(b, q, &found.results);
     let notice = slskd_notice(b, q, &found.query, &found.results, &items);
-    Ok(Answer {
-        notice,
-        ..Answer::live(items, found.query.clone())
-    })
+    Ok(Answer { notice, ..Answer::live(items, found.query.clone()) })
 }
 
 /// Why a Soulseek answer shows no rows (None when it shows some): nobody answered `text`, or those who did
 /// had no audio file named like what is wanted ([`slskd_want`]) – so an empty list never reads as a bare "0".
-fn slskd_notice(
-    b: &SearchBody,
-    q: &str,
-    text: &str,
-    responses: &[Value],
-    items: &[Value],
-) -> Option<String> {
+fn slskd_notice(b: &SearchBody, q: &str, text: &str, responses: &[Value], items: &[Value]) -> Option<String> {
     if !items.is_empty() {
         return None;
     }
@@ -797,46 +501,22 @@ fn slskd_notice(
         return Some(format!("Nobody on Soulseek answered \"{text}\" – fewer words (just the artist and title) often find more"));
     }
     let (want, _) = slskd_want(b, q);
-    let files: usize = responses
-        .iter()
-        .map(|r| r["files"].as_array().map_or(0, |f| f.len()))
-        .sum();
+    let files: usize = responses.iter().map(|r| r["files"].as_array().map_or(0, |f| f.len())).sum();
     Some(format!("{} Soulseek user(s) answered \"{text}\" with {files} file(s), but none is an audio file named like \"{want}\"", responses.len()))
 }
 
 /// One indexer result as a picker row. `album` marks a release of the album the song is on: only the
 /// song's file downloads from it. Prowlarr's API key in the release's link is sealed
 /// ([`torznab::seal_key`]): the worker puts it back when the pick is downloaded.
-fn torznab_row(
-    st: &AppState,
-    r: &Value,
-    sc: f64,
-    album: Option<(&str, &str, Option<u32>)>,
-) -> Value {
+fn torznab_row(st: &AppState, r: &Value, sc: f64, album: Option<(&str, &str, Option<u32>)>) -> Value {
     let proto = r["protocol"].as_str().unwrap_or("torrent").to_string();
-    let url = torznab::seal_key(
-        st,
-        r["magnetUrl"]
-            .as_str()
-            .filter(|m| !m.is_empty())
-            .or(r["downloadUrl"].as_str())
-            .unwrap_or(""),
-    );
+    let url = torznab::seal_key(st, r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or(""));
     let title = r["title"].as_str().unwrap_or("").to_string();
-    let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b")
-        .unwrap()
-        .is_match(&title);
+    let lossless = regex::Regex::new(r"(?i)\b(flac|lossless|alac|24[\s-]?bit|hi-?res)\b").unwrap().is_match(&title);
     let seeds = r["seeders"].as_i64();
-    let age = r["age"]
-        .as_i64()
-        .map(|d| format!("{d} days old"))
-        .unwrap_or_default();
+    let age = r["age"].as_i64().map(|d| format!("{d} days old")).unwrap_or_default();
     let indexer = r["indexer"].as_str().unwrap_or("").to_string();
-    let mut info = vec![
-        proto.clone(),
-        seeds.map(|s| format!("{s} seeders")).unwrap_or_default(),
-        age,
-    ];
+    let mut info = vec![proto.clone(), seeds.map(|s| format!("{s} seeders")).unwrap_or_default(), age];
     let mut payload = json!({ "title": title, "indexer": r["indexer"], "protocol": proto, "size": r["size"], "seeders": r["seeders"], "url": url, "guid": r["guid"], "lossless": lossless });
     let subtitle = match album {
         Some((name, song, no)) => {
@@ -850,11 +530,7 @@ fn torznab_row(
         }
         None => indexer,
     };
-    let info = info
-        .into_iter()
-        .filter(|x| !x.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let info = info.into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
     json!({ "source": "torznab", "key": format!("torznab:{}", r["guid"].as_str().unwrap_or(&title)), "title": title,
         "subtitle": subtitle, "quality": if lossless { "FLAC" } else { "" }, "lossless": lossless, "tracks": null, "size": r["size"], "info": info,
         "score": (sc * 10.0).round() / 10.0, "payload": payload })
@@ -863,24 +539,13 @@ fn torznab_row(
 /// Whether a release can be downloaded: it has a link, and its protocol's client is ready.
 fn torznab_usable(st: &AppState, r: &Value) -> bool {
     let proto = r["protocol"].as_str().unwrap_or("torrent");
-    let url = r["magnetUrl"]
-        .as_str()
-        .filter(|m| !m.is_empty())
-        .or(r["downloadUrl"].as_str())
-        .unwrap_or("");
-    !url.is_empty()
-        && !(proto == "torrent" && !torznab::qbit_ready(st))
-        && !(proto == "usenet" && !torznab::sab_ready(st))
+    let url = r["magnetUrl"].as_str().filter(|m| !m.is_empty()).or(r["downloadUrl"].as_str()).unwrap_or("");
+    !url.is_empty() && !(proto == "torrent" && !torznab::qbit_ready(st)) && !(proto == "usenet" && !torznab::sab_ready(st))
 }
 
 /// Sort results best score first.
 fn by_score(out: &mut [Value]) {
-    out.sort_by(|a, b| {
-        b["score"]
-            .as_f64()
-            .partial_cmp(&a["score"].as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// A release title that says it is lossless (FLAC, ALAC, 24-bit, hi-res).
@@ -928,13 +593,7 @@ impl Tally {
             self.queries.push(q.to_string());
         }
         for r in found {
-            if self.seen.insert(
-                r["guid"]
-                    .as_str()
-                    .or(r["title"].as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ) {
+            if self.seen.insert(r["guid"].as_str().or(r["title"].as_str()).unwrap_or("").to_string()) {
                 self.releases.push(r.clone());
             }
         }
@@ -943,44 +602,19 @@ impl Tally {
     /// Why the searches show no rows: Prowlarr found nothing; or what it found needs a client that isn't set
     /// up; or none of it names what is wanted.
     fn notice(&self, st: &AppState, b: &SearchBody) -> String {
-        let words = self
-            .queries
-            .iter()
-            .map(|q| {
-                if q.is_empty() {
-                    "(nothing)".to_string()
-                } else {
-                    format!("\"{q}\"")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" or ");
+        let words = self.queries.iter().map(|q| if q.is_empty() { "(nothing)".to_string() } else { format!("\"{q}\"") }).collect::<Vec<_>>().join(" or ");
         let n = self.releases.len();
         if n == 0 {
             return format!("Prowlarr's indexers found nothing for {words} – Prowlarr → History shows what each indexer answered (an indexer that is failing, rate limited or without Audio categories finds nothing)");
         }
-        let usable = self
-            .releases
-            .iter()
-            .filter(|r| torznab_usable(st, r))
-            .count();
+        let usable = self.releases.iter().filter(|r| torznab_usable(st, r)).count();
         if usable == 0 {
             // what the releases need: the protocols of the first ones that can't be taken
             let usenet = self.releases.iter().any(|r| r["protocol"] == "usenet");
-            let client = if usenet && !torznab::sab_ready(st) {
-                "Usenet"
-            } else {
-                "torrent"
-            };
+            let client = if usenet && !torznab::sab_ready(st) { "Usenet" } else { "torrent" };
             return format!("Prowlarr found {n} release(s) for {words}, but none can be downloaded: they need a {client} client, which isn't set up (Settings → Plugins → Torrents & Usenet)");
         }
-        let what = if b.title.trim().is_empty() {
-            "the words searched".to_string()
-        } else if b.artist.trim().is_empty() {
-            format!("\"{}\"", b.title)
-        } else {
-            format!("\"{}\" by {}", b.title, b.artist)
-        };
+        let what = if b.title.trim().is_empty() { "the words searched".to_string() } else if b.artist.trim().is_empty() { format!("\"{}\"", b.title) } else { format!("\"{}\" by {}", b.title, b.artist) };
         format!("Prowlarr found {n} release(s) for {words}, but none of them names {what} – try other words, e.g. the album's name")
     }
 }
@@ -988,17 +622,8 @@ impl Tally {
 impl<'a> Prowlarr<'a> {
     /// The searches for this picker search: kept with `req` when it is one.
     fn of(st: &'a AppState, b: &SearchBody, req: Option<&ForRequest>) -> Prowlarr<'a> {
-        let mine = req
-            .filter(|_| !typed(b))
-            .map(|r| (r.id, r.created_at, r.keys("torznab")));
-        Prowlarr {
-            st,
-            fresh: b.fresh,
-            request_id: req.map(|r| r.id),
-            mine,
-            kept: Default::default(),
-            tally: Default::default(),
-        }
+        let mine = req.filter(|_| !typed(b)).map(|r| (r.id, r.created_at, r.keys("torznab")));
+        Prowlarr { st, fresh: b.fresh, request_id: req.map(|r| r.id), mine, kept: Default::default(), tally: Default::default() }
     }
 
     /// Releases for `q` in `cats`; `own`: the album search the request's own attempts make too.
@@ -1009,13 +634,7 @@ impl<'a> Prowlarr<'a> {
             let k = key.clone();
             // an answer with no releases is searched again: an indexer that was down or slow then, or a search
             // made before the song could be searched, would otherwise read as "nothing on your indexers"
-            let found = self
-                .st
-                .blocking(move |st| Ok(kept_for(st, "torznab", &k, mine)))
-                .await
-                .ok()
-                .flatten()
-                .filter(|f| !f.results.is_empty());
+            let found = self.st.blocking(move |st| Ok(kept_for(st, "torznab", &k, mine))).await.ok().flatten().filter(|f| !f.results.is_empty());
             if let Some(f) = found {
                 let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
                 if kept.as_ref().is_none_or(|(at, _)| f.searched_at < *at) {
@@ -1033,27 +652,17 @@ impl<'a> Prowlarr<'a> {
 
     /// Add one search's words and answer to the [`Tally`].
     fn note(&self, q: &str, found: &[Value]) {
-        self.tally
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .add(q, found);
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).add(q, found);
     }
 
     /// The releases found so far, once each.
     fn found(&self) -> Vec<Value> {
-        self.tally
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .releases
-            .clone()
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).releases.clone()
     }
 
     /// Why nothing is shown ([`Tally::notice`]).
     fn notice(&self, b: &SearchBody) -> String {
-        self.tally
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .notice(self.st, b)
+        self.tally.lock().unwrap_or_else(|e| e.into_inner()).notice(self.st, b)
     }
 }
 
@@ -1071,27 +680,13 @@ fn loose_rows(st: &AppState, b: &SearchBody, q: &str, releases: &[Value]) -> Vec
         }
         let title = r["title"].as_str().unwrap_or("");
         let lossless = lossless_re.is_match(title);
-        let seeds = (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0)
-            .log2()
-            .min(10.0);
+        let seeds = (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
         // the strict reading first: the one the song's or album's own search uses
         let strict = if b.kind == "track" {
-            torznab::score_song(
-                title,
-                r["size"].as_f64().unwrap_or(0.0),
-                r["seeders"].as_i64(),
-                r["protocol"].as_str().unwrap_or("torrent"),
-                &b.artist,
-                &b.title,
-            )
-            .map(|x| x.0)
+            torznab::score_song(title, r["size"].as_f64().unwrap_or(0.0), r["seeders"].as_i64(), r["protocol"].as_str().unwrap_or("torrent"), &b.artist, &b.title).map(|x| x.0)
         } else {
-            let (a, ar) = (
-                torznab::album_share(title, &b.title),
-                contains(title, &b.artist),
-            );
-            (a >= 0.8 && ar >= 0.5)
-                .then_some(a * 40.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + seeds)
+            let (a, ar) = (torznab::album_share(title, &b.title), contains(title, &b.artist));
+            (a >= 0.8 && ar >= 0.5).then_some(a * 40.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + seeds)
         };
         let row = match strict {
             Some(sc) => torznab_row(st, r, sc, None),
@@ -1101,8 +696,7 @@ fn loose_rows(st: &AppState, b: &SearchBody, q: &str, releases: &[Value]) -> Vec
                     continue;
                 }
                 // below every match: 30 off what a release naming every word would score
-                let sc =
-                    words * 20.0 + artist * 10.0 + if lossless { 10.0 } else { 0.0 } + seeds - 30.0;
+                let sc = words * 20.0 + artist * 10.0 + if lossless { 10.0 } else { 0.0 } + seeds - 30.0;
                 let mut row = torznab_row(st, r, sc, None);
                 row["warning"] = json!(if b.kind == "track" {
                     format!("Not clearly \"{}\" – only the song's file downloads, if the release has it", b.title)
@@ -1128,11 +722,7 @@ async fn search_torznab(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
 /// nothing in the music categories – asked again without categories, since some indexers file music
 /// elsewhere ("Other", "Misc") – and then whatever was found that looks related ([`loose_rows`]). Still
 /// nothing: `p.notice` says why.
-async fn search_torznab_in(
-    p: &Prowlarr<'_>,
-    b: &SearchBody,
-    q: &str,
-) -> anyhow::Result<Vec<Value>> {
+async fn search_torznab_in(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let out = search_torznab_matched(p, b, q).await?;
     if !out.is_empty() {
         return Ok(out);
@@ -1145,11 +735,7 @@ async fn search_torznab_in(
 }
 
 /// The indexers' releases that match: a song's own search, else albums ranked by fit and quality.
-async fn search_torznab_matched(
-    p: &Prowlarr<'_>,
-    b: &SearchBody,
-    q: &str,
-) -> anyhow::Result<Vec<Value>> {
+async fn search_torznab_matched(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let st = p.st;
     if b.kind == "track" {
         return search_torznab_song(p, b, q).await;
@@ -1163,12 +749,7 @@ async fn search_torznab_matched(
         let title = r["title"].as_str().unwrap_or("");
         let lossless = lossless_re.is_match(title);
         // the album's title without its edition counts: releases are named "Rodeo", not "Rodeo (Expanded Edition)"
-        let sc = torznab::album_share(title, &b.title) * 40.0
-            + contains(title, &b.artist) * 15.0
-            + if lossless { 30.0 } else { 0.0 }
-            + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0)
-                .log2()
-                .min(10.0);
+        let sc = torznab::album_share(title, &b.title) * 40.0 + contains(title, &b.artist) * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0);
         out.push(torznab_row(st, &r, sc, None));
     }
     by_score(&mut out);
@@ -1178,20 +759,10 @@ async fn search_torznab_matched(
 /// The album a song is on, and its track number when known: what the client sent, else MusicBrainz
 /// (the song's first studio album or EP), else Deezer – looked up once a day per song (kept in memory).
 async fn song_album(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32>)> {
-    if let Some(a) = b
-        .album
-        .as_deref()
-        .map(str::trim)
-        .filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(&b.title))
-    {
+    if let Some(a) = b.album.as_deref().map(str::trim).filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(&b.title)) {
         return Some((a.to_string(), None));
     }
-    let key = format!(
-        "picker:song_album:{}|{}|{}",
-        b.artist.to_lowercase(),
-        b.title.to_lowercase(),
-        b.mbid.as_deref().unwrap_or("")
-    );
+    let key = format!("picker:song_album:{}|{}|{}", b.artist.to_lowercase(), b.title.to_lowercase(), b.mbid.as_deref().unwrap_or(""));
     if let Some(v) = st.cache_get(&key) {
         return serde_json::from_value(v).ok();
     }
@@ -1206,9 +777,7 @@ async fn song_album(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32
 async fn song_album_lookup(st: &AppState, b: &SearchBody) -> Option<(String, Option<u32>)> {
     let t = std::time::Duration::from_secs(4);
     if let Some(id) = b.mbid.as_deref().filter(|m| !m.is_empty()) {
-        if let Ok(Ok(Some(g))) =
-            tokio::time::timeout(t, encore_http::mb::album_for_recording(st, id, true)).await
-        {
+        if let Ok(Ok(Some(g))) = tokio::time::timeout(t, encore_http::mb::album_for_recording(st, id, true)).await {
             if let Some(name) = g["title"].as_str().filter(|n| !n.is_empty()) {
                 return Some((name.to_string(), None));
             }
@@ -1217,44 +786,15 @@ async fn song_album_lookup(st: &AppState, b: &SearchBody) -> Option<(String, Opt
     if b.artist.is_empty() || b.title.is_empty() {
         return None;
     }
-    let q = format!(
-        "artist:\"{}\" track:\"{}\"",
-        b.artist.replace('"', ""),
-        b.title.replace('"', "")
-    );
-    let d: Value = deezer::search(st, "track", &q, 10)
-        .timeout(t)
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let hit = d["data"]
-        .as_array()?
-        .iter()
-        .find(|x| {
-            score(
-                &b.title,
-                &b.artist,
-                x["title"].as_str().unwrap_or(""),
-                x["artist"]["name"].as_str().unwrap_or(""),
-                b.length,
-                x["duration"].as_f64(),
-            ) > 0.0
-                && x["album"]["title"]
-                    .as_str()
-                    .is_some_and(|a| !a.eq_ignore_ascii_case(&b.title))
-        })?
-        .clone();
+    let q = format!("artist:\"{}\" track:\"{}\"", b.artist.replace('"', ""), b.title.replace('"', ""));
+    let d: Value = deezer::search(st, "track", &q, 10).timeout(t).send().await.ok()?.json().await.ok()?;
+    let hit = d["data"].as_array()?.iter().find(|x| {
+        score(&b.title, &b.artist, x["title"].as_str().unwrap_or(""), x["artist"]["name"].as_str().unwrap_or(""), b.length, x["duration"].as_f64()) > 0.0
+            && x["album"]["title"].as_str().is_some_and(|a| !a.eq_ignore_ascii_case(&b.title))
+    })?.clone();
     let album = hit["album"]["title"].as_str()?.to_string();
     let no = match deezer::track(st, &hit["id"]).timeout(t).send().await {
-        Ok(r) => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v["track_position"].as_u64())
-            .map(|n| n as u32),
+        Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["track_position"].as_u64()).map(|n| n as u32),
         Err(_) => None,
     };
     Some((album, no))
@@ -1262,19 +802,13 @@ async fn song_album_lookup(st: &AppState, b: &SearchBody) -> Option<(String, Opt
 
 /// A song: single-track releases of it (searched in the audio, MP3 and lossless categories), plus
 /// releases of the album it is on, from which only the song's file downloads.
-async fn search_torznab_song(
-    p: &Prowlarr<'_>,
-    b: &SearchBody,
-    q: &str,
-) -> anyhow::Result<Vec<Value>> {
+async fn search_torznab_song(p: &Prowlarr<'_>, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     let st = p.st;
     let custom = typed(b);
     let (songs, album) = tokio::join!(p.search(q, &torznab::SONG_CATS, false), async {
         let (name, no) = song_album(st, b).await?;
         // the album's names as the worker searches them: "Travis Scott Rodeo", not "… Rodeo (Expanded Edition)"
-        let res = p
-            .search(&slskd::query_text(&[&b.artist, &name]), &["3000"], false)
-            .await;
+        let res = p.search(&slskd::query_text(&[&b.artist, &name]), &["3000"], false).await;
         Some((name, no, res))
     });
     let mut out = vec![];
@@ -1286,14 +820,7 @@ async fn search_torznab_song(
                     continue;
                 }
                 let title = r["title"].as_str().unwrap_or("");
-                let scored = torznab::score_song(
-                    title,
-                    r["size"].as_f64().unwrap_or(0.0),
-                    r["seeders"].as_i64(),
-                    r["protocol"].as_str().unwrap_or("torrent"),
-                    &b.artist,
-                    &b.title,
-                );
+                let scored = torznab::score_song(title, r["size"].as_f64().unwrap_or(0.0), r["seeders"].as_i64(), r["protocol"].as_str().unwrap_or("torrent"), &b.artist, &b.title);
                 // a typed query is shown as found, the song's own search only what matches the song
                 let sc = match scored {
                     Some((sc, _)) => sc,
@@ -1311,27 +838,16 @@ async fn search_torznab_song(
         let lossless_re = lossless_re();
         for r in list {
             let title = r["title"].as_str().unwrap_or("");
-            if !torznab_usable(st, &r)
-                || !seen.insert(r["guid"].as_str().unwrap_or(title).to_string())
-            {
+            if !torznab_usable(st, &r) || !seen.insert(r["guid"].as_str().unwrap_or(title).to_string()) {
                 continue;
             }
-            let (a, ar) = (
-                torznab::album_share(title, &name),
-                contains(title, &b.artist),
-            );
+            let (a, ar) = (torznab::album_share(title, &name), contains(title, &b.artist));
             if a < 0.8 || ar < 0.5 {
                 continue;
             }
             let lossless = lossless_re.is_match(title);
             // below the song's own releases of the same quality: the whole album has to arrive first
-            let sc = a * 30.0
-                + ar * 15.0
-                + if lossless { 30.0 } else { 0.0 }
-                + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0)
-                    .log2()
-                    .min(10.0)
-                - 10.0;
+            let sc = a * 30.0 + ar * 15.0 + if lossless { 30.0 } else { 0.0 } + (r["seeders"].as_i64().unwrap_or(0) as f64 + 1.0).log2().min(10.0) - 10.0;
             out.push(torznab_row(st, &r, sc, Some((&name, &b.title, no))));
         }
     }
@@ -1369,12 +885,7 @@ async fn search_deezer(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result
                 "score": score(&b.title, &b.artist, &t, a, b.length, x["duration"].as_f64()), "payload": { "url": format!("https://www.deezer.com/track/{}", x["id"]) } })
         }
     }).collect();
-    out.sort_by(|a, b| {
-        b["score"]
-            .as_f64()
-            .partial_cmp(&a["score"].as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    out.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
     Ok(out)
 }
 
@@ -1402,23 +913,17 @@ async fn search_ytmusic(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Resul
 /// The token the search runs with, and the country: the developer app's client-credentials token when a
 /// Tidal Client ID is set (Settings → Integrations), else the account streamrip signed in with.
 async fn tidal_credentials(st: &AppState) -> anyhow::Result<(String, String)> {
-    let client =
-        !st.cfg.str("tidal_client_id").is_empty() && !st.cfg.str("tidal_client_secret").is_empty();
+    let client = !st.cfg.str("tidal_client_id").is_empty() && !st.cfg.str("tidal_client_secret").is_empty();
     // the account's token (refreshed when lapsed); with a Client ID a lapsed account only costs its country
     let user = match streamrip::tidal_user_token(st).await {
         Ok(u) => u,
         Err(e) if client => {
-            st.db
-                .log("warning", &format!("picker: Tidal account token: {e}"));
+            st.db.log("warning", &format!("picker: Tidal account token: {e}"));
             None
         }
         Err(e) => return Err(e),
     };
-    let cc = user
-        .as_ref()
-        .map(|u| u.1.clone())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| "US".into());
+    let cc = user.as_ref().map(|u| u.1.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "US".into());
     if client {
         return Ok((streamrip::tidal_token(st).await?, cc));
     }
@@ -1429,12 +934,7 @@ async fn tidal_credentials(st: &AppState) -> anyhow::Result<(String, String)> {
 }
 
 /// A path of Tidal's API with the search's token; a rejected token means signing in again.
-async fn tidal_get(
-    st: &AppState,
-    tok: &str,
-    path: &str,
-    query: &[(&str, &str)],
-) -> anyhow::Result<Value> {
+async fn tidal_get(st: &AppState, tok: &str, path: &str, query: &[(&str, &str)]) -> anyhow::Result<Value> {
     tidal_read(tidal::get(st, tok, path).query(query)).await
 }
 
@@ -1443,9 +943,7 @@ async fn tidal_read(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
     let r = req.send().await?;
     let code = r.status().as_u16();
     if code == 401 || code == 403 {
-        anyhow::bail!(
-            "Tidal rejected the sign-in token – sign in again in Settings → Plugins → streamrip"
-        );
+        anyhow::bail!("Tidal rejected the sign-in token – sign in again in Settings → Plugins → streamrip");
     }
     tidal::read(r).await
 }
@@ -1453,9 +951,7 @@ async fn tidal_read(req: reqwest::RequestBuilder) -> anyhow::Result<Value> {
 /// Tidal's `mediaTags` as a quality label: (label, lossless). Tidal's search gives the tier, not the exact
 /// rate: hi-res is 24-bit at up to 192 kHz.
 fn tidal_quality(tags: Option<&Vec<Value>>) -> (&'static str, bool) {
-    let Some(tags) = tags else {
-        return ("FLAC", true);
-    };
+    let Some(tags) = tags else { return ("FLAC", true) };
     let has = |t: &str| tags.iter().any(|x| x.as_str() == Some(t));
     if has("HIRES_LOSSLESS") {
         ("FLAC 24-bit", true)
@@ -1472,99 +968,40 @@ fn tidal_quality(tags: Option<&Vec<Value>>) -> (&'static str, bool) {
 /// order the search gave the ids.
 fn tidal_rows(b: &SearchBody, d: &Value, order: &[String]) -> Vec<Value> {
     let album = b.kind == "album";
-    let inc: HashMap<(String, String), Value> = d["included"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|x| {
-            (
-                (
-                    x["type"].as_str().unwrap_or("").to_string(),
-                    x["id"].as_str().unwrap_or("").to_string(),
-                ),
-                x["attributes"].clone(),
-            )
-        })
-        .collect();
+    let inc: HashMap<(String, String), Value> = d["included"].as_array().cloned().unwrap_or_default().into_iter()
+        .map(|x| ((x["type"].as_str().unwrap_or("").to_string(), x["id"].as_str().unwrap_or("").to_string()), x["attributes"].clone())).collect();
     let items = d["data"].as_array().cloned().unwrap_or_default();
     let mut out = vec![];
     for id in order {
-        let Some(x) = items.iter().find(|x| x["id"].as_str() == Some(id)) else {
-            continue;
-        };
+        let Some(x) = items.iter().find(|x| x["id"].as_str() == Some(id)) else { continue };
         let a = &x["attributes"];
         let rel = |name: &str, typ: &str| -> Vec<Value> {
-            x["relationships"][name]["data"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|r| {
-                    inc.get(&(typ.to_string(), r["id"].as_str().unwrap_or("").to_string()))
-                        .cloned()
-                })
-                .collect()
+            x["relationships"][name]["data"].as_array().cloned().unwrap_or_default().iter()
+                .filter_map(|r| inc.get(&(typ.to_string(), r["id"].as_str().unwrap_or("").to_string())).cloned()).collect()
         };
-        let artists = rel("artists", "artists")
-            .iter()
-            .filter_map(|v| v["name"].as_str().map(String::from))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let artists = rel("artists", "artists").iter().filter_map(|v| v["name"].as_str().map(String::from)).collect::<Vec<_>>().join(", ");
         let mut title = a["title"].as_str().unwrap_or("").to_string();
-        if let Some(v) = a["version"]
-            .as_str()
-            .filter(|v| !v.is_empty() && !title.to_lowercase().contains(&v.to_lowercase()))
-        {
+        if let Some(v) = a["version"].as_str().filter(|v| !v.is_empty() && !title.to_lowercase().contains(&v.to_lowercase())) {
             title = format!("{title} ({v})");
         }
         let (quality, lossless) = tidal_quality(a["mediaTags"].as_array());
-        let dur = a["duration"]
-            .as_str()
-            .and_then(encore_core::text::iso_duration);
-        let explicit = if a["explicit"].as_bool().unwrap_or(false) {
-            "explicit"
-        } else {
-            ""
-        };
+        let dur = a["duration"].as_str().and_then(encore_core::text::iso_duration);
+        let explicit = if a["explicit"].as_bool().unwrap_or(false) { "explicit" } else { "" };
         let cover = |links: &Value| -> Value {
             let l = links.as_array().cloned().unwrap_or_default();
-            l.iter()
-                .find(|i| i["meta"]["width"].as_u64() == Some(320))
-                .or(l.first())
-                .and_then(|i| i["href"].as_str())
-                .map(|h| json!(h))
-                .unwrap_or(Value::Null)
+            l.iter().find(|i| i["meta"]["width"].as_u64() == Some(320)).or(l.first()).and_then(|i| i["href"].as_str()).map(|h| json!(h)).unwrap_or(Value::Null)
         };
         if album {
-            let year = a["releaseDate"]
-                .as_str()
-                .map(|d| d.chars().take(4).collect::<String>())
-                .unwrap_or_default();
-            let kind = a["type"]
-                .as_str()
-                .map(|t| {
-                    let t = t.to_lowercase();
-                    t.chars()
-                        .next()
-                        .map(|c| c.to_uppercase().collect::<String>() + &t[1..])
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-            let info = [kind, year, explicit.to_string()]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" · ");
+            let year = a["releaseDate"].as_str().map(|d| d.chars().take(4).collect::<String>()).unwrap_or_default();
+            let kind = a["type"].as_str().map(|t| { let t = t.to_lowercase(); t.chars().next().map(|c| c.to_uppercase().collect::<String>() + &t[1..]).unwrap_or_default() }).unwrap_or_default();
+            let info = [kind, year, explicit.to_string()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
             out.push(json!({ "source": "tidal", "key": format!("tidal:album:{id}"), "title": title, "subtitle": artists, "quality": quality, "lossless": lossless,
                 "tracks": a["numberOfItems"], "size": null, "duration": dur, "info": info, "cover": cover(&a["imageLinks"]),
                 "score": score(&b.title, &b.artist, &title, &artists, None, None), "payload": { "url": format!("https://tidal.com/browse/album/{id}") } }));
         } else {
             let alb = rel("albums", "albums");
             let album_title = alb.first().and_then(|v| v["title"].as_str()).unwrap_or("");
-            let sub = format!("{artists} · {album_title}")
-                .trim_end_matches(" · ")
-                .to_string();
+            let sub = format!("{artists} · {album_title}").trim_end_matches(" · ").to_string();
             out.push(json!({ "source": "tidal", "key": format!("tidal:track:{id}"), "title": title, "subtitle": sub, "quality": quality, "lossless": lossless,
                 "tracks": 1, "size": null, "duration": dur, "info": explicit, "cover": alb.first().map(|v| cover(&v["imageLinks"])).unwrap_or(Value::Null), "isrc": a["isrc"],
                 "score": score(&b.title, &b.artist, &title, &artists, b.length, dur), "payload": { "url": format!("https://tidal.com/browse/track/{id}") } }));
@@ -1577,40 +1014,17 @@ fn tidal_rows(b: &SearchBody, d: &Value, order: &[String]) -> Vec<Value> {
 /// albums). Picks hand the worker a tidal.com link, which streamrip downloads with the signed-in account.
 async fn search_tidal(st: &AppState, b: &SearchBody, q: &str) -> anyhow::Result<Vec<Value>> {
     // Tidal refuses an empty query (400): nothing to search for, nothing asked
-    let Some(q) = tidal::search_query(q) else {
-        return Ok(vec![]);
-    };
+    let Some(q) = tidal::search_query(q) else { return Ok(vec![]) };
     let (tok, cc) = tidal_credentials(st).await?;
-    let typ = if b.kind == "album" {
-        "albums"
-    } else {
-        "tracks"
-    };
+    let typ = if b.kind == "album" { "albums" } else { "tracks" };
     // the query in `filter[query]`: the older path form (/searchResults/{q}) answers 400 INVALID_RESOURCE_ID
     let found = tidal_read(tidal::search(st, &tok, &q, &cc, typ)).await?;
-    let ids: Vec<String> = tidal::search_ids(&found, typ)
-        .into_iter()
-        .take(25)
-        .collect();
+    let ids: Vec<String> = tidal::search_ids(&found, typ).into_iter().take(25).collect();
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let include = if typ == "albums" {
-        "artists"
-    } else {
-        "artists,albums"
-    };
-    let listing = tidal_get(
-        st,
-        &tok,
-        &format!("/{typ}"),
-        &[
-            ("countryCode", cc.as_str()),
-            ("filter[id]", ids.join(",").as_str()),
-            ("include", include),
-        ],
-    )
-    .await?;
+    let include = if typ == "albums" { "artists" } else { "artists,albums" };
+    let listing = tidal_get(st, &tok, &format!("/{typ}"), &[("countryCode", cc.as_str()), ("filter[id]", ids.join(",").as_str()), ("include", include)]).await?;
     let mut out = tidal_rows(b, &listing, &ids);
     by_score(&mut out);
     Ok(out)
@@ -1623,29 +1037,19 @@ fn qobuz_quality(depth: i64, rate: f64) -> String {
     if depth <= 0 || rate <= 0.0 {
         return "FLAC".into();
     }
-    let rate = if rate.fract() == 0.0 {
-        format!("{}", rate as i64)
-    } else {
-        format!("{rate:.1}")
-    };
+    let rate = if rate.fract() == 0.0 { format!("{}", rate as i64) } else { format!("{rate:.1}") };
     format!("FLAC {depth}/{rate}")
 }
 
 /// A Qobuz id as text (albums have string ids, tracks numbers).
 fn idstr(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string().trim_matches('"').to_string(),
-    }
+    match v { Value::String(s) => s.clone(), other => other.to_string().trim_matches('"').to_string() }
 }
 
 /// Picker rows from an `album/search` or `track/search` answer.
 fn qobuz_rows(b: &SearchBody, d: &Value) -> Vec<Value> {
     let album = b.kind == "album";
-    let items = d[if album { "albums" } else { "tracks" }]["items"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let items = d[if album { "albums" } else { "tracks" }]["items"].as_array().cloned().unwrap_or_default();
     items.iter().filter(|x| !x["id"].is_null()).map(|x| {
         let id = idstr(&x["id"]);
         let mut title = x["title"].as_str().unwrap_or("").to_string();
@@ -1692,11 +1096,7 @@ pub async fn run_search(st: &AppState, b: &SearchBody) -> ApiResult<Answer> {
 }
 
 /// [`run_search`] for the picker opened for request `req` (the caller may see it).
-pub async fn run_search_for(
-    st: &AppState,
-    b: &SearchBody,
-    req: Option<&ForRequest>,
-) -> ApiResult<Answer> {
+pub async fn run_search_for(st: &AppState, b: &SearchBody, req: Option<&ForRequest>) -> ApiResult<Answer> {
     if b.kind != "album" && b.kind != "track" {
         return Err(err(400, "Manual search works for albums and songs"));
     }
@@ -1709,23 +1109,10 @@ pub async fn run_search_for(
     }
     let source = b.source.clone();
     let s = st.blocking(move |st| Ok(source_state(st, &source))).await?;
-    let q = b
-        .query
-        .clone()
-        .map(|q| q.trim().to_string())
-        .filter(|q| !q.is_empty())
-        .unwrap_or_else(|| {
-            [b.artist.as_str(), b.title.as_str()]
-                .iter()
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
+    let q = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty())
+        .unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
     if b.source == "slskd" {
-        return slskd_answer(st, b, &q, &s, req)
-            .await
-            .map(|a| with_folders_warning(st, "slskd", a));
+        return slskd_answer(st, b, &q, &s, req).await.map(|a| with_folders_warning(st, "slskd", a));
     }
     if s.state != "ready" {
         return Err(state_error(&b.source, &s));
@@ -1735,36 +1122,14 @@ pub async fn run_search_for(
         // "(Expanded Edition)") and symbols out – indexers want every word of the search in a release's
         // name, and releases are named without them. Words typed by hand go as typed.
         let boxed = q.clone();
-        let q = if typed(b) {
-            q
-        } else {
-            Some(slskd::query_text(&[&b.artist, &b.title]))
-                .filter(|t| !t.is_empty())
-                .unwrap_or(q)
-        };
+        let q = if typed(b) { q } else { Some(slskd::query_text(&[&b.artist, &b.title])).filter(|t| !t.is_empty()).unwrap_or(q) };
         let p = Prowlarr::of(st, b, req);
-        let items = search_torznab_in(&p, b, &q)
-            .await
-            .map_err(|e| search_error(st, &b.source, e))?;
+        let items = search_torznab_in(&p, b, &q).await.map_err(|e| search_error(st, &b.source, e))?;
         let notice = items.is_empty().then(|| p.notice(b));
         let kept = p.kept.into_inner().unwrap_or_else(|e| e.into_inner());
         // kept: the box's words, unless the rows came from another search (as for Soulseek); live: the words sent
-        let query = match &kept {
-            Some((_, Some(other))) => other.clone(),
-            Some(_) => boxed,
-            None => q,
-        };
-        return Ok(with_folders_warning(
-            st,
-            "torznab",
-            Answer {
-                items,
-                cached_at: kept.map(|k| k.0),
-                query,
-                can_search: true,
-                notice,
-            },
-        ));
+        let query = match &kept { Some((_, Some(other))) => other.clone(), Some(_) => boxed, None => q };
+        return Ok(with_folders_warning(st, "torznab", Answer { items, cached_at: kept.map(|k| k.0), query, can_search: true, notice }));
     }
     // the streaming catalogues answer in a second or two: always live
     let res = match b.source.as_str() {
@@ -1773,8 +1138,7 @@ pub async fn run_search_for(
         "deezer" => search_deezer(st, b, &q).await,
         _ => search_ytmusic(st, b, &q).await,
     };
-    res.map(|items| Answer::live(items, q))
-        .map_err(|e| search_error(st, &b.source, e))
+    res.map(|items| Answer::live(items, q)).map_err(|e| search_error(st, &b.source, e))
 }
 
 /// Why picks from `source` ("slskd", "torznab") would wait now although it searches: its download folders can't
@@ -1783,23 +1147,14 @@ pub async fn run_search_for(
 fn folders_warning(st: &AppState, source: &str) -> Option<String> {
     let failing = encore_requests::worker::downloads::failing_for(st, source)?;
     let first = failing.first()?;
-    Some(format!(
-        "Downloads from here wait: {} (Settings → Diagnostics)",
-        first.sentence().unwrap_or_else(|| first.short())
-    ))
+    Some(format!("Downloads from here wait: {} (Settings → Diagnostics)", first.sentence().unwrap_or_else(|| first.short())))
 }
 
 /// [`folders_warning`] on an answer: on each row (the apps show a row's warning under it) and before the
 /// answer's notice, so searching still works but nobody picks without knowing the pick will wait.
 fn with_folders_warning(st: &AppState, source: &str, mut a: Answer) -> Answer {
-    let Some(w) = folders_warning(st, source) else {
-        return a;
-    };
-    for row in a
-        .items
-        .iter_mut()
-        .filter(|r| r["warning"].as_str().is_none_or(str::is_empty))
-    {
+    let Some(w) = folders_warning(st, source) else { return a };
+    for row in a.items.iter_mut().filter(|r| r["warning"].as_str().is_none_or(str::is_empty)) {
         row["warning"] = json!(w);
     }
     a.notice = Some(match a.notice.take() {
@@ -1811,64 +1166,25 @@ fn with_folders_warning(st: &AppState, source: &str, mut a: Answer) -> Answer {
 
 /// A plugin program's search (uploaded or installed from a URL): the box's words or the names the picker was
 /// opened with, its results as rows (always live: the plugin keeps its own pace).
-async fn plugin_answer(
-    st: &AppState,
-    b: &SearchBody,
-    p: &encore_requests::sources::plugin::PluginSource,
-) -> ApiResult<Answer> {
+async fn plugin_answer(st: &AppState, b: &SearchBody, p: &encore_requests::sources::plugin::PluginSource) -> ApiResult<Answer> {
     use encore_requests::sources::plugin::{self as plug, Ask};
     let s = source_state(st, &p.picker);
     if s.state != "ready" {
         return Err(state_error(&p.picker, &s));
     }
     if !p.kinds.contains(&b.kind) {
-        return Err(err(
-            400,
-            format!(
-                "{} does not search for {}s",
-                p.name,
-                if b.kind == "album" { "album" } else { "song" }
-            ),
-        ));
+        return Err(err(400, format!("{} does not search for {}s", p.name, if b.kind == "album" { "album" } else { "song" })));
     }
-    let query = b
-        .query
-        .clone()
-        .map(|q| q.trim().to_string())
-        .filter(|q| !q.is_empty());
-    let shown = query.clone().unwrap_or_else(|| {
-        [b.artist.as_str(), b.title.as_str()]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
+    let query = b.query.clone().map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    let shown = query.clone().unwrap_or_else(|| [b.artist.as_str(), b.title.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
     let ask = Ask {
-        kind: b.kind.clone(),
-        artist: b.artist.clone(),
-        title: b.title.clone(),
-        album: b.album.clone().unwrap_or_default(),
-        query: query.filter(|_| typed(b)),
-        length: b.length,
-        track_count: b.track_count,
-        lossless_only: false,
-        isrc: None,
-        limit: 50,
+        kind: b.kind.clone(), artist: b.artist.clone(), title: b.title.clone(), album: b.album.clone().unwrap_or_default(),
+        query: query.filter(|_| typed(b)), length: b.length, track_count: b.track_count, lossless_only: false, isrc: None, limit: 50,
     };
     match plug::search(st, p, &ask, None).await {
         Ok(results) => Ok(Answer::live(plug::picker_rows(p, &results), shown)),
-        Err(f) if f.code == encore_plugins::Code::RateLimited => {
-            Err(err(429, format!("{}: {}", p.name, f.message)))
-        }
-        Err(f) => Err(err(
-            502,
-            format!(
-                "{} search failed: {}",
-                p.name,
-                f.message.chars().take(160).collect::<String>()
-            ),
-        )),
+        Err(f) if f.code == encore_plugins::Code::RateLimited => Err(err(429, format!("{}: {}", p.name, f.message))),
+        Err(f) => Err(err(502, format!("{} search failed: {}", p.name, f.message.chars().take(160).collect::<String>()))),
     }
 }
 
@@ -1882,46 +1198,25 @@ fn search_error(st: &AppState, source: &str, e: anyhow::Error) -> ApiError {
     if source == "slskd" && e.is::<slskd::Busy>() {
         return err(429, msg); // another search held the turn for 30 s, or searches are rate limited
     }
-    err(
-        502,
-        format!(
-            "{} search failed: {}",
-            source_name(source),
-            msg.chars().take(160).collect::<String>()
-        ),
-    )
+    err(502, format!("{} search failed: {}", source_name(source), msg.chars().take(160).collect::<String>()))
 }
 
 /// POST /api/picker/search: one source's rows, `{items, from, cached_at, found, query, can_search,
 /// notice}` (see [`Answer::json`]).
-async fn search(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<SearchBody>,
-) -> ApiResult<Json<Value>> {
+async fn search(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
     }
     // the request the picker was opened for, when this person may see it (else as if none was sent)
-    let req = b
-        .request_id
-        .and_then(|id| get_owned(&st, id, &u).ok())
-        .map(|r| ForRequest::of(&r));
+    let req = b.request_id.and_then(|id| get_owned(&st, id, &u).ok()).map(|r| ForRequest::of(&r));
     let admin = encore_config::perms::is_admin(&u);
-    run_search_for(&st, &b, req.as_ref())
-        .await
-        .map(|a| Json(a.json()))
-        .map_err(|mut e| {
-            // a source that can't search (409 with its settings link): members get "ask an admin" instead
-            if let Some(x) = e
-                .extra
-                .as_mut()
-                .filter(|x| !admin && x["settings"].is_string())
-            {
-                e.detail = without_settings_link(&e.detail, x);
-            }
-            e
-        })
+    run_search_for(&st, &b, req.as_ref()).await.map(|a| Json(a.json())).map_err(|mut e| {
+        // a source that can't search (409 with its settings link): members get "ask an admin" instead
+        if let Some(x) = e.extra.as_mut().filter(|x| !admin && x["settings"].is_string()) {
+            e.detail = without_settings_link(&e.detail, x);
+        }
+        e
+    })
 }
 
 /// `POST /api/picker/pick` body: the chosen result.
@@ -1945,11 +1240,7 @@ struct PickBody {
 
 /// Create a request locked to the chosen result. An existing request's row is reused (stopped first when
 /// it is running), so the song keeps one row with its attempt count.
-async fn pick(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(mut b): Json<PickBody>,
-) -> ApiResult<Json<Value>> {
+async fn pick(State(st): State<AppState>, User(u): User, Json(mut b): Json<PickBody>) -> ApiResult<Json<Value>> {
     if !auth::can(&st, &u, "pick") {
         return Err(err(403, "Ask an admin for permission to pick downloads"));
     }
@@ -1968,11 +1259,8 @@ async fn pick(
     // YouTube Music albums → their playlist link
     if b.source == "ytmusic" {
         if let Some(bid) = b.payload["browseId"].as_str().map(String::from) {
-            let (title, pl, _) = ytmusic::album(&st, &bid)
-                .await
-                .map_err(|e| err(502, e.to_string()))?;
-            let pl = pl
-                .ok_or_else(|| err(502, "YouTube Music has no playable playlist for this album"))?;
+            let (title, pl, _) = ytmusic::album(&st, &bid).await.map_err(|e| err(502, e.to_string()))?;
+            let pl = pl.ok_or_else(|| err(502, "YouTube Music has no playable playlist for this album"))?;
             b.payload = json!({ "url": format!("https://music.youtube.com/playlist?list={pl}"), "title": title });
         }
     }
@@ -1982,27 +1270,15 @@ async fn pick(
     let req = if let Some(rid) = b.request_id {
         let old = get_owned(&st, rid, &u)?;
         let s = |k: &str| old[k].as_str().map(String::from);
-        let req = NewRequest {
-            kind: s("kind").unwrap_or_default(),
-            mbid: s("mbid"),
-            artist: s("artist"),
-            title: s("title"),
-            album: s("album"),
-            year: s("year"),
-            cover_url: s("cover_url"),
-            length: old["detail"]["length"].as_f64(),
-            isrc: old["detail"]["isrc"].as_str().map(String::from),
-            ..Default::default()
-        };
+        let req = NewRequest { kind: s("kind").unwrap_or_default(), mbid: s("mbid"), artist: s("artist"), title: s("title"), album: s("album"), year: s("year"),
+            cover_url: s("cover_url"), length: old["detail"]["length"].as_f64(), isrc: old["detail"]["isrc"].as_str().map(String::from), ..Default::default() };
         let status = old["status"].as_str().unwrap_or("");
         // a pick starts the request over, and its downloaded files would go with it: they are imported (or
         // the request cancelled) first
         if status == "importing" && worker::storage::has_files(&old["detail"]) {
             return Err(err(409, "It is being imported now – Pick works again once the import has finished or failed"));
         }
-        if matches!(status, "failed" | "waiting" | "completed")
-            && worker::storage::has_files(&old["detail"])
-        {
+        if matches!(status, "failed" | "waiting" | "completed") && worker::storage::has_files(&old["detail"]) {
             return Err(err(409, "This request has downloaded files waiting to be imported – Import again or cancel it first"));
         }
         if worker::ACTIVE.contains(&status) {
@@ -2015,67 +1291,29 @@ async fn pick(
     } else {
         return Err(err(400, "Nothing to download"));
     };
-    let label = b
-        .title
-        .clone()
-        .or(b.payload["title"].as_str().map(String::from))
-        .unwrap_or_default();
-    let skip = b
-        .no_check
-        .then(|| json!({ "by": u.s("username"), "why": "pick", "at": encore_db::now() }));
-    let (id, status) = create_pick_checked(
-        &st,
-        &u,
-        &req,
-        &b.source,
-        b.payload,
-        &label,
-        b.request_id,
-        skip,
-    )?;
+    let label = b.title.clone().or(b.payload["title"].as_str().map(String::from)).unwrap_or_default();
+    let skip = b.no_check.then(|| json!({ "by": u.s("username"), "why": "pick", "at": encore_db::now() }));
+    let (id, status) = create_pick_checked(&st, &u, &req, &b.source, b.payload, &label, b.request_id, skip)?;
     drop(hold);
     Ok(Json(json!({ "id": id, "status": status })))
 }
 
 /// The request behind a manual pick: the worker downloads exactly `payload` from `source`, then tags
 /// and imports it like any other request. Returns (id, status).
-pub fn create_pick(
-    st: &AppState,
-    u: &encore_db::Row,
-    req: &NewRequest,
-    source: &str,
-    payload: Value,
-    label: &str,
-) -> ApiResult<(i64, String)> {
+pub fn create_pick(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: &str, payload: Value, label: &str) -> ApiResult<(i64, String)> {
     create_pick_for(st, u, req, source, payload, label, None)
 }
 
 /// `create_pick` for an existing request (`reuse`): its row is reset and locked to the pick.
-pub fn create_pick_for(
-    st: &AppState,
-    u: &encore_db::Row,
-    req: &NewRequest,
-    source: &str,
-    payload: Value,
-    label: &str,
-    reuse: Option<i64>,
-) -> ApiResult<(i64, String)> {
+pub fn create_pick_for(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: &str, payload: Value, label: &str, reuse: Option<i64>) -> ApiResult<(i64, String)> {
     create_pick_checked(st, u, req, source, payload, label, reuse, None)
 }
 
 /// `create_pick_for` with the audio check off for the pick when `skip_check` ({by, why: "pick", at}) is
 /// given: the picker's "Don't check the audio".
 #[allow(clippy::too_many_arguments)]
-fn create_pick_checked(
-    st: &AppState,
-    u: &encore_db::Row,
-    req: &NewRequest,
-    source: &str,
-    payload: Value,
-    label: &str,
-    reuse: Option<i64>,
-    skip_check: Option<Value>,
-) -> ApiResult<(i64, String)> {
+fn create_pick_checked(st: &AppState, u: &encore_db::Row, req: &NewRequest, source: &str, payload: Value, label: &str, reuse: Option<i64>,
+                       skip_check: Option<Value>) -> ApiResult<(i64, String)> {
     if req.kind != "album" && req.kind != "track" {
         return Err(err(400, "Manual picks work for albums and songs"));
     }
@@ -2085,33 +1323,13 @@ fn create_pick_checked(
         extra["skip_check"] = s;
     }
     let id = encore_requests::create::create_or_reuse(st, u, req, None, Some(extra), reuse)?;
-    let status = st
-        .db
-        .one("SELECT status FROM requests WHERE id=?", p![id])?
-        .map(|r| r.s("status"))
-        .unwrap_or_default();
+    let status = st.db.one("SELECT status FROM requests WHERE id=?", p![id])?.map(|r| r.s("status")).unwrap_or_default();
     if status == "queued" {
-        let msg: String = if label.is_empty() {
-            "Manual pick".into()
-        } else {
-            format!("Manual pick: {label}").chars().take(200).collect()
-        };
-        st.db
-            .execute("UPDATE requests SET message=? WHERE id=?", p![msg, id])?;
+        let msg: String = if label.is_empty() { "Manual pick".into() } else { format!("Manual pick: {label}").chars().take(200).collect() };
+        st.db.execute("UPDATE requests SET message=? WHERE id=?", p![msg, id])?;
     }
-    st.db.log(
-        "info",
-        &format!(
-            "{} manually picked {source} result for {}: {label}{}",
-            u.s("username"),
-            req.title.clone().or(req.album.clone()).unwrap_or_default(),
-            if unchecked {
-                " (without the audio check)"
-            } else {
-                ""
-            }
-        ),
-    );
+    st.db.log("info", &format!("{} manually picked {source} result for {}: {label}{}", u.s("username"), req.title.clone().or(req.album.clone()).unwrap_or_default(),
+        if unchecked { " (without the audio check)" } else { "" }));
     Ok((id, status))
 }
 

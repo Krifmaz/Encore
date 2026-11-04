@@ -2,16 +2,16 @@
 //! shares, download files or folders as requests (the worker fetches, tags and imports them like a
 //! manual pick), and follow the transfers – all through the Soulseek engine Encore runs (slskd).
 use crate::auth::{self, Admin, User};
+use encore_db::{p, Row, RowExt};
+use encore_core::error::{err, ApiError, ApiResult};
 use crate::routes::picker::create_pick;
+use encore_requests::create::{quota, NewRequest};
+use encore_requests::slskd_managed;
+use encore_requests::sources::slskd;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use encore_core::error::{err, ApiError, ApiResult};
-use encore_db::{p, Row, RowExt};
-use encore_requests::create::{quota, NewRequest};
-use encore_requests::slskd_managed;
-use encore_requests::sources::slskd;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -62,13 +62,7 @@ fn gate(st: &AppState, u: &Row) -> ApiResult<()> {
 /// session being down is 409 ("Soulseek isn't connected – next attempt at 14:20"), a search that can't run
 /// now 429 ("Soulseek is busy with another search", "Rate limited … next search at 14:05").
 fn upstream(e: anyhow::Error) -> ApiError {
-    let code = if e.is::<slskd::NotConnected>() {
-        409
-    } else if e.is::<slskd::Busy>() {
-        429
-    } else {
-        424
-    };
+    let code = if e.is::<slskd::NotConnected>() { 409 } else if e.is::<slskd::Busy>() { 429 } else { 424 };
     err(code, e.to_string().chars().take(200).collect::<String>())
 }
 
@@ -105,8 +99,7 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
         "logged_in": false, "username": "", "error": m["error"].as_str().unwrap_or(""), "warning": m["warning"], "download_dir": m["download_dir"],
         "shares": { "dirs": 0, "files": 0 }, "port": m["listen_port"], "scanning": m["scanning"], "parent": null, "downloads": 0, "uploads": 0 });
     if installed.is_none() {
-        out["hint"] =
-            json!("Install or update the Soulseek (slskd) plugin under Settings → Plugins");
+        out["hint"] = json!("Install or update the Soulseek (slskd) plugin under Settings → Plugins");
     }
 
     if !slskd::enabled(&st) || state != "running" {
@@ -139,15 +132,9 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     // slskd's /application: server.state reads "Connected, LoggedIn" once it is in
     let srv = &s["server"];
     let sstate = srv["state"].as_str().unwrap_or("");
-    let logged_in = srv["isLoggedIn"]
-        .as_bool()
-        .unwrap_or_else(|| sstate.contains("LoggedIn"));
+    let logged_in = srv["isLoggedIn"].as_bool().unwrap_or_else(|| sstate.contains("LoggedIn"));
     out["logged_in"] = json!(logged_in);
-    out["username"] = srv["username"]
-        .as_str()
-        .or(s["user"]["username"].as_str())
-        .unwrap_or("")
-        .into();
+    out["username"] = srv["username"].as_str().or(s["user"]["username"].as_str()).unwrap_or("").into();
     // not signed in: say why in words, never just "Disconnected" – Encore's own view of the session first
     // (the reason and the next attempt: what the phone and older apps show in this field), else slskd's log
     let session = &out["session"];
@@ -159,27 +146,16 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
     } else if let Some(why) = m["server_error"].as_str().filter(|w| !w.is_empty()) {
         format!("not signed in to the Soulseek network – {why}")
     } else {
-        let st_word = if sstate.is_empty() {
-            "unknown".to_string()
-        } else {
-            sstate.to_string()
-        };
+        let st_word = if sstate.is_empty() { "unknown".to_string() } else { sstate.to_string() };
         format!("not signed in to the Soulseek network yet ({st_word}) – it signs in once the share scan is done; if this stays, the engine log below says why")
     });
     if encore_config::perms::is_admin(&u) {
         out["log"] = json!(st.requests.slskd.log_tail());
     }
     out["shares"] = json!({ "dirs": s["shares"]["directories"].as_u64().unwrap_or(0), "files": s["shares"]["files"].as_u64().unwrap_or(0) });
-    out["parent"] = s["distributedNetwork"]["parent"]
-        .as_str()
-        .filter(|p| !p.is_empty())
-        .into();
-    if let Some(v) = s["version"]["current"]
-        .as_str()
-        .or(s["version"]["full"].as_str())
-    {
-        out["version"] =
-            json!(encore_core::version::extract_version(v).unwrap_or_else(|| v.to_string()));
+    out["parent"] = s["distributedNetwork"]["parent"].as_str().filter(|p| !p.is_empty()).into();
+    if let Some(v) = s["version"]["current"].as_str().or(s["version"]["full"].as_str()) {
+        out["version"] = json!(encore_core::version::extract_version(v).unwrap_or_else(|| v.to_string()));
     }
     out["downloads"] = probe["downloads"].clone();
     out["uploads"] = probe["uploads"].clone();
@@ -190,20 +166,14 @@ async fn status(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Val
 /// after the backoff. The supervisor does the starting; the card's status poll shows how it went.
 async fn start(State(st): State<AppState>, Admin(me): Admin) -> ApiResult<Json<Value>> {
     if !slskd_managed::configured(&st) {
-        return Err(err(
-            400,
-            "Soulseek is off or has no username and password – fill them in and save first",
-        ));
+        return Err(err(400, "Soulseek is off or has no username and password – fill them in and save first"));
     }
     if slskd_managed::installed_version(&st).is_none() {
         return Err(err(400, slskd_managed::NOT_INSTALLED));
     }
-    st.db
-        .log("info", &format!("{} started Soulseek", me.s("username")));
+    st.db.log("info", &format!("{} started Soulseek", me.s("username")));
     st.requests.slskd.start_now();
-    Ok(Json(
-        json!({ "ok": true, "state": st.requests.slskd.status()["state"] }),
-    ))
+    Ok(Json(json!({ "ok": true, "state": st.requests.slskd.status()["state"] })))
 }
 
 // ---- search --------------------------------------------------------------------------------------
@@ -216,11 +186,7 @@ struct SearchBody {
 }
 
 /// POST /api/soulseek/search: start a search; its id to poll.
-async fn search_start(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<SearchBody>,
-) -> ApiResult<Json<Value>> {
+async fn search_start(State(st): State<AppState>, User(u): User, Json(b): Json<SearchBody>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     let q = b.q.trim().to_string();
     if q.is_empty() {
@@ -228,42 +194,19 @@ async fn search_start(
     }
     sweep(&st);
     let id = slskd::search_start(&st, &q).await.map_err(upstream)?;
-    st.web.soulseek_searches.lock().unwrap().insert(
-        id.clone(),
-        Session {
-            q,
-            started: Instant::now(),
-            done: false,
-        },
-    );
-    Ok(Json(
-        json!({ "id": id, "seconds": slskd::search_timeout(&st) }),
-    ))
+    st.web.soulseek_searches.lock().unwrap().insert(id.clone(), Session { q, started: Instant::now(), done: false });
+    Ok(Json(json!({ "id": id, "seconds": slskd::search_timeout(&st) })))
 }
 
 /// GET /api/soulseek/search/{id}: a search's answers so far.
-async fn search_poll(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn search_poll(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     sweep(&st);
     let over = || err(404, "That search is over – start a new one");
-    let (q, was_done) = st
-        .web
-        .soulseek_searches
-        .lock()
-        .unwrap()
-        .get(&id)
-        .map(|s| (s.q.clone(), s.done))
-        .ok_or_else(over)?;
+    let (q, was_done) = st.web.soulseek_searches.lock().unwrap().get(&id).map(|s| (s.q.clone(), s.done)).ok_or_else(over)?;
     let (responses, done, whole) = match slskd::search_poll_whole(&st, &id).await {
         Ok(x) => x,
-        Err(e) if e.to_string().contains("expired") => {
-            st.web.soulseek_searches.lock().unwrap().remove(&id);
-            return Err(over());
-        }
+        Err(e) if e.to_string().contains("expired") => { st.web.soulseek_searches.lock().unwrap().remove(&id); return Err(over()); }
         Err(e) => return Err(upstream(e)),
     };
     let done = done || was_done; // once over, stays over
@@ -277,9 +220,7 @@ async fn search_poll(
             encore_requests::search_cache::keep_slskd(&st, &q, None, &responses).await;
         }
     }
-    Ok(Json(
-        json!({ "id": id, "q": q, "done": done, "results": group(&responses) }),
-    ))
+    Ok(Json(json!({ "id": id, "q": q, "done": done, "results": group(&responses) })))
 }
 
 /// slskd-shaped responses → one entry per user, their audio files by folder.
@@ -289,17 +230,8 @@ fn group(responses: &[Value]) -> Vec<Value> {
         let mut folders: Vec<(String, Vec<Value>)> = vec![];
         for f in r["files"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
             let Some(v) = file_json(f) else { continue };
-            let dir = v["filename"]
-                .as_str()
-                .unwrap_or("")
-                .rsplit_once('\\')
-                .map(|(d, _)| d)
-                .unwrap_or("")
-                .to_string();
-            match folders.iter_mut().find(|(d, _)| *d == dir) {
-                Some((_, fs)) => fs.push(v),
-                None => folders.push((dir, vec![v])),
-            }
+            let dir = v["filename"].as_str().unwrap_or("").rsplit_once('\\').map(|(d, _)| d).unwrap_or("").to_string();
+            match folders.iter_mut().find(|(d, _)| *d == dir) { Some((_, fs)) => fs.push(v), None => folders.push((dir, vec![v])) }
         }
         if folders.is_empty() {
             continue;
@@ -313,13 +245,10 @@ fn group(responses: &[Value]) -> Vec<Value> {
 /// Folders by name, each one's files by name.
 fn folders_json(mut folders: Vec<(String, Vec<Value>)>) -> Vec<Value> {
     folders.sort_by_cached_key(|(d, _)| d.to_lowercase());
-    folders
-        .into_iter()
-        .map(|(d, mut files)| {
-            files.sort_by_cached_key(|f| f["filename"].as_str().unwrap_or("").to_lowercase());
-            json!({ "directory": d, "files": files })
-        })
-        .collect()
+    folders.into_iter().map(|(d, mut files)| {
+        files.sort_by_cached_key(|f| f["filename"].as_str().unwrap_or("").to_lowercase());
+        json!({ "directory": d, "files": files })
+    }).collect()
 }
 
 /// One file as the page shows it; None for anything that isn't audio.
@@ -329,57 +258,31 @@ fn file_json(f: &Value) -> Option<Value> {
     if !encore_core::audio::DOWNLOAD_EXTS.contains(&ext.as_str()) {
         return None;
     }
-    Some(
-        json!({ "filename": name, "name": name.rsplit('\\').next().unwrap_or(name), "size": f["size"].as_u64().unwrap_or(0), "extension": ext,
-        "bitRate": f["bitRate"], "bitDepth": f["bitDepth"], "sampleRate": f["sampleRate"], "length": f["length"] }),
-    )
+    Some(json!({ "filename": name, "name": name.rsplit('\\').next().unwrap_or(name), "size": f["size"].as_u64().unwrap_or(0), "extension": ext,
+        "bitRate": f["bitRate"], "bitDepth": f["bitDepth"], "sampleRate": f["sampleRate"], "length": f["length"] }))
 }
 
 // ---- browse --------------------------------------------------------------------------------------
 
 /// GET /api/soulseek/browse/{username}: a user's shared folders, cached for 10 minutes.
-async fn browse(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(username): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn browse(State(st): State<AppState>, User(u): User, Path(username): Path<String>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     // share lists are big: their own cache, held to a number of bytes and of lists, rather than the general one
     let dirs = match st.web.soulseek_browsed.get(&username) {
         Some(d) => d,
         None => {
-            let d = Arc::new(slskd::browse(&st, &username).await.map_err(|e| {
-                if e.to_string().contains("did not send") {
-                    err(408, e.to_string())
-                } else {
-                    upstream(e)
-                }
-            })?);
-            let bytes =
-                username.len() + d.iter().map(encore_core::cache::json_bytes).sum::<usize>();
-            st.web.soulseek_browsed.insert(
-                username.clone(),
-                d.clone(),
-                bytes,
-                Some(Duration::from_secs(BROWSE_CACHE_SECS)),
-                0,
-            );
+            let d = Arc::new(slskd::browse(&st, &username).await
+                .map_err(|e| if e.to_string().contains("did not send") { err(408, e.to_string()) } else { upstream(e) })?);
+            let bytes = username.len() + d.iter().map(encore_core::cache::json_bytes).sum::<usize>();
+            st.web.soulseek_browsed.insert(username.clone(), d.clone(), bytes, Some(Duration::from_secs(BROWSE_CACHE_SECS)), 0);
             d
         }
     };
-    let folders = dirs
-        .iter()
-        .filter_map(|d| {
-            let files: Vec<Value> = d["files"]
-                .as_array()
-                .map(|a| a.iter().filter_map(file_json).collect())
-                .unwrap_or_default();
-            (!files.is_empty()).then(|| (d["name"].as_str().unwrap_or("").to_string(), files))
-        })
-        .collect();
-    Ok(Json(
-        json!({ "username": username, "folders": folders_json(folders) }),
-    ))
+    let folders = dirs.iter().filter_map(|d| {
+        let files: Vec<Value> = d["files"].as_array().map(|a| a.iter().filter_map(file_json).collect()).unwrap_or_default();
+        (!files.is_empty()).then(|| (d["name"].as_str().unwrap_or("").to_string(), files))
+    }).collect();
+    Ok(Json(json!({ "username": username, "folders": folders_json(folders) })))
 }
 
 // ---- download ------------------------------------------------------------------------------------
@@ -406,119 +309,53 @@ struct DownloadBody {
 
 /// The text when it isn't blank, trimmed.
 fn given(s: &Option<String>) -> Option<String> {
-    s.as_deref()
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(String::from)
+    s.as_deref().map(str::trim).filter(|x| !x.is_empty()).map(String::from)
 }
 
 /// Download chosen files from one user: a request locked to them, exactly like a Soulseek pick.
-async fn download(
-    State(st): State<AppState>,
-    User(u): User,
-    Json(b): Json<DownloadBody>,
-) -> ApiResult<Json<Value>> {
+async fn download(State(st): State<AppState>, User(u): User, Json(b): Json<DownloadBody>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     let username = b.username.trim().to_string();
-    let files: Vec<&Value> = b
-        .files
-        .iter()
-        .filter(|f| !f["filename"].as_str().unwrap_or("").is_empty())
-        .collect();
+    let files: Vec<&Value> = b.files.iter().filter(|f| !f["filename"].as_str().unwrap_or("").is_empty()).collect();
     if username.is_empty() || files.is_empty() {
         return Err(err(400, "Pick a user and at least one file"));
     }
     let first = files[0]["filename"].as_str().unwrap_or("");
-    let directory = if b.directory.is_empty() {
-        first
-            .rsplit_once('\\')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default()
-    } else {
-        b.directory.clone()
-    };
+    let directory = if b.directory.is_empty() { first.rsplit_once('\\').map(|(d, _)| d.to_string()).unwrap_or_default() } else { b.directory.clone() };
     let kind = match b.kind.as_deref() {
         Some("album") => "album",
         Some("track") => "track",
         Some(_) => return Err(err(400, "kind is album or track")),
-        None => {
-            if files.len() > 1 {
-                "album"
-            } else {
-                "track"
-            }
-        }
+        None => if files.len() > 1 { "album" } else { "track" },
     };
     let (g_artist, g_album, g_title) = guess(&directory, first);
     // the import tags from the files themselves, so a guess only has to be a label, never a blocker
-    let artist = given(&b.artist).unwrap_or(if g_artist.is_empty() {
-        "Unknown artist".into()
-    } else {
-        g_artist
-    });
+    let artist = given(&b.artist).unwrap_or(if g_artist.is_empty() { "Unknown artist".into() } else { g_artist });
     let album = given(&b.album).unwrap_or(g_album);
-    let mut title = given(&b.title).unwrap_or(if kind == "album" {
-        album.clone()
-    } else {
-        g_title
-    });
+    let mut title = given(&b.title).unwrap_or(if kind == "album" { album.clone() } else { g_title });
     if title.is_empty() {
-        title = first
-            .rsplit('\\')
-            .next()
-            .unwrap_or(first)
-            .rsplit_once('.')
-            .map(|(s, _)| s.to_string())
-            .unwrap_or_else(|| first.to_string());
+        title = first.rsplit('\\').next().unwrap_or(first).rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| first.to_string());
     }
     if title.is_empty() {
         return Err(err(400, "That file has no name to request it by"));
     }
     quota(&st, &u, 1)?;
-    let exts: HashSet<String> = files
-        .iter()
-        .map(|f| slskd::ext(f["filename"].as_str().unwrap_or("")))
-        .collect();
-    let format = if exts.len() == 1 {
-        exts.into_iter().next().unwrap_or_default()
-    } else {
-        "mixed".into()
-    };
-    let bitrate = files
-        .iter()
-        .filter_map(|f| f["bitRate"].as_i64())
-        .filter(|b| *b > 0)
-        .min()
-        .unwrap_or(0);
+    let exts: HashSet<String> = files.iter().map(|f| slskd::ext(f["filename"].as_str().unwrap_or(""))).collect();
+    let format = if exts.len() == 1 { exts.into_iter().next().unwrap_or_default() } else { "mixed".into() };
+    let bitrate = files.iter().filter_map(|f| f["bitRate"].as_i64()).filter(|b| *b > 0).min().unwrap_or(0);
     let payload = json!({ "username": username, "directory": directory, "format": format, "bitrate": bitrate,
         "files": files.iter().map(|f| json!({ "filename": f["filename"], "size": f["size"].as_u64().unwrap_or(0) })).collect::<Vec<_>>() });
-    let req = NewRequest {
-        kind: kind.into(),
-        artist: Some(artist.clone()),
-        title: Some(title.clone()),
-        album: Some(album).filter(|a| !a.is_empty()),
-        ..Default::default()
-    };
-    let (id, status) = create_pick(
-        &st,
-        &u,
-        &req,
-        "slskd",
-        payload,
-        &format!("{artist} – {title}"),
-    )?;
+    let req = NewRequest { kind: kind.into(), artist: Some(artist.clone()), title: Some(title.clone()), album: Some(album).filter(|a| !a.is_empty()), ..Default::default() };
+    let (id, status) = create_pick(&st, &u, &req, "slskd", payload, &format!("{artist} – {title}"))?;
     // the songs say they came from the Soulseek page ("Requested by …" all the same: tracks.added_via)
     st.db.execute("UPDATE requests SET detail=json_set(CASE WHEN json_valid(detail) THEN detail ELSE '{}' END, '$.via', 'soulseek') WHERE id=?", p![id])?;
     Ok(Json(json!({ "request_id": id, "status": status })))
 }
 
 /// "01 - ", "1. ", "A1 " and the like in front of a file name.
-static TRACK_NO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:[A-Da-d]?\d{1,3}\s*[.\-_)]\s*|[A-Da-d]\d{1,2}\s+|\d{2,3}\s+)").unwrap()
-});
+static TRACK_NO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:[A-Da-d]?\d{1,3}\s*[.\-_)]\s*|[A-Da-d]\d{1,2}\s+|\d{2,3}\s+)").unwrap());
 /// "2001 - " or "(2001) " in front of a folder name.
-static YEAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\(\[]?(?:19|20)\d{2}[\)\]]?\s*[-–.]?\s+").unwrap());
+static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\(\[]?(?:19|20)\d{2}[\)\]]?\s*[-–.]?\s+").unwrap());
 /// "\[FLAC\]", "(2001)", "(Remastered)" at the end of a folder name.
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]\s*$").unwrap());
 
@@ -527,26 +364,14 @@ static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)
 /// lone "Artist - Album" folder) do.
 fn guess(directory: &str, filename: &str) -> (String, String, String) {
     // "@@abcd" is a client's virtual share root, not a folder anyone named
-    let parts: Vec<&str> = directory
-        .split('\\')
-        .map(str::trim)
-        .filter(|p| !p.is_empty() && !p.starts_with("@@"))
-        .collect();
+    let parts: Vec<&str> = directory.split('\\').map(str::trim).filter(|p| !p.is_empty() && !p.starts_with("@@")).collect();
     let mut album = parts.last().map(|s| s.to_string()).unwrap_or_default();
-    let mut artist = parts
-        .len()
-        .checked_sub(2)
-        .map(|i| parts[i].to_string())
-        .unwrap_or_default();
+    let mut artist = parts.len().checked_sub(2).map(|i| parts[i].to_string()).unwrap_or_default();
     let base = filename.rsplit('\\').next().unwrap_or(filename);
     let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
     let stem = TRACK_NO.replace(stem, "").trim().to_string();
     let mut title = stem.clone();
-    if let Some((a, t)) = stem
-        .split_once(" - ")
-        .map(|(a, t)| (a.trim(), t.trim()))
-        .filter(|(a, t)| !a.is_empty() && !t.is_empty())
-    {
+    if let Some((a, t)) = stem.split_once(" - ").map(|(a, t)| (a.trim(), t.trim())).filter(|(a, t)| !a.is_empty() && !t.is_empty()) {
         if artist.is_empty() {
             artist = a.to_string();
             title = t.to_string();
@@ -555,11 +380,7 @@ fn guess(directory: &str, filename: &str) -> (String, String, String) {
         }
     }
     if artist.is_empty() {
-        if let Some((a, al)) = album
-            .split_once(" - ")
-            .map(|(a, al)| (a.trim(), al.trim()))
-            .filter(|(a, al)| !a.is_empty() && !al.is_empty())
-        {
+        if let Some((a, al)) = album.split_once(" - ").map(|(a, al)| (a.trim(), al.trim())).filter(|(a, al)| !a.is_empty() && !al.is_empty()) {
             (artist, album) = (a.to_string(), al.to_string());
         }
     }
@@ -581,11 +402,7 @@ fn guess(directory: &str, filename: &str) -> (String, String, String) {
 /// GET /api/soulseek/transfers: slskd's downloads.
 async fn transfers(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
-    let dir_of = |n: &str| {
-        n.rsplit_once('\\')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default()
-    };
+    let dir_of = |n: &str| n.rsplit_once('\\').map(|(d, _)| d.to_string()).unwrap_or_default();
     let downloads: Vec<Value> = slskd::all_downloads(&st).await.map_err(upstream)?.into_iter().map(|d| {
         let name = d["path"].as_str().unwrap_or("");
         json!({ "id": d["id"], "username": d["username"], "filename": name, "directory": dir_of(name), "basename": d["filename"], "state": d["state"],
@@ -601,11 +418,7 @@ async fn transfers(State(st): State<AppState>, User(u): User) -> ApiResult<Json<
 }
 
 /// DELETE /api/soulseek/transfers/{username}/{id}: cancel a download.
-async fn cancel(
-    State(st): State<AppState>,
-    User(u): User,
-    Path((username, id)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
+async fn cancel(State(st): State<AppState>, User(u): User, Path((username, id)): Path<(String, String)>) -> ApiResult<Json<Value>> {
     gate(&st, &u)?;
     slskd::cancel(&st, &username, &id).await;
     Ok(Json(json!({ "ok": true })))
@@ -629,45 +442,12 @@ mod tests {
 
     #[test]
     fn guesses_artist_album_title_from_paths() {
-        assert_eq!(
-            g(
-                "@@music\\Daft Punk\\Discovery",
-                "@@music\\Daft Punk\\Discovery\\01 - One More Time.flac"
-            ),
-            "Daft Punk | Discovery | One More Time"
-        );
-        assert_eq!(
-            g(
-                "@@music\\Daft Punk\\(2001) Discovery [FLAC]",
-                "@@music\\Daft Punk\\(2001) Discovery [FLAC]\\03. Digital Love.flac"
-            ),
-            "Daft Punk | Discovery | Digital Love"
-        );
-        assert_eq!(
-            g(
-                "@@music\\Daft Punk\\Discovery",
-                "@@music\\Daft Punk\\Discovery\\04 - daft punk - Harder Better Faster Stronger.mp3"
-            ),
-            "Daft Punk | Discovery | Harder Better Faster Stronger"
-        );
-        assert_eq!(
-            g(
-                "@@music\\Singles",
-                "@@music\\Singles\\Daft Punk - Digital Love.mp3"
-            ),
-            "Daft Punk | Singles | Digital Love"
-        );
-        assert_eq!(
-            g(
-                "@@music\\Daft Punk - Discovery",
-                "@@music\\Daft Punk - Discovery\\A1 Digital Love.flac"
-            ),
-            "Daft Punk | Discovery | Digital Love"
-        );
-        assert_eq!(
-            g("Prince\\1999", "Prince\\1999\\07 Free.flac"),
-            "Prince | 1999 | Free"
-        );
+        assert_eq!(g("@@music\\Daft Punk\\Discovery", "@@music\\Daft Punk\\Discovery\\01 - One More Time.flac"), "Daft Punk | Discovery | One More Time");
+        assert_eq!(g("@@music\\Daft Punk\\(2001) Discovery [FLAC]", "@@music\\Daft Punk\\(2001) Discovery [FLAC]\\03. Digital Love.flac"), "Daft Punk | Discovery | Digital Love");
+        assert_eq!(g("@@music\\Daft Punk\\Discovery", "@@music\\Daft Punk\\Discovery\\04 - daft punk - Harder Better Faster Stronger.mp3"), "Daft Punk | Discovery | Harder Better Faster Stronger");
+        assert_eq!(g("@@music\\Singles", "@@music\\Singles\\Daft Punk - Digital Love.mp3"), "Daft Punk | Singles | Digital Love");
+        assert_eq!(g("@@music\\Daft Punk - Discovery", "@@music\\Daft Punk - Discovery\\A1 Digital Love.flac"), "Daft Punk | Discovery | Digital Love");
+        assert_eq!(g("Prince\\1999", "Prince\\1999\\07 Free.flac"), "Prince | 1999 | Free");
         assert_eq!(g("", "7 Rings.mp3"), " |  | 7 Rings");
     }
 
@@ -684,9 +464,6 @@ mod tests {
         assert_eq!(g[0]["folders"][0]["files"][0]["name"], "01 - a.mp3");
         assert_eq!(g[0]["folders"][0]["files"][0]["extension"], "mp3");
         assert_eq!(g[0]["folders"][1]["files"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            g[0]["folders"][1]["files"][0]["filename"],
-            "@@m\\B\\Two\\01 - a.flac"
-        );
+        assert_eq!(g[0]["folders"][1]["files"][0]["filename"], "@@m\\B\\Two\\01 - a.flac");
     }
 }

@@ -55,11 +55,7 @@ fn artist_filter(st: &AppState, name: &str, mbid: &str) -> Option<(String, Vec<V
     if name.is_empty() && !by_id {
         return None;
     }
-    let (mut cond, mut params) = if name.is_empty() {
-        ("0".to_string(), vec![])
-    } else {
-        st.library.artists.track_filter(&st.db, name)
-    };
+    let (mut cond, mut params) = if name.is_empty() { ("0".to_string(), vec![]) } else { st.library.artists.track_filter(&st.db, name) };
     if by_id {
         cond = format!("({cond} OR mb_albumartistid=? OR mb_artistid=?)");
         params.extend(p![mbid.clone(), mbid]);
@@ -69,12 +65,7 @@ fn artist_filter(st: &AppState, name: &str, mbid: &str) -> Option<(String, Vec<V
 
 /// `{total, tracks}`: the caller's liked songs by this artist that are in the library, newest like first.
 /// `limit` 1–500 (default 200); `total` counts them all.
-pub(super) async fn liked(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(path): Path<String>,
-    Query(q): Query<ArtistSongsQ>,
-) -> ApiResult<Json<Value>> {
+pub(super) async fn liked(State(st): State<AppState>, User(u): User, Path(path): Path<String>, Query(q): Query<ArtistSongsQ>) -> ApiResult<Json<Value>> {
     let name = q.artist(&path);
     let limit = q.limit.unwrap_or(200).clamp(1, 500) as usize;
     st.blocking(move |st| {
@@ -84,37 +75,24 @@ pub(super) async fn liked(
         // the artist's songs (indexed by name and id), each looked up in the liked list by playlist_items(track_id);
         // a GET does not make the Liked Songs playlist: none yet means nothing liked
         params.push(json!(u.i("id")));
-        let ids: Vec<i64> =
-            st.db
-                .query(
-                    &format!(
+        let ids: Vec<i64> = st.db.query(&format!(
             "SELECT track_id, MAX(added_at) liked, MIN(position) pos FROM playlist_items
              WHERE track_id IN (SELECT id FROM tracks WHERE {cond})
                AND playlist_id IN (SELECT id FROM playlists WHERE user_id=? AND kind='liked')
-             GROUP BY track_id ORDER BY liked DESC, pos, track_id"),
-                    params,
-                )?
-                .iter()
-                .map(|r| r.i("track_id"))
-                .collect();
+             GROUP BY track_id ORDER BY liked DESC, pos, track_id"), params)?
+            .iter().map(|r| r.i("track_id")).collect();
         let total = ids.len();
         let page: Vec<i64> = ids.into_iter().take(limit).collect();
         let mut v = json!({ "total": total, "tracks": rows_by_id(&st.db, TRACK_COLS, &page)? });
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    })
-    .await
+    }).await
 }
 
 /// `{total, offset, tracks}`: a page of the artist's songs in the library, by album year (oldest first, no
 /// year last), then album, disc and track. `offset` (default 0), `limit` 1–500 (default 50); `total` counts
 /// every song of the artist.
-pub(super) async fn songs(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(path): Path<String>,
-    Query(q): Query<ArtistSongsQ>,
-) -> ApiResult<Json<Value>> {
+pub(super) async fn songs(State(st): State<AppState>, User(u): User, Path(path): Path<String>, Query(q): Query<ArtistSongsQ>) -> ApiResult<Json<Value>> {
     let name = q.artist(&path);
     let (offset, limit) = (q.offset.max(0), q.limit.unwrap_or(50).clamp(1, 500));
     st.blocking(move |st| {
@@ -139,51 +117,24 @@ pub(super) async fn songs(
 /// `{total, offset, tracks}`: the artist's songs whose album is a One-off (a song or two of a compilation, a remix
 /// album, a soundtrack …: encore_library::album_types), newest first, each with its `release_label` ("Compilation",
 /// "Various artists", "Album" …). `offset` (default 0), `limit` 1–500 (default 50).
-pub(super) async fn one_offs(
-    State(st): State<AppState>,
-    User(u): User,
-    Path(path): Path<String>,
-    Query(q): Query<ArtistSongsQ>,
-) -> ApiResult<Json<Value>> {
+pub(super) async fn one_offs(State(st): State<AppState>, User(u): User, Path(path): Path<String>, Query(q): Query<ArtistSongsQ>) -> ApiResult<Json<Value>> {
     let name = q.artist(&path);
-    let (offset, limit) = (
-        q.offset.max(0) as usize,
-        q.limit.unwrap_or(50).clamp(1, 500) as usize,
-    );
+    let (offset, limit) = (q.offset.max(0) as usize, q.limit.unwrap_or(50).clamp(1, 500) as usize);
     st.blocking(move |st| {
         let Some((cond, params)) = artist_filter(st, &name, &q.mbid) else {
             return Ok(Json(json!({ "total": 0, "offset": offset, "tracks": [] })));
         };
         let types = st.library.types.get(&st.db);
-        let found: Vec<(i64, String)> = st
-            .db
-            .query(
-                &format!(
-                    "SELECT id, album_id FROM tracks WHERE {cond} ORDER BY added_at DESC, id DESC"
-                ),
-                params,
-            )?
-            .iter()
-            .map(|r| (r.i("id"), r.s("album_id")))
-            .filter(|(_, a)| types.get(a).is_some_and(|c| c.format == "one_off"))
-            .collect();
-        let page: Vec<i64> = found
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(id, _)| *id)
-            .collect();
+        let found: Vec<(i64, String)> = st.db.query(&format!("SELECT id, album_id FROM tracks WHERE {cond} ORDER BY added_at DESC, id DESC"), params)?
+            .iter().map(|r| (r.i("id"), r.s("album_id"))).filter(|(_, a)| types.get(a).is_some_and(|c| c.format == "one_off")).collect();
+        let page: Vec<i64> = found.iter().skip(offset).take(limit).map(|(id, _)| *id).collect();
         let mut tracks = rows_by_id(&st.db, TRACK_COLS, &page)?;
         for t in tracks.iter_mut() {
-            let label = types
-                .get(&t.s("album_id"))
-                .map(|c| c.release_label.clone())
-                .unwrap_or_default();
+            let label = types.get(&t.s("album_id")).map(|c| c.release_label.clone()).unwrap_or_default();
             t.insert("release_label".into(), json!(label));
         }
         let mut v = json!({ "total": found.len(), "offset": offset, "tracks": tracks });
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    })
-    .await
+    }).await
 }

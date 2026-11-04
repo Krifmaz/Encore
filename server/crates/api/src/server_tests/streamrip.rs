@@ -152,18 +152,12 @@ async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_o
     assert_eq!(binary(&st).as_deref(), Some(rip.to_string_lossy().as_ref()));
     // no file yet: streamrip writes its defaults, Encore its credentials (2.x key names, downloads db off)
     let c = check_config(&st, false).await.unwrap();
-    assert!(
-        c.regenerated && c.backup.is_none() && c.problem.is_none(),
-        "{c:?}"
-    );
+    assert!(c.regenerated && c.backup.is_none() && c.problem.is_none(), "{c:?}");
     let text = std::fs::read_to_string(&c.path).unwrap();
     assert_eq!(toml_value(&text, "qobuz", "email_or_userid"), "qu");
     assert_eq!(toml_value(&text, "qobuz", "password_or_token"), "qt");
     assert_eq!(toml_value(&text, "qobuz", "use_auth_token"), "true");
-    assert!(
-        !section_body(&text, "qobuz").contains("user_id ="),
-        "{text}"
-    );
+    assert!(!section_body(&text, "qobuz").contains("user_id ="), "{text}");
     assert_eq!(toml_value(&text, "database", "downloads_enabled"), "false");
     assert_eq!(toml_value(&text, "misc", "version"), "2.0.6");
     // a sound file is left alone, and Diagnostics says so
@@ -175,11 +169,7 @@ async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_o
     // the file breaks (keys from another streamrip, say) while holding a Tidal sign-in, a hand-typed ARL
     // and the 1.x Qobuz login
     let mut broken = text.clone();
-    for (k, v) in [
-        ("access_token", "\"tok-default-abcdef\""),
-        ("hires_access_token", "\"tok-hires-abcdef\""),
-        ("hires_client", "true"),
-    ] {
+    for (k, v) in [("access_token", "\"tok-default-abcdef\""), ("hires_access_token", "\"tok-hires-abcdef\""), ("hires_client", "true")] {
         broken = set_toml(&broken, "tidal", k, v);
     }
     broken = set_toml(&broken, "deezer", "arl", "\"old-arl-cookie\"");
@@ -189,30 +179,16 @@ async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_o
     broken = set_toml(&broken, "qobuz", "auth_token", "\"polluted-token\"");
     broken = set_toml(&broken, "misc", "broken", "true");
     std::fs::write(&c.path, &broken).unwrap();
-    st.cfg()
-        .set_many(&serde_json::json!({ "streamrip_qobuz_user": "", "streamrip_qobuz_token": "" }));
+    st.cfg().set_many(&serde_json::json!({ "streamrip_qobuz_user": "", "streamrip_qobuz_token": "" }));
     let check = config_loads_check(&st).await;
     assert_eq!(check["ok"], false, "{check}");
     let detail = check["detail"].as_str().unwrap();
-    assert!(
-        detail.contains("unexpected keyword argument 'user_id'")
-            && detail.contains("Reset streamrip config"),
-        "{detail}"
-    );
+    assert!(detail.contains("unexpected keyword argument 'user_id'") && detail.contains("Reset streamrip config"), "{detail}");
     let c = check_config(&st, false).await.unwrap();
     assert!(c.regenerated && c.problem.is_none(), "{c:?}");
     let backup = c.backup.clone().expect("the old file is kept");
-    assert!(
-        backup
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("config.toml.bak-"),
-        "{backup:?}"
-    );
-    assert!(std::fs::read_to_string(&backup)
-        .unwrap()
-        .contains("broken = true"));
+    assert!(backup.file_name().unwrap().to_string_lossy().starts_with("config.toml.bak-"), "{backup:?}");
+    assert!(std::fs::read_to_string(&backup).unwrap().contains("broken = true"));
     let fresh = std::fs::read_to_string(&c.path).unwrap();
     assert!(!fresh.contains("broken"), "{fresh}");
     let t = parse_tidal_toml(&fresh);
@@ -220,61 +196,26 @@ async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_o
     assert_eq!(t["hires_access_token"], "tok-hires-abcdef");
     assert_eq!(t["hires_client"], "true");
     assert_eq!(toml_value(&fresh, "deezer", "arl"), "old-arl-cookie");
-    assert_eq!(
-        toml_value(&fresh, "qobuz", "email_or_userid"),
-        "polluted",
-        "the 1.x login moves under the 2.x key names"
-    );
-    assert_eq!(
-        toml_value(&fresh, "qobuz", "password_or_token"),
-        "polluted-token"
-    );
+    assert_eq!(toml_value(&fresh, "qobuz", "email_or_userid"), "polluted", "the 1.x login moves under the 2.x key names");
+    assert_eq!(toml_value(&fresh, "qobuz", "password_or_token"), "polluted-token");
     assert_eq!(toml_value(&fresh, "qobuz", "use_auth_token"), "true");
-    assert!(
-        !fresh
-            .lines()
-            .any(|l| l.starts_with("user_id = \"polluted") || l.starts_with("auth_token =")),
-        "{fresh}"
-    );
+    assert!(!fresh.lines().any(|l| l.starts_with("user_id = \"polluted") || l.starts_with("auth_token =")), "{fresh}");
     assert!(c.message().contains("carried over"), "{}", c.message());
     // "Reset streamrip config" on a sound file: a fresh one all the same, sign-ins kept
     let c = reset_config(&st).await.unwrap();
-    assert!(
-        c.regenerated && c.backup.is_some() && c.problem.is_none(),
-        "{c:?}"
-    );
-    assert_eq!(
-        parse_tidal_toml(&std::fs::read_to_string(&c.path).unwrap())["access_token"],
-        "tok-default-abcdef"
-    );
+    assert!(c.regenerated && c.backup.is_some() && c.problem.is_none(), "{c:?}");
+    assert_eq!(parse_tidal_toml(&std::fs::read_to_string(&c.path).unwrap())["access_token"], "tok-default-abcdef");
     assert_eq!(c.json()["ok"], true);
     // a run whose output is the fork's config complaint: plain words, the whole output for the log
     std::fs::write(dir.join("fake/mode"), "config_error").unwrap();
-    let e = download(&st, "https://tidal.com/browse/track/1", &dir.join("out"))
-        .await
-        .expect_err("no files");
+    let e = download(&st, "https://tidal.com/browse/track/1", &dir.join("out")).await.expect_err("no files");
     let m = e.to_string();
     assert!(m.starts_with(CONFIG_BROKEN_MSG), "{m}");
-    assert!(
-        m.contains("Need to update config from 2.0.5 to 2.0.6"),
-        "{m}"
-    );
-    assert!(run_log(&e)
-        .unwrap()
-        .contains("Try running rip config reset"));
+    assert!(m.contains("Need to update config from 2.0.5 to 2.0.6"), "{m}");
+    assert!(run_log(&e).unwrap().contains("Try running rip config reset"));
     let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
-    assert!(
-        calls
-            .lines()
-            .last()
-            .unwrap()
-            .contains("url https://tidal.com/browse/track/1"),
-        "{calls}"
-    );
-    assert!(
-        calls.lines().all(|l| l.contains("stdin=/dev/null")),
-        "stdin is closed on every run:\n{calls}"
-    );
+    assert!(calls.lines().last().unwrap().contains("url https://tidal.com/browse/track/1"), "{calls}");
+    assert!(calls.lines().all(|l| l.contains("stdin=/dev/null")), "stdin is closed on every run:\n{calls}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -282,48 +223,26 @@ async fn a_missing_or_broken_config_is_written_fresh_with_the_sign_ins_carried_o
 async fn the_deezer_arl_prompt_becomes_a_plain_message() {
     let (st, dir) = state("arl");
     let rip = fake_rip(&dir.join("fake"));
-    st.cfg().set_many(
-        &serde_json::json!({ "streamrip_enabled": true, "streamrip_bin": rip.to_string_lossy() }),
-    );
+    st.cfg().set_many(&serde_json::json!({ "streamrip_enabled": true, "streamrip_bin": rip.to_string_lossy() }));
     let out = dir.join("out");
     // no ARL anywhere: a Deezer link is refused before streamrip runs
-    let e = download(&st, "https://www.deezer.com/track/1", &out)
-        .await
-        .expect_err("no ARL");
+    let e = download(&st, "https://www.deezer.com/track/1", &out).await.expect_err("no ARL");
     assert_eq!(e.to_string(), ARL_MSG);
     assert!(run_log(&e).is_none());
     let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
     assert!(!calls.contains(" url "), "{calls}");
     // an ARL streamrip still asks about (its prompt reads EOF): the same plain message, the output kept
-    st.cfg()
-        .set_many(&serde_json::json!({ "streamrip_deezer_arl": "a-cookie" }));
+    st.cfg().set_many(&serde_json::json!({ "streamrip_deezer_arl": "a-cookie" }));
     std::fs::write(dir.join("fake/mode"), "prompt").unwrap();
-    let e = download(&st, "https://www.deezer.com/track/1", &out)
-        .await
-        .expect_err("prompted");
+    let e = download(&st, "https://www.deezer.com/track/1", &out).await.expect_err("prompted");
     assert_eq!(e.to_string(), ARL_MSG);
-    assert!(run_log(&e)
-        .unwrap()
-        .contains("EOFError: EOF when reading a line"));
+    assert!(run_log(&e).unwrap().contains("EOFError: EOF when reading a line"));
     let calls = std::fs::read_to_string(dir.join("fake/calls.log")).unwrap();
-    assert!(
-        calls.contains("url https://www.deezer.com/track/1"),
-        "{calls}"
-    );
-    assert_eq!(
-        toml_value(
-            &std::fs::read_to_string(config_path(&st)).unwrap(),
-            "deezer",
-            "arl"
-        ),
-        "a-cookie",
-        "the ARL from Settings is in the file before the run"
-    );
+    assert!(calls.contains("url https://www.deezer.com/track/1"), "{calls}");
+    assert_eq!(toml_value(&std::fs::read_to_string(config_path(&st)).unwrap(), "deezer", "arl"), "a-cookie", "the ARL from Settings is in the file before the run");
     // and a run that works
     std::fs::write(dir.join("fake/mode"), "ok").unwrap();
-    let files = download(&st, "https://www.deezer.com/track/1", &out)
-        .await
-        .unwrap();
+    let files = download(&st, "https://www.deezer.com/track/1", &out).await.unwrap();
     assert_eq!(files.len(), 1);
     assert!(files[0].ends_with("Album/01 Song.flac"), "{files:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -339,36 +258,10 @@ pub(super) fn album_fixture(dir: &Path) -> bool {
     std::fs::create_dir_all(dir).unwrap();
     for n in 1..=4 {
         let out = dir.join(format!("{n:02}. Duumu - Light {n}.flac"));
-        let ok = std::process::Command::new("ffmpeg")
-            .args([
-                "-v",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                &format!("sine=frequency={}:duration=1", 220 * n),
-            ])
+        let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("sine=frequency={}:duration=1", 220 * n)])
             .args(["-ar", "44100", "-sample_fmt", "s16", "-c:a", "flac"])
-            .args([
-                "-metadata",
-                &format!("title=Light {n}"),
-                "-metadata",
-                "artist=Duumu",
-                "-metadata",
-                "album_artist=Duumu",
-                "-metadata",
-                "album=Illuminate EP",
-            ])
-            .args([
-                "-metadata",
-                &format!("track={n}/4"),
-                "-metadata",
-                "date=2024",
-            ])
-            .arg(&out)
-            .stdin(std::process::Stdio::null())
-            .status();
+            .args(["-metadata", &format!("title=Light {n}"), "-metadata", "artist=Duumu", "-metadata", "album_artist=Duumu", "-metadata", "album=Illuminate EP"])
+            .args(["-metadata", &format!("track={n}/4"), "-metadata", "date=2024"]).arg(&out).stdin(std::process::Stdio::null()).status();
         if !ok.map(|s| s.success()).unwrap_or(false) {
             return false;
         }
@@ -379,31 +272,13 @@ pub(super) fn album_fixture(dir: &Path) -> bool {
 /// A cover for the request (served from here, so the import asks no catalogue for one).
 pub(super) async fn cover_server(dir: &Path) -> Option<String> {
     let jpg = dir.join("cover.jpg");
-    let ok = std::process::Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=320x320",
-            "-frames:v",
-            "1",
-        ])
-        .arg(&jpg)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x320", "-frames:v", "1"]).arg(&jpg)
+        .stdin(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     let bytes = std::fs::read(&jpg).ok().filter(|_| ok)?;
-    let app = axum::Router::new().route(
-        "/cover.jpg",
-        axum::routing::get(move || {
-            let b = bytes.clone();
-            async move { ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], b) }
-        }),
-    );
+    let app = axum::Router::new().route("/cover.jpg", axum::routing::get(move || {
+        let b = bytes.clone();
+        async move { ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], b) }
+    }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/cover.jpg", l.local_addr().unwrap());
     tokio::spawn(async move {
@@ -424,11 +299,7 @@ struct Rip {
 
 async fn rip_server(name: &str) -> Option<Rip> {
     let ts = crate::test_support::TestServer::new(&format!("rip-e2e-{name}")).with_sources();
-    let (fake, staging, lib) = (
-        ts.dir.join("fake"),
-        ts.dir.join("staging"),
-        ts.dir.join("lib"),
-    );
+    let (fake, staging, lib) = (ts.dir.join("fake"), ts.dir.join("staging"), ts.dir.join("lib"));
     let rip = fake_rip(&fake);
     if !album_fixture(&fake.join("fixture")) {
         ts.remove();
@@ -442,13 +313,7 @@ async fn rip_server(name: &str) -> Option<Rip> {
         "source_order": "deezer", "ytdlp_enabled": false, "ytdlp_last_resort": false, "slskd_enabled": false }));
     crate::test_support::user(&ts.st, "boss", "admin"); // user 1, the requests' owner
     std::fs::write(fake.join("mode"), "album").unwrap();
-    Some(Rip {
-        ts,
-        fake,
-        staging,
-        lib,
-        cover,
-    })
+    Some(Rip { ts, fake, staging, lib, cover })
 }
 
 /// The album picked in the picker: its Deezer release.
@@ -460,137 +325,60 @@ fn picked_album(st: &AppState, cover: &str) -> i64 {
 }
 
 pub(super) fn request_row(st: &AppState, id: i64) -> (String, String, Value) {
-    let r = st
-        .db
-        .one(
-            "SELECT status, message, detail FROM requests WHERE id=?",
-            p![id],
-        )
-        .unwrap()
-        .unwrap();
-    (
-        r.s("status"),
-        r.s("message"),
-        serde_json::from_str(&r.s("detail")).unwrap_or(json!({})),
-    )
+    let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
+    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
 }
 
 pub(super) fn log_text(d: &Value) -> String {
-    d["log"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|l| l.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    d["log"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 
 /// Field `n` (1-based, after the command's parentheses) of a /proc/<pid>/stat line.
 fn stat_field(stat: &str, n: usize) -> i64 {
-    stat.rsplit_once(')')
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(n - 3)
-        .unwrap()
-        .parse()
-        .unwrap()
+    stat.rsplit_once(')').unwrap().1.split_whitespace().nth(n - 3).unwrap().parse().unwrap()
 }
 
 #[tokio::test]
 async fn a_picked_deezer_album_downloads_and_imports_through_the_worker() {
-    let Some(r) = rip_server("ok").await else {
-        return;
-    };
+    let Some(r) = rip_server("ok").await else { return };
     let st = r.ts.st.clone();
     let id = picked_album(&st, &r.cover);
     let started = std::time::Instant::now();
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "completed", "{message}\n{}", log_text(&d));
-    assert!(
-        message.starts_with("Downloaded from Deezer via streamrip"),
-        "{message}"
-    );
+    assert!(message.starts_with("Downloaded from Deezer via streamrip"), "{message}");
     // four tracks in the library, indexed, from the request
-    let n = st
-        .db
-        .one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id])
-        .unwrap()
-        .unwrap()
-        .i("n");
+    let n = st.db.one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id]).unwrap().unwrap().i("n");
     assert_eq!(n, 4);
-    let files: Vec<PathBuf> = walkdir::WalkDir::new(&r.lib)
-        .into_iter()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "flac"))
-        .map(|e| e.into_path())
-        .collect();
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(&r.lib).into_iter().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "flac")).map(|e| e.into_path()).collect();
     assert_eq!(files.len(), 4, "{files:?}");
-    assert!(
-        files.iter().all(|f| f.starts_with(r.lib.join("Duumu"))),
-        "{files:?}"
-    );
-    assert!(
-        !r.staging.join(format!("request-{id}")).exists(),
-        "the staging folder goes after the import"
-    );
+    assert!(files.iter().all(|f| f.starts_with(r.lib.join("Duumu"))), "{files:?}");
+    assert!(!r.staging.join(format!("request-{id}")).exists(), "the staging folder goes after the import");
     // streamrip's output stays with the request when it worked too (both pipes)
     let output = d["output"]["text"].as_str().unwrap_or("");
-    assert!(
-        output.contains("Downloaded 4 tracks") && output.contains("WARNING: a warning on stderr"),
-        "{d}"
-    );
-    assert_eq!(
-        (d["output"]["ok"].as_bool(), d["output"]["url"].as_str()),
-        (Some(true), Some(DEEZER_ALBUM)),
-        "{d}"
-    );
+    assert!(output.contains("Downloaded 4 tracks") && output.contains("WARNING: a warning on stderr"), "{d}");
+    assert_eq!((d["output"]["ok"].as_bool(), d["output"]["url"].as_str()), (Some(true), Some(DEEZER_ALBUM)), "{d}");
     // the run: the default command line, no terminal (the /dev/tty write and read failed at once instead of
     // hanging), its own session, plain output, HOME the data folder
     assert!(started.elapsed() < std::time::Duration::from_secs(60));
     let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap();
     let run = calls.lines().find(|l| l.contains(" url ")).unwrap();
     let folder = r.staging.join(format!("request-{id}/streamrip"));
-    assert!(
-        run.contains(&format!(
-            "--folder {} --quality 2 --no-db --no-progress url {DEEZER_ALBUM}",
-            folder.display()
-        )),
-        "{run}"
-    );
-    assert!(
-        calls.lines().all(|l| l.contains("stdin=/dev/null")),
-        "{calls}"
-    );
+    assert!(run.contains(&format!("--folder {} --quality 2 --no-db --no-progress url {DEEZER_ALBUM}", folder.display())), "{run}");
+    assert!(calls.lines().all(|l| l.contains("stdin=/dev/null")), "{calls}");
     let stat = std::fs::read_to_string(r.fake.join("stat")).unwrap();
     let mine = std::fs::read_to_string("/proc/self/stat").unwrap();
     assert_eq!(stat_field(&stat, 7), 0, "no controlling terminal: {stat}");
-    assert_ne!(
-        stat_field(&stat, 6),
-        stat_field(&mine, 6),
-        "a session of its own: {stat}"
-    );
+    assert_ne!(stat_field(&stat, 6), stat_field(&mine, 6), "a session of its own: {stat}");
     let env = std::fs::read_to_string(r.fake.join("env")).unwrap();
-    assert_eq!(
-        env.trim(),
-        format!(
-            "TERM=dumb NO_COLOR=1 COLUMNS=200 PYTHONUNBUFFERED=1 HOME={}",
-            st.data_dir().display()
-        )
-    );
+    assert_eq!(env.trim(), format!("TERM=dumb NO_COLOR=1 COLUMNS=200 PYTHONUNBUFFERED=1 HOME={}", st.data_dir().display()));
     // the config the run read: Deezer signed in, no downloads database, no progress bars, no update check
     let text = std::fs::read_to_string(config_path(&st)).unwrap();
     assert_eq!(toml_value(&text, "deezer", "arl"), "arl-cookie");
     assert_eq!(toml_value(&text, "database", "downloads_enabled"), "false");
     assert_eq!(toml_value(&text, "cli", "progress_bars"), "false");
-    assert_eq!(
-        toml_value(&text, "cli", "no_update_check"),
-        "true",
-        "{text}"
-    );
+    assert_eq!(toml_value(&text, "cli", "no_update_check"), "true", "{text}");
     r.ts.remove();
 }
 
@@ -599,19 +387,12 @@ async fn a_picked_deezer_album_downloads_and_imports_through_the_worker() {
 /// there it downloads from streamrip.
 #[tokio::test]
 async fn a_request_waits_for_a_streamrip_that_is_still_being_installed() {
-    let Some(r) = rip_server("installing").await else {
-        return;
-    };
+    let Some(r) = rip_server("installing").await else { return };
     let st = r.ts.st.clone();
     let rip = st.cfg.str("streamrip_bin");
     // as the first start after an upgrade has it: the install pass not done, streamrip's program not there
     st.cfg.set_many(&json!({ "streamrip_bin": "" }));
-    st.db
-        .execute(
-            "INSERT OR REPLACE INTO plugin_state (key, value) VALUES ('migration', 'install')",
-            p![],
-        )
-        .unwrap();
+    st.db.execute("INSERT OR REPLACE INTO plugin_state (key, value) VALUES ('migration', 'install')", p![]).unwrap();
     assert!(st.plugins.installing_after_upgrade("streamrip"));
     // a picked album and a song from the sources (Deezer first)
     let id = picked_album(&st, &r.cover);
@@ -623,76 +404,32 @@ async fn a_request_waits_for_a_streamrip_that_is_still_being_installed() {
         encore_requests::worker::step(st.clone(), song).await;
     }
     let (status, message, d) = request_row(&st, id);
-    assert_eq!(
-        (status.as_str(), message.as_str()),
-        (
-            "waiting",
-            "Waiting for the streamrip plugin to finish installing"
-        ),
-        "{}",
-        log_text(&d)
-    );
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for the streamrip plugin to finish installing"), "{}", log_text(&d));
     assert_eq!(d["wait"]["reason"], "plugin_install");
-    assert_eq!(
-        log_text(&d)
-            .matches("waiting for the streamrip plugin")
-            .count(),
-        1,
-        "said once: {}",
-        log_text(&d)
-    );
+    assert_eq!(log_text(&d).matches("waiting for the streamrip plugin").count(), 1, "said once: {}", log_text(&d));
     let (status, message, d) = request_row(&st, song);
-    assert_eq!(
-        (status.as_str(), message.as_str()),
-        (
-            "waiting",
-            "Waiting for the streamrip plugin to finish installing"
-        ),
-        "{}",
-        log_text(&d)
-    );
-    assert_eq!(
-        (d["sources"].clone(), d["install_wait"]["step"].clone()),
-        (json!(["streamrip"]), json!("source")),
-        "streamrip stays in its place: {d}"
-    );
-    st.db
-        .execute(
-            "UPDATE requests SET status='cancelled' WHERE id=?",
-            p![song],
-        )
-        .unwrap();
+    assert_eq!((status.as_str(), message.as_str()), ("waiting", "Waiting for the streamrip plugin to finish installing"), "{}", log_text(&d));
+    assert_eq!((d["sources"].clone(), d["install_wait"]["step"].clone()), (json!(["streamrip"]), json!("source")), "streamrip stays in its place: {d}");
+    st.db.execute("UPDATE requests SET status='cancelled' WHERE id=?", p![song]).unwrap();
     // the program arrives (here: the stand-in): the picked album downloads from streamrip
     st.cfg.set_many(&json!({ "streamrip_bin": rip }));
-    assert!(
-        !st.plugins.installing_after_upgrade("streamrip")
-            || encore_requests::sources::streamrip::binary(&st).is_some()
-    );
+    assert!(!st.plugins.installing_after_upgrade("streamrip") || encore_requests::sources::streamrip::binary(&st).is_some());
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "completed", "{message}\n{}", log_text(&d));
-    assert!(
-        message.starts_with("Downloaded from Deezer via streamrip"),
-        "{message}"
-    );
+    assert!(message.starts_with("Downloaded from Deezer via streamrip"), "{message}");
     assert!(d["wait"].is_null() && d["install_wait"].is_null(), "{d}");
     r.ts.remove();
 }
 
 #[tokio::test]
 async fn a_run_hands_back_its_output_when_it_works_too() {
-    let Some(r) = rip_server("output").await else {
-        return;
-    };
+    let Some(r) = rip_server("output").await else { return };
     let st = r.ts.st.clone();
     let out = r.ts.dir.join("out");
     let got = download_run(&st, DEEZER_ALBUM, &out).await.unwrap();
     assert_eq!(got.files.len(), 4);
-    for line in [
-        "Downloading Illuminate EP by Duumu",
-        "WARNING: a warning on stderr",
-        "Downloaded 4 tracks",
-    ] {
+    for line in ["Downloading Illuminate EP by Duumu", "WARNING: a warning on stderr", "Downloaded 4 tracks"] {
         assert!(got.log.contains(line), "{line} in {}", got.log);
     }
     r.ts.remove();
@@ -700,9 +437,7 @@ async fn a_run_hands_back_its_output_when_it_works_too() {
 
 #[tokio::test]
 async fn a_staging_folder_that_cannot_be_made_names_mkdir_and_its_path() {
-    let Some(r) = rip_server("mkdir").await else {
-        return;
-    };
+    let Some(r) = rip_server("mkdir").await else { return };
     let st = r.ts.st.clone();
     let id = picked_album(&st, &r.cover);
     let folder = r.staging.join(format!("request-{id}/streamrip"));
@@ -716,27 +451,16 @@ async fn a_staging_folder_that_cannot_be_made_names_mkdir_and_its_path() {
     fsx::fault::clear(&r.staging);
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "failed", "{message}");
-    assert!(
-        message.contains(&format!(
-            "mkdir {}: Permission denied (os error 13)",
-            folder.display()
-        )),
-        "{message}"
-    );
+    assert!(message.contains(&format!("mkdir {}: Permission denied (os error 13)", folder.display())), "{message}");
     let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default();
     assert!(!calls.contains(" url "), "streamrip never ran: {calls}");
-    assert!(
-        log_text(&d).contains(&format!("mkdir {}", folder.display())),
-        "{d}"
-    );
+    assert!(log_text(&d).contains(&format!("mkdir {}", folder.display())), "{d}");
     r.ts.remove();
 }
 
 #[tokio::test]
 async fn a_config_that_cannot_be_written_names_write_and_the_config() {
-    let Some(r) = rip_server("config").await else {
-        return;
-    };
+    let Some(r) = rip_server("config").await else { return };
     let st = r.ts.st.clone();
     let id = picked_album(&st, &r.cover);
     let config = config_path(&st);
@@ -745,13 +469,7 @@ async fn a_config_that_cannot_be_written_names_write_and_the_config() {
     fsx::fault::clear(config.parent().unwrap());
     let (status, message, _) = request_row(&st, id);
     assert_eq!(status, "failed", "{message}");
-    assert!(
-        message.contains(&format!(
-            "config failed: write {}: Input/output error (os error 5)",
-            config.display()
-        )),
-        "{message}"
-    );
+    assert!(message.contains(&format!("config failed: write {}: Input/output error (os error 5)", config.display())), "{message}");
     let calls = std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default();
     assert!(!calls.contains(" url "), "streamrip never ran: {calls}");
     r.ts.remove();
@@ -759,9 +477,7 @@ async fn a_config_that_cannot_be_written_names_write_and_the_config() {
 
 #[tokio::test]
 async fn a_failed_run_keeps_streamrips_words_and_its_whole_output() {
-    let Some(r) = rip_server("fail").await else {
-        return;
-    };
+    let Some(r) = rip_server("fail").await else { return };
     let st = r.ts.st.clone();
     std::fs::write(r.fake.join("mode"), "fail").unwrap();
     let id = picked_album(&st, &r.cover);
@@ -769,50 +485,20 @@ async fn a_failed_run_keeps_streamrips_words_and_its_whole_output() {
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "failed", "{message}");
     // the message says it in plain words (2318cac); streamrip's own words are in the output below
-    assert!(
-        message.contains(encore_requests::sources::streamrip::NOT_STREAMABLE_MSG),
-        "{message}"
-    );
+    assert!(message.contains(encore_requests::sources::streamrip::NOT_STREAMABLE_MSG), "{message}");
     // the whole output, both pipes, in the request's details (once: the log says where it is)
     let output = d["output"]["text"].as_str().unwrap_or("").to_string();
     // (the stand-in's write to /dev/tty is not in it: there is no terminal, and the shell said so)
-    assert!(
-        !output.contains("Logging in to Deezer")
-            && output.contains("/dev/tty: No such device or address"),
-        "{output}"
-    );
-    for line in [
-        "first line of the run, kept in the log",
-        "Traceback (most recent call last):",
-        "File \"rip/main.py\", line 120, in rip",
-        "NonStreamableError: This album is not available in your country",
-    ] {
+    assert!(!output.contains("Logging in to Deezer") && output.contains("/dev/tty: No such device or address"), "{output}");
+    for line in ["first line of the run, kept in the log", "Traceback (most recent call last):", "File \"rip/main.py\", line 120, in rip",
+                 "NonStreamableError: This album is not available in your country"] {
         assert!(output.contains(line), "{line} in {output}");
     }
-    assert_eq!(
-        (d["output"]["ok"].as_bool(), d["output"]["url"].as_str()),
-        (Some(false), Some(DEEZER_ALBUM)),
-        "{d}"
-    );
+    assert_eq!((d["output"]["ok"].as_bool(), d["output"]["url"].as_str()), (Some(false), Some(DEEZER_ALBUM)), "{d}");
     let log = log_text(&d);
-    assert!(
-        log.contains(&format!(
-            "streamrip: {DEEZER_ALBUM} failed – its output is in the details"
-        )),
-        "{log}"
-    );
-    assert!(
-        !log.contains("first line of the run"),
-        "the output is not in the log a second time: {log}"
-    );
-    assert_eq!(
-        walkdir::WalkDir::new(&r.lib)
-            .into_iter()
-            .flatten()
-            .filter(|e| e.file_type().is_file())
-            .count(),
-        0
-    );
+    assert!(log.contains(&format!("streamrip: {DEEZER_ALBUM} failed – its output is in the details")), "{log}");
+    assert!(!log.contains("first line of the run"), "the output is not in the log a second time: {log}");
+    assert_eq!(walkdir::WalkDir::new(&r.lib).into_iter().flatten().filter(|e| e.file_type().is_file()).count(), 0);
     r.ts.remove();
 }
 
@@ -821,37 +507,19 @@ async fn a_failed_run_keeps_streamrips_words_and_its_whole_output() {
 /// completes it.
 #[tokio::test]
 async fn eio_on_the_move_into_the_library_waits_with_the_files_kept_then_imports() {
-    let Some(r) = rip_server("eio").await else {
-        return;
-    };
+    let Some(r) = rip_server("eio").await else { return };
     let st = r.ts.st.clone();
     let id = picked_album(&st, &r.cover);
     fsx::fault::fail(&r.lib, "*", 5);
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "waiting", "{message}");
-    assert!(
-        message.starts_with("Waiting: library storage error – import failed: "),
-        "{message}"
-    );
-    assert!(
-        message.contains("Input/output error (os error 5)"),
-        "{message}"
-    );
+    assert!(message.starts_with("Waiting: library storage error – import failed: "), "{message}");
+    assert!(message.contains("Input/output error (os error 5)"), "{message}");
     assert_eq!(d["attempts"].as_i64().unwrap_or(0), 0, "{d}");
-    let kept = walkdir::WalkDir::new(r.staging.join(format!("request-{id}")))
-        .into_iter()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "flac"))
-        .count();
+    let kept = walkdir::WalkDir::new(r.staging.join(format!("request-{id}"))).into_iter().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "flac")).count();
     assert_eq!(kept, 4, "the downloaded files stay in staging");
-    let runs = || {
-        std::fs::read_to_string(r.fake.join("calls.log"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| l.contains(" url "))
-            .count()
-    };
+    let runs = || std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains(" url ")).count();
     assert_eq!(runs(), 1);
     // still failing: the queue's look leaves it waiting, nothing downloaded again
     encore_requests::worker::step(st.clone(), id).await;
@@ -865,14 +533,7 @@ async fn eio_on_the_move_into_the_library_waits_with_the_files_kept_then_imports
     let (status, message, _) = request_row(&st, id);
     assert_eq!(status, "completed", "{message}");
     assert_eq!(runs(), 1, "never downloaded again");
-    assert_eq!(
-        st.db
-            .one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id])
-            .unwrap()
-            .unwrap()
-            .i("n"),
-        4
-    );
+    assert_eq!(st.db.one("SELECT COUNT(*) n FROM tracks WHERE request_id=?", p![id]).unwrap().unwrap().i("n"), 4);
     r.ts.remove();
 }
 
@@ -881,47 +542,22 @@ async fn eio_on_the_move_into_the_library_waits_with_the_files_kept_then_imports
 /// counted, nothing else tried) and runs again once its turn comes and the disk is fine.
 #[tokio::test]
 async fn streamrips_own_disk_error_in_staging_waits_for_the_storage() {
-    let Some(r) = rip_server("errno").await else {
-        return;
-    };
+    let Some(r) = rip_server("errno").await else { return };
     let st = r.ts.st.clone();
     std::fs::write(r.fake.join("mode"), "errno").unwrap();
     let id = picked_album(&st, &r.cover);
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
-    assert_eq!(
-        (status.as_str(), d["wait"]["reason"].as_str()),
-        ("waiting", Some("storage_download")),
-        "{message}"
-    );
-    let file = r.staging.join(format!(
-        "request-{id}/streamrip/Duumu - Illuminate EP/01. Light 1.flac"
-    ));
+    assert_eq!((status.as_str(), d["wait"]["reason"].as_str()), ("waiting", Some("storage_download")), "{message}");
+    let file = r.staging.join(format!("request-{id}/streamrip/Duumu - Illuminate EP/01. Light 1.flac"));
     assert!(message.starts_with(&format!("Waiting: storage error – download failed: write {}: Input/output error (os error 5). Next try at ", file.display())), "{message}");
     assert_eq!(d["attempts"].as_i64().unwrap_or(0), 0, "{d}");
-    assert!(
-        d["output"]["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("[Errno 5] Input/output error"),
-        "{d}"
-    );
-    let runs = || {
-        std::fs::read_to_string(r.fake.join("calls.log"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| l.contains(" url "))
-            .count()
-    };
+    assert!(d["output"]["text"].as_str().unwrap_or("").contains("[Errno 5] Input/output error"), "{d}");
+    let runs = || std::fs::read_to_string(r.fake.join("calls.log")).unwrap_or_default().lines().filter(|l| l.contains(" url ")).count();
     assert_eq!(runs(), 1);
     // its turn, the disk fine again: the download runs again and the album is imported
     std::fs::write(r.fake.join("mode"), "album").unwrap();
-    st.db
-        .execute(
-            "UPDATE requests SET detail=json_set(detail, '$.wait.next_try_at', ?) WHERE id=?",
-            p![encore_db::now() - 1.0, id],
-        )
-        .unwrap();
+    st.db.execute("UPDATE requests SET detail=json_set(detail, '$.wait.next_try_at', ?) WHERE id=?", p![encore_db::now() - 1.0, id]).unwrap();
     encore_requests::worker::step(st.clone(), id).await;
     let (status, message, d) = request_row(&st, id);
     assert_eq!(status, "completed", "{message}");
@@ -936,34 +572,24 @@ async fn streamrips_own_disk_error_in_staging_waits_for_the_storage() {
 #[tokio::test]
 #[ignore = "runs the real streamrip against Deezer: set ENCORE_LIVE_DEEZER_URL and ENCORE_LIVE_DEEZER_ARL"]
 async fn deezer_album_live() {
-    let (Ok(url), Ok(arl)) = (
-        std::env::var("ENCORE_LIVE_DEEZER_URL"),
-        std::env::var("ENCORE_LIVE_DEEZER_ARL"),
-    ) else {
+    let (Ok(url), Ok(arl)) = (std::env::var("ENCORE_LIVE_DEEZER_URL"), std::env::var("ENCORE_LIVE_DEEZER_ARL")) else {
         eprintln!("ENCORE_LIVE_DEEZER_URL and ENCORE_LIVE_DEEZER_ARL are not set: nothing to do");
         return;
     };
     let (st, dir) = state("live");
-    let mut settings =
-        json!({ "streamrip_enabled": true, "streamrip_deezer_arl": arl, "streamrip_quality": 2 });
+    let mut settings = json!({ "streamrip_enabled": true, "streamrip_deezer_arl": arl, "streamrip_quality": 2 });
     if let Ok(bin) = std::env::var("ENCORE_LIVE_STREAMRIP_BIN") {
         settings["streamrip_bin"] = json!(bin);
     }
     st.cfg().set_many(&settings);
-    let bin = binary(&st)
-        .expect("streamrip installed (PATH, /opt/tools/bin or ENCORE_LIVE_STREAMRIP_BIN)");
+    let bin = binary(&st).expect("streamrip installed (PATH, /opt/tools/bin or ENCORE_LIVE_STREAMRIP_BIN)");
     let c = check_config(&st, false).await.unwrap();
     assert!(c.problem.is_none(), "{}", c.message());
     let out = dir.join("out");
     let started = std::time::Instant::now();
     let res = download_run(&st, &url, &out).await;
     match &res {
-        Ok(r) => eprintln!(
-            "{bin}: {} file(s) in {:?}\n{}",
-            r.files.len(),
-            started.elapsed(),
-            r.log
-        ),
+        Ok(r) => eprintln!("{bin}: {} file(s) in {:?}\n{}", r.files.len(), started.elapsed(), r.log),
         Err(e) => eprintln!("{bin}: {e:#}\n{}", run_log(e).unwrap_or("")),
     }
     let got = res.unwrap();

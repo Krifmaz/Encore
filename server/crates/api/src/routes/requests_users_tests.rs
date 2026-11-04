@@ -8,13 +8,7 @@ use axum::http::StatusCode;
 
 /// An account without a password (signed in with a session made here; bcrypt would cost a second each).
 fn account(st: &AppState, name: &str, role: &str) -> (i64, String) {
-    let id = st
-        .db
-        .execute(
-            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, '-', ?, ?)",
-            p![name, role, now()],
-        )
-        .unwrap();
+    let id = st.db.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, '-', ?, ?)", p![name, role, now()]).unwrap();
     let (t, _) = crate::auth::create_session(st, id, "test", "1.2.3.4").unwrap();
     (id, format!("encore_session={t}"))
 }
@@ -26,23 +20,14 @@ fn insert(st: &AppState, owner: i64, title: &str, status: &str) -> i64 {
 }
 
 fn status(st: &AppState, id: i64) -> String {
-    st.db
-        .one("SELECT status FROM requests WHERE id=?", p![id])
-        .unwrap()
-        .map(|r| r.s("status"))
-        .unwrap_or_else(|| "gone".into())
+    st.db.one("SELECT status FROM requests WHERE id=?", p![id]).unwrap().map(|r| r.s("status")).unwrap_or_else(|| "gone".into())
 }
 
 /// The owners of the rows a list call answers with.
 async fn owners(app: &Router, uri: &str, cookie: &str) -> Vec<i64> {
     let (code, v, _) = call(app, "GET", uri, cookie, None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    let mut o: Vec<i64> = v
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r["user_id"].as_i64().unwrap())
-        .collect();
+    let mut o: Vec<i64> = v.as_array().unwrap().iter().map(|r| r["user_id"].as_i64().unwrap()).collect();
     o.sort();
     o.dedup();
     o
@@ -61,11 +46,7 @@ fn whose_requests() {
     assert_eq!(whose(&admin, false, Some(7)), Some(7), "one person's");
     assert_eq!(whose(&admin, true, Some(7)), Some(1), "Only mine wins");
     assert_eq!(whose(&member, false, None), Some(2));
-    assert_eq!(
-        whose(&member, false, Some(7)),
-        Some(2),
-        "a member only ever their own"
-    );
+    assert_eq!(whose(&member, false, Some(7)), Some(2), "a member only ever their own");
     assert_eq!(user_id(Some("12")), Some(12));
     assert_eq!(user_id(Some("")), None);
     assert_eq!(user_id(Some("caz")), None);
@@ -83,14 +64,7 @@ async fn an_admin_looks_at_one_persons_requests_and_a_member_only_at_their_own()
     let (_, nobody) = account(&st, "nobody", "user"); // no requests: not in the list of people
     let _ = nobody;
     let mut rows = vec![];
-    for (owner, statuses) in [
-        (sam, vec!["failed", "completed", "queued"]),
-        (
-            caz,
-            vec!["failed", "failed", "completed", "queued", "waiting"],
-        ),
-        (boss, vec!["completed"]),
-    ] {
+    for (owner, statuses) in [(sam, vec!["failed", "completed", "queued"]), (caz, vec!["failed", "failed", "completed", "queued", "waiting"]), (boss, vec!["completed"])] {
         for s in statuses {
             rows.push((insert(&st, owner, &format!("{s} of {owner}"), s), owner, s));
         }
@@ -99,135 +73,47 @@ async fn an_admin_looks_at_one_persons_requests_and_a_member_only_at_their_own()
     // the people who have requests, by name, with their counts (admins only)
     let (code, v, _) = call(&app, "GET", "/api/requests/users", &boss_c, None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    assert_eq!(
-        v,
-        json!([{ "id": boss, "username": "boss", "count": 1 }, { "id": caz, "username": "Caz", "count": 5 }, { "id": sam, "username": "sam", "count": 3 }])
-    );
-    assert_eq!(
-        call(&app, "GET", "/api/requests/users", &sam_c, None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        call(&app, "GET", "/api/requests/users", "", None).await.0,
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(v, json!([{ "id": boss, "username": "boss", "count": 1 }, { "id": caz, "username": "Caz", "count": 5 }, { "id": sam, "username": "sam", "count": 3 }]));
+    assert_eq!(call(&app, "GET", "/api/requests/users", &sam_c, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&app, "GET", "/api/requests/users", "", None).await.0, StatusCode::UNAUTHORIZED);
 
     // the list: everyone's, one person's, Only mine; a user id that isn't one reads as everyone's
-    assert_eq!(
-        owners(&app, "/api/requests", &boss_c).await,
-        vec![sam, caz, boss]
-    );
-    assert_eq!(
-        owners(&app, &format!("/api/requests?user={caz}"), &boss_c).await,
-        vec![caz]
-    );
-    assert_eq!(
-        owners(
-            &app,
-            &format!("/api/requests?user={caz}&status=failed"),
-            &boss_c
-        )
-        .await,
-        vec![caz]
-    );
-    assert_eq!(
-        owners(&app, "/api/requests?user=", &boss_c).await,
-        vec![sam, caz, boss]
-    );
-    assert_eq!(
-        owners(&app, "/api/requests?mine=true", &boss_c).await,
-        vec![boss]
-    );
+    assert_eq!(owners(&app, "/api/requests", &boss_c).await, vec![sam, caz, boss]);
+    assert_eq!(owners(&app, &format!("/api/requests?user={caz}"), &boss_c).await, vec![caz]);
+    assert_eq!(owners(&app, &format!("/api/requests?user={caz}&status=failed"), &boss_c).await, vec![caz]);
+    assert_eq!(owners(&app, "/api/requests?user=", &boss_c).await, vec![sam, caz, boss]);
+    assert_eq!(owners(&app, "/api/requests?mine=true", &boss_c).await, vec![boss]);
     // a member: their own, whoever they ask for
-    assert_eq!(
-        owners(&app, &format!("/api/requests?user={caz}"), &sam_c).await,
-        vec![sam]
-    );
+    assert_eq!(owners(&app, &format!("/api/requests?user={caz}"), &sam_c).await, vec![sam]);
     assert_eq!(owners(&app, "/api/requests", &sam_c).await, vec![sam]);
 
     // Clear waiting and Clear finished, kept to Caz
-    let (_, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/clear-waiting",
-        &boss_c,
-        Some(json!({ "user": caz, "dry_run": true })),
-    )
-    .await;
+    let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &boss_c, Some(json!({ "user": caz, "dry_run": true }))).await;
     assert_eq!(v, json!({ "count": 2, "text": "2 waiting requests" }));
     // (a member asking for Caz's counts only their own)
-    let (_, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/clear-waiting",
-        &sam_c,
-        Some(json!({ "user": caz, "dry_run": true })),
-    )
-    .await;
+    let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &sam_c, Some(json!({ "user": caz, "dry_run": true }))).await;
     assert_eq!(v["count"], 1);
-    let (_, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/clear",
-        &boss_c,
-        Some(json!({ "user": caz, "statuses": ["completed"] })),
-    )
-    .await;
+    let (_, v, _) = call(&app, "POST", "/api/requests/clear", &boss_c, Some(json!({ "user": caz, "statuses": ["completed"] }))).await;
     assert_eq!(v["removed"], 1, "{v}");
     for (id, owner, s) in &rows {
         if *s == "completed" {
-            assert_eq!(
-                status(&st, *id),
-                if *owner == caz { "gone" } else { "completed" },
-                "{s} of {owner}"
-            );
+            assert_eq!(status(&st, *id), if *owner == caz { "gone" } else { "completed" }, "{s} of {owner}");
         }
     }
 
     // Download all now, kept to Caz: only Caz's queued request is woken; the words don't say "your"
-    let (code, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/download-now",
-        &boss_c,
-        Some(json!({ "user": caz })),
-    )
-    .await;
+    let (code, v, _) = call(&app, "POST", "/api/requests/download-now", &boss_c, Some(json!({ "user": caz }))).await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    assert_eq!(
-        (v["woken"].as_u64(), v["text"].as_str()),
-        (Some(1), Some("Woke 1 waiting request")),
-        "{v}"
-    );
-    let (_, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/download-now",
-        &boss_c,
-        Some(json!({})),
-    )
-    .await;
+    assert_eq!((v["woken"].as_u64(), v["text"].as_str()), (Some(1), Some("Woke 1 waiting request")), "{v}");
+    let (_, v, _) = call(&app, "POST", "/api/requests/download-now", &boss_c, Some(json!({}))).await;
     assert_eq!(v["woken"], 2, "everyone's: Caz's and Sam's queued ones");
 
     // Retry failed, kept to Caz: Caz's two failed ones go back in the queue, Sam's stays failed
-    let (_, v, _) = call(
-        &app,
-        "POST",
-        "/api/requests/retry-failed",
-        &boss_c,
-        Some(json!({ "user": caz })),
-    )
-    .await;
+    let (_, v, _) = call(&app, "POST", "/api/requests/retry-failed", &boss_c, Some(json!({ "user": caz }))).await;
     assert_eq!(v["retried"], 2, "{v}");
     for (id, owner, s) in &rows {
         if *s == "failed" {
-            assert_eq!(
-                status(&st, *id),
-                if *owner == caz { "queued" } else { "failed" },
-                "{s} of {owner}"
-            );
+            assert_eq!(status(&st, *id), if *owner == caz { "queued" } else { "failed" }, "{s} of {owner}");
         }
     }
     // the counts follow
@@ -240,30 +126,10 @@ async fn an_admin_looks_at_one_persons_requests_and_a_member_only_at_their_own()
 /// denied or cancelled requests only count in All.
 #[test]
 fn counts_group_the_statuses() {
-    let c = Counts::from_statuses(
-        [
-            ("queued", 2),
-            ("downloading", 1),
-            ("waiting", 3),
-            ("pending", 4),
-            ("failed", 5),
-            ("completed", 6),
-            ("cancelled", 7),
-            ("denied", 1),
-        ]
-        .map(|(s, n)| (s.to_string(), n)),
-    );
-    assert_eq!(
-        c,
-        Counts {
-            all: 29,
-            remaining: 6,
-            pending: 4,
-            active: 10,
-            completed: 6,
-            failed: 5
-        }
-    );
+    let c = Counts::from_statuses([
+        ("queued", 2), ("downloading", 1), ("waiting", 3), ("pending", 4), ("failed", 5), ("completed", 6), ("cancelled", 7), ("denied", 1),
+    ].map(|(s, n)| (s.to_string(), n)));
+    assert_eq!(c, Counts { all: 29, remaining: 6, pending: 4, active: 10, completed: 6, failed: 5 });
     assert_eq!(Counts::from_statuses([]), Counts::default());
 }
 
@@ -277,40 +143,21 @@ async fn counts_follow_whose_requests() {
     let (sam, sam_c) = account(&st, "sam", "user");
     let (caz, _) = account(&st, "Caz", "user");
     let (boss, boss_c) = account(&st, "boss", "admin");
-    for (owner, statuses) in [
-        (sam, vec!["failed", "queued", "pending"]),
-        (
-            caz,
-            vec!["failed", "failed", "downloading", "waiting", "completed"],
-        ),
-        (boss, vec!["completed"]),
-    ] {
+    for (owner, statuses) in [(sam, vec!["failed", "queued", "pending"]), (caz, vec!["failed", "failed", "downloading", "waiting", "completed"]), (boss, vec!["completed"])] {
         for s in statuses {
             insert(&st, owner, &format!("{s} of {owner}"), s);
         }
     }
     let (code, v, _) = call(&app, "GET", "/api/requests/counts", &boss_c, None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    assert_eq!(
-        v,
-        json!({ "all": 9, "remaining": 3, "pending": 1, "active": 4, "completed": 2, "failed": 3 })
-    );
+    assert_eq!(v, json!({ "all": 9, "remaining": 3, "pending": 1, "active": 4, "completed": 2, "failed": 3 }));
     let one = format!("/api/requests/counts?user={caz}");
     let (_, v, _) = call(&app, "GET", &one, &boss_c, None).await;
-    assert_eq!(
-        v,
-        json!({ "all": 5, "remaining": 2, "pending": 0, "active": 2, "completed": 1, "failed": 2 })
-    );
+    assert_eq!(v, json!({ "all": 5, "remaining": 2, "pending": 0, "active": 2, "completed": 1, "failed": 2 }));
     let (_, v, _) = call(&app, "GET", "/api/requests/counts?mine=true", &boss_c, None).await;
     assert_eq!(v["all"], 1);
     // a member: their own, whatever `user` says
     let (_, v, _) = call(&app, "GET", &one, &sam_c, None).await;
-    assert_eq!(
-        v,
-        json!({ "all": 3, "remaining": 1, "pending": 1, "active": 2, "completed": 0, "failed": 1 })
-    );
-    assert_eq!(
-        call(&app, "GET", "/api/requests/counts", "", None).await.0,
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(v, json!({ "all": 3, "remaining": 1, "pending": 1, "active": 2, "completed": 0, "failed": 1 }));
+    assert_eq!(call(&app, "GET", "/api/requests/counts", "", None).await.0, StatusCode::UNAUTHORIZED);
 }

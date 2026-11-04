@@ -15,28 +15,13 @@ fn main() {
                     let v = name.strip_suffix(".md")?;
                     // plain releases only: 0.36.0, not the old dated 2026.10.11.1 or the -edge builds
                     let parts: Vec<&str> = v.split('.').collect();
-                    (parts.len() == 3
-                        && parts
-                            .iter()
-                            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
-                    .then(|| {
-                        (
-                            v.to_string(),
-                            e.path()
-                                .canonicalize()
-                                .unwrap_or(e.path())
-                                .display()
-                                .to_string(),
-                        )
-                    })
+                    (parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
+                        .then(|| (v.to_string(), e.path().canonicalize().unwrap_or(e.path()).display().to_string()))
                 })
                 .collect()
         })
         .unwrap_or_else(|_| {
-            println!(
-                "cargo:warning=no release notes at {}: the changelog is empty",
-                dir.display()
-            );
+            println!("cargo:warning=no release notes at {}: the changelog is empty", dir.display());
             Vec::new()
         });
     notes.sort();

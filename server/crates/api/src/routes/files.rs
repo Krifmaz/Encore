@@ -28,10 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/files/roots", get(get_roots))
         .route("/api/files/list", get(list_dir))
         .route("/api/files/search", get(search_names))
-        .route(
-            "/api/files/upload",
-            post(upload_files).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
-        )
+        .route("/api/files/upload", post(upload_files).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)))
         .route("/api/files/mkdir", post(mkdir))
         .route("/api/files/rename", post(rename))
         .route("/api/files/move", post(move_items))
@@ -47,11 +44,7 @@ pub fn router() -> Router<AppState> {
 
 /// The roots as they are now (the settings and Soulseek's folder in use).
 fn roots_of(st: &AppState) -> Vec<Root> {
-    roots::all(
-        &st.cfg,
-        st.data_dir(),
-        &encore_requests::slskd_managed::download_dir(st),
-    )
+    roots::all(&st.cfg, st.data_dir(), &encore_requests::slskd_managed::download_dir(st))
 }
 
 /// `root` + `path` of a request, checked (the root must be one of them, the path confined to it).
@@ -60,37 +53,24 @@ fn target(roots: &[Root], root: &str, path: &str) -> ApiResult<Target> {
 }
 
 /// File work on the blocking pool.
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> ApiResult<T> + Send + 'static,
-) -> ApiResult<T> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| err(500, format!("The file operation stopped: {e}")))?
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> ApiResult<T> + Send + 'static) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| err(500, format!("The file operation stopped: {e}")))?
 }
 
 /// GET /api/files/roots: the folders the file manager may open. Trash's also says whether deletes keep files
 /// there (`keep`, Settings → Library → Deleting files) and for how many `days`.
 async fn get_roots(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     blocking(move || {
-        let (keep, days) = (
-            encore_library::folders::trash_keep(&st.cfg),
-            encore_library::folders::trash_days(&st.cfg),
-        );
-        Ok(Json(Value::Array(
-            roots_of(&st)
-                .iter()
-                .map(|r| {
-                    let mut v = r.json();
-                    if r.kind == roots::RootKind::Trash {
-                        v["keep"] = Value::Bool(keep);
-                        v["days"] = Value::from(days);
-                    }
-                    v
-                })
-                .collect(),
-        )))
-    })
-    .await
+        let (keep, days) = (encore_library::folders::trash_keep(&st.cfg), encore_library::folders::trash_days(&st.cfg));
+        Ok(Json(Value::Array(roots_of(&st).iter().map(|r| {
+            let mut v = r.json();
+            if r.kind == roots::RootKind::Trash {
+                v["keep"] = Value::Bool(keep);
+                v["days"] = Value::from(days);
+            }
+            v
+        }).collect())))
+    }).await
 }
 
 /// `GET /api/files/list` query.
@@ -112,18 +92,13 @@ struct ListQ {
 }
 
 /// GET /api/files/list: a folder's entries, sorted and paged.
-async fn list_dir(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Query(q): Query<ListQ>,
-) -> ApiResult<Json<Value>> {
+async fn list_dir(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let query = ListQuery::parse(q.sort.as_deref(), q.dir.as_deref(), q.offset, q.limit)?;
     blocking(move || {
         let roots = roots_of(&st);
         let t = target(&roots, &q.root, &q.path)?;
         list::list(&st.db, &LibraryDirs::of(&st.cfg), &roots, &t, &query).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// `GET /api/files/search` query.
@@ -143,11 +118,7 @@ struct SearchQ {
 
 /// GET /api/files/search: the files and folders under a folder whose names hold every word of `q`, at any
 /// depth (encore_files::search). Trash is searched from its own list (`GET /api/files/trash`), not here.
-async fn search_names(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Query(q): Query<SearchQ>,
-) -> ApiResult<Json<Value>> {
+async fn search_names(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<SearchQ>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let roots = roots_of(&st);
         let t = target(&roots, &q.root, &q.path)?;
@@ -155,8 +126,7 @@ async fn search_names(
             return Err(err(400, "Search the trash from its list"));
         }
         search::search(&roots, &t, &q.q, q.limit).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// `POST /api/files/mkdir` and `/rename` body.
@@ -172,29 +142,19 @@ struct NameBody {
 }
 
 /// POST /api/files/mkdir: make a folder.
-async fn mkdir(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<NameBody>,
-) -> ApiResult<Json<Value>> {
+async fn mkdir(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
         ops::mkdir(&st, &Who::of(&u), &t, &b.name).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// POST /api/files/rename: rename a file or folder (the library's rows follow).
-async fn rename(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<NameBody>,
-) -> ApiResult<Json<Value>> {
+async fn rename(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<NameBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
         ops::rename(&st, &Who::of(&u), &t, &b.name).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// `POST /api/files/move` body.
@@ -212,25 +172,16 @@ struct MoveBody {
 }
 
 /// POST /api/files/move: move items to another folder (the library's rows follow).
-async fn move_items(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<MoveBody>,
-) -> ApiResult<Json<Value>> {
+async fn move_items(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<MoveBody>) -> ApiResult<Json<Value>> {
     if b.from.is_empty() {
         return Err(err(400, "Nothing to move"));
     }
     blocking(move || {
         let roots = roots_of(&st);
         let to = target(&roots, &b.to_root, &b.to_path)?;
-        let from = b
-            .from
-            .iter()
-            .map(|p| target(&roots, &b.root, p))
-            .collect::<ApiResult<Vec<_>>>()?;
+        let from = b.from.iter().map(|p| target(&roots, &b.root, p)).collect::<ApiResult<Vec<_>>>()?;
         ops::move_items(&st, &Who::of(&u), &from, &to).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// `POST /api/files/trash` body.
@@ -243,24 +194,15 @@ struct TrashBody {
 }
 
 /// POST /api/files/trash: move items to the trash.
-async fn to_trash(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<TrashBody>,
-) -> ApiResult<Json<Value>> {
+async fn to_trash(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TrashBody>) -> ApiResult<Json<Value>> {
     if b.paths.is_empty() {
         return Err(err(400, "Nothing to move to trash"));
     }
     blocking(move || {
         let roots = roots_of(&st);
-        let items = b
-            .paths
-            .iter()
-            .map(|p| target(&roots, &b.root, p))
-            .collect::<ApiResult<Vec<_>>>()?;
+        let items = b.paths.iter().map(|p| target(&roots, &b.root, p)).collect::<ApiResult<Vec<_>>>()?;
         trash::trash(&st, &Who::of(&u), &items).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// GET /api/files/trash: what the trash holds.
@@ -276,20 +218,12 @@ struct RestoreBody {
 }
 
 /// POST /api/files/restore: put trash items back where they were.
-async fn restore(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<RestoreBody>,
-) -> ApiResult<Json<Value>> {
+async fn restore(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<RestoreBody>) -> ApiResult<Json<Value>> {
     blocking(move || trash::restore(&st, &Who::of(&u), &roots_of(&st), &b.items).map(Json)).await
 }
 
 /// DELETE /api/files/trash/{id}: delete one trash item for good.
-async fn delete_forever(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
+async fn delete_forever(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<StatusCode> {
     if !trash::valid_id(&id) {
         return Err(err(404, "That isn't in the trash"));
     }
@@ -311,11 +245,7 @@ struct FileQ {
 }
 
 /// GET /api/files/tags: a file's tags.
-async fn get_tags(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Query(q): Query<FileQ>,
-) -> ApiResult<Json<Value>> {
+async fn get_tags(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<FileQ>) -> ApiResult<Json<Value>> {
     blocking(move || tags::get(&target(&roots_of(&st), &q.root, &q.path)?).map(Json)).await
 }
 
@@ -331,16 +261,11 @@ struct TagsBody {
 }
 
 /// PUT /api/files/tags: write a file's tags (its library row follows).
-async fn put_tags(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<TagsBody>,
-) -> ApiResult<Json<Value>> {
+async fn put_tags(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TagsBody>) -> ApiResult<Json<Value>> {
     blocking(move || {
         let t = target(&roots_of(&st), &b.root, &b.path)?;
         tags::put(&st, &Who::of(&u), &t, &b.tags).map(Json)
-    })
-    .await
+    }).await
 }
 
 /// `POST /api/files/upload` query.
@@ -393,12 +318,7 @@ impl Drop for PendingRows {
 
 /// `POST /api/files/upload?root=&path=&conflict=`: multipart `file` parts, each streamed to a part file of its
 /// own and renamed when complete (see encore_files::upload).
-async fn upload_files(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Query(q): Query<UploadQ>,
-    mut form: Multipart,
-) -> ApiResult<Json<Value>> {
+async fn upload_files(State(st): State<AppState>, Admin(u): Admin, Query(q): Query<UploadQ>, mut form: Multipart) -> ApiResult<Json<Value>> {
     use tokio::io::AsyncWriteExt;
     let who = Who::of(&u);
     let conflict = Conflict::parse(q.conflict.as_deref())?;
@@ -408,14 +328,10 @@ async fn upload_files(
             let t = target(&roots_of(&st), &q.root, &q.path)?;
             t.open_dir()?;
             Ok(t)
-        })
-        .await?
+        }).await?
     };
     let mut outcomes: Vec<Outcome> = vec![];
-    let pending = std::sync::Arc::new(PendingRows {
-        st: st.clone(),
-        change: std::sync::Mutex::new(Change::default()),
-    });
+    let pending = std::sync::Arc::new(PendingRows { st: st.clone(), change: std::sync::Mutex::new(Change::default()) });
     let stopped = loop {
         let mut field = match form.next_field().await {
             Ok(Some(f)) => f,
@@ -423,9 +339,7 @@ async fn upload_files(
             Err(e) => break Some(err(400, format!("The upload stopped: {e}"))),
         };
         // a part without a filename is a form field, not a file
-        let Some(sent) = field.file_name().map(String::from) else {
-            continue;
-        };
+        let Some(sent) = field.file_name().map(String::from) else { continue };
         let begun = {
             let (b, s) = (base.clone(), sent.clone());
             blocking(move || upload::begin(&b, &s, conflict)).await
@@ -439,10 +353,7 @@ async fn upload_files(
             }
             // this file can't go there (a folder that can't be made, say): the others still can
             Err(e) => {
-                outcomes.push(Outcome::Skipped {
-                    sent,
-                    reason: e.detail,
-                });
+                outcomes.push(Outcome::Skipped { sent, reason: e.detail });
                 continue;
             }
         };
@@ -457,36 +368,22 @@ async fn upload_files(
         let mut size: u64 = 0;
         // Err(true): the client went away (the whole upload stops); Err(false): this file couldn't be written
         let written: Result<(), (bool, String)> = async {
-            while let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|e| (true, format!("The upload stopped: {e}")))?
-            {
+            while let Some(chunk) = field.chunk().await.map_err(|e| (true, format!("The upload stopped: {e}")))? {
                 size += chunk.len() as u64;
-                out.write_all(&chunk)
-                    .await
-                    .map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
+                out.write_all(&chunk).await.map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
             }
-            out.flush()
-                .await
-                .map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
-            out.sync_all()
-                .await
-                .map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
+            out.flush().await.map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
+            out.sync_all().await.map_err(|e| (false, format!("Couldn't write {sent}: {e}")))?;
             Ok(())
-        }
-        .await;
+        }.await;
         drop(out);
         match written {
             Ok(()) => {
                 let (rows, who2) = (pending.clone(), who.clone());
                 let o = blocking(move || {
                     let mut ch = rows.change.lock().unwrap_or_else(|e| e.into_inner());
-                    Ok(upload::finish(
-                        &rows.st, &who2, inc, size, conflict, &mut ch,
-                    ))
-                })
-                .await?;
+                    Ok(upload::finish(&rows.st, &who2, inc, size, conflict, &mut ch))
+                }).await?;
                 outcomes.push(o);
             }
             Err((gone, why)) => {
@@ -505,8 +402,7 @@ async fn upload_files(
             tracing::warn!("files: reading in uploaded songs: {e:#}");
         }
         Ok(())
-    })
-    .await;
+    }).await;
     match stopped {
         Some(e) if outcomes.is_empty() => Err(e),
         _ => Ok(Json(upload::answer(&outcomes))),
@@ -529,21 +425,10 @@ struct PreviewBody {
 }
 
 /// POST /api/files/import/preview: how a folder would be imported: its albums, their matches and the new paths.
-async fn import_preview(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Json(b): Json<PreviewBody>,
-) -> ApiResult<Json<Value>> {
+async fn import_preview(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<PreviewBody>) -> ApiResult<Json<Value>> {
     let mode = Mode::parse(&b.mode)?;
     let t = target(&roots_of(&st), &b.root, &b.path)?;
-    import::preview(
-        &st,
-        &t,
-        mode,
-        b.release_id.as_deref().filter(|r| !r.is_empty()),
-    )
-    .await
-    .map(Json)
+    import::preview(&st, &t, mode, b.release_id.as_deref().filter(|r| !r.is_empty())).await.map(Json)
 }
 
 /// `POST /api/files/import/match` body.
@@ -564,20 +449,14 @@ struct MatchBody {
 }
 
 /// POST /api/files/import/match: releases that may be a folder's album.
-async fn import_match(
-    State(st): State<AppState>,
-    Admin(_): Admin,
-    Json(b): Json<MatchBody>,
-) -> ApiResult<Json<Value>> {
+async fn import_match(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<MatchBody>) -> ApiResult<Json<Value>> {
     let t = target(&roots_of(&st), &b.root, &b.path)?;
     let f = {
         let t2 = t.clone();
         blocking(move || import::folder(&t2, &t2.rel())).await?
     };
     let provider = b.provider.unwrap_or_else(|| "musicbrainz".into());
-    import::candidates(&st, &f, &b.artist, &b.album, &provider)
-        .await
-        .map(Json)
+    import::candidates(&st, &f, &b.artist, &b.album, &provider).await.map(Json)
 }
 
 /// One album of an import: its folder and the release to tag it with.
@@ -605,21 +484,11 @@ struct ApplyBody {
 }
 
 /// POST /api/files/import/apply: import a folder's albums into the library.
-async fn import_apply(
-    State(st): State<AppState>,
-    Admin(u): Admin,
-    Json(b): Json<ApplyBody>,
-) -> ApiResult<Json<Value>> {
+async fn import_apply(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<ApplyBody>) -> ApiResult<Json<Value>> {
     let mode = Mode::parse(&b.mode)?;
     let t = target(&roots_of(&st), &b.root, &b.path)?;
-    let albums: Vec<(String, Option<String>)> = b
-        .albums
-        .into_iter()
-        .map(|a| (a.folder, a.release_id))
-        .collect();
-    import::apply(&st, &Who::of(&u), &t, mode, &albums)
-        .await
-        .map(Json)
+    let albums: Vec<(String, Option<String>)> = b.albums.into_iter().map(|a| (a.folder, a.release_id)).collect();
+    import::apply(&st, &Who::of(&u), &t, mode, &albums).await.map(Json)
 }
 
 #[cfg(test)]
