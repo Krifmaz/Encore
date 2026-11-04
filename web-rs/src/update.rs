@@ -438,8 +438,10 @@ mod tests {
     #[test]
     fn the_server_names_its_build_in_health() {
         // the field this module reads is the one the server sends
+        // (the answer and the parsing are the kit's kit-server-health since the server moved onto it: it sends
+        // `web` from the script name Encore hands it)
         let lib = include_str!("../../server/crates/api/src/lib.rs");
-        assert!(lib.contains(r#""web": web"#), "/api/health sends `web`");
-        assert!(lib.contains(r#"strip_prefix("encore-web-")"#), "the server reads the same script name");
+        assert!(lib.contains("kit_server_health::Health::new(crate::VERSION, web)"), "/api/health sends `web`");
+        assert!(lib.contains(r#"const WEB_SCRIPT: &str = "encore-web-";"#), "the server reads the same script name");
     }
 }

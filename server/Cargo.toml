@@ -27,6 +27,16 @@ encore-requests = { path = "crates/requests" }
 encore-api = { path = "crates/api" }
 encore-files = { path = "crates/files" }
 encore-plugins = { path = "crates/plugins" }
+# the shared server crates of Krifmaz/kit (health, What's new, notices, bug reports, diagnostics, settings, updates),
+# pinned to a kit commit until the kit's first release (v0.1.0)
+kit-server-core = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
+kit-server-health = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
+kit-server-changelog = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143", default-features = false }
+kit-server-notices = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
+kit-server-bugreports = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
+kit-server-diagnostics = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
+kit-server-settings = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143", default-features = false }
+kit-server-updates = { git = "https://github.com/Krifmaz/kit", rev = "d24d02cc0b1312398af5f522c86ff2f1de894143" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }

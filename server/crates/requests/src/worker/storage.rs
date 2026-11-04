@@ -398,13 +398,18 @@ pub fn tick<C: Ctx>(st: &C) -> Option<tokio::task::JoinHandle<()>> {
 /// 15 s: the answer then says a check still runs (`downloads.checking`), and the folder it waits on counts as
 /// failing after half a minute.
 pub async fn check_now<C: Ctx>(st: &C, admin: bool) -> Value {
+    probe_all(st).await;
+    status(st, admin)
+}
+
+/// [`check_now`]'s probe: every folder, the download folders too, waited for at most 15 s.
+pub async fn probe_all<C: Ctx>(st: &C) {
     let s = st.clone();
     let check = tokio::task::spawn_blocking(move || {
         let _ = health_check(&s, None, None, true, true);
         super::downloads::probe_now(&s);
     });
     let _ = tokio::time::timeout(std::time::Duration::from_secs(15), check).await;
-    status(st, admin)
 }
 
 /// Requests waiting for the storage now.
@@ -449,8 +454,8 @@ pub fn status(st: &impl Ctx, admin: bool) -> Value {
     v
 }
 
-/// [`status`] without the download folders.
-fn imports_status(st: &impl Ctx, admin: bool) -> Value {
+/// [`status`] without the download folders (the `downloads` notice is served through the kit's notices).
+pub fn imports_status(st: &impl Ctx, admin: bool) -> Value {
     let h = lock(st);
     let (problem, checked_at) = (h.problem.clone(), h.checked_at);
     drop(h);

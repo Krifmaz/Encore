@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+kit-server-core = { workspace = true }
 encore-core = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }

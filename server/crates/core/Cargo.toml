@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+kit-server-core = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }

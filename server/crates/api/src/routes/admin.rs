@@ -1,6 +1,5 @@
 //! /api/admin: users & permissions, invites, settings, activity log.
 use crate::auth::{self, Admin, Owner};
-use encore_config::Config;
 use encore_db::{now, RowExt};
 use encore_core::error::{err, ApiResult};
 use encore_db::p;
@@ -20,12 +19,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/permissions", get(permissions))
         .route("/api/admin/invites", get(invites).post(create_invite))
         .route("/api/admin/invites/{iid}", delete(delete_invite))
-        .route("/api/admin/settings", get(get_settings).put(put_settings))
         .route("/api/admin/settings/api-key", post(regen_api_key))
-        .route("/api/admin/settings/schema", get(settings_schema))
-        .route("/api/admin/settings/secret/{key}", get(reveal_secret))
         .route("/api/system/api-key", get(api_key))
         .route("/api/system/activity", get(activity))
+        // GET/PUT /api/admin/settings, the schema and a saved secret: the kit's settings routes (Encore's hooks below)
+        .merge(kit_server_settings::router())
 }
 
 /// GET /api/admin/users: every account with its invite.
@@ -277,11 +275,6 @@ async fn delete_invite(State(st): State<AppState>, Admin(_): Admin, Path(iid): P
     Ok(Json(json!({ "ok": true })))
 }
 
-/// GET /api/admin/settings: every setting, secrets masked.
-async fn get_settings(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
-    Json(dump(&st))
-}
-
 /// Every setting for the admin UI, with gamdl's wrapper fields credited to the Apple Music wrapper plugin
 /// while it is on and they are its own (the gamdl card then shows them read-only).
 fn dump(st: &AppState) -> Value {
@@ -292,40 +285,50 @@ fn dump(st: &AppState) -> Value {
     out
 }
 
-/// The pages, cards and fields of Settings → Server (docs/contracts/settings-schema.md); the values are in
-/// GET /api/admin/settings.
-async fn settings_schema(State(st): State<AppState>, Admin(_): Admin) -> Json<Value> {
-    Json(st.cfg.schema())
-}
+/// Encore's side of the settings routes (kit-server-settings): its values are `Config`, the API key is kept
+/// for its own route, the WireGuard key is never shown, and a save checks the signup mode, probes changed
+/// folders and tells the plugins and Soulseek.
+impl kit_server_settings::SettingsHost for AppState {
+    fn settings(&self) -> &dyn kit_server_settings::Values {
+        &self.cfg
+    }
 
-/// PUT /api/admin/settings: change settings (unknown, masked, locked and api_key values are left out).
-async fn put_settings(State(st): State<AppState>, Admin(me): Admin, Json(values): Json<Map<String, Value>>) -> ApiResult<Json<Value>> {
-    let mut clean = Map::new();
-    for (k, v) in values {
-        if st.cfg.def(&k).is_none() || Config::is_masked(&v) || k == "api_key" || st.cfg.env_locked(&k) {
-            continue;
+    async fn owner(&self, parts: &mut axum::http::request::Parts) -> kit_server_core::Result<kit_server_core::Account> {
+        let Owner(u) = <Owner as axum::extract::FromRequestParts<AppState>>::from_request_parts(parts, self).await?;
+        Ok(kit_server_core::Account::from_row(u))
+    }
+
+    fn dump(&self) -> Value {
+        dump(self)
+    }
+
+    fn kept(&self) -> &'static [&'static str] {
+        &["api_key"]
+    }
+
+    fn unrevealed(&self, key: &str) -> Option<&'static str> {
+        // the WireGuard private key never goes back to a browser
+        (key == "vpn_wireguard_config").then_some("The WireGuard config can't be shown – paste it again to replace it")
+    }
+
+    fn before_save(&self, values: &Map<String, Value>) -> kit_server_core::Result<Vec<Value>> {
+        if let Some(m) = values.get("signup_mode").and_then(|v| v.as_str()) {
+            if !matches!(m, "invite" | "open" | "closed") {
+                return Err(kit_server_core::err(400, "signup_mode must be invite, open or closed"));
+            }
         }
-        clean.insert(k, v);
+        Ok(folder_warnings(values, |k| self.cfg.get(k)))
     }
-    if let Some(m) = clean.get("signup_mode").and_then(|v| v.as_str()) {
-        if !matches!(m, "invite" | "open" | "closed") {
-            return Err(err(400, "signup_mode must be invite, open or closed"));
-        }
+
+    fn after_save(&self, keys: &[String]) {
+        // the 0.30 apps' auto-update switches (tools_auto_<id>) are the plugins' own for one more release
+        self.plugins.follow_auto_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        self.requests.slskd.poke(); // a changed Soulseek login or port takes effect now, not at the next check
     }
-    let mut keys: Vec<&String> = clean.keys().collect();
-    keys.sort();
-    st.db.log("info", &format!("{} updated settings: {}", me.s("username"), keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-    let warnings = folder_warnings(&clean, |k| st.cfg.get(k));
-    let saved: Vec<String> = clean.keys().cloned().collect();
-    st.cfg.set_many(&Value::Object(clean));
-    // the 0.30 apps' auto-update switches (tools_auto_<id>) are the plugins' own for one more release
-    st.plugins.follow_auto_keys(&saved.iter().map(String::as_str).collect::<Vec<_>>());
-    st.requests.slskd.poke(); // a changed Soulseek login or port takes effect now, not at the next check
-    let mut out = dump(&st);
-    if !warnings.is_empty() {
-        out["_warnings"] = json!(warnings);
+
+    fn log(&self, message: &str) {
+        self.db.log("info", message);
     }
-    Ok(Json(out))
 }
 
 /// Folders Encore has to write to, probed when one changes so a wrong PUID/PGID shows on the card at
@@ -356,20 +359,6 @@ fn folder_warnings(saved: &Map<String, Value>, current: impl Fn(&str) -> Value) 
 /// The API key acts as the owner – only the owner may see or change it.
 async fn api_key(State(st): State<AppState>, Owner(_): Owner) -> Json<Value> {
     Json(json!({ "api_key": st.cfg.str("api_key") }))
-}
-
-/// One saved secret in plain text, for the eye/copy buttons in Settings. Owner only, and logged.
-async fn reveal_secret(State(st): State<AppState>, Owner(me): Owner, Path(key): Path<String>) -> ApiResult<Json<Value>> {
-    if st.cfg.def(&key).is_none() {
-        return Err(err(404, "Unknown setting"));
-    }
-    // the WireGuard private key never goes back to a browser
-    if key == "vpn_wireguard_config" {
-        return Err(err(403, "The WireGuard config can't be shown – paste it again to replace it"));
-    }
-    st.db.log("info", &format!("{} viewed the saved {key}", me.s("username")));
-    let v = st.cfg.get(&key);
-    Ok(Json(json!({ "key": key, "value": v.as_str().map(String::from).unwrap_or_else(|| v.to_string()) })))
 }
 
 /// POST /api/admin/settings/api-key: make a new API key (the owner).

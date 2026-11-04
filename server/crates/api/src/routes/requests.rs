@@ -536,15 +536,50 @@ async fn download_anyway(State(st): State<AppState>, User(u): User, Path(rid): P
 
 /// `GET /api/requests/storage`: whether imports go on, for the banner on the Requests page. Admins get the
 /// folder, the operation and the error; everyone else whether imports are paused and the plain words.
+/// `downloads` is the kit notice of the download folders ([`downloads_notice`]), as it reads now.
 async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
+    use kit_server_notices::NoticesHost;
     let admin = encore_config::perms::is_admin(&u);
-    st.blocking(move |st| Ok(Json(worker::storage::status(st, admin)))).await
+    let mut v = st.blocking(move |st| Ok(worker::storage::imports_status(st, admin))).await?;
+    v["downloads"] = st.notices().current(&st, DOWNLOADS, admin).await.map(Value::from).unwrap_or(Value::Null);
+    Ok(Json(v))
 }
 
-/// `POST /api/requests/storage/check` (admins): Check again – every folder probed now; the answer is the new
-/// state, and waiting imports resume at once when it passes.
+/// `POST /api/requests/storage/check` (admins): Check again – every folder probed now (the kit notice's check);
+/// the answer is the new state, and waiting imports resume at once when it passes.
 async fn storage_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    Ok(Json(worker::storage::check_now(&st, true).await))
+    use kit_server_notices::NoticesHost;
+    let downloads = st.notices().check(&st, DOWNLOADS, true).await.map(Value::from).unwrap_or(Value::Null);
+    let mut v = worker::storage::imports_status(&st, true);
+    v["downloads"] = downloads;
+    Ok(Json(v))
+}
+
+/// The id of the download folders' notice.
+const DOWNLOADS: &str = "downloads";
+
+/// The download folders' notice (the banner on every page; the `downloads` part of `GET /api/requests/storage`):
+/// how it reads now is the last probe's ([`worker::downloads::status`]; the probe runs every minute), and Check
+/// again probes every folder (the library's storage too) first, waiting at most 15 s
+/// ([`worker::storage::probe_all`]). The three sentences are the web app's Check again toasts.
+pub(crate) fn downloads_notice() -> kit_server_notices::NoticeCheck<AppState> {
+    use kit_server_notices::{Notice, NoticeCheck, Severity, Toasts};
+    NoticeCheck::new(
+        DOWNLOADS,
+        Severity::Warn,
+        |st: &AppState, admin| Notice::from(worker::downloads::status(st, admin)),
+        |st: AppState, admin| async move {
+            worker::storage::probe_all(&st).await;
+            Notice::from(worker::downloads::status(&st, admin))
+        },
+    )
+    .toasts(Toasts::new("A downloads folder still can't be written", "Still checking the downloads folders", "The downloads folders can be written"))
+}
+
+impl kit_server_notices::NoticesHost for AppState {
+    fn notices(&self) -> kit_server_notices::Notices<AppState> {
+        kit_server_notices::Notices::new().register(downloads_notice())
+    }
 }
 
 /// The fault seam for a live test run (`--features fault-io`, never a release build): `{prefix, op, errno}`

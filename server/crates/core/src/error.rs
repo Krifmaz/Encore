@@ -57,3 +57,17 @@ impl From<anyhow::Error> for ApiError {
         ApiError::new(500, e.to_string())
     }
 }
+
+/// A kit server crate's error answers as Encore's own: same status, `detail` and extra fields.
+impl From<kit_server_core::Error> for ApiError {
+    fn from(e: kit_server_core::Error) -> Self {
+        ApiError { status: e.status, detail: e.detail, extra: e.extra }
+    }
+}
+
+/// Encore's error handed to a kit server crate (the sign-in check's 401 / 403), unchanged.
+impl From<ApiError> for kit_server_core::Error {
+    fn from(e: ApiError) -> Self {
+        kit_server_core::Error { status: e.status, detail: e.detail, extra: e.extra }
+    }
+}
