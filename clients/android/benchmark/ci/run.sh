@@ -21,9 +21,10 @@ ARGS=(--no-daemon --stacktrace
   "-P$A.encore.compilation=${COMPILATION:-partial}"
   "-P$A.encore.iterations=${ITERATIONS:-5}"
   "-P$A.encore.startupIterations=${STARTUP_ITERATIONS:-10}")
-if [ "${EMULATOR:-0}" = 1 ]; then
-  ARGS+=("-P$A.androidx.benchmark.suppressErrors=EMULATOR")
-fi
+# errors Macrobenchmark lets pass: an emulator in CI (the debug pass adds DEBUGGABLE; a repeated -P would not override)
+SUPPRESS=""
+if [ "${EMULATOR:-0}" = 1 ]; then SUPPRESS=EMULATOR; fi
+if [ -n "$SUPPRESS" ]; then ARGS+=("-P$A.androidx.benchmark.suppressErrors=$SUPPRESS"); fi
 if [ "${PROFILE:-0}" = 1 ]; then
   mkdir -p benchmark/build
   gradle "${ARGS[@]}" :app:generateBaselineProfile > benchmark/build/gradle-profile.log 2>&1 \
@@ -57,12 +58,17 @@ if [ "${STRICTMODE:-0}" = 1 ]; then
   quiet_gradle benchmark/build/gradle-install-debug.log --no-daemon :app:installDebug || true
   adb logcat -c
   rm -rf "$RESULTS" "$OUT"
-  quiet_gradle benchmark/build/gradle-debug-pass.log "${ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest \
+  # the arguments this pass sets itself are left out of ARGS (Gradle keeps the first of a repeated -P)
+  DEBUG_ARGS=()
+  for a in "${ARGS[@]}"; do
+    case "$a" in *suppressErrors=*|*encore.compilation=*|*encore.iterations=*) ;; *) DEBUG_ARGS+=("$a") ;; esac
+  done
+  quiet_gradle benchmark/build/gradle-debug-pass.log "${DEBUG_ARGS[@]}" :benchmark:connectedBenchmarkReleaseAndroidTest \
     "-P$A.class=app.encore.android.benchmark.JourneyBenchmarks" \
     "-P$A.encore.package=app.encore.client.debug" \
     "-P$A.encore.compilation=none" \
     "-P$A.encore.iterations=1" \
-    "-P$A.androidx.benchmark.suppressErrors=EMULATOR,DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
+    "-P$A.androidx.benchmark.suppressErrors=${SUPPRESS:+$SUPPRESS,}DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
   python3 benchmark/ci/failures.py "$RESULTS" "$OUT" || true
   adb logcat -d -v brief > benchmark/build/debug-logcat.txt || true
   python3 benchmark/ci/strictmode.py benchmark/build/debug-logcat.txt | tee benchmark/build/strictmode.md || true

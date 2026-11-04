@@ -145,14 +145,14 @@ private fun UiDevice.flingToEnd(list: UiObject2) {
 }
 
 /**
- * Gets the app ready for a journey: allows its notifications (Android 13+ would otherwise ask on top of the first
- * screen), starts it in a new task (the previous iteration's pages and open player are gone, it opens on Home) and,
- * when it is signed out, signs in with [JourneyArgs]. Ends with the app open on Home with its bottom tabs.
+ * Gets the app ready for a journey: stops it (a still running app would come back with the previous iteration's
+ * pages and open player), allows its notifications (Android 13+ would otherwise ask on top of the first screen),
+ * starts it and, when it is signed out, signs in with [JourneyArgs]. Ends with the app open on Home with its bottom
+ * tabs.
  */
 fun MacrobenchmarkScope.prepare() {
-    if (Build.VERSION.SDK_INT >= 33) {
-        device.executeShellCommand("pm grant $packageName android.permission.POST_NOTIFICATIONS")
-    }
+    killProcess()
+    allowNotifications()
     startActivityAndWait()
     if (!signedIn) {
         val server = device.wait(Until.findObject(By.res(Tags.SERVER_FIELD)), 5_000)
@@ -163,18 +163,19 @@ fun MacrobenchmarkScope.prepare() {
 }
 
 /**
- * For a cold start: signs in the first time (the app is then stopped again, so the measured start is cold) and
- * otherwise only allows the notifications. Never leaves the app running.
+ * For a cold start: signs in the first time and otherwise only allows the notifications, then stops the app (its
+ * playback service or a previous iteration may have left it running), so the measured start is cold.
  */
 fun MacrobenchmarkScope.prepareCold() {
-    if (signedIn) {
-        if (Build.VERSION.SDK_INT >= 33) {
-            device.executeShellCommand("pm grant $packageName android.permission.POST_NOTIFICATIONS")
-        }
-        return
-    }
-    prepare()
+    if (signedIn) allowNotifications() else prepare()
     killProcess()
+}
+
+/** Allows the app's notifications (Android 13+ asks for them on top of the first screen otherwise). */
+private fun MacrobenchmarkScope.allowNotifications() {
+    if (Build.VERSION.SDK_INT >= 33) {
+        device.executeShellCommand("pm grant $packageName android.permission.POST_NOTIFICATIONS")
+    }
 }
 
 /** Fills the sign-in flow (server address, then username and password) from [JourneyArgs]. */
@@ -231,10 +232,23 @@ fun MacrobenchmarkScope.playFirstAlbum() {
     device.wait(Until.hasObject(By.res(Tags.MINI_PLAYER).hasDescendant(By.desc("Pause"))), SCREEN_TIMEOUT_MS)
 }
 
-/** Opens the full player from the mini player and waits for it. */
+/** Opens the full player from the mini player and waits for it (and for its opening animation to end). */
 fun MacrobenchmarkScope.openFullPlayer() {
     device.need(By.res(Tags.MINI_PLAYER), "the mini player").click()
     device.need(By.res(Tags.FULL_PLAYER), "the full player")
+    device.waitForIdle()
+}
+
+/**
+ * Opens the Up next sheet from the full player and returns its list. Taps the button up to three times: a tap while
+ * the player still animates in can be lost on a slow emulator.
+ */
+private fun MacrobenchmarkScope.openUpNext(): UiObject2 {
+    repeat(3) {
+        device.need(By.desc("Up next"), "the Up next button").click()
+        device.wait(Until.findObject(By.res(Tags.UP_NEXT)), 5_000)?.let { return it }
+    }
+    fail(device, "the Up next sheet did not open")
 }
 
 /** Journey: opens the full player and lets the song play for [seconds] seconds (the seek bar and lyrics move). */
@@ -249,8 +263,7 @@ fun MacrobenchmarkScope.watchFullPlayer(seconds: Int = 10) {
  * order the list animates).
  */
 fun MacrobenchmarkScope.editUpNext() {
-    device.need(By.desc("Up next"), "the Up next button").click()
-    val list = device.need(By.res(Tags.UP_NEXT), "the Up next list")
+    val list = openUpNext()
     list.setGestureMargin(device.displayWidth / 5)
     list.fling(Direction.DOWN)
     device.waitForIdle(300)
