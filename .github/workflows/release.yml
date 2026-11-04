@@ -68,7 +68,7 @@ concurrency:
 jobs:
   # The checks every release and every pull request runs (docker.yml runs the same).
   test:
-    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       rust-dirs: server
       wasm-dirs: web-rs
@@ -85,7 +85,7 @@ jobs:
   # the version, the web app (web-rs → static/) and the server tarballs for x86_64 and aarch64
   prepare:
     needs: test
-    uses: Krifmaz/kit/.github/workflows/kit-release.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       stage: prepare
       app-name: Encore
@@ -110,7 +110,7 @@ jobs:
   docker:
     # an Android-only release too: the in-app updater pulls :<version> of every release
     needs: prepare
-    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       image: encore
       version: ${{ needs.prepare.outputs.version }}
@@ -124,7 +124,7 @@ jobs:
   android:
     needs: prepare
     if: inputs.apps || inputs.only == 'android'
-    uses: Krifmaz/kit/.github/workflows/kit-android.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-android.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       app-name: Encore
       version: ${{ needs.prepare.outputs.version }}
@@ -150,7 +150,7 @@ jobs:
   desktop:
     needs: prepare
     if: inputs.apps && inputs.only != 'android'
-    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       app-name: Encore
       version: ${{ needs.prepare.outputs.version }}
@@ -180,7 +180,7 @@ jobs:
     if: >-
       always() && needs.prepare.result == 'success' && needs.docker.result == 'success' &&
       (inputs.only != 'android' || needs.android.result == 'success')
-    uses: Krifmaz/kit/.github/workflows/kit-release.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       stage: publish
       app-name: Encore

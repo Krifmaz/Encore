@@ -46,7 +46,7 @@ jobs:
   # release's tag
   build:
     needs: version
-    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@93ef80f21b96e67489359f1c038e71d4750db095
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       app-name: Encore
       version: ${{ needs.version.outputs.v }}
