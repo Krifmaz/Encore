@@ -18,10 +18,10 @@
 //! through the pass (`every_answer_is_already_enriched`): a new handler that lists music calls it too, and
 //! joins that list.
 use crate::auth;
-use encore_db::Row;
 use crate::state::AppState;
-use encore_library::translate::{self, Mode};
 use axum::http::HeaderMap;
+use encore_db::Row;
+use encore_library::translate::{self, Mode};
 use serde_json::Value;
 
 /// Adds covers, credits and translations to `v` for `user` (None: nobody signed in, or a handler that
@@ -104,7 +104,12 @@ fn apply(st: &AppState, covers: bool, target: Option<&'static str>, v: &mut Valu
 /// so its quote starts the same bytes).
 pub fn mentions_albums(v: &Value) -> bool {
     fn names(s: &str) -> bool {
-        s == "album" || s.ends_with("\"album") || s.starts_with("album_") || s.starts_with("cover_") || s.contains("\"album_") || s.contains("\"cover_")
+        s == "album"
+            || s.ends_with("\"album")
+            || s.starts_with("album_")
+            || s.starts_with("cover_")
+            || s.contains("\"album_")
+            || s.contains("\"cover_")
     }
     match v {
         Value::String(s) => names(s),
@@ -128,7 +133,8 @@ mod tests {
     fn mentions_albums_matches_the_byte_test() {
         let bytes_say = |v: &Value| {
             let b = serde_json::to_vec(v).unwrap();
-            b.windows(7).any(|w| w == b"\"album\"" || w == b"\"album_" || w == b"\"cover_")
+            b.windows(7)
+                .any(|w| w == b"\"album\"" || w == b"\"album_" || w == b"\"cover_")
         };
         let cases = [
             json!({ "album": "x" }),
@@ -165,9 +171,26 @@ mod tests {
         let s = crate::test_support::TestServer::new("enrich-translate");
         let st = s.st.clone();
         st.db.execute("INSERT INTO tracks (id, path, title, artist, album, albumartist, album_id) VALUES (1, '/m/1.flac', '真夏の果実', 'サザン', 'アルバム', 'サザン', 'aa00aa00aa00aa00')", encore_db::p![]).unwrap();
-        encore_library::translate::store::set_manual(&st.db, "真夏の果実", "en", "title", Some("Midsummer Fruit"), Some("Manatsu no Kajitsu")).unwrap();
-        st.db.execute("UPDATE users SET prefs=? WHERE id=1", encore_db::p![r#"{"translate_mode":"under","translate_lang":"en"}"#]).unwrap();
-        let reader = st.db.one("SELECT * FROM users WHERE id=1", encore_db::p![]).unwrap().unwrap();
+        encore_library::translate::store::set_manual(
+            &st.db,
+            "真夏の果実",
+            "en",
+            "title",
+            Some("Midsummer Fruit"),
+            Some("Manatsu no Kajitsu"),
+        )
+        .unwrap();
+        st.db
+            .execute(
+                "UPDATE users SET prefs=? WHERE id=1",
+                encore_db::p![r#"{"translate_mode":"under","translate_lang":"en"}"#],
+            )
+            .unwrap();
+        let reader = st
+            .db
+            .one("SELECT * FROM users WHERE id=1", encore_db::p![])
+            .unwrap()
+            .unwrap();
         let song = || json!([{ "id": 1, "title": "真夏の果実", "artist": "サザン", "album": "アルバム", "album_id": "aa00aa00aa00aa00" }]);
         // nobody signed in, and somebody who has translations off: covers and credits only
         let mut off = reader.clone();
@@ -192,7 +215,10 @@ mod tests {
                 enrich_now(&st, Some(&reader), &mut w);
                 w
             }
-        }).await.map(|w| assert_eq!(w, v)).unwrap();
+        })
+        .await
+        .map(|w| assert_eq!(w, v))
+        .unwrap();
         // no album, no cover: nothing is stamped but the translation
         let mut plain = json!({ "title": "真夏の果実" });
         enrich(&st, None, &mut plain).await;

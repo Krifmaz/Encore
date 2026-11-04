@@ -41,7 +41,9 @@ pub fn router() -> Router<AppState> {
 
 /// A share link's path anywhere in the text: `/s/<token>` (the page) or `/api/share/<token>` (its data,
 /// cover, stream and video).
-static IN_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/(?:api/share|s)/([A-Za-z0-9_-]{4,64})(?:[^A-Za-z0-9_-]|$)").unwrap());
+static IN_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"/(?:api/share|s)/([A-Za-z0-9_-]{4,64})(?:[^A-Za-z0-9_-]|$)").unwrap()
+});
 /// A bare token.
 static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_-]{8,64}$").unwrap());
 
@@ -99,7 +101,12 @@ impl LinkSnapshot {
 
     /// The snapshot of a playlist as it is now.
     fn of_live(owner_id: i64, pl: &SharedPlaylist) -> Self {
-        LinkSnapshot { owner: pl.owner.clone(), owner_id, playlist: pl.id, liked: pl.liked }
+        LinkSnapshot {
+            owner: pl.owner.clone(),
+            owner_id,
+            playlist: pl.id,
+            liked: pl.liked,
+        }
     }
 }
 
@@ -113,16 +120,25 @@ pub(super) fn read_only(pl: &Row) -> ApiResult<()> {
     if !is_linked(pl) {
         return Ok(());
     }
-    Err(match LinkSnapshot::of(pl).map(|s| s.owner).filter(|o| !o.is_empty()) {
-        Some(owner) => err(403, format!("Only {owner} can change this playlist")),
-        None => err(403, "Only its owner can change this playlist"),
-    })
+    Err(
+        match LinkSnapshot::of(pl)
+            .map(|s| s.owner)
+            .filter(|o| !o.is_empty())
+        {
+            Some(owner) => err(403, format!("Only {owner} can change this playlist")),
+            None => err(403, "Only its owner can change this playlist"),
+        },
+    )
 }
 
 /// The name an entry (and a saved copy) gets: the owner's name for the playlist, "Liked Songs · <owner>" for
 /// Liked Songs.
 pub(super) fn link_playlist_name(pl: &SharedPlaylist) -> String {
-    if pl.liked { format!("Liked Songs · {}", pl.owner) } else { pl.name.clone() }
+    if pl.liked {
+        format!("Liked Songs · {}", pl.owner)
+    } else {
+        pl.name.clone()
+    }
 }
 
 /// The owner's playlist an entry shows, when its link still works: the token is there, still shares that
@@ -161,15 +177,25 @@ fn view(st: &AppState, row: &Row) -> ApiResult<(Value, Option<SharedPlaylist>)> 
             let n = listed(st, pl.id)?;
             let owner_id = snap.as_ref().map_or(0, |s| s.owner_id);
             if name != row.s("name") || snap.as_ref().is_none_or(|s| s.owner != pl.owner) {
-                st.db.execute("UPDATE playlists SET name=?, remote_ids=? WHERE id=? AND kind='linked'",
-                    p![name, LinkSnapshot::of_live(owner_id, pl).to_json(), row.i("id")])?;
+                st.db.execute(
+                    "UPDATE playlists SET name=?, remote_ids=? WHERE id=? AND kind='linked'",
+                    p![
+                        name,
+                        LinkSnapshot::of_live(owner_id, pl).to_json(),
+                        row.i("id")
+                    ],
+                )?;
             }
             v["name"] = json!(name);
             v["description"] = json!(pl.description);
             v["total"] = json!(n);
             v["matched"] = json!(n);
             // only when a listed song has a cover: the link's picture route answers 404 otherwise
-            v["cover_url"] = if n > 0 && super::library::playlist_has_cover(st, pl) { json!(format!("/api/share/{}/cover", row.s("source_url"))) } else { Value::Null };
+            v["cover_url"] = if n > 0 && super::library::playlist_has_cover(st, pl) {
+                json!(format!("/api/share/{}/cover", row.s("source_url")))
+            } else {
+                Value::Null
+            };
             v["linked"] = json!({ "owner": pl.owner, "active": true, "liked": pl.liked });
         }
         None => {
@@ -226,7 +252,13 @@ pub(super) fn added_by_all(st: &AppState, uid: i64) -> ApiResult<HashMap<String,
 
 /// The user's entry for this link's token, when they have one.
 pub(super) fn entry_for(st: &AppState, uid: i64, token: &str) -> ApiResult<Option<i64>> {
-    Ok(st.db.one("SELECT id FROM playlists WHERE user_id=? AND kind='linked' AND source_url=?", p![uid, token])?.map(|r| r.i("id")))
+    Ok(st
+        .db
+        .one(
+            "SELECT id FROM playlists WHERE user_id=? AND kind='linked' AND source_url=?",
+            p![uid, token],
+        )?
+        .map(|r| r.i("id")))
 }
 
 // ---- adding ------------------------------------------------------------------------------------------
@@ -270,8 +302,13 @@ pub(super) fn add_link(st: &AppState, u: &Row, token: &str) -> ApiResult<Value> 
     }))?;
     if added {
         // the owner sees how many people added it, never who: an admin who shares reads this log too
-        let what = if pl.liked { format!("{}'s Liked Songs", pl.owner) } else { format!("{}'s playlist '{name}'", pl.owner) };
-        st.db.log("info", &format!("Someone added {what} to their playlists"));
+        let what = if pl.liked {
+            format!("{}'s Liked Songs", pl.owner)
+        } else {
+            format!("{}'s playlist '{name}'", pl.owner)
+        };
+        st.db
+            .log("info", &format!("Someone added {what} to their playlists"));
     }
     Ok(json!({ "id": id, "name": name, "added": added }))
 }
@@ -290,19 +327,33 @@ fn token_in(body: &LinkBody) -> ApiResult<String> {
 }
 
 /// `POST /api/playlists/shared {link}`: Add a shared playlist from a pasted link (every app).
-async fn add_shared(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
-    st.blocking(move |st| add_link(st, &u, &token_in(&b)?).map(Json)).await
+async fn add_shared(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
+    st.blocking(move |st| add_link(st, &u, &token_in(&b)?).map(Json))
+        .await
 }
 
 /// `POST /api/share/{token}/add`: the share page's Add to my playlists.
-async fn share_add(State(st): State<AppState>, User(u): User, Path(token): Path<String>) -> ApiResult<Json<Value>> {
-    st.blocking(move |st| add_link(st, &u, &token).map(Json)).await
+async fn share_add(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(token): Path<String>,
+) -> ApiResult<Json<Value>> {
+    st.blocking(move |st| add_link(st, &u, &token).map(Json))
+        .await
 }
 
 /// `POST /api/playlists/shared/check {link}`: what a link would add, without adding it (the phone asks before
 /// it offers Add to my playlists for a link shared into the app). `own` with the owner's playlist id for the
 /// owner; `added` and `id` give the user's entry when they have one.
-async fn check_shared(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+async fn check_shared(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let token = token_in(&b)?;
         let (s, pl) = live_link(st, &token)?;
@@ -316,15 +367,23 @@ async fn check_shared(State(st): State<AppState>, User(u): User, Json(b): Json<L
 }
 
 /// `POST /api/playlists/{pid}/copy`: Save a copy of an entry, as the share page's Save a copy does.
-async fn copy_linked(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn copy_linked(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let row = super::playlists::own(st, pid, &u)?;
         if !is_linked(&row) {
-            return Err(err(400, "Only playlists added from a link can be copied here"));
+            return Err(err(
+                400,
+                "Only playlists added from a link can be copied here",
+            ));
         }
         let pl = resolve(st, &row).ok_or_else(library::link_gone)?;
         library::copy_link(st, &u, &pl, None).map(Json)
-    }).await
+    })
+    .await
 }
 
 #[cfg(test)]

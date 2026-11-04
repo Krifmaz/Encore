@@ -17,16 +17,16 @@
 //!
 //! Each section: `{label, offset}`, plus `short` when the rail shows a shorter text than the bubble.
 use crate::auth::User;
-use encore_core::error::ApiResult;
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::Json;
+use encore_core::error::ApiResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 // the section builders live in encore_library; the tests below reach them through here
-use encore_library::sections::{sections_for, Spec};
 #[cfg(test)]
 use encore_library::sections::{label, letters, By};
+use encore_library::sections::{sections_for, Spec};
 
 /// `GET /api/library/index` query (see the module docs).
 #[derive(Deserialize, Default, Clone)]
@@ -52,20 +52,36 @@ pub struct IndexQ {
 }
 
 /// GET /api/library/index: the list's sections, cached per query.
-pub async fn index(State(st): State<AppState>, User(_): User, Query(a): Query<IndexQ>) -> ApiResult<Json<Value>> {
+pub async fn index(
+    State(st): State<AppState>,
+    User(_): User,
+    Query(a): Query<IndexQ>,
+) -> ApiResult<Json<Value>> {
     if !a.q.trim().is_empty() {
         return Ok(Json(json!([])));
     }
     // the same sections until the songs change (see super::cached_list); built on the blocking pool
     st.blocking(move |st| {
-        let key = format!("index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind, a.types);
+        let key = format!(
+            "index\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            a.kind, a.sort, a.dir, a.artist, a.filter, a.album_kind, a.types
+        );
         let st2 = st.clone();
         let v = super::cached_list(st, &key, move || {
-            let spec = Spec { kind: &a.kind, sort: &a.sort, dir: &a.dir, artist: &a.artist, filter: &a.filter, album_kind: &a.album_kind, album_type: &a.types };
+            let spec = Spec {
+                kind: &a.kind,
+                sort: &a.sort,
+                dir: &a.dir,
+                artist: &a.artist,
+                filter: &a.filter,
+                album_kind: &a.album_kind,
+                album_type: &a.types,
+            };
             sections_for(&st2.db, &st2.library.artists, &st2.library.types, &spec)
         })?;
         Ok(Json((*v).clone()))
-    }).await
+    })
+    .await
 }
 
 #[cfg(test)]

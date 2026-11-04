@@ -5,8 +5,8 @@
 use crate::test_support::{call, send, user, Resp, TestServer};
 use axum::Router;
 use encore_db::{now, p, RowExt};
-use serde_json::{json, Value};
 use encore_http::Ctx as _;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 struct Env {
@@ -22,7 +22,14 @@ struct Env {
 }
 
 async fn login(app: &Router, name: &str) -> String {
-    let (code, _, cookie) = call(app, "POST", "/api/auth/login", "", Some(json!({ "username": name, "password": "a-long-password-1" }))).await;
+    let (code, _, cookie) = call(
+        app,
+        "POST",
+        "/api/auth/login",
+        "",
+        Some(json!({ "username": name, "password": "a-long-password-1" })),
+    )
+    .await;
     assert_eq!(code, axum::http::StatusCode::OK);
     cookie.split(';').next().unwrap_or("").to_string()
 }
@@ -42,7 +49,17 @@ async fn env_at(name: &str, lib: Option<PathBuf>) -> Env {
     let app = ts.app();
     let cookie = login(&app, &admin_name).await;
     let member_cookie = login(&app, &format!("fan-{name}")).await;
-    Env { ts, app, lib, admin, admin_name, cookie, member, member_cookie, next: 1 }
+    Env {
+        ts,
+        app,
+        lib,
+        admin,
+        admin_name,
+        cookie,
+        member,
+        member_cookie,
+        next: 1,
+    }
 }
 
 async fn env(name: &str) -> Env {
@@ -63,14 +80,25 @@ impl Env {
         send(&self.app, method, uri, &self.cookie, body, &[]).await
     }
     async fn trash(&self, body: Value) -> Resp {
-        self.send("POST", "/api/library/albums/trash", Some(body)).await
+        self.send("POST", "/api/library/albums/trash", Some(body))
+            .await
     }
     async fn added(&self, id: i64) -> Value {
-        self.get(&format!("/api/library/tracks/{id}/added")).await.json()
+        self.get(&format!("/api/library/tracks/{id}/added"))
+            .await
+            .json()
     }
     /// One song: a file at `lib/<artist>/<album>/<title>.flac` (a few bytes; its row says `size`) and its row, as a
     /// scan of that file would make it (the folder names are its artist and album). → its id
-    fn song_in(&mut self, base: &Path, artist: &str, album: &str, title: &str, track: i64, size: i64) -> i64 {
+    fn song_in(
+        &mut self,
+        base: &Path,
+        artist: &str,
+        album: &str,
+        title: &str,
+        track: i64,
+        size: i64,
+    ) -> i64 {
         let dir = base.join(artist).join(album);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{title}.flac"));
@@ -100,7 +128,12 @@ impl Env {
 }
 
 fn ids(v: &Value) -> Vec<String> {
-    v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect()
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect()
 }
 
 /// The lists by type: every item carries its filter key; `kind=albums` is format Album, `kind=singles` Singles &
@@ -119,9 +152,33 @@ async fn album_lists_by_type() {
     let all = e.get("/api/library/albums?limit=500").await.json();
     assert_eq!(all["total"], 4, "{all}");
     assert!(!ids(&all).contains(&one_off), "no kind: no One-offs");
-    let type_of = |id: &str| all["items"].as_array().unwrap().iter().find(|i| i["id"] == id).map(|i| i["type"].clone()).unwrap();
-    assert_eq!((type_of(&studio), type_of(&live), type_of(&single), type_of(&ep)), (json!("album"), json!("live"), json!("singles"), json!("singles")));
-    let mut got = ids(&e.get("/api/library/albums?kind=albums&limit=500").await.json());
+    let type_of = |id: &str| {
+        all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .map(|i| i["type"].clone())
+            .unwrap()
+    };
+    assert_eq!(
+        (
+            type_of(&studio),
+            type_of(&live),
+            type_of(&single),
+            type_of(&ep)
+        ),
+        (
+            json!("album"),
+            json!("live"),
+            json!("singles"),
+            json!("singles")
+        )
+    );
+    let mut got = ids(&e
+        .get("/api/library/albums?kind=albums&limit=500")
+        .await
+        .json());
     got.sort();
     let mut want = vec![studio.clone(), live.clone()];
     want.sort();
@@ -131,23 +188,70 @@ async fn album_lists_by_type() {
     let mut want = vec![single.clone(), ep.clone()];
     want.sort();
     assert_eq!(got, want);
-    assert_eq!(ids(&e.get("/api/library/albums?q=now").await.json()), vec![one_off.clone()], "a search finds One-offs");
-    assert_eq!(ids(&e.get("/api/library/albums?type=live&kind=singles").await.json()), vec![live.clone()], "type alone decides");
-    assert_eq!(ids(&e.get("/api/library/albums?type=one_off").await.json()), vec![one_off.clone()]);
-    assert_eq!(e.get("/api/library/albums?type=singles").await.json()["total"], 2);
-    assert_eq!(ids(&e.get("/api/library/albums?type=ep").await.json()), vec![ep.clone()]);
+    assert_eq!(
+        ids(&e.get("/api/library/albums?q=now").await.json()),
+        vec![one_off.clone()],
+        "a search finds One-offs"
+    );
+    assert_eq!(
+        ids(&e
+            .get("/api/library/albums?type=live&kind=singles")
+            .await
+            .json()),
+        vec![live.clone()],
+        "type alone decides"
+    );
+    assert_eq!(
+        ids(&e.get("/api/library/albums?type=one_off").await.json()),
+        vec![one_off.clone()]
+    );
+    assert_eq!(
+        e.get("/api/library/albums?type=singles").await.json()["total"],
+        2
+    );
+    assert_eq!(
+        ids(&e.get("/api/library/albums?type=ep").await.json()),
+        vec![ep.clone()]
+    );
     let bad = e.get("/api/library/albums?type=bogus").await;
     assert_eq!(bad.status, 400);
     assert_eq!(bad.json()["detail"], "Unknown album type");
     let only = e.get("/api/library/albums?ids_only=1&limit=1").await.json();
-    assert_eq!((only["total"].clone(), only["ids"].as_array().unwrap().len(), only["capped"].clone()), (json!(4), 4, json!(false)));
-    assert_eq!(e.get("/api/library/albums?ids_only=1&type=one_off").await.json()["ids"], json!([one_off]));
+    assert_eq!(
+        (
+            only["total"].clone(),
+            only["ids"].as_array().unwrap().len(),
+            only["capped"].clone()
+        ),
+        (json!(4), 4, json!(false))
+    );
+    assert_eq!(
+        e.get("/api/library/albums?ids_only=1&type=one_off")
+            .await
+            .json()["ids"],
+        json!([one_off])
+    );
     // the side index with a type: offsets on the same list
-    let idx = e.get("/api/library/index?kind=albums&type=singles&sort=artist&dir=asc").await.json();
-    let list = e.get("/api/library/albums?type=singles&sort=artist&dir=asc").await.json();
-    assert_eq!(idx, json!([{ "label": "Q", "offset": 0 }, { "label": "S", "offset": 1 }]), "{idx}");
+    let idx = e
+        .get("/api/library/index?kind=albums&type=singles&sort=artist&dir=asc")
+        .await
+        .json();
+    let list = e
+        .get("/api/library/albums?type=singles&sort=artist&dir=asc")
+        .await
+        .json();
+    assert_eq!(
+        idx,
+        json!([{ "label": "Q", "offset": 0 }, { "label": "S", "offset": 1 }]),
+        "{idx}"
+    );
     assert_eq!(list["items"][1]["albumartist"], "Solo");
-    assert_eq!(e.get("/api/library/index?kind=albums&type=bogus").await.status, 400);
+    assert_eq!(
+        e.get("/api/library/index?kind=albums&type=bogus")
+            .await
+            .status,
+        400
+    );
     e.done();
 }
 
@@ -161,17 +265,70 @@ async fn album_type_counts() {
     e.song("Solo", "Song", "Song", 1, 1000);
     let v = e.get("/api/library/album-types").await.json();
     assert_eq!(v["total"], 4);
-    let keys: Vec<&str> = v["types"].as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
-    assert_eq!(keys, ["album", "live", "compilation", "remix", "soundtrack", "demo", "dj_mix", "mixtape", "karaoke", "singles", "one_off", "other"]);
-    let count = |k: &str| v["types"].as_array().unwrap().iter().find(|t| t["key"] == k).unwrap()["count"].as_i64().unwrap();
-    assert_eq!((count("album"), count("live"), count("singles"), count("one_off"), count("remix")), (1, 1, 1, 1, 0));
-    assert_eq!(v["types"].as_array().unwrap().iter().map(|t| t["count"].as_i64().unwrap()).sum::<i64>(), 4);
+    let keys: Vec<&str> = v["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "album",
+            "live",
+            "compilation",
+            "remix",
+            "soundtrack",
+            "demo",
+            "dj_mix",
+            "mixtape",
+            "karaoke",
+            "singles",
+            "one_off",
+            "other"
+        ]
+    );
+    let count = |k: &str| {
+        v["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["key"] == k)
+            .unwrap()["count"]
+            .as_i64()
+            .unwrap()
+    };
+    assert_eq!(
+        (
+            count("album"),
+            count("live"),
+            count("singles"),
+            count("one_off"),
+            count("remix")
+        ),
+        (1, 1, 1, 1, 0)
+    );
+    assert_eq!(
+        v["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["count"].as_i64().unwrap())
+            .sum::<i64>(),
+        4
+    );
     assert_eq!(v["types"][9]["label"], "Singles & EPs");
     assert_eq!(v["types"][10]["label"], "One-offs");
     assert_eq!(v["types"][0]["label"], "Studio albums");
     // an artist's
-    let a = e.get("/api/library/album-types?artist=Live%20Band").await.json();
-    assert_eq!((a["total"].clone(), a["types"][1]["count"].clone()), (json!(1), json!(1)));
+    let a = e
+        .get("/api/library/album-types?artist=Live%20Band")
+        .await
+        .json();
+    assert_eq!(
+        (a["total"].clone(), a["types"][1]["count"].clone()),
+        (json!(1), json!(1))
+    );
     e.done();
 }
 
@@ -188,30 +345,98 @@ async fn album_page_type_history_and_who_added() {
     let rs = db.execute("INSERT INTO requests (user_id, kind, status, created_at, updated_at) VALUES (?, 'track', 'completed', 2000, 2000)", p![sam]).unwrap();
     db.execute("UPDATE tracks SET request_id=?, added_by=?, added_via='request', requested_at=1000 WHERE id IN (1, 2)", p![ra, alex]).unwrap();
     db.execute("UPDATE tracks SET request_id=?, added_by=?, added_via='link', requested_at=2000 WHERE id=3", p![rs, sam]).unwrap();
-    db.execute("UPDATE tracks SET added_by=?, added_via='upload' WHERE id=4", p![e.admin]).unwrap();
-    db.execute("UPDATE tracks SET added_by=9999, added_via='import' WHERE id=5", p![]).unwrap();
+    db.execute(
+        "UPDATE tracks SET added_by=?, added_via='upload' WHERE id=4",
+        p![e.admin],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE tracks SET added_by=9999, added_via='import' WHERE id=5",
+        p![],
+    )
+    .unwrap();
     let v = e.get(&format!("/api/library/albums/{album}")).await.json();
     assert_eq!(v["type"]["key"], "album");
     assert_eq!(v["type"]["label"], "Album");
     assert_eq!(v["type"]["chosen"], Value::Null);
     let h = v["history"].as_array().unwrap();
     assert_eq!(h.len(), 4, "{h:?}");
-    assert_eq!((h[0]["via"].clone(), h[0]["by"].clone(), h[0]["songs"].clone(), h[0]["requested_at"].clone()), (json!("request"), json!("alex"), json!(2), json!(1000.0)));
-    assert_eq!((h[1]["via"].clone(), h[1]["by"].clone(), h[1]["requested_at"].clone()), (json!("link"), json!("sam"), json!(2000.0)));
-    let rest: Vec<(Value, Value, Value)> = h[2..].iter().map(|g| (g["via"].clone(), g["by"].clone(), g["by_deleted"].clone())).collect();
-    assert!(rest.contains(&(json!("upload"), json!(e.admin_name), json!(false))), "{rest:?}");
-    assert!(rest.contains(&(json!("import"), Value::Null, json!(true))), "{rest:?}");
+    assert_eq!(
+        (
+            h[0]["via"].clone(),
+            h[0]["by"].clone(),
+            h[0]["songs"].clone(),
+            h[0]["requested_at"].clone()
+        ),
+        (json!("request"), json!("alex"), json!(2), json!(1000.0))
+    );
+    assert_eq!(
+        (
+            h[1]["via"].clone(),
+            h[1]["by"].clone(),
+            h[1]["requested_at"].clone()
+        ),
+        (json!("link"), json!("sam"), json!(2000.0))
+    );
+    let rest: Vec<(Value, Value, Value)> = h[2..]
+        .iter()
+        .map(|g| (g["via"].clone(), g["by"].clone(), g["by_deleted"].clone()))
+        .collect();
+    assert!(
+        rest.contains(&(json!("upload"), json!(e.admin_name), json!(false))),
+        "{rest:?}"
+    );
+    assert!(
+        rest.contains(&(json!("import"), Value::Null, json!(true))),
+        "{rest:?}"
+    );
     assert!(v["added_at"].as_f64().is_some());
     let t0 = &v["tracks"][0];
-    assert_eq!((t0["added_via"].clone(), t0["added_by_name"].clone(), t0["requested_by"].clone(), t0["requested_at"].clone()), (json!("request"), json!("alex"), json!("alex"), json!(1000.0)));
-    assert!(t0.get("releasetype").is_none(), "the type tags stay on the server");
+    assert_eq!(
+        (
+            t0["added_via"].clone(),
+            t0["added_by_name"].clone(),
+            t0["requested_by"].clone(),
+            t0["requested_at"].clone()
+        ),
+        (
+            json!("request"),
+            json!("alex"),
+            json!("alex"),
+            json!(1000.0)
+        )
+    );
+    assert!(
+        t0.get("releasetype").is_none(),
+        "the type tags stay on the server"
+    );
     assert_eq!(v["tracks"][4]["added_by_deleted"], true);
     // Clear finished deletes the request rows: the names stay (the owner's Mufasa case)
-    let r = e.send("POST", "/api/requests/clear", Some(json!({ "statuses": ["completed"] }))).await;
+    let r = e
+        .send(
+            "POST",
+            "/api/requests/clear",
+            Some(json!({ "statuses": ["completed"] })),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!(e.st().db.one("SELECT COUNT(*) n FROM requests", p![]).unwrap().unwrap().i("n"), 0);
+    assert_eq!(
+        e.st()
+            .db
+            .one("SELECT COUNT(*) n FROM requests", p![])
+            .unwrap()
+            .unwrap()
+            .i("n"),
+        0
+    );
     let v = e.get(&format!("/api/library/albums/{album}")).await.json();
-    assert_eq!((v["tracks"][0]["requested_by"].clone(), v["tracks"][0]["requested_at"].clone()), (json!("alex"), json!(1000.0)));
+    assert_eq!(
+        (
+            v["tracks"][0]["requested_by"].clone(),
+            v["tracks"][0]["requested_at"].clone()
+        ),
+        (json!("alex"), json!(1000.0))
+    );
     assert_eq!(v["tracks"][2]["requested_by"], "sam");
     assert_eq!(v["history"][0]["by"], "alex");
     e.done();
@@ -225,25 +450,74 @@ async fn change_type() {
     e.song("Various Artists", "Now 99", "Hit", 7, 1000);
     let id = encore_library::album_key("Various Artists", "Now 99", "");
     let uri = format!("/api/library/albums/{id}/type");
-    assert_eq!(e.as_member("PUT", &uri, Some(json!({ "format": "album" }))).await.status, 403);
+    assert_eq!(
+        e.as_member("PUT", &uri, Some(json!({ "format": "album" })))
+            .await
+            .status,
+        403
+    );
     let bad = e.send("PUT", &uri, Some(json!({ "format": "lp" }))).await;
-    assert_eq!((bad.status.as_u16(), bad.json()["detail"].clone()), (400, json!("Pick Album, EP, Single or One-off")));
-    assert_eq!(e.send("PUT", "/api/library/albums/nothing/type", Some(json!({ "format": "album" }))).await.status, 404);
-    let r = e.send("PUT", &uri, Some(json!({ "format": "album" }))).await;
+    assert_eq!(
+        (bad.status.as_u16(), bad.json()["detail"].clone()),
+        (400, json!("Pick Album, EP, Single or One-off"))
+    );
+    assert_eq!(
+        e.send(
+            "PUT",
+            "/api/library/albums/nothing/type",
+            Some(json!({ "format": "album" }))
+        )
+        .await
+        .status,
+        404
+    );
+    let r = e
+        .send("PUT", &uri, Some(json!({ "format": "album" })))
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     let t = r.json();
-    assert_eq!((t["format"].clone(), t["kind"].clone(), t["key"].clone(), t["chosen"].clone(), t["why_text"].clone()),
-               (json!("album"), json!("compilation"), json!("compilation"), json!("album"), json!("You chose this")));
+    assert_eq!(
+        (
+            t["format"].clone(),
+            t["kind"].clone(),
+            t["key"].clone(),
+            t["chosen"].clone(),
+            t["why_text"].clone()
+        ),
+        (
+            json!("album"),
+            json!("compilation"),
+            json!("compilation"),
+            json!("album"),
+            json!("You chose this")
+        )
+    );
     assert_eq!(t["auto"]["label"], "Compilation · One-off");
     assert_eq!(t["auto"]["why_text"], "Only 1 of its 7 songs are here");
-    assert_eq!(ids(&e.get("/api/library/albums?kind=albums").await.json()), vec![id.clone()], "in the Albums grid now");
-    assert_eq!(e.get(&format!("/api/library/albums/{id}")).await.json()["type"]["label"], "Compilation");
+    assert_eq!(
+        ids(&e.get("/api/library/albums?kind=albums").await.json()),
+        vec![id.clone()],
+        "in the Albums grid now"
+    );
+    assert_eq!(
+        e.get(&format!("/api/library/albums/{id}")).await.json()["type"]["label"],
+        "Compilation"
+    );
     // a full rescan rewrites the rows, never the choice
     let lib = e.lib.to_string_lossy().to_string();
     e.st().library.scan_sync(&e.st().db, &lib, true);
-    assert_eq!(e.get(&format!("/api/library/albums/{id}")).await.json()["type"]["chosen"], "album");
-    let r = e.send("PUT", &uri, Some(json!({ "format": null }))).await.json();
-    assert_eq!((r["chosen"].clone(), r["format"].clone()), (Value::Null, json!("one_off")));
+    assert_eq!(
+        e.get(&format!("/api/library/albums/{id}")).await.json()["type"]["chosen"],
+        "album"
+    );
+    let r = e
+        .send("PUT", &uri, Some(json!({ "format": null })))
+        .await
+        .json();
+    assert_eq!(
+        (r["chosen"].clone(), r["format"].clone()),
+        (Value::Null, json!("one_off"))
+    );
     assert!(ids(&e.get("/api/library/albums").await.json()).is_empty());
     e.done();
 }
@@ -262,13 +536,25 @@ async fn albums_to_the_trash_and_back() {
     e.song("Ex Artist", "Exclusive", "Two", 2, 524_288);
     let ex = encore_library::album_key("Ex Artist", "Exclusive", "");
     std::fs::write(e.lib.join("Ex Artist/Exclusive/cover.jpg"), b"jpg").unwrap();
-    e.st().db.execute("UPDATE tracks SET added_by=?, added_via='request', requested_at=1000 WHERE album_id=?", p![alex, ex]).unwrap();
+    e.st()
+        .db
+        .execute(
+            "UPDATE tracks SET added_by=?, added_via='request', requested_at=1000 WHERE album_id=?",
+            p![alex, ex],
+        )
+        .unwrap();
     // two albums sharing a folder (only one goes); its song has lyrics beside it
     let y1 = e.song("Shared", "Mixed", "Yes", 1, 524_288);
     let shared_dir = e.lib.join("Shared/Mixed");
     std::fs::write(shared_dir.join("Yes.lrc"), b"[00:01]la").unwrap();
     let yid = "shared-y".to_string();
-    e.st().db.execute("UPDATE tracks SET album_id=?, album='Y' WHERE id=?", p![yid, y1]).unwrap();
+    e.st()
+        .db
+        .execute(
+            "UPDATE tracks SET album_id=?, album='Y' WHERE id=?",
+            p![yid, y1],
+        )
+        .unwrap();
     let z1 = e.song("Shared", "Mixed", "Zed", 2, 1000);
     // an album kept where it was downloaded: its folder is an extra library folder (in Soulseek's folder)
     let slsk = e.ts.dir.join("slskd");
@@ -283,40 +569,151 @@ async fn albums_to_the_trash_and_back() {
     // a liked song and a type choice
     let pid = e.st().db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?, 'Mix', 'playlist', 'manual', '[]', 1, 1)", p![e.admin]).unwrap();
     let item = e.st().db.execute("INSERT INTO playlist_items (playlist_id, position, title, track_id, added_at) VALUES (?, 0, 'One', ?, 1)", p![pid, x1]).unwrap();
-    assert_eq!(e.send("PUT", &format!("/api/library/albums/{ex}/type"), Some(json!({ "format": "ep" }))).await.status, 200);
+    assert_eq!(
+        e.send(
+            "PUT",
+            &format!("/api/library/albums/{ex}/type"),
+            Some(json!({ "format": "ep" }))
+        )
+        .await
+        .status,
+        200
+    );
 
-    assert_eq!(e.as_member("POST", "/api/library/albums/trash", Some(json!({ "ids": [ex], "dry_run": true }))).await.status, 403);
+    assert_eq!(
+        e.as_member(
+            "POST",
+            "/api/library/albums/trash",
+            Some(json!({ "ids": [ex], "dry_run": true }))
+        )
+        .await
+        .status,
+        403
+    );
     let r = e.trash(json!({ "ids": [], "dry_run": true })).await;
-    assert_eq!((r.status.as_u16(), r.json()["detail"].clone()), (400, json!("Pick at least one album")));
+    assert_eq!(
+        (r.status.as_u16(), r.json()["detail"].clone()),
+        (400, json!("Pick at least one album"))
+    );
     let many: Vec<String> = (0..101).map(|i| format!("a{i}")).collect();
     let r = e.trash(json!({ "ids": many, "dry_run": false })).await;
-    assert_eq!((r.status.as_u16(), r.json()["detail"].clone()), (400, json!("At most 100 albums at a time")));
+    assert_eq!(
+        (r.status.as_u16(), r.json()["detail"].clone()),
+        (400, json!("At most 100 albums at a time"))
+    );
     let lots: Vec<String> = (0..5001).map(|i| format!("a{i}")).collect();
-    assert_eq!(e.trash(json!({ "ids": lots, "dry_run": true })).await.status, 400);
+    assert_eq!(
+        e.trash(json!({ "ids": lots, "dry_run": true }))
+            .await
+            .status,
+        400
+    );
     // the dry run counts and touches nothing
-    let d = e.trash(json!({ "ids": [ex, yid], "dry_run": true })).await.json();
-    assert_eq!((d["albums"].clone(), d["songs"].clone(), d["bytes"].clone(), d["text"].clone()), (json!(2), json!(3), json!(1_572_864), json!("Delete 2 albums (1.5 MB)?")));
-    assert_eq!((d["skipped"].clone(), d["skipped_text"].clone(), d["missing"].clone()), (json!([]), json!(""), json!([])));
-    assert_eq!(e.trash(json!({ "ids": [ex], "dry_run": true })).await.json()["text"], "Delete 1 album (1.0 MB)?");
-    let d = e.trash(json!({ "ids": [ex, "outside", "unknown"], "dry_run": true })).await.json();
+    let d = e
+        .trash(json!({ "ids": [ex, yid], "dry_run": true }))
+        .await
+        .json();
+    assert_eq!(
+        (
+            d["albums"].clone(),
+            d["songs"].clone(),
+            d["bytes"].clone(),
+            d["text"].clone()
+        ),
+        (
+            json!(2),
+            json!(3),
+            json!(1_572_864),
+            json!("Delete 2 albums (1.5 MB)?")
+        )
+    );
+    assert_eq!(
+        (
+            d["skipped"].clone(),
+            d["skipped_text"].clone(),
+            d["missing"].clone()
+        ),
+        (json!([]), json!(""), json!([]))
+    );
+    assert_eq!(
+        e.trash(json!({ "ids": [ex], "dry_run": true }))
+            .await
+            .json()["text"],
+        "Delete 1 album (1.0 MB)?"
+    );
+    let d = e
+        .trash(json!({ "ids": [ex, "outside", "unknown"], "dry_run": true }))
+        .await
+        .json();
     assert_eq!(d["missing"], json!(["unknown"]));
     assert_eq!(d["skipped_text"], "1 of them can't be moved to the Trash and stays: Its files are outside the folders Encore manages");
-    assert_eq!(e.st().db.one("SELECT COUNT(*) n FROM tracks", p![]).unwrap().unwrap().i("n"), 6);
+    assert_eq!(
+        e.st()
+            .db
+            .one("SELECT COUNT(*) n FROM tracks", p![])
+            .unwrap()
+            .unwrap()
+            .i("n"),
+        6
+    );
     assert!(e.lib.join("Ex Artist/Exclusive/One.flac").exists());
     // the real run
-    let r = e.trash(json!({ "ids": [ex, yid, kid, "outside"], "dry_run": false })).await;
+    let r = e
+        .trash(json!({ "ids": [ex, yid, kid, "outside"], "dry_run": false }))
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     let v = r.json();
-    assert_eq!((v["albums"].clone(), v["songs"].clone(), v["text"].clone()), (json!(3), json!(4), json!("Moved 3 albums to the Trash")), "{v}");
-    assert_eq!(v["failed"], json!([{ "id": "outside", "album": "Far", "reason": "Its files are outside the folders Encore manages" }]));
-    assert_eq!(v["items"].as_array().unwrap().len(), 3, "the exclusive folder once, the shared song, the kept song: {v}");
-    assert!(!e.lib.join("Ex Artist/Exclusive").exists(), "the album's own folder went whole");
-    assert!(!shared_dir.join("Yes.flac").exists() && !shared_dir.join("Yes.lrc").exists(), "the song and its lyrics went");
-    assert!(shared_dir.join("Zed.flac").exists(), "the other album's song stays");
-    assert!(!kept.join("K.flac").exists() && kept.is_dir(), "the song went, the extra library folder stays");
-    let left: Vec<i64> = e.st().db.query("SELECT id FROM tracks ORDER BY id", p![]).unwrap().iter().map(|r| r.i("id")).collect();
-    assert!(left.contains(&z1) && !left.contains(&x1) && !left.contains(&k1), "{left:?}");
-    assert!(e.st().db.one("SELECT track_id FROM playlist_items WHERE id=?", p![item]).unwrap().unwrap().get("track_id").unwrap().is_null());
+    assert_eq!(
+        (v["albums"].clone(), v["songs"].clone(), v["text"].clone()),
+        (json!(3), json!(4), json!("Moved 3 albums to the Trash")),
+        "{v}"
+    );
+    assert_eq!(
+        v["failed"],
+        json!([{ "id": "outside", "album": "Far", "reason": "Its files are outside the folders Encore manages" }])
+    );
+    assert_eq!(
+        v["items"].as_array().unwrap().len(),
+        3,
+        "the exclusive folder once, the shared song, the kept song: {v}"
+    );
+    assert!(
+        !e.lib.join("Ex Artist/Exclusive").exists(),
+        "the album's own folder went whole"
+    );
+    assert!(
+        !shared_dir.join("Yes.flac").exists() && !shared_dir.join("Yes.lrc").exists(),
+        "the song and its lyrics went"
+    );
+    assert!(
+        shared_dir.join("Zed.flac").exists(),
+        "the other album's song stays"
+    );
+    assert!(
+        !kept.join("K.flac").exists() && kept.is_dir(),
+        "the song went, the extra library folder stays"
+    );
+    let left: Vec<i64> = e
+        .st()
+        .db
+        .query("SELECT id FROM tracks ORDER BY id", p![])
+        .unwrap()
+        .iter()
+        .map(|r| r.i("id"))
+        .collect();
+    assert!(
+        left.contains(&z1) && !left.contains(&x1) && !left.contains(&k1),
+        "{left:?}"
+    );
+    assert!(e
+        .st()
+        .db
+        .one("SELECT track_id FROM playlist_items WHERE id=?", p![item])
+        .unwrap()
+        .unwrap()
+        .get("track_id")
+        .unwrap()
+        .is_null());
     // the Trash lists them, by whom
     let list = e.get("/api/files/trash").await.json();
     let items = list.as_array().unwrap();
@@ -325,26 +722,74 @@ async fn albums_to_the_trash_and_back() {
     let folder = items.iter().find(|i| i["kind"] == "dir").unwrap();
     assert_eq!(folder["name"], "Exclusive");
     let item_dir = encore_files::trash::dir_of(e.st()).join(folder["id"].as_str().unwrap());
-    assert!(item_dir.join("Exclusive/cover.jpg").exists(), "the cover went with the folder");
+    assert!(
+        item_dir.join("Exclusive/cover.jpg").exists(),
+        "the cover went with the folder"
+    );
     let lyric_item = items.iter().find(|i| i["name"] == "Yes.flac").unwrap();
-    assert!(encore_files::trash::dir_of(e.st()).join(lyric_item["id"].as_str().unwrap()).join("Yes.lrc").exists(), "the lyrics are in the song's item");
+    assert!(
+        encore_files::trash::dir_of(e.st())
+            .join(lyric_item["id"].as_str().unwrap())
+            .join("Yes.lrc")
+            .exists(),
+        "the lyrics are in the song's item"
+    );
     // Restore: the album comes back with its id, its choice and who asked for it; the lyrics come back too
-    let r = e.send("POST", "/api/files/restore", Some(json!({ "items": [folder["id"], lyric_item["id"]] }))).await;
+    let r = e
+        .send(
+            "POST",
+            "/api/files/restore",
+            Some(json!({ "items": [folder["id"], lyric_item["id"]] })),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["restored"], 2, "{}", r.text());
-    assert!(shared_dir.join("Yes.lrc").exists(), "the lyrics are back beside the song");
+    assert!(
+        shared_dir.join("Yes.lrc").exists(),
+        "the lyrics are back beside the song"
+    );
     let page = e.get(&format!("/api/library/albums/{ex}")).await.json();
-    assert_eq!(page["tracks"].as_array().map(|a| a.len()), Some(2), "{page}");
+    assert_eq!(
+        page["tracks"].as_array().map(|a| a.len()),
+        Some(2),
+        "{page}"
+    );
     assert_eq!(page["type"]["chosen"], "ep");
     assert_eq!(page["tracks"][0]["requested_by"], "alex");
     assert_eq!(page["tracks"][0]["id"], x1, "the old id");
-    assert_eq!(e.st().db.one("SELECT track_id FROM playlist_items WHERE id=?", p![item]).unwrap().unwrap().i("track_id"), x1);
+    assert_eq!(
+        e.st()
+            .db
+            .one("SELECT track_id FROM playlist_items WHERE id=?", p![item])
+            .unwrap()
+            .unwrap()
+            .i("track_id"),
+        x1
+    );
     // DELETE …/albums/{id}: to the Trash as well
-    let r = e.send("DELETE", &format!("/api/library/albums/{ex}"), None).await;
+    let r = e
+        .send("DELETE", &format!("/api/library/albums/{ex}"), None)
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!((r.json()["ok"].clone(), r.json()["text"].clone()), (json!(true), json!("Moved 1 album to the Trash")));
-    assert_eq!(e.get("/api/files/trash").await.json().as_array().unwrap().len(), 2);
-    assert_eq!(e.send("DELETE", "/api/library/albums/nothing", None).await.status, 404);
+    assert_eq!(
+        (r.json()["ok"].clone(), r.json()["text"].clone()),
+        (json!(true), json!("Moved 1 album to the Trash"))
+    );
+    assert_eq!(
+        e.get("/api/files/trash")
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        e.send("DELETE", "/api/library/albums/nothing", None)
+            .await
+            .status,
+        404
+    );
     assert!(e.st().db.query("SELECT message FROM activity WHERE message LIKE '%moved 3 albums to the Trash (4 songs, %'", p![]).unwrap().len() == 1);
     e.done();
 }
@@ -361,7 +806,13 @@ async fn an_album_missing_a_file_goes_and_one_missing_all_stays() {
     // sharing a folder with another album (so song by song), one of two files gone
     let s1 = e.song("Shared", "Both", "Here", 1, 1000);
     let s2 = e.song("Shared", "Both", "Gone", 2, 1000);
-    e.st().db.execute("UPDATE tracks SET album_id='half', album='Half' WHERE id IN (?, ?)", p![s1, s2]).unwrap();
+    e.st()
+        .db
+        .execute(
+            "UPDATE tracks SET album_id='half', album='Half' WHERE id IN (?, ?)",
+            p![s1, s2],
+        )
+        .unwrap();
     std::fs::remove_file(e.lib.join("Shared/Both/Gone.flac")).unwrap();
     let other = e.song("Shared", "Both", "Other", 3, 1000);
     // every file gone (a disk that isn't mounted looks the same)
@@ -369,19 +820,59 @@ async fn an_album_missing_a_file_goes_and_one_missing_all_stays() {
     for i in 1..=2 {
         std::fs::remove_file(e.lib.join(format!("None Artist/None/Song {i}.flac"))).unwrap();
     }
-    let r = e.trash(json!({ "ids": [gap, "half", none], "dry_run": false })).await;
+    let r = e
+        .trash(json!({ "ids": [gap, "half", none], "dry_run": false }))
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     let v = r.json();
-    assert_eq!((v["albums"].clone(), v["text"].clone()), (json!(2), json!("Moved 2 albums to the Trash")), "{v}");
-    assert_eq!(v["failed"], json!([{ "id": none, "album": "None", "reason": encore_files::albums::FILE_MISSING }]));
-    assert_eq!(v["items"].as_array().unwrap().len(), 2, "Gap's folder once, Half's one song there: {v}");
-    assert!(!e.lib.join("Gap Artist/Gap").exists(), "the folder went whole");
-    assert!(!e.lib.join("Shared/Both/Here.flac").exists() && e.lib.join("Shared/Both/Other.flac").exists());
-    let left = |album: &str| e.st().db.one("SELECT COUNT(*) n FROM tracks WHERE album_id=?", p![album]).unwrap().unwrap().i("n");
-    assert_eq!((left(&gap), left("half"), left(&none)), (0, 0, 2), "the gone songs' rows left with their albums; None's stay");
-    assert!(e.st().db.one("SELECT 1 x FROM tracks WHERE id=?", p![other]).unwrap().is_some());
-    let r = e.send("DELETE", &format!("/api/library/albums/{none}"), None).await;
-    assert_eq!((r.status.as_u16(), r.json()["detail"].clone()), (409, json!(encore_files::albums::FILE_MISSING)));
+    assert_eq!(
+        (v["albums"].clone(), v["text"].clone()),
+        (json!(2), json!("Moved 2 albums to the Trash")),
+        "{v}"
+    );
+    assert_eq!(
+        v["failed"],
+        json!([{ "id": none, "album": "None", "reason": encore_files::albums::FILE_MISSING }])
+    );
+    assert_eq!(
+        v["items"].as_array().unwrap().len(),
+        2,
+        "Gap's folder once, Half's one song there: {v}"
+    );
+    assert!(
+        !e.lib.join("Gap Artist/Gap").exists(),
+        "the folder went whole"
+    );
+    assert!(
+        !e.lib.join("Shared/Both/Here.flac").exists()
+            && e.lib.join("Shared/Both/Other.flac").exists()
+    );
+    let left = |album: &str| {
+        e.st()
+            .db
+            .one("SELECT COUNT(*) n FROM tracks WHERE album_id=?", p![album])
+            .unwrap()
+            .unwrap()
+            .i("n")
+    };
+    assert_eq!(
+        (left(&gap), left("half"), left(&none)),
+        (0, 0, 2),
+        "the gone songs' rows left with their albums; None's stay"
+    );
+    assert!(e
+        .st()
+        .db
+        .one("SELECT 1 x FROM tracks WHERE id=?", p![other])
+        .unwrap()
+        .is_some());
+    let r = e
+        .send("DELETE", &format!("/api/library/albums/{none}"), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()["detail"].clone()),
+        (409, json!(encore_files::albums::FILE_MISSING))
+    );
     assert_eq!(left(&none), 2);
     e.done();
 }
@@ -392,7 +883,9 @@ async fn a_library_on_another_disk_needs_no_room_for_the_trash() {
     let shm = PathBuf::from("/dev/shm");
     let probe = std::env::temp_dir();
     use std::os::unix::fs::MetadataExt;
-    let (Ok(a), Ok(b)) = (std::fs::metadata(&shm), std::fs::metadata(&probe)) else { return };
+    let (Ok(a), Ok(b)) = (std::fs::metadata(&shm), std::fs::metadata(&probe)) else {
+        return;
+    };
     if a.dev() == b.dev() {
         eprintln!("/dev/shm is on the temp folder's disk here: skipped");
         return;
@@ -402,9 +895,30 @@ async fn a_library_on_another_disk_needs_no_room_for_the_trash() {
     e.song("Big", "Huge", "One", 1, 10 << 40);
     let id = encore_library::album_key("Big", "Huge", "");
     // the Trash is on the music disk: a library on another disk than the config folder needs no room for it
-    let d = e.send("POST", "/api/library/albums/trash", Some(json!({ "ids": [id], "dry_run": true }))).await.json();
-    assert_eq!((d["other_disk"].clone(), d["room"].clone(), d["room_text"].clone()), (json!(false), json!(true), json!("")), "{d}");
-    let r = e.send("POST", "/api/library/albums/trash", Some(json!({ "ids": [id], "dry_run": false }))).await;
+    let d = e
+        .send(
+            "POST",
+            "/api/library/albums/trash",
+            Some(json!({ "ids": [id], "dry_run": true })),
+        )
+        .await
+        .json();
+    assert_eq!(
+        (
+            d["other_disk"].clone(),
+            d["room"].clone(),
+            d["room_text"].clone()
+        ),
+        (json!(false), json!(true), json!("")),
+        "{d}"
+    );
+    let r = e
+        .send(
+            "POST",
+            "/api/library/albums/trash",
+            Some(json!({ "ids": [id], "dry_run": false })),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert!(!lib.join("Big/Huge/One.flac").exists() && lib.join(".encore-trash").is_dir());
     e.done();
@@ -417,31 +931,78 @@ async fn a_library_on_another_disk_needs_no_room_for_the_trash() {
 async fn who_added_a_song() {
     let mut e = env("added").await;
     let alex = user(e.st(), "alex", "user").i("id");
-    let rows = [("request", Some(alex), Some(1000.0)), ("link", Some(alex), None), ("soulseek", Some(9999), Some(5.0)), ("request", None, None),
-                ("upload", Some(e.admin), None), ("import", Some(9999), None), ("scan", None, None)];
+    let rows = [
+        ("request", Some(alex), Some(1000.0)),
+        ("link", Some(alex), None),
+        ("soulseek", Some(9999), Some(5.0)),
+        ("request", None, None),
+        ("upload", Some(e.admin), None),
+        ("import", Some(9999), None),
+        ("scan", None, None),
+    ];
     let mut ids = vec![];
     for (i, (via, by, at)) in rows.iter().enumerate() {
         let id = e.song("A", "B", &format!("S{i}"), i as i64 + 1, 1);
-        e.st().db.execute("UPDATE tracks SET added_via=?, added_by=?, requested_at=? WHERE id=?", p![via, by, at, id]).unwrap();
+        e.st()
+            .db
+            .execute(
+                "UPDATE tracks SET added_via=?, added_by=?, requested_at=? WHERE id=?",
+                p![via, by, at, id],
+            )
+            .unwrap();
         ids.push(id);
     }
     let v = e.added(ids[0]).await;
-    assert_eq!((v["via"].clone(), v["by"].clone(), v["by_id"].clone(), v["by_deleted"].clone(), v["requested_at"].clone()), (json!("request"), json!("alex"), json!(alex), json!(false), json!(1000.0)));
+    assert_eq!(
+        (
+            v["via"].clone(),
+            v["by"].clone(),
+            v["by_id"].clone(),
+            v["by_deleted"].clone(),
+            v["requested_at"].clone()
+        ),
+        (
+            json!("request"),
+            json!("alex"),
+            json!(alex),
+            json!(false),
+            json!(1000.0)
+        )
+    );
     assert!(v["added_at"].as_f64().is_some());
     assert_eq!(e.added(ids[1]).await["requested_at"], Value::Null);
     let v = e.added(ids[2]).await;
-    assert_eq!((v["via"].clone(), v["by"].clone(), v["by_deleted"].clone()), (json!("soulseek"), Value::Null, json!(true)));
+    assert_eq!(
+        (v["via"].clone(), v["by"].clone(), v["by_deleted"].clone()),
+        (json!("soulseek"), Value::Null, json!(true))
+    );
     let v = e.added(ids[3]).await;
-    assert_eq!((v["by"].clone(), v["by_id"].clone(), v["by_deleted"].clone()), (Value::Null, Value::Null, json!(false)), "a cleared request");
+    assert_eq!(
+        (v["by"].clone(), v["by_id"].clone(), v["by_deleted"].clone()),
+        (Value::Null, Value::Null, json!(false)),
+        "a cleared request"
+    );
     assert_eq!(e.added(ids[4]).await["by"], json!(e.admin_name));
     assert_eq!(e.added(ids[5]).await["by_deleted"], true);
     assert_eq!(e.added(ids[6]).await["via"], "scan");
     // a member may ask too
-    assert_eq!(e.as_member("GET", &format!("/api/library/tracks/{}/added", ids[0]), None).await.json()["by"], "alex");
+    assert_eq!(
+        e.as_member(
+            "GET",
+            &format!("/api/library/tracks/{}/added", ids[0]),
+            None
+        )
+        .await
+        .json()["by"],
+        "alex"
+    );
     let sid = e.st().db.execute("INSERT INTO surround_tracks (path, title, added_via, added_at) VALUES ('/m/s.m4a', 'S', 'scan', 1)", p![]).unwrap();
     assert_eq!(e.added(sid).await["via"], "scan");
     let r = e.get("/api/library/tracks/424242/added").await;
-    assert_eq!((r.status.as_u16(), r.json()["detail"].clone()), (404, json!("Track not found")));
+    assert_eq!(
+        (r.status.as_u16(), r.json()["detail"].clone()),
+        (404, json!("Track not found"))
+    );
     e.done();
 }
 
@@ -455,16 +1016,37 @@ async fn one_offs_shelf() {
     let b = e.song("Various Artists", "Now 100", "Glow", 3, 1);
     e.song("Various Artists", "Now 100", "Other Artist Song", 4, 1);
     e.st().db.execute("UPDATE tracks SET artist='Solo Star', mb_artistid='11111111-2222-3333-4444-555555555555', added_at=added_at + id WHERE id IN (?, ?)", p![a, b]).unwrap();
-    let v = e.get("/api/library/artists/Solo%20Star/one-offs").await.json();
+    let v = e
+        .get("/api/library/artists/Solo%20Star/one-offs")
+        .await
+        .json();
     assert_eq!(v["total"], 2, "{v}");
-    let titles: Vec<&str> = v["tracks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+    let titles: Vec<&str> = v["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["title"].as_str().unwrap())
+        .collect();
     assert_eq!(titles, ["Glow", "Shine"], "newest first");
     assert_eq!(v["tracks"][0]["release_label"], "Various artists");
-    let page = e.get("/api/library/artists/_/one-offs?name=Solo%20Star&limit=1&offset=1").await.json();
-    assert_eq!((page["total"].clone(), page["offset"].clone(), page["tracks"].as_array().unwrap().len()), (json!(2), json!(1), 1));
+    let page = e
+        .get("/api/library/artists/_/one-offs?name=Solo%20Star&limit=1&offset=1")
+        .await
+        .json();
+    assert_eq!(
+        (
+            page["total"].clone(),
+            page["offset"].clone(),
+            page["tracks"].as_array().unwrap().len()
+        ),
+        (json!(2), json!(1), 1)
+    );
     let by_id = e.get("/api/library/artists/Someone%20Else/one-offs?mbid=11111111-2222-3333-4444-555555555555").await.json();
     assert_eq!(by_id["total"], 2);
-    assert_eq!(e.get("/api/library/artists/Nobody/one-offs").await.json()["total"], 0);
+    assert_eq!(
+        e.get("/api/library/artists/Nobody/one-offs").await.json()["total"],
+        0
+    );
     e.done();
 }
 
@@ -475,18 +1057,78 @@ async fn owners_keep_fixing_their_songs() {
     let mut e = env("owns").await;
     let id = e.song("A", "B", "Mine", 1, 1);
     let other = e.song("A", "B", "Theirs", 2, 1);
-    e.st().db.execute("UPDATE tracks SET added_by=?, added_via='request' WHERE id=?", p![e.member, id]).unwrap();
-    e.st().db.execute("UPDATE tracks SET added_by=?, added_via='request' WHERE id=?", p![e.admin, other]).unwrap();
-    let r = e.as_member("POST", "/api/library/verify-manual", Some(json!({ "track_ids": [id] }))).await;
+    e.st()
+        .db
+        .execute(
+            "UPDATE tracks SET added_by=?, added_via='request' WHERE id=?",
+            p![e.member, id],
+        )
+        .unwrap();
+    e.st()
+        .db
+        .execute(
+            "UPDATE tracks SET added_by=?, added_via='request' WHERE id=?",
+            p![e.admin, other],
+        )
+        .unwrap();
+    let r = e
+        .as_member(
+            "POST",
+            "/api/library/verify-manual",
+            Some(json!({ "track_ids": [id] })),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!(e.st().db.one("SELECT verify_status FROM tracks WHERE id=?", p![id]).unwrap().unwrap().s("verify_status"), "manual");
-    assert_eq!(e.as_member("POST", "/api/library/verify-manual", Some(json!({ "track_ids": [other] }))).await.status, 403);
-    assert_eq!(e.as_member("DELETE", &format!("/api/library/tracks/{other}"), None).await.status, 403);
+    assert_eq!(
+        e.st()
+            .db
+            .one("SELECT verify_status FROM tracks WHERE id=?", p![id])
+            .unwrap()
+            .unwrap()
+            .s("verify_status"),
+        "manual"
+    );
+    assert_eq!(
+        e.as_member(
+            "POST",
+            "/api/library/verify-manual",
+            Some(json!({ "track_ids": [other] }))
+        )
+        .await
+        .status,
+        403
+    );
+    assert_eq!(
+        e.as_member("DELETE", &format!("/api/library/tracks/{other}"), None)
+            .await
+            .status,
+        403
+    );
     // an upload is not a request: no "fix" right from it
-    e.st().db.execute("UPDATE tracks SET added_via='upload' WHERE id=?", p![id]).unwrap();
-    assert_eq!(e.as_member("POST", "/api/library/verify-manual", Some(json!({ "track_ids": [id] }))).await.status, 403);
-    e.st().db.execute("UPDATE tracks SET added_via='soulseek' WHERE id=?", p![id]).unwrap();
-    assert_eq!(e.as_member("DELETE", &format!("/api/library/tracks/{id}"), None).await.status, 200);
+    e.st()
+        .db
+        .execute("UPDATE tracks SET added_via='upload' WHERE id=?", p![id])
+        .unwrap();
+    assert_eq!(
+        e.as_member(
+            "POST",
+            "/api/library/verify-manual",
+            Some(json!({ "track_ids": [id] }))
+        )
+        .await
+        .status,
+        403
+    );
+    e.st()
+        .db
+        .execute("UPDATE tracks SET added_via='soulseek' WHERE id=?", p![id])
+        .unwrap();
+    assert_eq!(
+        e.as_member("DELETE", &format!("/api/library/tracks/{id}"), None)
+            .await
+            .status,
+        200
+    );
     e.done();
 }
 
@@ -498,13 +1140,31 @@ async fn no_musicbrainz_on_requests() {
     let id = e.album("A", "B", 3);
     e.st().db.execute("UPDATE tracks SET mb_releasegroupid='0b0f2b0e-0000-0000-0000-000000000000', mb_trackid='0b0f2b0e-0000-0000-0000-000000000001'", p![]).unwrap();
     let turns = |st: &crate::state::AppState| -> i64 {
-        st.mb().line_stats().as_object().unwrap().values().map(|c| c["turns"].as_i64().unwrap_or(0)).sum()
+        st.mb()
+            .line_stats()
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|c| c["turns"].as_i64().unwrap_or(0))
+            .sum()
     };
     let before = turns(e.st());
     for (m, uri, body) in [
-        ("GET", "/api/library/albums".to_string(), None), ("GET", "/api/library/albums?type=one_off".into(), None), ("GET", format!("/api/library/albums/{id}"), None),
-        ("GET", "/api/library/album-types".into(), None), ("PUT", format!("/api/library/albums/{id}/type"), Some(json!({ "format": "single" }))),
-        ("GET", "/api/library/artists/A/one-offs".into(), None), ("POST", "/api/library/albums/trash".into(), Some(json!({ "ids": [id], "dry_run": true }))),
+        ("GET", "/api/library/albums".to_string(), None),
+        ("GET", "/api/library/albums?type=one_off".into(), None),
+        ("GET", format!("/api/library/albums/{id}"), None),
+        ("GET", "/api/library/album-types".into(), None),
+        (
+            "PUT",
+            format!("/api/library/albums/{id}/type"),
+            Some(json!({ "format": "single" })),
+        ),
+        ("GET", "/api/library/artists/A/one-offs".into(), None),
+        (
+            "POST",
+            "/api/library/albums/trash".into(),
+            Some(json!({ "ids": [id], "dry_run": true })),
+        ),
         ("GET", "/api/library/tracks/1/added".into(), None),
     ] {
         let r = e.send(m, &uri, body).await;
@@ -519,10 +1179,18 @@ async fn no_musicbrainz_on_requests() {
 async fn the_types_task_is_listed() {
     let e = env("task").await;
     let tasks = crate::scheduler::listing(e.st());
-    let t = tasks.iter().find(|t| t["key"] == "types").expect("the types task");
+    let t = tasks
+        .iter()
+        .find(|t| t["key"] == "types")
+        .expect("the types task");
     assert_eq!(t["name"], "Sort albums by type");
-    assert!(t["desc"].as_str().unwrap().starts_with("Work out which albums are live, compilations, remixes, soundtracks, singles or one-offs"));
-    assert_eq!((t["enabled"].clone(), t["minutes"].clone()), (json!(true), json!(360)));
+    assert!(t["desc"].as_str().unwrap().starts_with(
+        "Work out which albums are live, compilations, remixes, soundtracks, singles or one-offs"
+    ));
+    assert_eq!(
+        (t["enabled"].clone(), t["minutes"].clone()),
+        (json!(true), json!(360))
+    );
     e.done();
 }
 
@@ -536,8 +1204,20 @@ async fn live_versions_listed_then_removed_on_request() {
     let antidote = e.song("Travis Scott", "Rodeo", "Antidote", 1, 1000);
     let n90210 = e.song("Travis Scott", "Rodeo", "90210", 2, 1000);
     let studio = encore_library::album_key("Travis Scott", "Rodeo", "");
-    let live_antidote = e.song("Travis Scott", "Rodeo (Live at Coachella)", "Antidote", 1, 1000);
-    e.song("Travis Scott", "Rodeo (Live at Coachella)", "90210", 2, 1000);
+    let live_antidote = e.song(
+        "Travis Scott",
+        "Rodeo (Live at Coachella)",
+        "Antidote",
+        1,
+        1000,
+    );
+    e.song(
+        "Travis Scott",
+        "Rodeo (Live at Coachella)",
+        "90210",
+        2,
+        1000,
+    );
     e.song("Travis Scott", "Rodeo (Live at Coachella)", "Jam", 3, 1000);
     let live = encore_library::album_key("Travis Scott", "Rodeo (Live at Coachella)", "");
     let take = e.song("Travis Scott", "Tour Bits", "Antidote (Live)", 1, 1000);
@@ -547,37 +1227,138 @@ async fn live_versions_listed_then_removed_on_request() {
         e.song("Travis Scott", "Tour Bits", t, 3 + i as i64, 1000);
     }
     let pid = e.st().db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?, 'Mix', 'playlist', 'manual', '[]', 1, 1)", p![e.admin]).unwrap();
-    let item = |track: i64, pos: i64| e.st().db.execute("INSERT INTO playlist_items (playlist_id, position, title, track_id, added_at) VALUES (?, ?, 'Antidote', ?, 1)", p![pid, pos, track]).unwrap();
+    let item = |track: i64, pos: i64| {
+        e.st().db.execute("INSERT INTO playlist_items (playlist_id, position, title, track_id, added_at) VALUES (?, ?, 'Antidote', ?, 1)", p![pid, pos, track]).unwrap()
+    };
     let (in_album, on_take) = (item(live_antidote, 0), item(take, 1));
 
-    assert_eq!(e.as_member("GET", "/api/library/live-versions", None).await.status, 403);
+    assert_eq!(
+        e.as_member("GET", "/api/library/live-versions", None)
+            .await
+            .status,
+        403
+    );
     let v = e.get("/api/library/live-versions").await.json();
     assert_eq!(v["albums"].as_array().unwrap().len(), 1, "{v}");
     let a = &v["albums"][0];
-    assert_eq!((a["album_id"].clone(), a["songs"].clone(), a["with_studio"].clone(), a["suggested"].clone()), (json!(live), json!(3), json!(2), json!(true)));
+    assert_eq!(
+        (
+            a["album_id"].clone(),
+            a["songs"].clone(),
+            a["with_studio"].clone(),
+            a["suggested"].clone()
+        ),
+        (json!(live), json!(3), json!(2), json!(true))
+    );
     assert_eq!(a["tracks"][0]["studio"]["id"], antidote);
-    let songs: Vec<(i64, Value)> = v["songs"].as_array().unwrap().iter().map(|s| (s["id"].as_i64().unwrap(), s["studio"]["id"].clone())).collect();
+    let songs: Vec<(i64, Value)> = v["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["id"].as_i64().unwrap(), s["studio"]["id"].clone()))
+        .collect();
     assert_eq!(songs, vec![(take, json!(antidote)), (other, Value::Null)]);
 
-    assert_eq!(e.send("POST", "/api/library/live-versions/remove", Some(json!({}))).await.status, 400);
-    let r = e.send("POST", "/api/library/live-versions/remove", Some(json!({ "albums": [live, studio], "songs": [take, n90210] }))).await;
+    assert_eq!(
+        e.send("POST", "/api/library/live-versions/remove", Some(json!({})))
+            .await
+            .status,
+        400
+    );
+    let r = e
+        .send(
+            "POST",
+            "/api/library/live-versions/remove",
+            Some(json!({ "albums": [live, studio], "songs": [take, n90210] })),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     let r = r.json();
-    assert_eq!((r["albums"].clone(), r["songs"].clone(), r["deleted"].clone(), r["failed"].clone()), (json!(1), json!(3), json!(1), json!([])));
+    assert_eq!(
+        (
+            r["albums"].clone(),
+            r["songs"].clone(),
+            r["deleted"].clone(),
+            r["failed"].clone()
+        ),
+        (json!(1), json!(3), json!(1), json!([]))
+    );
     let count = |sql: &str| e.st().db.one(sql, p![]).unwrap().unwrap().i("n");
-    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE album_id='{live}'")), 0, "the live album is gone");
-    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE album_id='{studio}'")), 2, "the studio album stays");
-    assert_eq!(count(&format!("SELECT COUNT(*) n FROM tracks WHERE id IN ({take}, {other})")), 1, "only the ticked live song went");
-    assert!(!e.lib.join("Travis Scott/Rodeo (Live at Coachella)").exists());
-    let track_of = |id: i64| e.st().db.one("SELECT track_id FROM playlist_items WHERE id=?", p![id]).unwrap().unwrap().i("track_id");
-    assert_eq!((track_of(in_album), track_of(on_take)), (antidote, antidote), "playlists play the studio copy");
-    assert_eq!(e.get("/api/files/trash").await.json().as_array().map(|a| a.len()), Some(1), "the album is in the Trash");
+    assert_eq!(
+        count(&format!(
+            "SELECT COUNT(*) n FROM tracks WHERE album_id='{live}'"
+        )),
+        0,
+        "the live album is gone"
+    );
+    assert_eq!(
+        count(&format!(
+            "SELECT COUNT(*) n FROM tracks WHERE album_id='{studio}'"
+        )),
+        2,
+        "the studio album stays"
+    );
+    assert_eq!(
+        count(&format!(
+            "SELECT COUNT(*) n FROM tracks WHERE id IN ({take}, {other})"
+        )),
+        1,
+        "only the ticked live song went"
+    );
+    assert!(!e
+        .lib
+        .join("Travis Scott/Rodeo (Live at Coachella)")
+        .exists());
+    let track_of = |id: i64| {
+        e.st()
+            .db
+            .one("SELECT track_id FROM playlist_items WHERE id=?", p![id])
+            .unwrap()
+            .unwrap()
+            .i("track_id")
+    };
+    assert_eq!(
+        (track_of(in_album), track_of(on_take)),
+        (antidote, antidote),
+        "playlists play the studio copy"
+    );
+    assert_eq!(
+        e.get("/api/files/trash")
+            .await
+            .json()
+            .as_array()
+            .map(|a| a.len()),
+        Some(1),
+        "the album is in the Trash"
+    );
 
     // Keep: only this tool's keys; a kept song stays off the list
-    assert_eq!(e.send("POST", "/api/library/live-versions/keep", Some(json!({ "key": "1,2" }))).await.status, 400);
+    assert_eq!(
+        e.send(
+            "POST",
+            "/api/library/live-versions/keep",
+            Some(json!({ "key": "1,2" }))
+        )
+        .await
+        .status,
+        400
+    );
     let key = encore_library::live_copies::song_key(other);
-    assert_eq!(e.send("POST", "/api/library/live-versions/keep", Some(json!({ "key": key }))).await.status, 200);
+    assert_eq!(
+        e.send(
+            "POST",
+            "/api/library/live-versions/keep",
+            Some(json!({ "key": key }))
+        )
+        .await
+        .status,
+        200
+    );
     let v = e.get("/api/library/live-versions").await.json();
-    assert_eq!((v["total_albums"].clone(), v["total_songs"].clone()), (json!(0), json!(0)), "{v}");
+    assert_eq!(
+        (v["total_albums"].clone(), v["total_songs"].clone()),
+        (json!(0), json!(0)),
+        "{v}"
+    );
     e.done();
 }

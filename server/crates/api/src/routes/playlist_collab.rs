@@ -23,9 +23,18 @@ use std::sync::LazyLock;
 /// The collaborative playlist routes.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/playlists/{pid}/collaborators", get(members).post(invite))
-        .route("/api/playlists/{pid}/collaborators/{uid}", delete(remove_member))
-        .route("/api/playlists/{pid}/invite-link", post(make_link).delete(drop_link))
+        .route(
+            "/api/playlists/{pid}/collaborators",
+            get(members).post(invite),
+        )
+        .route(
+            "/api/playlists/{pid}/collaborators/{uid}",
+            delete(remove_member),
+        )
+        .route(
+            "/api/playlists/{pid}/invite-link",
+            post(make_link).delete(drop_link),
+        )
         .route("/api/collab/invites", get(my_invites))
         .route("/api/collab/invites/{pid}/accept", post(accept))
         .route("/api/collab/invites/{pid}/decline", post(decline))
@@ -51,10 +60,15 @@ fn joined(st: &AppState, pid: i64, uid: i64) -> ApiResult<Option<Row>> {
 
 /// A playlist the user may open: their own (any kind), or a collaborative one they joined. 404 otherwise.
 pub(crate) fn member(st: &AppState, pid: i64, u: &Row) -> ApiResult<(Row, Role)> {
-    if let Some(pl) = st.db.one("SELECT * FROM playlists WHERE id=? AND user_id=?", p![pid, u.i("id")])? {
+    if let Some(pl) = st.db.one(
+        "SELECT * FROM playlists WHERE id=? AND user_id=?",
+        p![pid, u.i("id")],
+    )? {
         return Ok((pl, Role::Owner));
     }
-    joined(st, pid, u.i("id"))?.map(|pl| (pl, Role::Collaborator)).ok_or_else(|| err(404, "Playlist not found"))
+    joined(st, pid, u.i("id"))?
+        .map(|pl| (pl, Role::Collaborator))
+        .ok_or_else(|| err(404, "Playlist not found"))
 }
 
 /// The owner's playlist that can be collaborative: kind `playlist` of theirs (404 for anyone else's, 400 for
@@ -72,19 +86,28 @@ pub(crate) fn set_collaborative(st: &AppState, pl: &Row, on: bool) -> ApiResult<
     if on && pl.s("kind") != "playlist" {
         return Err(err(400, "Only your own playlists can be collaborative"));
     }
-    st.db.execute("UPDATE playlists SET collaborative=? WHERE id=?", p![on as i64, pl.i("id")])?;
+    st.db.execute(
+        "UPDATE playlists SET collaborative=? WHERE id=?",
+        p![on as i64, pl.i("id")],
+    )?;
     Ok(())
 }
 
 /// Everything about a playlist's collaboration goes with it (the playlist is being deleted).
 pub(crate) fn forget(st: &AppState, pid: i64) -> ApiResult<()> {
-    st.db.execute("DELETE FROM playlist_collaborators WHERE playlist_id=?", p![pid])?;
+    st.db.execute(
+        "DELETE FROM playlist_collaborators WHERE playlist_id=?",
+        p![pid],
+    )?;
     Ok(())
 }
 
 /// A deleted account's memberships and invites go with it.
 pub(crate) fn forget_user(st: &AppState, uid: i64) -> ApiResult<()> {
-    st.db.execute("DELETE FROM playlist_collaborators WHERE user_id=?", p![uid])?;
+    st.db.execute(
+        "DELETE FROM playlist_collaborators WHERE user_id=?",
+        p![uid],
+    )?;
     Ok(())
 }
 
@@ -97,7 +120,11 @@ pub(crate) fn joined_rows(st: &AppState, uid: i64) -> ApiResult<Vec<Row>> {
 
 /// The owner's user name.
 fn owner_name(st: &AppState, pl: &Row) -> ApiResult<String> {
-    Ok(st.db.one("SELECT username FROM users WHERE id=?", p![pl.i("user_id")])?.map(|r| r.s("username")).unwrap_or_default())
+    Ok(st
+        .db
+        .one("SELECT username FROM users WHERE id=?", p![pl.i("user_id")])?
+        .map(|r| r.s("username"))
+        .unwrap_or_default())
 }
 
 /// How many accounts joined (active ones).
@@ -112,8 +139,14 @@ pub(crate) fn collab_json(st: &AppState, pl: &Row, role: Role) -> ApiResult<Valu
     if role == Role::Owner && pl.i("collaborative") == 0 {
         return Ok(Value::Null);
     }
-    let role = if role == Role::Owner { "owner" } else { "collaborator" };
-    Ok(json!({ "role": role, "owner": owner_name(st, pl)?, "members": joined_count(st, pl.i("id"))? }))
+    let role = if role == Role::Owner {
+        "owner"
+    } else {
+        "collaborator"
+    };
+    Ok(
+        json!({ "role": role, "owner": owner_name(st, pl)?, "members": joined_count(st, pl.i("id"))? }),
+    )
 }
 
 /// An invite link as the apps get it: `{token, path, url}`; the web app opens `/#/collab/<token>`.
@@ -126,11 +159,16 @@ fn link_json(st: &AppState, token: &str) -> Value {
 
 /// `GET /api/playlists/{pid}/collaborators`: `{name, collaborative, role, owner, members: [{user_id, username,
 /// status}], invite_link}`. The owner sees invites and the link; a member sees who joined.
-async fn members(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn members(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let (pl, role) = member(st, pid, &u)?;
         Ok(Json(members_json(st, &pl, role)?))
-    }).await
+    })
+    .await
 }
 
 /// The playlist's members as the viewer may see them (pending invites only for the owner).
@@ -145,8 +183,10 @@ fn members_json(st: &AppState, pl: &Row, role: Role) -> ApiResult<Value> {
         t if owner && !t.is_empty() => link_json(st, &t),
         _ => Value::Null,
     };
-    Ok(json!({ "name": pl.s("name"), "collaborative": pl.i("collaborative") == 1, "role": if owner { "owner" } else { "collaborator" },
-        "owner": owner_name(st, pl)?, "members": list, "invite_link": link }))
+    Ok(
+        json!({ "name": pl.s("name"), "collaborative": pl.i("collaborative") == 1, "role": if owner { "owner" } else { "collaborator" },
+        "owner": owner_name(st, pl)?, "members": list, "invite_link": link }),
+    )
 }
 
 /// `POST /api/playlists/{pid}/collaborators` body.
@@ -159,7 +199,12 @@ struct InviteBody {
 
 /// `POST /api/playlists/{pid}/collaborators {username}`: the owner invites an account on this server, which
 /// turns Collaborative on. Inviting someone who joined already changes nothing. → the members' view.
-async fn invite(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>, Json(b): Json<InviteBody>) -> ApiResult<Json<Value>> {
+async fn invite(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+    Json(b): Json<InviteBody>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = owned_playlist(st, pid, &u)?;
         let name = b.username.trim().trim_start_matches('@');
@@ -181,25 +226,44 @@ async fn invite(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>,
 
 /// `DELETE /api/playlists/{pid}/collaborators/{uid}`: the owner removes a member or takes an invite back;
 /// a member leaves (their own id), and an invited account declines. → `{ok}`
-async fn remove_member(State(st): State<AppState>, User(u): User, Path((pid, uid)): Path<(i64, i64)>) -> ApiResult<Json<Value>> {
+async fn remove_member(
+    State(st): State<AppState>,
+    User(u): User,
+    Path((pid, uid)): Path<(i64, i64)>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let me = u.i("id");
-        let is_owner = st.db.one("SELECT 1 FROM playlists WHERE id=? AND user_id=?", p![pid, me])?.is_some();
+        let is_owner = st
+            .db
+            .one(
+                "SELECT 1 FROM playlists WHERE id=? AND user_id=?",
+                p![pid, me],
+            )?
+            .is_some();
         if !is_owner && uid != me {
             return Err(err(404, "Playlist not found"));
         }
-        st.db.execute("DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?", p![pid, uid])?;
+        st.db.execute(
+            "DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?",
+            p![pid, uid],
+        )?;
         Ok(Json(json!({ "ok": true })))
-    }).await
+    })
+    .await
 }
 
 /// `POST /api/playlists/{pid}/invite-link`: the owner's invite link (asking again gives the same one), which
 /// turns Collaborative on. → `{token, path, url}`
-async fn make_link(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn make_link(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = owned_playlist(st, pid, &u)?;
         Ok(Json(invite_link(st, &pl)?))
-    }).await
+    })
+    .await
 }
 
 /// Turns Collaborative on and gives the playlist's invite link (made the first time): `{token, path, url}`.
@@ -210,7 +274,10 @@ pub(crate) fn invite_link(st: &AppState, pl: &Row) -> ApiResult<Value> {
         t if !t.is_empty() => t,
         _ => {
             let t = encore_core::ids::random_token(12);
-            st.db.execute("UPDATE playlists SET invite_token=? WHERE id=?", p![t, pl.i("id")])?;
+            st.db.execute(
+                "UPDATE playlists SET invite_token=? WHERE id=?",
+                p![t, pl.i("id")],
+            )?;
             t
         }
     };
@@ -219,12 +286,18 @@ pub(crate) fn invite_link(st: &AppState, pl: &Row) -> ApiResult<Value> {
 
 /// `DELETE /api/playlists/{pid}/invite-link`: the link stops working; those who joined with it stay. A new
 /// link is a new token.
-async fn drop_link(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn drop_link(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         super::playlists::own(st, pid, &u)?;
-        st.db.execute("UPDATE playlists SET invite_token=NULL WHERE id=?", p![pid])?;
+        st.db
+            .execute("UPDATE playlists SET invite_token=NULL WHERE id=?", p![pid])?;
         Ok(Json(json!({ "ok": true })))
-    }).await
+    })
+    .await
 }
 
 // ---- the invited -----------------------------------------------------------------------------------------
@@ -252,7 +325,11 @@ fn join_now(st: &AppState, uid: i64, pl: &Row) -> ApiResult<Value> {
 }
 
 /// `POST /api/collab/invites/{pid}/accept`: join a playlist the user was invited to.
-async fn accept(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn accept(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = st.db.one(
             "SELECT p.* FROM playlists p JOIN playlist_collaborators c ON c.playlist_id = p.id AND c.user_id = ?
@@ -263,21 +340,33 @@ async fn accept(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>)
 }
 
 /// `POST /api/collab/invites/{pid}/decline`: say no to an invite (a member who joined leaves). → `{ok}`
-async fn decline(State(st): State<AppState>, User(u): User, Path(pid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn decline(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(pid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        st.db.execute("DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?", p![pid, u.i("id")])?;
+        st.db.execute(
+            "DELETE FROM playlist_collaborators WHERE playlist_id=? AND user_id=?",
+            p![pid, u.i("id")],
+        )?;
         Ok(Json(json!({ "ok": true })))
-    }).await
+    })
+    .await
 }
 
 /// An invite link's path anywhere in the text (`…/#/collab/<token>`, `/collab/<token>`), or a bare token.
-static IN_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"collab/([A-Za-z0-9_-]{8,64})(?:[^A-Za-z0-9_-]|$)").unwrap());
+static IN_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"collab/([A-Za-z0-9_-]{8,64})(?:[^A-Za-z0-9_-]|$)").unwrap());
 /// A bare invite token.
 static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_-]{8,64}$").unwrap());
 
 /// The invite token in text as the user pasted or shared it. None when there is none.
 pub(crate) fn invite_token_of(text: &str) -> Option<String> {
-    let t = text.trim().trim_matches(|c| c == '<' || c == '>' || c == '"' || c == '\'').trim();
+    let t = text
+        .trim()
+        .trim_matches(|c| c == '<' || c == '>' || c == '"' || c == '\'')
+        .trim();
     if let Some(c) = IN_LINK.captures(t) {
         return Some(c[1].to_string());
     }
@@ -295,25 +384,38 @@ struct LinkBody {
 /// The playlist a working invite link opens (collaborative, of an active owner).
 fn by_link(st: &AppState, b: &LinkBody) -> ApiResult<Row> {
     let token = invite_token_of(&b.link).ok_or_else(|| err(400, "That isn't an invite link"))?;
-    st.db.one("SELECT p.* FROM playlists p JOIN users o ON o.id = p.user_id AND o.disabled = 0
-               WHERE p.invite_token = ? AND p.kind = 'playlist' AND p.collaborative = 1", p![token])?
+    st.db
+        .one(
+            "SELECT p.* FROM playlists p JOIN users o ON o.id = p.user_id AND o.disabled = 0
+               WHERE p.invite_token = ? AND p.kind = 'playlist' AND p.collaborative = 1",
+            p![token],
+        )?
         .ok_or_else(|| err(404, "This invite link no longer works"))
 }
 
 /// `POST /api/collab/join {link}`: join with an invite link. → `{id, name, owner}`
-async fn join(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+async fn join(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = by_link(st, &b)?;
         if pl.i("user_id") == u.i("id") {
             return Err(err(400, "This is your own playlist"));
         }
         join_now(st, u.i("id"), &pl).map(Json)
-    }).await
+    })
+    .await
 }
 
 /// `POST /api/collab/join/check {link}`: what an invite link opens, without joining: `{id, name, owner,
 /// count, own, joined}`.
-async fn join_check(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+async fn join_check(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pl = by_link(st, &b)?;
         let own = pl.i("user_id") == u.i("id");

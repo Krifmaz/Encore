@@ -1,16 +1,16 @@
 use crate::auth::RateLimiter;
 use encore_config::Config;
-use encore_db::Db;
-use encore_library::Library;
-use encore_http::mb::Mb;
 use encore_core::cache::{json_bytes, ByteCache};
+use encore_db::Db;
+use encore_http::mb::Mb;
 pub(crate) use encore_jobs::Refreshed;
+use encore_library::Library;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use std::time::Duration;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 /// The server state: the database, the settings, the HTTP clients and every crate's services. Clones share it.
 #[derive(Clone)]
@@ -149,7 +149,11 @@ impl AppState {
 
     /// [`AppState::open`] with the settings loaded by `load` (a test server's: without the process's
     /// environment).
-    pub fn open_with(data: &std::path::Path, static_dir: PathBuf, load: impl FnOnce(Db) -> anyhow::Result<Config>) -> anyhow::Result<AppState> {
+    pub fn open_with(
+        data: &std::path::Path,
+        static_dir: PathBuf,
+        load: impl FnOnce(Db) -> anyhow::Result<Config>,
+    ) -> anyhow::Result<AppState> {
         let db = Db::open(data)?;
         let cfg = load(db.clone())?;
         let contact = cfg.str("contact_email");
@@ -160,11 +164,28 @@ impl AppState {
         let scheduler = encore_jobs::Scheduler::new(db.clone(), cfg.clone(), jobs.clone());
         let plugins = encore_plugins::Registry::new(data, db.clone(), cfg.clone());
         let st = AppState {
-            db, cfg, http, http_no_redirects, urls: Default::default(), limits: Arc::new(RateLimiter::default()), static_dir, library: Library::new(busy.clone()),
+            db,
+            cfg,
+            http,
+            http_no_redirects,
+            urls: Default::default(),
+            limits: Arc::new(RateLimiter::default()),
+            static_dir,
+            library: Library::new(busy.clone()),
             // MusicBrainz's look-ups kept next to the database, so a restart doesn't make every page ask again
             mb: Mb::with_store(&data.join("musicbrainz-cache.db")),
-            pace: Default::default(), cache: Arc::new(ByteCache::new(REMOTE_CACHE_BYTES, REMOTE_CACHE_ENTRIES)), requests: Default::default(), busy, jobs, scheduler, media: Default::default(),
-            playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(), plugins,
+            pace: Default::default(),
+            cache: Arc::new(ByteCache::new(REMOTE_CACHE_BYTES, REMOTE_CACHE_ENTRIES)),
+            requests: Default::default(),
+            busy,
+            jobs,
+            scheduler,
+            media: Default::default(),
+            playback: Default::default(),
+            vpn: Default::default(),
+            system: Default::default(),
+            web: Default::default(),
+            plugins,
         };
         crate::auth::ensure_owner(&st)?;
         Ok(st)
@@ -184,7 +205,9 @@ impl AppState {
         F: FnOnce(&AppState) -> encore_core::error::ApiResult<T> + Send + 'static,
     {
         let st = self.clone();
-        tokio::task::spawn_blocking(move || f(&st)).await.unwrap_or_else(|e| Err(encore_core::error::err(500, e.to_string())))
+        tokio::task::spawn_blocking(move || f(&st))
+            .await
+            .unwrap_or_else(|e| Err(encore_core::error::err(500, e.to_string())))
     }
 
     /// Small in-memory cache for slow lookups (Deezer, Last.fm …).
@@ -194,7 +217,8 @@ impl AppState {
     /// Cache `v` under `key` for `secs` seconds.
     pub fn cache_put(&self, key: &str, v: Value, secs: u64) {
         let bytes = key.len() + json_bytes(&v);
-        self.cache.insert(key, v, bytes, Some(Duration::from_secs(secs)), 0);
+        self.cache
+            .insert(key, v, bytes, Some(Duration::from_secs(secs)), 0);
     }
 }
 
@@ -258,13 +282,28 @@ impl encore_library::Ctx for AppState {
 
 /// The sync (encore_sync) hands the server what needs its request queue and its link reader.
 impl encore_sync::Ctx for AppState {
-    fn request_missing(&self, owner: &encore_db::Row, playlist: i64, auto: bool, album_mode: Option<String>) -> anyhow::Result<encore_sync::MissingReport> {
+    fn request_missing(
+        &self,
+        owner: &encore_db::Row,
+        playlist: i64,
+        auto: bool,
+        album_mode: Option<String>,
+    ) -> anyhow::Result<encore_sync::MissingReport> {
         encore_requests::missing::request_missing(self, owner, playlist, auto, album_mode)
     }
-    fn fetch_link(&self, url: &str, user: Option<i64>) -> impl std::future::Future<Output = anyhow::Result<Value>> + Send {
+    fn fetch_link(
+        &self,
+        url: &str,
+        user: Option<i64>,
+    ) -> impl std::future::Future<Output = anyhow::Result<Value>> + Send {
         encore_requests::sources::links::fetch_as(self, url, user)
     }
-    fn spotify_api(&self, token: &str, kind: &str, id: &str) -> impl std::future::Future<Output = anyhow::Result<Value>> + Send {
+    fn spotify_api(
+        &self,
+        token: &str,
+        kind: &str,
+        id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Value>> + Send {
         encore_requests::sources::links::spotify_api(self, token, kind, id)
     }
 }
@@ -286,7 +325,10 @@ impl encore_system::Ctx for AppState {
         if id == "translator" {
             crate::translate::tool_info(self, last)
         } else {
-            encore_system::tools::slskd_info(encore_requests::slskd_managed::installed_version(self), last)
+            encore_system::tools::slskd_info(
+                encore_requests::slskd_managed::installed_version(self),
+                last,
+            )
         }
     }
 }

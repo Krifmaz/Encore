@@ -1,36 +1,36 @@
 pub mod admin;
 pub mod auth;
 pub mod bugreports;
+pub mod catalog;
+pub mod changelog;
+pub mod discover;
 pub mod files;
+pub mod foryou;
 pub mod group;
 pub mod library;
 pub mod own_file;
 pub mod perf;
 pub mod picker;
 pub mod playback;
-pub mod playlists;
-pub mod playlist_links;
 pub mod playlist_collab;
+pub mod playlist_links;
+pub mod playlists;
 pub mod plugins;
+#[cfg(test)]
+mod plugins_tests;
 pub mod remote;
-pub mod roon;
 pub mod report;
 pub mod request_events;
 pub mod requests;
+pub mod roon;
 pub mod soulseek;
 pub mod stats;
 pub mod surround;
 pub mod system;
-pub mod update;
 pub mod tagging;
-pub mod wrapper;
-pub mod ytauth;
-pub mod discover;
-pub mod foryou;
 pub mod taste;
-pub mod catalog;
-pub mod changelog;
-#[cfg(test)]
-mod plugins_tests;
+pub mod update;
+pub mod wrapper;
 #[cfg(test)]
 mod wrapper_tests;
+pub mod ytauth;

@@ -3,12 +3,12 @@
 //! silent lead-in of the next song and start it at the last audible moment of the one playing.
 //! Measured once per file with ffmpeg's silencedetect and kept in the database (recomputed when the file changes).
 use crate::auth::User;
-use encore_db::{now, RowExt};
-use encore_core::error::{err, ApiResult};
-use encore_db::p;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
+use encore_core::error::{err, ApiResult};
+use encore_db::p;
+use encore_db::{now, RowExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -26,40 +26,83 @@ fn ensure_table(st: &AppState) -> ApiResult<()> {
 }
 
 /// GET /api/library/tracks/{id}/edges: where the song's sound starts and ends (seconds), cached per file.
-pub async fn edges(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT id, path, duration, mtime, size FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+pub async fn edges(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
+    let t = st
+        .db
+        .one(
+            "SELECT id, path, duration, mtime, size FROM tracks WHERE id=?",
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     ensure_table(&st)?;
     let (mtime, size, dur) = (t.f("mtime"), t.i("size"), t.f("duration"));
-    if let Some(c) = st.db.one("SELECT start_s, end_s, mtime, size FROM track_edges WHERE track_id=?", p![id])? {
+    if let Some(c) = st.db.one(
+        "SELECT start_s, end_s, mtime, size FROM track_edges WHERE track_id=?",
+        p![id],
+    )? {
         if c.f("mtime") == mtime && c.i("size") == size {
-            return Ok(Json(json!({ "start_s": c.f("start_s"), "end_s": c.f("end_s"), "cached": true })));
+            return Ok(Json(
+                json!({ "start_s": c.f("start_s"), "end_s": c.f("end_s"), "cached": true }),
+            ));
         }
     }
     let path = t.s("path");
     let (start_s, end_s) = {
-        let _slot = st.web.track_edges.acquire().await.map_err(|_| err(503, "Busy"))?;
-        analyse(&path, dur).await.ok_or_else(|| err(502, "Could not analyse this song"))?
+        let _slot = st
+            .web
+            .track_edges
+            .acquire()
+            .await
+            .map_err(|_| err(503, "Busy"))?;
+        analyse(&path, dur)
+            .await
+            .ok_or_else(|| err(502, "Could not analyse this song"))?
     };
     st.db.execute(
         "INSERT INTO track_edges (track_id, mtime, size, start_s, end_s, computed_at) VALUES (?,?,?,?,?,?)
          ON CONFLICT(track_id) DO UPDATE SET mtime=excluded.mtime, size=excluded.size, start_s=excluded.start_s, end_s=excluded.end_s, computed_at=excluded.computed_at",
         p![id, mtime, size, start_s, end_s, now()],
     )?;
-    Ok(Json(json!({ "start_s": start_s, "end_s": end_s, "cached": false })))
+    Ok(Json(
+        json!({ "start_s": start_s, "end_s": end_s, "cached": false }),
+    ))
 }
 
 /// Run silencedetect over the whole file: (start_s, end_s), or None when ffmpeg is missing or fails.
 pub async fn analyse(path: &str, duration: f64) -> Option<(f64, f64)> {
     // worked out ahead of the song, never what plays: ffmpeg at idle priority, like every background run
-    let out = tokio::time::timeout(Duration::from_secs(120), encore_media::Ffmpeg::new().low_priority()
-        .args(["-hide_banner", "-nostdin", "-v", "info", "-i"]).arg(path)
-        .args(["-vn", "-af", &format!("silencedetect=noise={SILENCE_DB}dB:d={MIN_SILENCE_S}"), "-f", "null", "-"])
-        .output()).await.ok()?.ok()?;
+    let out = tokio::time::timeout(
+        Duration::from_secs(120),
+        encore_media::Ffmpeg::new()
+            .low_priority()
+            .args(["-hide_banner", "-nostdin", "-v", "info", "-i"])
+            .arg(path)
+            .args([
+                "-vn",
+                "-af",
+                &format!("silencedetect=noise={SILENCE_DB}dB:d={MIN_SILENCE_S}"),
+                "-f",
+                "null",
+                "-",
+            ])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     if !out.status.success() {
         return None;
     }
     let log = String::from_utf8_lossy(&out.stderr);
-    let dur = if duration > 0.0 { duration } else { parse_duration(&log).unwrap_or(0.0) };
+    let dur = if duration > 0.0 {
+        duration
+    } else {
+        parse_duration(&log).unwrap_or(0.0)
+    };
     Some(parse_silence(&log, dur))
 }
 
@@ -79,7 +122,12 @@ fn parse_duration(log: &str) -> Option<f64> {
 pub fn parse_silence(log: &str, duration: f64) -> (f64, f64) {
     let num = |line: &str, key: &str| -> Option<f64> {
         let at = line.find(key)? + key.len();
-        line[at..].split_whitespace().next()?.trim_end_matches('|').parse().ok()
+        line[at..]
+            .split_whitespace()
+            .next()?
+            .trim_end_matches('|')
+            .parse()
+            .ok()
     };
     // (start, end) pairs; end None = silent until the file ends
     let mut spans: Vec<(f64, Option<f64>)> = vec![];
@@ -96,7 +144,12 @@ pub fn parse_silence(log: &str, duration: f64) -> (f64, f64) {
     // the end as ffmpeg decoded it (its last progress `time=`): often shorter than the tagged length (an
     // MP3's encoder delay and padding, a VBR estimate), and ffmpeg 5+ ends a trailing silence there
     let decoded = decoded_end(log);
-    let end_of_file = |e: Option<f64>| e.is_none_or(|e| (duration > 0.0 && e >= duration - 0.05) || decoded.is_some_and(|d| d > 0.0 && e >= d - 0.05));
+    let end_of_file = |e: Option<f64>| {
+        e.is_none_or(|e| {
+            (duration > 0.0 && e >= duration - 0.05)
+                || decoded.is_some_and(|d| d > 0.0 && e >= d - 0.05)
+        })
+    };
     let mut start = 0.0;
     let mut end = duration;
     if let Some(&(s, e)) = spans.first() {

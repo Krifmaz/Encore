@@ -1,16 +1,16 @@
 //! /api/library: browse, play, download, share, likes, storage, and removing things.
 use crate::auth::{self, Admin, MaybeUser, User};
-use encore_db::{now, Conn, RowExt};
 use crate::enrich::{enrich, enrich_now};
-use encore_core::error::{err, ApiResult};
-use encore_library::{self as lib, album_types, delete_tracks, prune_empty};
-use encore_db::p;
 use crate::state::AppState;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use encore_core::error::{err, ApiResult};
+use encore_db::p;
+use encore_db::{now, Conn, RowExt};
+use encore_library::{self as lib, album_types, delete_tracks, prune_empty};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -28,28 +28,49 @@ pub fn router() -> Router<AppState> {
         .route("/api/library/albums", get(albums))
         .route("/api/library/album-types", get(album_type_counts))
         .route("/api/library/albums/trash", post(trash_albums))
-        .route("/api/library/albums/{id}/type", axum::routing::put(set_album_type))
-        .route("/api/library/artists/{name}/one-offs", get(library_artist::one_offs))
+        .route(
+            "/api/library/albums/{id}/type",
+            axum::routing::put(set_album_type),
+        )
+        .route(
+            "/api/library/artists/{name}/one-offs",
+            get(library_artist::one_offs),
+        )
         .route("/api/library/tracks/{id}/added", get(track_added))
         .route("/api/library/artists", get(artists).delete(delete_artist))
         .route("/api/library/tracks", get(tracks))
         .route("/api/library/artist-tracks", get(artist_tracks))
-        .route("/api/library/artists/{name}/liked", get(library_artist::liked))
-        .route("/api/library/artists/{name}/tracks", get(library_artist::songs))
-        .route("/api/library/search", get(crate::search::library_search_route))
+        .route(
+            "/api/library/artists/{name}/liked",
+            get(library_artist::liked),
+        )
+        .route(
+            "/api/library/artists/{name}/tracks",
+            get(library_artist::songs),
+        )
+        .route(
+            "/api/library/search",
+            get(crate::search::library_search_route),
+        )
         .route("/api/library/index", get(library_index::index))
         .route("/api/library/recent", get(recent))
         .route("/api/library/shuffle", get(shuffle_get).post(shuffle_post))
         .route("/api/library/plays", post(plays))
         .route("/api/library/now-playing", post(now_playing))
-        .route("/api/library/tracks/{id}", axum::routing::delete(delete_track))
+        .route(
+            "/api/library/tracks/{id}",
+            axum::routing::delete(delete_track),
+        )
         .route("/api/library/tracks/{id}/file", get(track_file))
         .route("/api/library/tracks/{id}/stream", get(stream))
         .route("/api/library/tracks/{id}/info", get(track_info))
         .route("/api/library/tracks/{id}", get(track))
         .route("/api/library/plays/recent", get(recent_plays))
         .route("/api/library/tracks/{id}/lyrics", get(lyrics))
-        .route("/api/library/tracks/{id}/lyrics/shift", axum::routing::put(lyrics_shift))
+        .route(
+            "/api/library/tracks/{id}/lyrics/shift",
+            axum::routing::put(lyrics_shift),
+        )
         .route("/api/library/tracks/{id}/edges", get(track_edges::edges))
         .route("/api/library/tracks/{id}/share", post(share))
         .route("/api/library/albums/{id}/share", post(share_album))
@@ -114,7 +135,9 @@ where
         return Ok(v);
     }
     if let (Some(old), Ok(rt)) = (st.web.lists.get(key), tokio::runtime::Handle::try_current()) {
-        let Some(building) = start_build(st, key) else { return Ok(old) };
+        let Some(building) = start_build(st, key) else {
+            return Ok(old);
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let (st2, k) = (st.clone(), key.to_string());
         rt.spawn_blocking(move || {
@@ -143,7 +166,9 @@ where
         return Ok(v);
     }
     if let Some(old) = st.web.lists.get(&key) {
-        let Some(building) = start_build(st, &key) else { return Ok(old) };
+        let Some(building) = start_build(st, &key) else {
+            return Ok(old);
+        };
         let st2 = st.clone();
         let task = tokio::spawn(async move {
             let _building = building;
@@ -166,14 +191,20 @@ struct Building(AppState, String);
 
 impl Drop for Building {
     fn drop(&mut self) {
-        self.0.web.list_builds.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+        self.0
+            .web
+            .list_builds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.1);
     }
 }
 
 /// Marks `key` as being made again, or None when that is running already.
 fn start_build(st: &AppState, key: &str) -> Option<Building> {
     let mut b = st.web.list_builds.lock().unwrap_or_else(|e| e.into_inner());
-    b.insert(key.to_string()).then(|| Building(st.clone(), key.to_string()))
+    b.insert(key.to_string())
+        .then(|| Building(st.clone(), key.to_string()))
 }
 
 /// The cached answer for `key` when it was made at this library version.
@@ -187,7 +218,9 @@ fn cached_at(st: &AppState, key: &str, version: u64) -> Option<Arc<Value>> {
 /// (`state::LIST_CACHE_BYTES`) pushes out the least recently used ones.
 fn keep_list(st: &AppState, k: String, version: u64, value: Arc<Value>) {
     let bytes = k.len() + encore_core::cache::json_bytes(&value);
-    st.web.lists.insert(k, value, bytes, Some(LIST_TTL), version);
+    st.web
+        .lists
+        .insert(k, value, bytes, Some(LIST_TTL), version);
 }
 
 #[cfg(test)]
@@ -197,13 +230,21 @@ mod list_wait_tests {
     use std::time::{Duration, Instant};
 
     fn songs_written(st: &AppState) {
-        st.db.execute("UPDATE tracks SET bitrate=bitrate WHERE id=0", p![]).unwrap();
+        st.db
+            .execute("UPDATE tracks SET bitrate=bitrate WHERE id=0", p![])
+            .unwrap();
     }
 
-    async fn list(st: &AppState, make: impl FnOnce() -> ApiResult<Value> + Send + 'static) -> (Value, Duration) {
+    async fn list(
+        st: &AppState,
+        make: impl FnOnce() -> ApiResult<Value> + Send + 'static,
+    ) -> (Value, Duration) {
         let st = st.clone();
         let t = Instant::now();
-        let v = tokio::task::spawn_blocking(move || cached_list(&st, "k", make)).await.unwrap().unwrap();
+        let v = tokio::task::spawn_blocking(move || cached_list(&st, "k", make))
+            .await
+            .unwrap()
+            .unwrap();
         ((*v).clone(), t.elapsed())
     }
 
@@ -216,7 +257,11 @@ mod list_wait_tests {
         let st: AppState = (*tmp).clone();
         assert_eq!(list(&st, || Ok(json!(1))).await.0, json!(1));
         songs_written(&st);
-        assert_eq!(list(&st, || Ok(json!(2))).await.0, json!(2), "a quick build is waited for");
+        assert_eq!(
+            list(&st, || Ok(json!(2))).await.0,
+            json!(2),
+            "a quick build is waited for"
+        );
 
         songs_written(&st);
         let slow = list(&st, || {
@@ -229,18 +274,36 @@ mod list_wait_tests {
         };
         let ((v, waited), (v2, waited2)) = tokio::join!(slow, meanwhile);
         assert_eq!(v, json!(2), "the list as it was");
-        assert!(waited >= LIST_WAIT && waited < LIST_WAIT + Duration::from_millis(1000), "{waited:?}");
+        assert!(
+            waited >= LIST_WAIT && waited < LIST_WAIT + Duration::from_millis(1000),
+            "{waited:?}"
+        );
         assert_eq!(v2, json!(2));
-        assert!(waited2 < Duration::from_millis(500), "a page during the build doesn't wait: {waited2:?}");
+        assert!(
+            waited2 < Duration::from_millis(500),
+            "a page during the build doesn't wait: {waited2:?}"
+        );
 
         tokio::time::sleep(Duration::from_millis(2000)).await;
-        assert_eq!(list(&st, || panic!("made already")).await.0, json!(3), "the new list once it is made");
+        assert_eq!(
+            list(&st, || panic!("made already")).await.0,
+            json!(3),
+            "the new list once it is made"
+        );
     }
 }
 
 /// Items `offset..offset+limit` of a cached JSON array.
 fn page(all: &Value, offset: i64, limit: usize) -> Vec<Value> {
-    all.as_array().map(|a| a.iter().skip(offset.max(0) as usize).take(limit).cloned().collect()).unwrap_or_default()
+    all.as_array()
+        .map(|a| {
+            a.iter()
+                .skip(offset.max(0) as usize)
+                .take(limit)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 use encore_library::lists::{order, ALBUM_SORTS, ARTISTS_MAX, TRACK_COLS, TRACK_SORTS};
@@ -250,7 +313,11 @@ use encore_library::lists::{order, ALBUM_SORTS, ARTISTS_MAX, TRACK_COLS, TRACK_S
 async fn stats(State(st): State<AppState>, User(_): User) -> Json<Value> {
     let mut s = match cached_read(&st, "stats".into(), |c| Ok(lib::stats(c))).await {
         Ok(v) => (*v).clone(),
-        Err(_) => st.db.read(|c| Ok::<_, rusqlite::Error>(lib::stats(c))).await.unwrap_or_default(),
+        Err(_) => st
+            .db
+            .read(|c| Ok::<_, rusqlite::Error>(lib::stats(c)))
+            .await
+            .unwrap_or_default(),
     };
     let scan = st.library.scan.lock().unwrap().clone();
     s["scan"] = json!(scan);
@@ -270,13 +337,21 @@ struct ScanQ {
 }
 
 /// POST /api/library/scan: scan the library in the background (admins).
-async fn scan(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<ScanQ>) -> ApiResult<Json<Value>> {
+async fn scan(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Query(q): Query<ScanQ>,
+) -> ApiResult<Json<Value>> {
     if st.library.scan.lock().unwrap().scanning {
         return Err(err(409, "A scan is already running"));
     }
     // the library folder, the extra library folders and the Surround folder, in one scanning session
     let st2 = st.clone();
-    tokio::spawn(async move { st2.library.scan_library(st2.db.clone(), &st2.cfg, q.full).await });
+    tokio::spawn(async move {
+        st2.library
+            .scan_library(st2.db.clone(), &st2.cfg, q.full)
+            .await
+    });
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -285,15 +360,28 @@ fn dir_size(path: &str) -> u64 {
     if path.is_empty() {
         return 0;
     }
-    walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// `df` for the file system a folder is on: `{total, used, free}` in bytes.
 fn disk_usage(path: &str) -> Option<Value> {
-    let out = std::process::Command::new("df").args(["-Pk", path]).output().ok()?;
+    let out = std::process::Command::new("df")
+        .args(["-Pk", path])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let cols: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
-    let k = |i: usize| cols.get(i).and_then(|v| v.parse::<u64>().ok()).map(|v| v * 1024);
+    let k = |i: usize| {
+        cols.get(i)
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v * 1024)
+    };
     Some(json!({ "total": k(1)?, "used": k(2)?, "free": k(3)? }))
 }
 
@@ -303,12 +391,21 @@ async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Va
         return Err(err(403, "Storage isn't shared with your account"));
     }
     let libp = st.cfg.str("library_path");
-    let (slsk, staging) = (st.cfg.str("slskd_download_path"), st.cfg.str("staging_path"));
+    let (slsk, staging) = (
+        st.cfg.str("slskd_download_path"),
+        st.cfg.str("staging_path"),
+    );
     // `df` and the walks of the download folders: the last answer for these folders, worked out again in the
     // background (while it is shown) once it is a minute old or the library changed (a song deleted or
     // imported moved the disk numbers); only the first look at these folders waits
     let key = format!("{libp}\u{1f}{slsk}\u{1f}{staging}");
-    let (disk, s1, s2) = st.web.storage.get_blocking_at(&key, st.db.library_version(), move || (disk_usage(&libp), dir_size(&slsk), dir_size(&staging))).await;
+    let (disk, s1, s2) = st
+        .web
+        .storage
+        .get_blocking_at(&key, st.db.library_version(), move || {
+            (disk_usage(&libp), dir_size(&slsk), dir_size(&staging))
+        })
+        .await;
     // the library's own numbers: four GROUP BYs over every song, made on a read connection once per state of
     // the library
     let lib = cached_read(&st, "storage".into(), |c| {
@@ -364,17 +461,28 @@ const IDS_MAX: usize = 5000;
 
 /// The albums list (the web's Albums tab, an artist's albums, the phone's library). The artist index (a
 /// search's ranks, the artist filter) and the queries run on the blocking pool.
-async fn albums(State(st): State<AppState>, User(u): User, Query(a): Query<AlbumQ>) -> ApiResult<Json<Value>> {
+async fn albums(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(a): Query<AlbumQ>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let mut v = albums_answer(st, &a)?;
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    }).await
+    })
+    .await
 }
 
 /// Every album of a list (an artist's, a filter's) in list order, each with its Type filter key (`type`), once per
 /// state of the library: the kinds and types are slices of it in memory, and so are the pages.
-fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) -> ApiResult<Arc<Value>> {
+fn album_list(
+    st: &AppState,
+    artist: &str,
+    filter: &str,
+    sort: &str,
+    dir: &str,
+) -> ApiResult<Arc<Value>> {
     let mut wh = vec!["1=1".to_string()];
     let mut params: Vec<Value> = vec![];
     if !artist.is_empty() {
@@ -407,7 +515,10 @@ fn album_list(st: &AppState, artist: &str, filter: &str, sort: &str, dir: &str) 
         // the type is part of the list: both follow the library's state
         let types = st2.library.types.get(&st2.db);
         for r in rows.iter_mut() {
-            let key = types.get(r.get("id").and_then(|v| v.as_str()).unwrap_or("")).map(|c| c.key()).unwrap_or("album");
+            let key = types
+                .get(r.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+                .map(|c| c.key())
+                .unwrap_or("album");
             r.insert("type".into(), json!(key));
         }
         Ok(json!(rows))
@@ -420,20 +531,34 @@ fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
     let pick = album_types::Pick::of(&a.types, &a.kind, searching).map_err(|e| err(400, e))?;
     // a search is ranked in memory (exact > starts with > a word starts with > contains, accents ignored)
     let ranked = searching.then(|| {
-        let mut r = encore_library::search::library_album_ranks(&st.library.artists.index(&st.db), &a.q);
+        let mut r =
+            encore_library::search::library_album_ranks(&st.library.artists.index(&st.db), &a.q);
         r.truncate(30000);
         r
     });
     let all = album_list(st, &a.artist, &a.filter, &a.sort, &a.dir)?;
     let types = st.library.types.get(&st.db);
-    let mut items: Vec<&Value> = all.as_array().map(|v| v.iter().filter(|i| pick.wants(i["id"].as_str().and_then(|id| types.get(id)))).collect()).unwrap_or_default();
+    let mut items: Vec<&Value> = all
+        .as_array()
+        .map(|v| {
+            v.iter()
+                .filter(|i| pick.wants(i["id"].as_str().and_then(|id| types.get(id))))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(r) = ranked {
         // a search: the matches out of the same list, best rank first (the sort breaks ties; an album's
         // numbers don't depend on the search, which picks whole albums), instead of asking the database
         // again with every matching album id in an IN list
         let tier: HashMap<String, u8> = r.into_iter().collect();
         items.retain(|i| i["id"].as_str().is_some_and(|id| tier.contains_key(id)));
-        items.sort_by_key(|i| i["id"].as_str().and_then(|id| tier.get(id)).copied().unwrap_or(9));   // stable
+        items.sort_by_key(|i| {
+            i["id"]
+                .as_str()
+                .and_then(|id| tier.get(id))
+                .copied()
+                .unwrap_or(9)
+        }); // stable
     }
     let total = items.len();
     if matches!(a.ids_only.as_str(), "1" | "true") {
@@ -441,7 +566,11 @@ fn albums_answer(st: &AppState, a: &AlbumQ) -> ApiResult<Value> {
         return Ok(json!({ "total": total, "ids": ids, "capped": total > IDS_MAX }));
     }
     let limit = a.limit.unwrap_or(120).clamp(1, 500) as usize;
-    let page: Vec<&Value> = items.into_iter().skip(a.offset.max(0) as usize).take(limit).collect();
+    let page: Vec<&Value> = items
+        .into_iter()
+        .skip(a.offset.max(0) as usize)
+        .take(limit)
+        .collect();
     Ok(json!({ "total": total, "items": page }))
 }
 
@@ -457,7 +586,11 @@ struct TypeCountsQ {
 
 /// GET /api/library/album-types: the Type dropdown's entries – every filter key in its order with its label and
 /// how many albums it has (0 too), over every album (One-offs included) under the same `artist` / `filter`.
-async fn album_type_counts(State(st): State<AppState>, User(_): User, Query(q): Query<TypeCountsQ>) -> ApiResult<Json<Value>> {
+async fn album_type_counts(
+    State(st): State<AppState>,
+    User(_): User,
+    Query(q): Query<TypeCountsQ>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let all = album_list(st, &q.artist, &q.filter, "", "")?;
         let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -480,23 +613,43 @@ struct TypeBody {
 
 /// PUT /api/library/albums/{id}/type (admins): the owner's format for an album – Album, EP, Single or One-off – or
 /// null for automatic again. → the album's `type` object.
-async fn set_album_type(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>, Json(b): Json<TypeBody>) -> ApiResult<Json<Value>> {
+async fn set_album_type(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    Path(id): Path<String>,
+    Json(b): Json<TypeBody>,
+) -> ApiResult<Json<Value>> {
     let format: Option<&'static str> = match b.format.as_deref() {
         None => None,
-        Some(f) => Some(album_types::FORMATS.iter().find(|x| x.0 == f).map(|x| x.0).ok_or_else(|| err(400, "Pick Album, EP, Single or One-off"))?),
+        Some(f) => Some(
+            album_types::FORMATS
+                .iter()
+                .find(|x| x.0 == f)
+                .map(|x| x.0)
+                .ok_or_else(|| err(400, "Pick Album, EP, Single or One-off"))?,
+        ),
     };
     st.blocking(move |st| {
-        if st.db.one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+        if st
+            .db
+            .one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?
+            .is_none()
+        {
             return Err(err(404, "Album not found"));
         }
         album_types::choose(&st.db, &id, format, u.i("id"))?;
         Ok(Json(st.library.types.of(&st.db, &id).json()))
-    }).await
+    })
+    .await
 }
 
 /// The folders the file manager may use (what Trash's items are relative to).
 fn file_roots(st: &AppState) -> Vec<encore_files::roots::Root> {
-    encore_files::roots::all(&st.cfg, st.data_dir(), &encore_requests::slskd_managed::download_dir(st))
+    encore_files::roots::all(
+        &st.cfg,
+        st.data_dir(),
+        &encore_requests::slskd_managed::download_dir(st),
+    )
 }
 
 /// `POST /api/library/albums/trash` body.
@@ -512,15 +665,31 @@ struct TrashBody {
 
 /// POST /api/library/albums/trash (admins) `{ids, dry_run}`: what moving these albums to the Trash would do, or
 /// doing it (encore_files::albums).
-async fn trash_albums(State(st): State<AppState>, Admin(u): Admin, Json(b): Json<TrashBody>) -> ApiResult<Json<Value>> {
+async fn trash_albums(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    Json(b): Json<TrashBody>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let roots = file_roots(st);
-        encore_files::albums::trash_albums(st, &encore_files::Who::of(&u), &roots, &b.ids, b.dry_run).map(Json)
-    }).await
+        encore_files::albums::trash_albums(
+            st,
+            &encore_files::Who::of(&u),
+            &roots,
+            &b.ids,
+            b.dry_run,
+        )
+        .map(Json)
+    })
+    .await
 }
 
 /// GET /api/library/tracks/{id}/added: who brought a song in (the song ⋯ menu's first line).
-async fn track_added(State(st): State<AppState>, User(_): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+async fn track_added(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
     let r = st.db.one(&format!("SELECT t.added_by, t.added_via, t.requested_at, t.added_at, u.username FROM {} t LEFT JOIN users u ON u.id=t.added_by WHERE t.id=?", table_of(id)), p![id])?
         .ok_or_else(|| err(404, "Track not found"))?;
     let by_id = r.get("added_by").filter(|v| !v.is_null()).cloned();
@@ -553,12 +722,19 @@ struct SimpleQ {
 /// Most songs one `/tracks?ids=` call returns (a restored queue is fetched in pages of this size).
 const MAX_IDS: usize = 300;
 
-
 /// Parses `1,2,3` (duplicates dropped, order kept).
 fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
     let mut out: Vec<i64> = Vec::new();
     for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        let id: i64 = part.parse().map_err(|_| err(400, format!("Not a song id: {}", part.chars().take(20).collect::<String>())))?;
+        let id: i64 = part.parse().map_err(|_| {
+            err(
+                400,
+                format!(
+                    "Not a song id: {}",
+                    part.chars().take(20).collect::<String>()
+                ),
+            )
+        })?;
         if !out.contains(&id) {
             out.push(id);
         }
@@ -569,27 +745,42 @@ fn parse_ids(raw: &str) -> ApiResult<Vec<i64>> {
     Ok(out)
 }
 
-
 /// Artists (merged spellings, collaborations split into their artists, see `artists`). With `q`: ranked
 /// by name / alias, then artists whose albums or songs match; each has "match".
-async fn artists(State(st): State<AppState>, User(u): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
+async fn artists(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(a): Query<SimpleQ>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let idx = st.library.artists.index(&st.db);
-        let limit = a.limit.unwrap_or(ARTISTS_MAX as i64).clamp(1, ARTISTS_MAX as i64) as usize;
+        let limit = a
+            .limit
+            .unwrap_or(ARTISTS_MAX as i64)
+            .clamp(1, ARTISTS_MAX as i64) as usize;
         let mut v = if a.q.trim().is_empty() {
             let (ix, sort, dir) = (idx.clone(), a.sort.clone(), a.dir.clone());
-            let all = cached_list(st, &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir), move || Ok(json!(ix.list(&sort, &dir))))?;
+            let all = cached_list(
+                st,
+                &format!("artists\u{1f}{}\u{1f}{}", a.sort, a.dir),
+                move || Ok(json!(ix.list(&sort, &dir))),
+            )?;
             json!(page(&all, a.offset, limit))
         } else {
             json!(encore_library::search::library_artists(&idx, &a.q, limit))
         };
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    }).await
+    })
+    .await
 }
 
 /// Every song of a library artist (all spellings, aliases and collaborations), for Play / Shuffle.
-async fn artist_tracks(State(st): State<AppState>, User(u): User, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
+async fn artist_tracks(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(q): Query<NameQ>,
+) -> ApiResult<Json<Value>> {
     if q.name.trim().is_empty() {
         return Ok(Json(json!([])));
     }
@@ -607,12 +798,23 @@ async fn artist_tracks(State(st): State<AppState>, User(u): User, Query(q): Quer
 mod search_tests;
 
 /// `cols` of these songs, in this order: one indexed lookup by id (at most `MAX_IDS`, or a page of a list).
-pub(super) fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<encore_db::Row>> {
+pub(super) fn rows_by_id(
+    db: &impl encore_db::Query,
+    cols: &str,
+    ids: &[i64],
+) -> rusqlite::Result<Vec<encore_db::Row>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
-    let rows = db.query(&format!("SELECT {cols} FROM tracks WHERE id IN ({})", encore_library::artists::marks(ids.len())), ids.iter().map(|i| json!(i)).collect())?;
-    let mut by_id: HashMap<i64, encore_db::Row> = rows.into_iter().map(|r| (r.i("id"), r)).collect();
+    let rows = db.query(
+        &format!(
+            "SELECT {cols} FROM tracks WHERE id IN ({})",
+            encore_library::artists::marks(ids.len())
+        ),
+        ids.iter().map(|i| json!(i)).collect(),
+    )?;
+    let mut by_id: HashMap<i64, encore_db::Row> =
+        rows.into_iter().map(|r| (r.i("id"), r)).collect();
     Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
 }
 
@@ -621,18 +823,40 @@ pub(super) fn rows_by_id(db: &impl encore_db::Query, cols: &str, ids: &[i64]) ->
 fn track_ids(st: &AppState, order_by: &str) -> ApiResult<Arc<Value>> {
     // each song once: not the copies of a song the library has from MusicBrainz (encore_library::twins)
     let shown = encore_library::twins::SHOWN;
-    let sql = if order_by.is_empty() { format!("SELECT id FROM tracks WHERE {shown}") } else { format!("SELECT id FROM tracks WHERE {shown} ORDER BY {order_by}") };
+    let sql = if order_by.is_empty() {
+        format!("SELECT id FROM tracks WHERE {shown}")
+    } else {
+        format!("SELECT id FROM tracks WHERE {shown} ORDER BY {order_by}")
+    };
     let db = st.db.clone();
-    cached_list(st, &format!("track-ids\u{1f}{order_by}"), move || Ok(json!(db.query(&sql, p![])?.iter().map(|r| r.i("id")).collect::<Vec<i64>>())))
+    cached_list(st, &format!("track-ids\u{1f}{order_by}"), move || {
+        Ok(json!(db
+            .query(&sql, p![])?
+            .iter()
+            .map(|r| r.i("id"))
+            .collect::<Vec<i64>>()))
+    })
 }
 
 /// Items `offset..offset+limit` of a cached id list.
 fn page_ids(all: &Value, offset: i64, limit: usize) -> Vec<i64> {
-    all.as_array().map(|a| a.iter().skip(offset.max(0) as usize).take(limit).filter_map(|v| v.as_i64()).collect()).unwrap_or_default()
+    all.as_array()
+        .map(|a| {
+            a.iter()
+                .skip(offset.max(0) as usize)
+                .take(limit)
+                .filter_map(|v| v.as_i64())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// GET /api/library/tracks: the songs list (or `?ids=` those songs in that order).
-async fn tracks(State(st): State<AppState>, User(u): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
+async fn tracks(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(a): Query<SimpleQ>,
+) -> ApiResult<Json<Value>> {
     if let Some(raw) = a.ids.as_deref() {
         let ids = parse_ids(raw)?;
         let mut v = json!(st.db.read(move |c| rows_by_id(c, TRACK_COLS, &ids)).await?);
@@ -642,10 +866,21 @@ async fn tracks(State(st): State<AppState>, User(u): User, Query(a): Query<Simpl
     st.blocking(move |st| {
         let ids: Vec<i64> = if !a.q.trim().is_empty() {
             // ranked in memory, the same song twice shown once (see search::library_track_ids)
-            encore_library::search::library_track_ids(&st.library.artists.index(&st.db), &a.q, &a.sort, &a.dir).into_iter()
-                .skip(a.offset.max(0) as usize).take(a.limit.unwrap_or(200).clamp(1, 1000) as usize).collect()
+            encore_library::search::library_track_ids(
+                &st.library.artists.index(&st.db),
+                &a.q,
+                &a.sort,
+                &a.dir,
+            )
+            .into_iter()
+            .skip(a.offset.max(0) as usize)
+            .take(a.limit.unwrap_or(200).clamp(1, 1000) as usize)
+            .collect()
         } else {
-            let (limit, offset) = (a.limit.unwrap_or(200).clamp(1, 1000) as usize, a.offset.max(0));
+            let (limit, offset) = (
+                a.limit.unwrap_or(200).clamp(1, 1000) as usize,
+                a.offset.max(0),
+            );
             // the id list is sorted once per sort and kept; a page fetches its rows by id (the 0.25.3 WIP cached
             // each page on its own, so every new page was another sort of every song)
             let all = track_ids(st, &order(TRACK_SORTS, &a.sort, &a.dir, "artist"))?;
@@ -654,11 +889,16 @@ async fn tracks(State(st): State<AppState>, User(u): User, Query(a): Query<Simpl
         let mut v = json!(rows_by_id(&st.db, TRACK_COLS, &ids)?);
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    }).await
+    })
+    .await
 }
 
 /// GET /api/library/recent: the albums added last (18 by default, at most 200).
-async fn recent(State(st): State<AppState>, User(u): User, Query(a): Query<SimpleQ>) -> ApiResult<Json<Value>> {
+async fn recent(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(a): Query<SimpleQ>,
+) -> ApiResult<Json<Value>> {
     let limit = a.limit.unwrap_or(18).clamp(1, 200);
     let rows = cached_read(&st, format!("recent\u{1f}{limit}"), move |c| Ok(json!(c.query(
         "SELECT album_id AS id, MAX(album) album, MAX(albumartist) albumartist, MAX(year) year, MAX(added_at) added, COUNT(*) tracks
@@ -682,8 +922,17 @@ struct ShuffleQ {
 }
 
 /// GET /api/library/shuffle: random songs.
-async fn shuffle_get(State(st): State<AppState>, User(u): User, Query(q): Query<ShuffleQ>) -> ApiResult<Json<Value>> {
-    let ex: Vec<i64> = q.exclude.split(',').filter_map(|x| x.trim().parse().ok()).take(500).collect();
+async fn shuffle_get(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(q): Query<ShuffleQ>,
+) -> ApiResult<Json<Value>> {
+    let ex: Vec<i64> = q
+        .exclude
+        .split(',')
+        .filter_map(|x| x.trim().parse().ok())
+        .take(500)
+        .collect();
     let Json(mut v) = shuffle_inner(&st, u.i("id"), q.limit.unwrap_or(50), &ex)?;
     enrich(&st, Some(&u), &mut v).await;
     Ok(Json(v))
@@ -701,8 +950,17 @@ struct ShuffleBody {
 
 /// Random songs nobody heard yet this session (the web player sends what it already played), with their
 /// loudness for normalization (the player queues them as they are).
-async fn shuffle_post(State(st): State<AppState>, User(u): User, Json(b): Json<ShuffleBody>) -> ApiResult<Json<Value>> {
-    let Json(mut v) = shuffle_inner(&st, u.i("id"), b.limit.unwrap_or(50), &b.exclude[..b.exclude.len().min(20000)])?;
+async fn shuffle_post(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<ShuffleBody>,
+) -> ApiResult<Json<Value>> {
+    let Json(mut v) = shuffle_inner(
+        &st,
+        u.i("id"),
+        b.limit.unwrap_or(50),
+        &b.exclude[..b.exclude.len().min(20000)],
+    )?;
     encore_library::loudness::stamp(&st.db, &mut v);
     Ok(Json(v))
 }
@@ -714,7 +972,11 @@ fn shuffle_inner(st: &AppState, uid: i64, limit: i64, exclude: &[i64]) -> ApiRes
     ex.extend(super::taste::disliked_song_ids(st, uid)?);
     // random picks from the cached id list (`ORDER BY RANDOM()` read and sorted every song for 50 of them)
     let all = track_ids(st, "")?;
-    let ids = draw(all.as_array().map(|a| a.as_slice()).unwrap_or(&[]), limit.clamp(1, 200) as usize, &ex);
+    let ids = draw(
+        all.as_array().map(|a| a.as_slice()).unwrap_or(&[]),
+        limit.clamp(1, 200) as usize,
+        &ex,
+    );
     Ok(Json(json!(rows_by_id(&st.db, SHUFFLE_COLS, &ids)?)))
 }
 
@@ -735,7 +997,11 @@ fn draw(pool: &[Value], n: usize, exclude: &std::collections::HashSet<i64>) -> V
         }
     }
     if out.len() < n {
-        let mut rest: Vec<i64> = pool.iter().filter_map(|v| v.as_i64()).filter(|i| !exclude.contains(i) && !taken.contains(i)).collect();
+        let mut rest: Vec<i64> = pool
+            .iter()
+            .filter_map(|v| v.as_i64())
+            .filter(|i| !exclude.contains(i) && !taken.contains(i))
+            .collect();
         rest.shuffle(&mut rand::rng());
         out.extend(rest.into_iter().take(n - out.len()));
     }
@@ -768,7 +1034,11 @@ const SCROBBLE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
 /// or the bare array – answered `{ok: true, saved, skipped}`. In a list, unknown songs are skipped, and so is
 /// a play that is already saved (the same song at the same `played_at`: a list sent twice after a lost answer).
 /// Each play is saved and scrobbled with its own time, clamped to the last 400 days.
-async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+async fn plays(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<Value>,
+) -> ApiResult<Json<Value>> {
     let uid = u.i("id");
     let (single, raw) = match b {
         Value::Array(a) => (false, a),
@@ -781,14 +1051,23 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
     if raw.len() > MAX_PLAYS {
         return Err(err(413, format!("At most {MAX_PLAYS} plays in one call")));
     }
-    let list = raw.into_iter().map(serde_json::from_value::<Play>).collect::<Result<Vec<_>, _>>().map_err(|e| err(422, format!("Bad play: {e}")))?;
+    let list = raw
+        .into_iter()
+        .map(serde_json::from_value::<Play>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| err(422, format!("Bad play: {e}")))?;
     let ids: Vec<i64> = list.iter().map(|p| p.track_id).collect();
     let known: HashMap<i64, encore_db::Row> = st.db.query("SELECT id, artist, title, album FROM tracks WHERE id IN (SELECT value FROM json_each(?))", p![json!(ids).to_string()])?
         .into_iter().map(|r| (r.i("id"), r)).collect();
     if single && known.is_empty() {
         // a Surround song: played, but not counted (plays, stats and scrobbles are the stereo library's)
-        if list.iter().all(|p| encore_library::surround::is_track(p.track_id)) {
-            return Ok(Json(json!({ "ok": true, "saved": 0, "skipped": list.len() })));
+        if list
+            .iter()
+            .all(|p| encore_library::surround::is_track(p.track_id))
+        {
+            return Ok(Json(
+                json!({ "ok": true, "saved": 0, "skipped": list.len() }),
+            ));
         }
         return Err(err(404, "Track not found"));
     }
@@ -802,7 +1081,10 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
             continue;
         }
         let secs = p.seconds.clamp(0.0, 7200.0);
-        let at = p.played_at.filter(|t| t.is_finite()).map_or(now, |t| t.clamp(now - MAX_PLAY_AGE, now));
+        let at = p
+            .played_at
+            .filter(|t| t.is_finite())
+            .map_or(now, |t| t.clamp(now - MAX_PLAY_AGE, now));
         if p.played_at.is_some() && !seen.insert((p.track_id, at.to_bits())) {
             skipped += 1;
             continue;
@@ -824,12 +1106,28 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
         let mut params = Vec::with_capacity(rows.len() * 7);
         for (tid, secs, at) in &rows {
             let t = &known[tid];
-            params.extend(p![uid, tid, t.s("artist"), t.s("title"), t.s("album"), secs, at]);
+            params.extend(p![
+                uid,
+                tid,
+                t.s("artist"),
+                t.s("title"),
+                t.s("album"),
+                secs,
+                at
+            ]);
         }
-        saved = st.db.query(&sql, params)?.iter().map(|r| (r.i("track_id"), r.f("seconds"), r.f("played_at"))).collect();
+        saved = st
+            .db
+            .query(&sql, params)?
+            .iter()
+            .map(|r| (r.i("track_id"), r.f("seconds"), r.f("played_at")))
+            .collect();
         skipped += rows.len() - saved.len();
     }
-    let starts: Vec<(i64, i64)> = saved.iter().map(|(tid, secs, at)| (*tid, (at - secs) as i64)).collect();
+    let starts: Vec<(i64, i64)> = saved
+        .iter()
+        .map(|(tid, secs, at)| (*tid, (at - secs) as i64))
+        .collect();
     if single {
         for (tid, start) in starts {
             encore_sync::scrobble::scrobble(&st, uid, tid, start);
@@ -845,11 +1143,17 @@ async fn plays(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) 
             }
         });
     }
-    Ok(Json(json!({ "ok": true, "saved": saved.len(), "skipped": skipped })))
+    Ok(Json(
+        json!({ "ok": true, "saved": saved.len(), "skipped": skipped }),
+    ))
 }
 
 /// A song started: shows as "now playing" on Last.fm / ListenBrainz.
-async fn now_playing(State(st): State<AppState>, User(u): User, Json(b): Json<Play>) -> Json<Value> {
+async fn now_playing(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<Play>,
+) -> Json<Value> {
     encore_sync::scrobble::now_playing(&st, u.i("id"), b.track_id);
     Json(json!({ "ok": true }))
 }
@@ -862,13 +1166,30 @@ fn owns_song(st: &AppState, u: &encore_db::Row, t: &encore_db::Row) -> bool {
     }
     let me = u.i("id");
     let request_id = t.i("request_id");
-    (request_id > 0 && st.db.one("SELECT user_id FROM requests WHERE id=?", p![request_id]).ok().flatten().is_some_and(|r| r.i("user_id") == me))
-        || (t.i("added_by") == me && matches!(t.s("added_via").as_str(), "request" | "link" | "soulseek"))
+    (request_id > 0
+        && st
+            .db
+            .one("SELECT user_id FROM requests WHERE id=?", p![request_id])
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.i("user_id") == me))
+        || (t.i("added_by") == me
+            && matches!(t.s("added_via").as_str(), "request" | "link" | "soulseek"))
 }
 
 /// DELETE /api/library/tracks/{id}: delete a song and its file (admins, or who brought it in).
-async fn delete_track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT path, artist, title, request_id, added_by, added_via FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+async fn delete_track(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
+    let t = st
+        .db
+        .one(
+            "SELECT path, artist, title, request_id, added_by, added_via FROM tracks WHERE id=?",
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     if !encore_config::perms::is_admin(&u) && !owns_song(&st, &u, &t) {
         return Err(err(403, "You can only remove songs you requested"));
     }
@@ -876,21 +1197,60 @@ async fn delete_track(State(st): State<AppState>, User(u): User, Path(id): Path<
     if let Some(d) = FsPath::new(&t.s("path")).parent() {
         prune_empty(d, FsPath::new(&st.cfg.str("library_path")));
     }
-    st.db.log("info", &format!("{} deleted {} – {}", u.s("username"), t.s("artist"), t.s("title")));
+    st.db.log(
+        "info",
+        &format!(
+            "{} deleted {} – {}",
+            u.s("username"),
+            t.s("artist"),
+            t.s("title")
+        ),
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
 /// The table a song id is in: the Surround library's ids start at a billion (encore_library::surround).
 fn table_of(id: i64) -> &'static str {
-    if encore_library::surround::is_track(id) { "surround_tracks" } else { "tracks" }
+    if encore_library::surround::is_track(id) {
+        "surround_tracks"
+    } else {
+        "tracks"
+    }
 }
 
 /// GET /api/library/tracks/{id}/file: the song's file as it is (a download).
-async fn track_file(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, req: Request) -> ApiResult<Response> {
-    let t = st.db.one(&format!("SELECT path, artist, title FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "File not found"))?;
+async fn track_file(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+    req: Request,
+) -> ApiResult<Response> {
+    let t = st
+        .db
+        .one(
+            &format!(
+                "SELECT path, artist, title FROM {} WHERE id=?",
+                table_of(id)
+            ),
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "File not found"))?;
     let path = t.s("path");
-    let ext = FsPath::new(&path).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-    serve_file(&path, req, None, Some(encore_core::fs::safe_file_name(&format!("{} - {}{ext}", t.s("artist"), t.s("title"))))).await
+    let ext = FsPath::new(&path)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    serve_file(
+        &path,
+        req,
+        None,
+        Some(encore_core::fs::safe_file_name(&format!(
+            "{} - {}{ext}",
+            t.s("artist"),
+            t.s("title")
+        ))),
+    )
+    .await
 }
 
 use encore_core::audio::mime as browser_type;
@@ -899,27 +1259,55 @@ use encore_media::Ffmpeg;
 /// A library song's stream: what `encore_playback::stream::plan_stream` decides (the original, a conversion
 /// made on the fly, or server processing by Cadenza). `user` is None for share links, which never get
 /// server processing.
-pub async fn stream_track(st: &AppState, id: i64, q: &StreamQ, req: Request, user: Option<&encore_db::Row>) -> ApiResult<Response> {
+pub async fn stream_track(
+    st: &AppState,
+    id: i64,
+    q: &StreamQ,
+    req: Request,
+    user: Option<&encore_db::Row>,
+) -> ApiResult<Response> {
     // a Surround song's format is its codec (eac3, truehd …): no browser plays those, so they are converted
-    let tr = st.db.one(&format!("SELECT path, format FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let tr = st
+        .db
+        .one(
+            &format!("SELECT path, format FROM {} WHERE id=?", table_of(id)),
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     // the permission is only looked at when processing is asked for
-    let listener = user.map(|u| Listener { user: u.i("id"), may_process: q.dsp && auth::can(st, u, "server_dsp") });
+    let listener = user.map(|u| Listener {
+        user: u.i("id"),
+        may_process: q.dsp && auth::can(st, u, "server_dsp"),
+    });
     serve_stream(st, id, &tr.s("path"), &tr.s("format"), q, req, listener).await
 }
 
 /// GET /api/library/tracks/{id}/stream: the song as the player streams it (as is, or transcoded / processed).
-async fn stream(State(st): State<AppState>, User(u): User, Path(id): Path<i64>, Query(q): Query<StreamQ>, req: Request) -> ApiResult<Response> {
+async fn stream(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+    Query(q): Query<StreamQ>,
+    req: Request,
+) -> ApiResult<Response> {
     stream_track(&st, id, &q, req, Some(&u)).await
 }
 
 /// One song as the lists return it (the car player rebuilds its queue from ids).
-async fn track(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+async fn track(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
     if encore_library::surround::is_track(id) {
-        let r = encore_library::surround::track(&st.db, id).ok_or_else(|| err(404, "Track not found"))?;
+        let r = encore_library::surround::track(&st.db, id)
+            .ok_or_else(|| err(404, "Track not found"))?;
         return Ok(Json(encore_library::surround::track_json(&r)));
     }
     let mut t = st.db.one("SELECT id, title, artist, album, albumartist, album_id, track, disc, year, duration, format, bitrate, path FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
-    if !encore_config::perms::is_admin(&u) { t.remove("path"); }
+    if !encore_config::perms::is_admin(&u) {
+        t.remove("path");
+    }
     let mut v = Value::Object(t);
     enrich(&st, Some(&u), &mut v).await;
     Ok(Json(v))
@@ -934,7 +1322,11 @@ struct LimitQ {
 }
 
 /// What this user played most recently (one row per song, newest first).
-async fn recent_plays(State(st): State<AppState>, User(u): User, Query(q): Query<LimitQ>) -> ApiResult<Json<Value>> {
+async fn recent_plays(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(q): Query<LimitQ>,
+) -> ApiResult<Json<Value>> {
     let limit = if q.limit <= 0 { 50 } else { q.limit.min(200) };
     let rows = st.db.query(
         "SELECT t.id, t.title, t.artist, t.album, t.albumartist, t.album_id, t.track, t.disc, t.year, t.duration, t.format, t.bitrate, MAX(p.played_at) played_at \
@@ -960,20 +1352,45 @@ struct InfoQ {
 /// `offline_ok` is true when that stream is the original, so a copy saved for offline play is the file itself.
 /// `gain` (0.31, when anything is known): the song's loudness as its track rows carry it, with `source`
 /// ("tags" | "measured") and `lufs` (see encore_library::loudness).
-async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<InfoQ>, headers: axum::http::HeaderMap) -> ApiResult<Json<Value>> {
+async fn track_info(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+    Query(q): Query<InfoQ>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Json<Value>> {
     let surround = encore_library::surround::is_track(id);
-    let t = st.db.one(&format!("SELECT id, path, format, size, bitrate, duration FROM {} WHERE id=?", table_of(id)), p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let t = st
+        .db
+        .one(
+            &format!(
+                "SELECT id, path, format, size, bitrate, duration FROM {} WHERE id=?",
+                table_of(id)
+            ),
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     let (path, media) = (t.s("path"), st.media.clone());
-    let mut info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
-    let plan = plan(&t.s("format"), &info, decoders(&headers, &q.codecs).as_deref());
+    let mut info = tokio::task::spawn_blocking(move || media.audio_info(&path))
+        .await
+        .unwrap_or(json!({}));
+    let plan = plan(
+        &t.s("format"),
+        &info,
+        decoders(&headers, &q.codecs).as_deref(),
+    );
     info["stream"] = json!({ "kind": plan.kind, "codec": plan.codec, "reason": plan.reason });
     // otherwise a client saves a conversion (`?q=aac` or `?q=opus`, its quality marked "(converted)")
     info["offline_ok"] = json!(plan.kind == "original");
     info["id"] = json!(t.i("id"));
     info["format"] = json!(t.s("format"));
     info["size"] = json!(t.i("size"));
-    if info["bitrate"].is_null() { info["bitrate"] = json!(t.i("bitrate")); }
-    if info["duration"].is_null() { info["duration"] = json!(t.f("duration")); }
+    if info["bitrate"].is_null() {
+        info["bitrate"] = json!(t.i("bitrate"));
+    }
+    if info["duration"].is_null() {
+        info["duration"] = json!(t.f("duration"));
+    }
     if surround {
         // what the receiver gets: "Dolby Atmos (E-AC-3 5.1)"; no quality check or loudness for surround songs
         info["class"] = json!("surround");
@@ -983,7 +1400,7 @@ async fn track_info(State(st): State<AppState>, User(_): User, Path(id): Path<i6
         return Ok(Json(info));
     }
     info["quality"] = encore_media::quality::for_track(&st, id); // "Fake lossless? cutoff 16 kHz" in the signal path
-    // "Your own file, uploaded by alex" in the signal path (⋯ → Replace with my own file)
+                                                                 // "Your own file, uploaded by alex" in the signal path (⋯ → Replace with my own file)
     info["own_file"] = encore_library::own_file::latest(&st, id).unwrap_or(Value::Null);
     if let Some(gain) = encore_library::loudness::info_gain(&st.db, id) {
         info["gain"] = gain;
@@ -1003,38 +1420,71 @@ struct LyricsQ {
 
 /// Lyrics next to the song (.lrc synced, .txt plain), looked up on LRCLIB and saved when missing; with
 /// `shift_ms`, how much later the time-synced lines are to be shown (the song's saved nudge).
-async fn lyrics(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Query(q): Query<LyricsQ>) -> ApiResult<Json<Value>> {
-    let (id, answer) = lyrics_answer(&st, id, q.fetch.unwrap_or(true), q.force.unwrap_or(false)).await?;
+async fn lyrics(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+    Query(q): Query<LyricsQ>,
+) -> ApiResult<Json<Value>> {
+    let (id, answer) =
+        lyrics_answer(&st, id, q.fetch.unwrap_or(true), q.force.unwrap_or(false)).await?;
     Ok(Json(encore_library::lyrics::with_shift(&st, id, answer)))
 }
 
 /// The lyrics of song `id` (a Surround song: the .lrc beside it, else its stereo song's), looked up when
 /// missing if `fetch` (again even when there are some if `force`).
 /// → (the id the lyrics and their nudge belong to, {lyrics, synced, source, …})
-async fn lyrics_answer(st: &AppState, id: i64, fetch: bool, force: bool) -> ApiResult<(i64, Value)> {
+async fn lyrics_answer(
+    st: &AppState,
+    id: i64,
+    fetch: bool,
+    force: bool,
+) -> ApiResult<(i64, Value)> {
     if encore_library::surround::is_track(id) {
         // a Surround song: the .lrc beside it (gamdl writes one), else its stereo song's
-        let r = encore_library::surround::track(&st.db, id).ok_or_else(|| err(404, "Track not found"))?;
+        let r = encore_library::surround::track(&st.db, id)
+            .ok_or_else(|| err(404, "Track not found"))?;
         if let Some((text, synced)) = encore_library::lyrics::sidecar(FsPath::new(&r.s("path"))) {
-            return Ok((id, json!({ "lyrics": text, "synced": synced, "source": "file" })));
+            return Ok((
+                id,
+                json!({ "lyrics": text, "synced": synced, "source": "file" }),
+            ));
         }
         if r.i("stereo_track_id") <= 0 {
-            return Ok((id, json!({ "lyrics": null, "synced": false, "source": null })));
+            return Ok((
+                id,
+                json!({ "lyrics": null, "synced": false, "source": null }),
+            ));
         }
     }
     let id = if encore_library::surround::is_track(id) {
-        encore_library::surround::track(&st.db, id).map(|r| r.i("stereo_track_id")).unwrap_or(0)
+        encore_library::surround::track(&st.db, id)
+            .map(|r| r.i("stereo_track_id"))
+            .unwrap_or(0)
     } else {
         id
     };
-    let t = st.db.one("SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+    let t = st
+        .db
+        .one(
+            "SELECT id, path, artist, title, album, duration FROM tracks WHERE id=?",
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     if !fetch {
-        return Ok((id, match encore_library::lyrics::sidecar(FsPath::new(&t.s("path"))) {
-            Some((text, synced)) => json!({ "lyrics": text, "synced": synced, "source": "file" }),
-            None => json!({ "lyrics": null, "synced": false, "source": null }),
-        }));
+        return Ok((
+            id,
+            match encore_library::lyrics::sidecar(FsPath::new(&t.s("path"))) {
+                Some((text, synced)) => {
+                    json!({ "lyrics": text, "synced": synced, "source": "file" })
+                }
+                None => json!({ "lyrics": null, "synced": false, "source": null }),
+            },
+        ));
     }
-    let answer = encore_library::lyrics::fetch_for_track(st, &t, force).await.map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))?;
+    let answer = encore_library::lyrics::fetch_for_track(st, &t, force)
+        .await
+        .map_err(|e| err(502, format!("Lyrics lookup failed: {e}")))?;
     Ok((id, answer))
 }
 
@@ -1048,20 +1498,32 @@ struct ShiftBody {
 
 /// Nudge a song's time-synced lyrics (the lyrics view's Earlier / Later), for every device and listener.
 /// → the lyrics answer with the new `shift_ms`
-async fn lyrics_shift(State(st): State<AppState>, User(_): User, Path(id): Path<i64>, Json(b): Json<ShiftBody>) -> ApiResult<Json<Value>> {
+async fn lyrics_shift(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<i64>,
+    Json(b): Json<ShiftBody>,
+) -> ApiResult<Json<Value>> {
     // the lyrics shown now (the file next to the song; with saving files off, what LRCLIB answers again)
     let (id, answer) = lyrics_answer(&st, id, true, false).await?;
-    let text = answer["lyrics"].as_str().filter(|_| answer["synced"].as_bool().unwrap_or(false))
+    let text = answer["lyrics"]
+        .as_str()
+        .filter(|_| answer["synced"].as_bool().unwrap_or(false))
         .ok_or_else(|| err(409, "Only time-synced lyrics can be nudged"))?
         .to_string();
     // the file's own [offset:] tag stays in the file; what is saved is the rest
     let saved = b.shift_ms - encore_library::lyrics::lrc_offset_shift(&text);
-    encore_library::lyrics::set_shift(&st, id, &text, saved).map_err(|e| err(500, e.to_string()))?;
+    encore_library::lyrics::set_shift(&st, id, &text, saved)
+        .map_err(|e| err(500, e.to_string()))?;
     Ok(Json(encore_library::lyrics::with_shift(&st, id, answer)))
 }
 
 /// GET /api/library/albums/{id}: an album with its songs.
-async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn album(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     if encore_library::surround::is_album(&id) {
         return surround_album(&st, &u, &id).await;
     }
@@ -1078,28 +1540,43 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
     // an album merged from copies (encore_library::merge): each song once, in its best copy
     // (its size and when it came are of every copy)
     let copies = encore_library::merge::other_copies(&rows);
-    let (size, added_at) = (rows.iter().map(|r| r.i("size")).sum::<i64>(), rows.iter().filter_map(|r| r.get("added_at").and_then(|v| v.as_f64())).reduce(f64::min));
-    let rows: Vec<_> = rows.into_iter().filter(|r| !copies.contains(&r.i("id"))).collect();
+    let (size, added_at) = (
+        rows.iter().map(|r| r.i("size")).sum::<i64>(),
+        rows.iter()
+            .filter_map(|r| r.get("added_at").and_then(|v| v.as_f64()))
+            .reduce(f64::min),
+    );
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| !copies.contains(&r.i("id")))
+        .collect();
     let libp = format!("{}/", st.cfg.str("library_path").trim_end_matches('/'));
     let admin = encore_config::perms::is_admin(&u);
-    let tracks: Vec<Value> = rows.iter().map(|r| {
-        let mut r = r.clone();
-        let p = r.s("path");
-        r.insert("relpath".into(), json!(p.strip_prefix(&libp).unwrap_or(&p)));
-        if !admin {
-            r.remove("path");
-        }
-        who_added(&mut r);
-        // the raw credit tags: songs carry `artists` (each artist, split) instead
-        r.remove("artist_credit");
-        r.remove("albumartist_credit");
-        Value::Object(r)
-    }).collect();
+    let tracks: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            let p = r.s("path");
+            r.insert("relpath".into(), json!(p.strip_prefix(&libp).unwrap_or(&p)));
+            if !admin {
+                r.remove("path");
+            }
+            who_added(&mut r);
+            // the raw credit tags: songs carry `artists` (each artist, split) instead
+            r.remove("artist_credit");
+            r.remove("albumartist_credit");
+            Value::Object(r)
+        })
+        .collect();
     // the album's name and ids from its MusicBrainz copy when it has one
-    let f = rows.iter().find(|r| !r.s("mb_releasegroupid").is_empty()).unwrap_or(&rows[0]);
+    let f = rows
+        .iter()
+        .find(|r| !r.s("mb_releasegroupid").is_empty())
+        .unwrap_or(&rows[0]);
     let class = {
         let id = id.clone();
-        st.blocking(move |st| Ok(st.library.types.of(&st.db, &id))).await?
+        st.blocking(move |st| Ok(st.library.types.of(&st.db, &id)))
+            .await?
     };
     // an album of one name with others (Weezer's self-titled ones): which it is, "Weezer (Blue Album)"
     let (title, rg) = (f.s("album"), f.s("mb_releasegroupid"));
@@ -1108,9 +1585,13 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
         st.blocking(move |st| {
             let e = encore_library::split::edition_of(&st.db, &id, &title);
             // not named by MusicBrainz yet: asked in the background, the next look shows it
-            let asked = st.db.one("SELECT 1 x FROM rg_names WHERE rg=?", p![rg])?.is_some();
+            let asked = st
+                .db
+                .one("SELECT 1 x FROM rg_names WHERE rg=?", p![rg])?
+                .is_some();
             Ok((e, !rg.is_empty() && !asked))
-        }).await?
+        })
+        .await?
     };
     if edition.1 {
         let st2 = st.clone();
@@ -1145,9 +1626,15 @@ async fn album(State(st): State<AppState>, User(u): User, Path(id): Path<String>
 /// album – lossless when it is lossy, hi-res (Qobuz/Tidal through streamrip) when it is CD quality – and
 /// answers `{request_id, tier, text}`; 409 when it is hi-res already or an upgrade runs, 422 when it can't be
 /// looked for (not matched to MusicBrainz, or hi-res without streamrip).
-async fn upgrade_album(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn upgrade_album(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     use encore_requests::upgrade::{queue_album, Queued, Tier};
-    let done = st.blocking(move |st| queue_album(st, &id).map_err(|e| err(500, e.to_string()))).await?;
+    let done = st
+        .blocking(move |st| queue_album(st, &id).map_err(|e| err(500, e.to_string())))
+        .await?;
     match done {
         Queued::Requested(rid, tier) => {
             let text = if tier == Tier::HiRes { "Looking for a hi-res copy on Qobuz/Tidal" } else { "Looking for a lossless copy" };
@@ -1175,10 +1662,21 @@ fn who_added(r: &mut encore_db::Row) {
     let by = r.get("added_by").filter(|v| !v.is_null()).cloned();
     let requester = r.remove("request_user").filter(|v| !v.is_null());
     let request_day = r.remove("request_created").filter(|v| !v.is_null());
-    r.insert("added_by_deleted".into(), json!(by.is_some() && name.is_none()));
-    let requested_by = if request_like(&via) { name.clone() } else { name.clone().or(requester) };
+    r.insert(
+        "added_by_deleted".into(),
+        json!(by.is_some() && name.is_none()),
+    );
+    let requested_by = if request_like(&via) {
+        name.clone()
+    } else {
+        name.clone().or(requester)
+    };
     r.insert("requested_by".into(), requested_by.unwrap_or(Value::Null));
-    let at = r.get("requested_at").filter(|v| !v.is_null()).cloned().or(request_day);
+    let at = r
+        .get("requested_at")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .or(request_day);
     r.insert("requested_at".into(), at.unwrap_or(Value::Null));
     r.insert("added_by_name".into(), name.unwrap_or(Value::Null));
     // the files' type tags are the server's business (the album's `type` says what they mean)
@@ -1192,10 +1690,21 @@ type Added = (String, Option<i64>, Option<String>, Option<f64>, f64);
 
 /// [`Added`] of each song.
 fn tracks_of(rows: &[encore_db::Row]) -> Vec<Added> {
-    rows.iter().map(|r| {
-        (r.s("added_via"), r.get("added_by").and_then(|v| v.as_i64()), r.get("added_by_name").and_then(|v| v.as_str()).map(String::from),
-         r.get("requested_at").and_then(|v| v.as_f64()).or_else(|| r.get("request_created").and_then(|v| v.as_f64())), r.f("added_at"))
-    }).collect()
+    rows.iter()
+        .map(|r| {
+            (
+                r.s("added_via"),
+                r.get("added_by").and_then(|v| v.as_i64()),
+                r.get("added_by_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                r.get("requested_at")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| r.get("request_created").and_then(|v| v.as_f64())),
+                r.f("added_at"),
+            )
+        })
+        .collect()
 }
 
 /// The album page's history line, as groups: the songs by (how they came – requests, links and Soulseek-page
@@ -1215,18 +1724,41 @@ fn history(songs: &[Added]) -> Value {
             continue;
         }
         fn class(v: &str) -> &str {
-            if request_like(v) { "request" } else { v }
+            if request_like(v) {
+                "request"
+            } else {
+                v
+            }
         }
-        match groups.iter_mut().find(|g| class(&g.via) == class(via) && g.by_id == *by_id) {
+        match groups
+            .iter_mut()
+            .find(|g| class(&g.via) == class(via) && g.by_id == *by_id)
+        {
             Some(g) => {
                 g.songs += 1;
-                g.at = match (g.at, *at) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+                g.at = match (g.at, *at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
                 g.first = g.first.min(*added);
             }
-            None => groups.push(G { via: via.clone(), by_id: *by_id, by: by.clone(), at: *at, first: *added, songs: 1 }),
+            None => groups.push(G {
+                via: via.clone(),
+                by_id: *by_id,
+                by: by.clone(),
+                at: *at,
+                first: *added,
+                songs: 1,
+            }),
         }
     }
-    groups.sort_by(|a, b| b.songs.cmp(&a.songs).then(a.at.unwrap_or(a.first).partial_cmp(&b.at.unwrap_or(b.first)).unwrap_or(std::cmp::Ordering::Equal)));
+    groups.sort_by(|a, b| {
+        b.songs.cmp(&a.songs).then(
+            a.at.unwrap_or(a.first)
+                .partial_cmp(&b.at.unwrap_or(b.first))
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
     json!(groups.iter().map(|g| json!({
         "via": g.via, "by": g.by, "by_deleted": g.by_id.is_some() && g.by.is_none(), "requested_at": g.at, "songs": g.songs,
     })).collect::<Vec<_>>())
@@ -1241,13 +1773,21 @@ async fn surround_album(st: &AppState, u: &encore_db::Row, id: &str) -> ApiResul
     let admin = encore_config::perms::is_admin(u);
     if admin {
         for t in tracks.iter_mut() {
-            if let Some(r) = t["id"].as_i64().and_then(|i| encore_library::surround::track(&st.db, i)) {
+            if let Some(r) = t["id"]
+                .as_i64()
+                .and_then(|i| encore_library::surround::track(&st.db, i))
+            {
                 t["path"] = json!(r.s("path"));
             }
         }
     }
     let f = tracks[0].clone();
-    let stereo = tracks.iter().find_map(|t| t["stereo_album_id"].as_str().filter(|s| !s.is_empty()).map(String::from));
+    let stereo = tracks.iter().find_map(|t| {
+        t["stereo_album_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    });
     Ok(Json(json!({
         "id": id, "class": "surround", "album": f["album"], "albumartist": f["albumartist"], "year": f["year"],
         "quality": f["quality"], "atmos": tracks.iter().any(|t| t["atmos"] == true),
@@ -1269,14 +1809,26 @@ struct CoverQ {
 
 /// Whether `If-None-Match` names this ETag (or `*`).
 fn etag_matches(headers: &axum::http::HeaderMap, etag: &str) -> bool {
-    headers.get(header::IF_NONE_MATCH).and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h.split(',').any(|t| { let t = t.trim(); t == etag || t == "*" || t.strip_prefix("W/") == Some(etag) }))
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| {
+            h.split(',').any(|t| {
+                let t = t.trim();
+                t == etag || t == "*" || t.strip_prefix("W/") == Some(etag)
+            })
+        })
 }
 
 /// A file answered after the ETag check: 304 when `If-None-Match` names `etag`. A request that sends an ETag
 /// is answered by it alone (as HTTP says): the file's date is not looked at, since the same URL may serve
 /// another, older file now (another album's cover under a playlist link).
-async fn serve_tagged(path: &std::path::Path, mut req: Request, content_type: Option<&str>, etag: &str) -> ApiResult<Response> {
+async fn serve_tagged(
+    path: &std::path::Path,
+    mut req: Request,
+    content_type: Option<&str>,
+    etag: &str,
+) -> ApiResult<Response> {
     let mut r = if etag_matches(req.headers(), etag) {
         axum::http::StatusCode::NOT_MODIFIED.into_response()
     } else {
@@ -1285,7 +1837,10 @@ async fn serve_tagged(path: &std::path::Path, mut req: Request, content_type: Op
         }
         serve_file(&path.to_string_lossy(), req, content_type, None).await?
     };
-    r.headers_mut().insert(header::ETAG, HeaderValue::from_str(etag).unwrap_or(HeaderValue::from_static("\"0\"")));
+    r.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(etag).unwrap_or(HeaderValue::from_static("\"0\"")),
+    );
     Ok(r)
 }
 
@@ -1293,18 +1848,50 @@ async fn serve_tagged(path: &std::path::Path, mut req: Request, content_type: Op
 /// immutable; without it, clients keep it a day and revalidate with ETag / Last-Modified. The ETag names the
 /// album too, so one URL that stands for different albums over time (a playlist link) never gets a 304 for
 /// another album's cover.
-pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, req: Request) -> ApiResult<Response> {
+pub async fn cover_response(
+    st: &AppState,
+    album_id: &str,
+    size: u32,
+    v: &str,
+    req: Request,
+) -> ApiResult<Response> {
     let size = encore_media::covers::snap(size);
-    let webp = size > 0 && req.headers().get(header::ACCEPT).and_then(|a| a.to_str().ok()).is_some_and(|a| a.contains("image/webp"));
+    let webp = size > 0
+        && req
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|a| a.to_str().ok())
+            .is_some_and(|a| a.contains("image/webp"));
     let (st2, aid) = (st.clone(), album_id.to_string());
     let (path, cur) = tokio::task::spawn_blocking(move || {
         let (p, cv) = st2.library.covers.get(&st2.db, &aid)?;
-        Some((if size > 0 { encore_media::covers::thumbnail(&st2.db, &p, &aid, cv, size, webp) } else { p }, cv))
-    }).await.ok().flatten().ok_or_else(|| err(404, "No cover"))?;
-    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let album: String = album_id.chars().filter(char::is_ascii_alphanumeric).collect();
+        Some((
+            if size > 0 {
+                encore_media::covers::thumbnail(&st2.db, &p, &aid, cv, size, webp)
+            } else {
+                p
+            },
+            cv,
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(|| err(404, "No cover"))?;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let album: String = album_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
     let etag = format!("\"{album}-{cur:x}-{size}-{ext}\"");
-    let cache = if !v.is_empty() && v == cur.to_string() { "private, max-age=31536000, immutable" } else { "private, max-age=86400, stale-while-revalidate=604800" };
+    let cache = if !v.is_empty() && v == cur.to_string() {
+        "private, max-age=31536000, immutable"
+    } else {
+        "private, max-age=86400, stale-while-revalidate=604800"
+    };
     let mut r = serve_tagged(&path, req, None, &etag).await?;
     let h = r.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
@@ -1315,25 +1902,53 @@ pub async fn cover_response(st: &AppState, album_id: &str, size: u32, v: &str, r
 }
 
 /// GET /api/library/albums/{id}/cover: the album's cover.
-async fn cover(State(st): State<AppState>, User(_): User, Path(id): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
+async fn cover(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<String>,
+    Query(q): Query<CoverQ>,
+    req: Request,
+) -> ApiResult<Response> {
     cover_response(&st, &id, q.s, &q.v, req).await
 }
 
 /// GET /api/library/albums/{id}/download: the album's files as a zip.
-async fn album_zip(State(st): State<AppState>, User(_): User, Path(id): Path<String>, req: Request) -> ApiResult<Response> {
-    let rows = st.db.query("SELECT path, albumartist, album FROM tracks WHERE album_id=? ORDER BY disc, track, path", p![id])?;
+async fn album_zip(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(id): Path<String>,
+    req: Request,
+) -> ApiResult<Response> {
+    let rows = st.db.query(
+        "SELECT path, albumartist, album FROM tracks WHERE album_id=? ORDER BY disc, track, path",
+        p![id],
+    )?;
     if rows.is_empty() {
         return Err(err(404, "Album not found"));
     }
-    let name = encore_core::fs::safe_file_name(&format!("{} - {}.zip", rows[0].s("albumartist"), rows[0].s("album")));
+    let name = encore_core::fs::safe_file_name(&format!(
+        "{} - {}.zip",
+        rows[0].s("albumartist"),
+        rows[0].s("album")
+    ));
     let st2 = st.clone();
     let tmp = tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-        let tmp = std::env::temp_dir().join(format!("encore-{}.zip", encore_core::ids::random_hex(8)));
+        let tmp =
+            std::env::temp_dir().join(format!("encore-{}.zip", encore_core::ids::random_hex(8)));
         let songs: Vec<String> = rows.iter().map(|r| r.s("path")).collect();
         write_zip(&tmp, &songs, || st2.library.find_cover(&st2.db, &id))?;
         Ok(tmp)
-    }).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(500, format!("Could not build the zip: {e}")))?;
-    let resp = serve_file(&tmp.to_string_lossy(), req, Some("application/zip"), Some(name)).await;
+    })
+    .await
+    .map_err(|e| err(500, e.to_string()))?
+    .map_err(|e| err(500, format!("Could not build the zip: {e}")))?;
+    let resp = serve_file(
+        &tmp.to_string_lossy(),
+        req,
+        Some("application/zip"),
+        Some(name),
+    )
+    .await;
     // the open file handle keeps the data readable after the name is gone (unix)
     let _ = std::fs::remove_file(&tmp);
     resp
@@ -1342,10 +1957,16 @@ async fn album_zip(State(st): State<AppState>, User(_): User, Path(id): Path<Str
 /// Writes the songs (the ones that can be opened) and then the cover to a new zip at `to`. When that fails
 /// part way (two songs with the same file name, a full disk), the part already written is removed again,
 /// so a failed download leaves nothing behind in the temp folder.
-fn write_zip(to: &FsPath, songs: &[String], cover: impl FnOnce() -> Option<std::path::PathBuf>) -> anyhow::Result<()> {
+fn write_zip(
+    to: &FsPath,
+    songs: &[String],
+    cover: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     let r = (|| -> anyhow::Result<()> {
         let mut z = zip::ZipWriter::new(std::fs::File::create(to)?);
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
         for p in songs {
             if let (Ok(mut f), Some(n)) = (std::fs::File::open(p), FsPath::new(p).file_name()) {
                 z.start_file(n.to_string_lossy(), opts)?;
@@ -1354,7 +1975,10 @@ fn write_zip(to: &FsPath, songs: &[String], cover: impl FnOnce() -> Option<std::
         }
         if let Some(c) = cover() {
             if let Ok(mut f) = std::fs::File::open(&c) {
-                let ext = c.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or("jpg".into());
+                let ext = c
+                    .extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or("jpg".into());
                 z.start_file(format!("cover.{ext}"), opts)?;
                 std::io::copy(&mut f, &mut z)?;
             }
@@ -1385,13 +2009,20 @@ mod write_zip_tests {
 
         // two songs with one file name: the zip can't hold both, and the half-written file is gone
         let bad = d.join("bad.zip");
-        let same = [song("music", "01 - Song 1.flac"), song("music-live", "01 - Song 1.flac")];
+        let same = [
+            song("music", "01 - Song 1.flac"),
+            song("music-live", "01 - Song 1.flac"),
+        ];
         assert!(write_zip(&bad, &same, || None).is_err());
         assert!(!bad.exists());
 
         // the songs that open, then the cover; a song that is gone is left out as before
         let good = d.join("good.zip");
-        let songs = [song("music", "01 - Song 1.flac"), song("music", "02 - Song 2.flac"), song("music", "gone.flac")];
+        let songs = [
+            song("music", "01 - Song 1.flac"),
+            song("music", "02 - Song 2.flac"),
+            song("music", "gone.flac"),
+        ];
         write_zip(&good, &songs, || Some(d.join("cover.png"))).unwrap();
         let z = zip::ZipArchive::new(std::fs::File::open(&good).unwrap()).unwrap();
         let mut names: Vec<String> = z.file_names().map(|n| n.unwrap().into_owned()).collect();
@@ -1403,19 +2034,39 @@ mod write_zip_tests {
 
 /// DELETE /api/library/albums/{id} (admins): the album to the Trash (restorable from Files → Trash), as the
 /// Library's Delete… moves several (encore_files::albums).
-async fn delete_album(State(st): State<AppState>, Admin(u): Admin, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn delete_album(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
-        if st.db.one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+        if st
+            .db
+            .one("SELECT 1 x FROM tracks WHERE album_id=? LIMIT 1", p![id])?
+            .is_none()
+        {
             return Err(err(404, "Album not found"));
         }
         let roots = file_roots(st);
-        let r = encore_files::albums::trash_albums(st, &encore_files::Who::of(&u), &roots, std::slice::from_ref(&id), false)?;
+        let r = encore_files::albums::trash_albums(
+            st,
+            &encore_files::Who::of(&u),
+            &roots,
+            std::slice::from_ref(&id),
+            false,
+        )?;
         if r["albums"].as_u64().unwrap_or(0) == 0 {
-            let why = r["failed"][0]["reason"].as_str().unwrap_or("It couldn't be moved to the Trash").to_string();
+            let why = r["failed"][0]["reason"]
+                .as_str()
+                .unwrap_or("It couldn't be moved to the Trash")
+                .to_string();
             return Err(err(409, why));
         }
-        Ok(Json(json!({ "ok": true, "text": r["text"], "items": r["items"] })))
-    }).await
+        Ok(Json(
+            json!({ "ok": true, "text": r["text"], "items": r["items"] }),
+        ))
+    })
+    .await
 }
 
 /// An artist name query.
@@ -1429,7 +2080,11 @@ struct NameQ {
 /// spelling the library merged into the artist goes (its own and its alias spellings); albums it made
 /// with other artists stay, since they belong to those artists too. The artist index, the deletes and the
 /// file work run on the blocking pool.
-async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Query<NameQ>) -> ApiResult<Json<Value>> {
+async fn delete_artist(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    Query(q): Query<NameQ>,
+) -> ApiResult<Json<Value>> {
     let (v, cancelled) = st.blocking(move |st| delete_artist_now(st, &u, &q)).await?;
     // its requests that were not done stop (a waiting one would import the artist again later); only
     // Encore's own staging folders of them go
@@ -1441,12 +2096,32 @@ async fn delete_artist(State(st): State<AppState>, Admin(u): Admin, Query(q): Qu
 }
 
 /// Delete an artist's songs, follows and pending requests (see [`delete_artist`]): the answer and the deleted song ids.
-fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<(Json<Value>, Vec<i64>)> {
+fn delete_artist_now(
+    st: &AppState,
+    u: &encore_db::Row,
+    q: &NameQ,
+) -> ApiResult<(Json<Value>, Vec<i64>)> {
     let idx = st.library.artists.index(&st.db);
     // (an alias that is also another artist's name, kept apart by MusicBrainz, stays with that artist)
-    let mut names: Vec<String> = idx.find(&q.name).map(|a| a.spellings.iter().chain(a.aliases.iter().filter(|x| idx.find(x).is_some_and(|b| b.key == a.key))).cloned().collect()).unwrap_or_default();
+    let mut names: Vec<String> = idx
+        .find(&q.name)
+        .map(|a| {
+            a.spellings
+                .iter()
+                .chain(
+                    a.aliases
+                        .iter()
+                        .filter(|x| idx.find(x).is_some_and(|b| b.key == a.key)),
+                )
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     drop(idx);
-    if !names.iter().any(|n| n.to_lowercase() == q.name.to_lowercase()) {
+    if !names
+        .iter()
+        .any(|n| n.to_lowercase() == q.name.to_lowercase())
+    {
         names.push(q.name.clone());
     }
     let lower: Vec<Value> = names.iter().map(|n| json!(n.to_lowercase())).collect();
@@ -1465,7 +2140,10 @@ fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<
             prune_empty(d, FsPath::new(&stop));
         }
     }
-    st.db.execute(&format!("DELETE FROM follows WHERE lower(name) IN ({m})"), lower.clone())?;
+    st.db.execute(
+        &format!("DELETE FROM follows WHERE lower(name) IN ({m})"),
+        lower.clone(),
+    )?;
     let open: Vec<i64> = st.db.query(&format!("SELECT id FROM requests WHERE lower(artist) IN ({m}) AND status IN ('pending','queued','waiting')"), lower)?
         .iter().map(|r| r.i("id")).collect();
     for id in &open {
@@ -1474,7 +2152,15 @@ fn delete_artist_now(st: &AppState, u: &encore_db::Row, q: &NameQ) -> ApiResult<
     st.library.artists.invalidate();
     // the artist index made again now, by the delete, instead of by the next page someone opens
     let _ = st.library.artists.index(&st.db);
-    st.db.log("info", &format!("{} removed artist {} ({} songs)", u.s("username"), q.name, rows.len()));
+    st.db.log(
+        "info",
+        &format!(
+            "{} removed artist {} ({} songs)",
+            u.s("username"),
+            q.name,
+            rows.len()
+        ),
+    );
     Ok((Json(json!({ "ok": true, "removed": rows.len() })), open))
 }
 
@@ -1493,16 +2179,29 @@ fn yes() -> bool {
 }
 
 /// "This is the right song" – overrides the fingerprint check (e.g. matched to Deezer, not MusicBrainz).
-async fn verify_manual(State(st): State<AppState>, User(u): User, Json(b): Json<ManualVerify>) -> ApiResult<Json<Value>> {
+async fn verify_manual(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<ManualVerify>,
+) -> ApiResult<Json<Value>> {
     for id in b.track_ids {
-        let Some(t) = st.db.one("SELECT request_id, added_by, added_via FROM tracks WHERE id=?", p![id])? else { continue };
+        let Some(t) = st.db.one(
+            "SELECT request_id, added_by, added_via FROM tracks WHERE id=?",
+            p![id],
+        )?
+        else {
+            continue;
+        };
         if !encore_config::perms::is_admin(&u) && !owns_song(&st, &u, &t) {
             return Err(err(403, "You can only confirm songs you requested"));
         }
         if b.correct {
             st.db.execute("UPDATE tracks SET verify_status='manual', verify_detail=?, verified_at=? WHERE id=?", p![format!("Confirmed by {}", u.s("username")), now(), id])?;
         } else {
-            st.db.execute("UPDATE tracks SET verify_status=NULL, verify_detail=NULL WHERE id=?", p![id])?;
+            st.db.execute(
+                "UPDATE tracks SET verify_status=NULL, verify_detail=NULL WHERE id=?",
+                p![id],
+            )?;
         }
     }
     Ok(Json(json!({ "ok": true })))
@@ -1520,7 +2219,10 @@ async fn mismatches(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Js
 
 /// The user's Liked Songs playlist, made on first use.
 fn liked_playlist(st: &AppState, uid: i64) -> ApiResult<i64> {
-    if let Some(r) = st.db.one("SELECT id FROM playlists WHERE user_id=? AND kind='liked'", p![uid])? {
+    if let Some(r) = st.db.one(
+        "SELECT id FROM playlists WHERE user_id=? AND kind='liked'",
+        p![uid],
+    )? {
         return Ok(r.i("id"));
     }
     Ok(st.db.execute("INSERT INTO playlists (user_id, name, kind, source, sync_targets, created_at, updated_at) VALUES (?, 'Liked Songs', 'liked', 'manual', '[]', ?, ?)", p![uid, now(), now()])?)
@@ -1530,19 +2232,55 @@ fn liked_playlist(st: &AppState, uid: i64) -> ApiResult<i64> {
 async fn likes(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     st.blocking(move |st| {
         let pid = liked_playlist(st, u.i("id"))?;
-        Ok(Json(json!(st.db.query("SELECT track_id FROM playlist_items WHERE playlist_id=? AND track_id IS NOT NULL", p![pid])?.iter().map(|r| r.i("track_id")).collect::<Vec<_>>())))
-    }).await
+        Ok(Json(json!(st
+            .db
+            .query(
+                "SELECT track_id FROM playlist_items WHERE playlist_id=? AND track_id IS NOT NULL",
+                p![pid]
+            )?
+            .iter()
+            .map(|r| r.i("track_id"))
+            .collect::<Vec<_>>())))
+    })
+    .await
 }
 
 /// POST /api/likes/{id}: like a song.
-async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    let t = st.db.one("SELECT title, artist, album, duration, isrc, mb_trackid FROM tracks WHERE id=?", p![id])?.ok_or_else(|| err(404, "Track not found"))?;
+async fn like(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
+    let t = st
+        .db
+        .one(
+            "SELECT title, artist, album, duration, isrc, mb_trackid FROM tracks WHERE id=?",
+            p![id],
+        )?
+        .ok_or_else(|| err(404, "Track not found"))?;
     let pid = liked_playlist(&st, u.i("id"))?;
-    if st.db.one("SELECT 1 FROM playlist_items WHERE playlist_id=? AND track_id=?", p![pid, id])?.is_none() {
-        let pos = st.db.one("SELECT COALESCE(MAX(position)+1,0) n FROM playlist_items WHERE playlist_id=?", p![pid])?.map(|r| r.i("n")).unwrap_or(1);
+    if st
+        .db
+        .one(
+            "SELECT 1 FROM playlist_items WHERE playlist_id=? AND track_id=?",
+            p![pid, id],
+        )?
+        .is_none()
+    {
+        let pos = st
+            .db
+            .one(
+                "SELECT COALESCE(MAX(position)+1,0) n FROM playlist_items WHERE playlist_id=?",
+                p![pid],
+            )?
+            .map(|r| r.i("n"))
+            .unwrap_or(1);
         st.db.execute("INSERT INTO playlist_items (playlist_id, position, title, artist, album, duration, isrc, mbid, source, track_id, match_reason, added_at) VALUES (?,?,?,?,?,?,?,?,'library',?,'added from library',?)",
             p![pid, pos, t.s("title"), t.s("artist"), t.s("album"), t.f("duration"), t.get("isrc"), t.get("mb_trackid"), id, now()])?;
-        st.db.execute("UPDATE playlists SET updated_at=? WHERE id=?", p![now(), pid])?;
+        st.db.execute(
+            "UPDATE playlists SET updated_at=? WHERE id=?",
+            p![now(), pid],
+        )?;
         // a like takes back a dislike of the song (the two buttons are opposites)
         super::taste::forget_dislike(&st, u.i("id"), id)?;
         return Ok(Json(json!({ "liked": true, "added": 1 })));
@@ -1551,7 +2289,11 @@ async fn like(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) ->
 }
 
 /// DELETE /api/likes/{id}: unlike a song.
-async fn unlike(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+async fn unlike(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
     remove_like(&st, u.i("id"), id).await?;
     Ok(Json(json!({ "liked": false })))
 }
@@ -1583,11 +2325,20 @@ pub(super) fn link_gone() -> encore_core::error::ApiError {
 }
 
 /// The link for one thing a user shares: one token per user and song / album / artist / playlist.
-pub(super) fn share_link(st: &AppState, uid: i64, kind: &str, track_id: i64, r: &str) -> ApiResult<Json<Value>> {
+pub(super) fn share_link(
+    st: &AppState,
+    uid: i64,
+    kind: &str,
+    track_id: i64,
+    r: &str,
+) -> ApiResult<Json<Value>> {
     let found = if kind == "track" {
         st.db.one("SELECT token FROM shares WHERE track_id=? AND user_id=? AND COALESCE(kind,'track')='track'", p![track_id, uid])?
     } else {
-        st.db.one("SELECT token FROM shares WHERE kind=? AND ref=? AND user_id=?", p![kind, r, uid])?
+        st.db.one(
+            "SELECT token FROM shares WHERE kind=? AND ref=? AND user_id=?",
+            p![kind, r, uid],
+        )?
     };
     let token = match found {
         Some(row) => row.s("token"),
@@ -1608,16 +2359,32 @@ pub(super) fn share_json(st: &AppState, token: &str) -> Value {
 }
 
 /// POST /api/library/tracks/{id}/share: a share link for a song.
-async fn share(State(st): State<AppState>, User(u): User, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
-    if st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_none() {
+async fn share(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Value>> {
+    if st
+        .db
+        .one("SELECT 1 FROM tracks WHERE id=?", p![id])?
+        .is_none()
+    {
         return Err(err(404, "Track not found"));
     }
     share_link(&st, u.i("id"), "track", id, "")
 }
 
 /// POST /api/library/albums/{id}/share: a share link for an album.
-async fn share_album(State(st): State<AppState>, User(u): User, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    if st.db.one("SELECT 1 FROM tracks WHERE album_id=? LIMIT 1", p![id])?.is_none() {
+async fn share_album(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    if st
+        .db
+        .one("SELECT 1 FROM tracks WHERE album_id=? LIMIT 1", p![id])?
+        .is_none()
+    {
         return Err(err(404, "Album not found"));
     }
     share_link(&st, u.i("id"), "album", 0, &id)
@@ -1632,7 +2399,11 @@ struct ShareArtistB {
 }
 
 /// An artist link names the artist as the library shows it (any spelling or alias finds it).
-async fn share_artist(State(st): State<AppState>, User(u): User, Json(b): Json<ShareArtistB>) -> ApiResult<Json<Value>> {
+async fn share_artist(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<ShareArtistB>,
+) -> ApiResult<Json<Value>> {
     let name = b.name.trim();
     if name.is_empty() {
         return Err(err(400, "Which artist?"));
@@ -1669,7 +2440,12 @@ pub(super) struct Shared {
 /// The share link with this token; 404 when it doesn't work.
 pub(super) fn share_row(st: &AppState, token: &str) -> ApiResult<Shared> {
     let s = st.db.one("SELECT track_id, user_id, COALESCE(kind,'track') kind, COALESCE(ref,'') ref FROM shares WHERE token=?", p![token])?.ok_or_else(link_gone)?;
-    Ok(Shared { kind: s.s("kind"), r: s.s("ref"), track_id: s.i("track_id"), user_id: s.i("user_id") })
+    Ok(Shared {
+        kind: s.s("kind"),
+        r: s.s("ref"),
+        track_id: s.i("track_id"),
+        user_id: s.i("user_id"),
+    })
 }
 
 /// The song columns a share answer has.
@@ -1707,7 +2483,17 @@ pub(super) fn shared_playlist(st: &AppState, s: &Shared) -> ApiResult<SharedPlay
         "SELECT p.id, p.name, p.kind, COALESCE(p.description,'') description, u.username FROM playlists p JOIN users u ON u.id = p.user_id
          WHERE p.id = ? AND p.user_id = ? AND p.kind IN ('playlist','liked') AND u.disabled = 0", p![pid, s.user_id])?.ok_or_else(link_gone)?;
     let liked = r.s("kind") == "liked";
-    Ok(SharedPlaylist { id: r.i("id"), name: if liked { "Liked Songs".into() } else { r.s("name") }, liked, description: public_description(&r.s("description")), owner: r.s("username") })
+    Ok(SharedPlaylist {
+        id: r.i("id"),
+        name: if liked {
+            "Liked Songs".into()
+        } else {
+            r.s("name")
+        },
+        liked,
+        description: public_description(&r.s("description")),
+        owner: r.s("username"),
+    })
 }
 
 /// Most characters of a playlist's description a link shows (the page shows two lines).
@@ -1717,8 +2503,13 @@ const SHARE_DESCRIPTION_MAX: usize = 300;
 /// description, such as Spotify's `<a href=spotify:…>`, taken out), at most [`SHARE_DESCRIPTION_MAX`]
 /// characters. The note older Spotify imports left there for the owner is not shown.
 pub(crate) fn public_description(d: &str) -> String {
-    static TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"</?[A-Za-z][^<>]*>").unwrap());
-    let text = TAG.replace_all(d, " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    static TAG: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"</?[A-Za-z][^<>]*>").unwrap());
+    let text = TAG
+        .replace_all(d, " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if text.starts_with("Imported without Spotify login") {
         return String::new();
     }
@@ -1732,12 +2523,20 @@ pub(crate) fn public_description(d: &str) -> String {
 /// list and an unlike numbers it again, so the highest position is the latest like), any other playlist in
 /// its own order.
 pub(super) fn playlist_order(pl: &SharedPlaylist) -> &'static str {
-    if pl.liked { "i.position DESC, i.id DESC" } else { "i.position, i.id" }
+    if pl.liked {
+        "i.position DESC, i.id DESC"
+    } else {
+        "i.position, i.id"
+    }
 }
 
 /// The ids of the songs a playlist link lists, in list order (the first `limit`, or all): only items that are
 /// in the library, and a song listed twice is there twice.
-fn playlist_song_ids(st: &AppState, pl: &SharedPlaylist, limit: Option<usize>) -> ApiResult<Vec<i64>> {
+fn playlist_song_ids(
+    st: &AppState,
+    pl: &SharedPlaylist,
+    limit: Option<usize>,
+) -> ApiResult<Vec<i64>> {
     let limit = limit.map_or(-1, |l| l as i64);
     let rows = st.db.query(&format!("SELECT i.track_id FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? ORDER BY {} LIMIT ?", playlist_order(pl)),
         p![pl.id, limit])?;
@@ -1746,11 +2545,18 @@ fn playlist_song_ids(st: &AppState, pl: &SharedPlaylist, limit: Option<usize>) -
 
 /// `cols` of these songs in this order, like [`rows_by_id`], but a song listed twice comes back twice (a
 /// playlist may hold one song twice).
-fn rows_in_order(db: &impl encore_db::Query, cols: &str, ids: &[i64]) -> rusqlite::Result<Vec<encore_db::Row>> {
+fn rows_in_order(
+    db: &impl encore_db::Query,
+    cols: &str,
+    ids: &[i64],
+) -> rusqlite::Result<Vec<encore_db::Row>> {
     let mut uniq = ids.to_vec();
     uniq.sort_unstable();
     uniq.dedup();
-    let by_id: HashMap<i64, encore_db::Row> = rows_by_id(db, cols, &uniq)?.into_iter().map(|r| (r.i("id"), r)).collect();
+    let by_id: HashMap<i64, encore_db::Row> = rows_by_id(db, cols, &uniq)?
+        .into_iter()
+        .map(|r| (r.i("id"), r))
+        .collect();
     Ok(ids.iter().filter_map(|i| by_id.get(i).cloned()).collect())
 }
 
@@ -1782,17 +2588,34 @@ fn shared_tracks(st: &AppState, s: &Shared) -> ApiResult<Vec<encore_db::Row>> {
 /// playlist lists now (a song taken out of it, or unliked, stops playing at once).
 fn shared_has(st: &AppState, s: &Shared, id: i64) -> ApiResult<bool> {
     Ok(match s.kind.as_str() {
-        "album" => st.db.one("SELECT 1 FROM tracks WHERE album_id=? AND id=?", p![s.r, id])?.is_some(),
+        "album" => st
+            .db
+            .one(
+                "SELECT 1 FROM tracks WHERE album_id=? AND id=?",
+                p![s.r, id],
+            )?
+            .is_some(),
         "artist" => {
             let (cond, mut params) = st.library.artists.track_filter(&st.db, &s.r);
             params.push(json!(id));
-            st.db.one(&format!("SELECT 1 FROM tracks WHERE {cond} AND id=?"), params)?.is_some()
+            st.db
+                .one(
+                    &format!("SELECT 1 FROM tracks WHERE {cond} AND id=?"),
+                    params,
+                )?
+                .is_some()
         }
         "playlist" => {
             let pl = shared_playlist(st, s)?;
             st.db.one("SELECT 1 FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? AND i.track_id = ? LIMIT 1", p![pl.id, id])?.is_some()
         }
-        _ => id == s.track_id && st.db.one("SELECT 1 FROM tracks WHERE id=?", p![id])?.is_some(),
+        _ => {
+            id == s.track_id
+                && st
+                    .db
+                    .one("SELECT 1 FROM tracks WHERE id=?", p![id])?
+                    .is_some()
+        }
     })
 }
 
@@ -1802,7 +2625,14 @@ fn shared_cover_album(st: &AppState, s: &Shared, tracks: &[encore_db::Row]) -> S
     let first = || tracks.first().map(|t| t.s("album_id")).unwrap_or_default();
     match s.kind.as_str() {
         "album" => s.r.clone(),
-        "artist" => st.library.artists.index(&st.db).find(&s.r).map(|a| a.cover_album.clone()).filter(|c| !c.is_empty()).unwrap_or_else(first),
+        "artist" => st
+            .library
+            .artists
+            .index(&st.db)
+            .find(&s.r)
+            .map(|a| a.cover_album.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(first),
         _ => first(),
     }
 }
@@ -1820,7 +2650,10 @@ const MOSAIC_LOOK: usize = 64;
 
 /// The covers of the first four albums, in list order, among a playlist link's songs that have one:
 /// (album id, cover file, cover version).
-fn playlist_covers(st: &AppState, pl: &SharedPlaylist) -> ApiResult<Vec<(String, std::path::PathBuf, u64)>> {
+fn playlist_covers(
+    st: &AppState,
+    pl: &SharedPlaylist,
+) -> ApiResult<Vec<(String, std::path::PathBuf, u64)>> {
     let rows = st.db.query(&format!("SELECT t.album_id FROM playlist_items i JOIN tracks t ON t.id = i.track_id WHERE i.playlist_id = ? ORDER BY {} LIMIT 2000", playlist_order(pl)),
         p![pl.id])?;
     let mut seen = std::collections::HashSet::new();
@@ -1856,28 +2689,50 @@ fn playlist_cover(st: &AppState, token: &str, pl: &SharedPlaylist) -> ApiResult<
             return Ok(Some(LinkCover::Mosaic(m)));
         }
     }
-    Ok(covers.into_iter().next().map(|(aid, _, _)| LinkCover::Album(aid)))
+    Ok(covers
+        .into_iter()
+        .next()
+        .map(|(aid, _, _)| LinkCover::Album(aid)))
 }
 
 /// The mosaic of four covers, made once per set of four (album and cover version) and kept under
 /// <config>/cache/share-cover/<token>.<album>-<version>….jpg; this link's older mosaics and those of links
 /// that are gone are tidied away before a new one is made. None when one of the four can't be read.
-fn playlist_mosaic(st: &AppState, token: &str, covers: &[(String, std::path::PathBuf, u64)]) -> Option<std::path::PathBuf> {
+fn playlist_mosaic(
+    st: &AppState,
+    token: &str,
+    covers: &[(String, std::path::PathBuf, u64)],
+) -> Option<std::path::PathBuf> {
     let dir = st.db.data_dir.join("cache").join("share-cover");
     std::fs::create_dir_all(&dir).ok()?;
-    let name = format!("{token}.{}.jpg", covers.iter().map(|(aid, _, v)| format!("{aid}-{v:x}")).collect::<Vec<_>>().join("."));
+    let name = format!(
+        "{token}.{}.jpg",
+        covers
+            .iter()
+            .map(|(aid, _, v)| format!("{aid}-{v:x}"))
+            .collect::<Vec<_>>()
+            .join(".")
+    );
     let out = dir.join(&name);
     if out.is_file() {
         return Some(out);
     }
     share_video_tidy(st, &dir, token, &name);
     // the 400 px thumbnails (made ahead of time for every album) are plenty for 300 px squares
-    let thumbs: Vec<std::path::PathBuf> = covers.iter().map(|(aid, path, v)| encore_media::covers::thumbnail(&st.db, path, aid, *v, 400, false)).collect();
+    let thumbs: Vec<std::path::PathBuf> = covers
+        .iter()
+        .map(|(aid, path, v)| encore_media::covers::thumbnail(&st.db, path, aid, *v, 400, false))
+        .collect();
     encore_media::covers::mosaic(&thumbs, &out).then_some(out)
 }
 
 /// What stands for a link (see [`LinkCover`]): a playlist's picture, else the album of [`shared_cover_album`].
-fn link_cover(st: &AppState, token: &str, s: &Shared, tracks: &[encore_db::Row]) -> ApiResult<Option<LinkCover>> {
+fn link_cover(
+    st: &AppState,
+    token: &str,
+    s: &Shared,
+    tracks: &[encore_db::Row],
+) -> ApiResult<Option<LinkCover>> {
     if s.kind == "playlist" {
         return playlist_cover(st, token, &shared_playlist(st, s)?);
     }
@@ -1885,7 +2740,12 @@ fn link_cover(st: &AppState, token: &str, s: &Shared, tracks: &[encore_db::Row])
 }
 
 /// The picture of a link's preview video: a playlist's mosaic or cover, else the cover of its album.
-fn shared_cover_file(st: &AppState, token: &str, s: &Shared, tracks: &[encore_db::Row]) -> ApiResult<Option<std::path::PathBuf>> {
+fn shared_cover_file(
+    st: &AppState,
+    token: &str,
+    s: &Shared,
+    tracks: &[encore_db::Row],
+) -> ApiResult<Option<std::path::PathBuf>> {
     Ok(match link_cover(st, token, s, tracks)? {
         Some(LinkCover::Mosaic(path)) => Some(path),
         Some(LinkCover::Album(aid)) => st.library.find_cover(&st.db, &aid),
@@ -1919,16 +2779,27 @@ fn playlist_meta(st: &AppState, s: &Shared, q: &SharePageQ) -> ApiResult<Value> 
         .map_or(0.0, |r| r.f("d"));
     // the first song in list order is what the link plays first (its stream, the preview's audio)
     let format = match ids.first() {
-        Some(id) => st.db.one("SELECT format FROM tracks WHERE id=?", p![id])?.map(|r| r.s("format")).unwrap_or_default(),
+        Some(id) => st
+            .db
+            .one("SELECT format FROM tracks WHERE id=?", p![id])?
+            .map(|r| r.s("format"))
+            .unwrap_or_default(),
         None => String::new(),
     };
     if let Some(seed) = q.shuffle {
         ids.shuffle(&mut rand::rngs::StdRng::seed_from_u64(seed));
     }
     let offset = q.offset.max(0) as usize;
-    let limit = q.limit.unwrap_or(SHARE_PAGE as i64).clamp(1, SHARE_PAGE_MAX as i64) as usize;
+    let limit = q
+        .limit
+        .unwrap_or(SHARE_PAGE as i64)
+        .clamp(1, SHARE_PAGE_MAX as i64) as usize;
     let page: Vec<i64> = ids.iter().skip(offset).take(limit).copied().collect();
-    let tracks = rows_in_order(&st.db, "id, title, artist, album, track, disc, duration", &page)?;
+    let tracks = rows_in_order(
+        &st.db,
+        "id, title, artist, album, track, disc, duration",
+        &page,
+    )?;
     Ok(json!({
         "kind": "playlist", "liked": pl.liked, "title": pl.name, "owner": pl.owner, "description": pl.description,
         "count": count, "duration": duration,
@@ -1943,16 +2814,26 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
     // the link, its songs and, for an artist, the name the library shows (the artist index): on the blocking
     // pool, since anyone with the link (and every link-preview bot) can ask
     let (token, q) = (token.to_string(), q.clone());
-    let (s, tracks, artist_name, playlist) = st.blocking(move |st| {
-        let s = share_row(st, &token)?;
-        if s.kind == "playlist" {
-            let v = playlist_meta(st, &s, &q)?;
-            return Ok((s, vec![], None, Some(v)));
-        }
-        let tracks = shared_tracks(st, &s)?;
-        let name = (s.kind == "artist").then(|| st.library.artists.index(&st.db).find(&s.r).map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| s.r.clone()));
-        Ok((s, tracks, name, None))
-    }).await?;
+    let (s, tracks, artist_name, playlist) = st
+        .blocking(move |st| {
+            let s = share_row(st, &token)?;
+            if s.kind == "playlist" {
+                let v = playlist_meta(st, &s, &q)?;
+                return Ok((s, vec![], None, Some(v)));
+            }
+            let tracks = shared_tracks(st, &s)?;
+            let name = (s.kind == "artist").then(|| {
+                st.library
+                    .artists
+                    .index(&st.db)
+                    .find(&s.r)
+                    .map(|a| a.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| s.r.clone())
+            });
+            Ok((s, tracks, name, None))
+        })
+        .await?;
     if let Some(v) = playlist {
         return Ok((v, s.user_id));
     }
@@ -1962,14 +2843,19 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
         let t = first;
         let path = t.s("path");
         let media = st.media.clone();
-        let info = tokio::task::spawn_blocking(move || media.audio_info(&path)).await.unwrap_or(json!({}));
-        return Ok((json!({
-            "kind": "track",
-            "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
-            "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
-            "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
-            "app_name": app,
-        }), s.user_id));
+        let info = tokio::task::spawn_blocking(move || media.audio_info(&path))
+            .await
+            .unwrap_or(json!({}));
+        return Ok((
+            json!({
+                "kind": "track",
+                "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"), "albumartist": t.get("albumartist"), "year": t.get("year"), "track": t.get("track"),
+                "duration": t.get("duration"), "format": t.get("format"), "bitrate": t.get("bitrate"),
+                "sample_rate": info["sample_rate"], "bit_depth": info["bit_depth"], "channels": info["channels"], "lossless": info["lossless"],
+                "app_name": app,
+            }),
+            s.user_id,
+        ));
     }
     let list: Vec<Value> = tracks.iter().map(|t| json!({
         "id": t.get("id"), "title": t.get("title"), "artist": t.get("artist"), "album": t.get("album"),
@@ -1977,18 +2863,31 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
     })).collect();
     let duration: f64 = tracks.iter().map(|t| t.f("duration")).sum();
     let (title, artist, album, year) = if s.kind == "album" {
-        let year = tracks.iter().map(|t| t.s("year")).filter(|y| !y.is_empty()).max().unwrap_or_default();
+        let year = tracks
+            .iter()
+            .map(|t| t.s("year"))
+            .filter(|y| !y.is_empty())
+            .max()
+            .unwrap_or_default();
         let aa = first.s("albumartist");
-        (first.s("album"), if aa.is_empty() { first.s("artist") } else { aa }, first.s("album"), year)
+        (
+            first.s("album"),
+            if aa.is_empty() { first.s("artist") } else { aa },
+            first.s("album"),
+            year,
+        )
     } else {
         let name = artist_name.unwrap_or_else(|| s.r.clone());
         (name.clone(), name, String::new(), String::new())
     };
-    Ok((json!({
-        "kind": s.kind, "title": title, "artist": artist, "album": album, "year": year,
-        "duration": duration, "count": list.len(), "tracks": list,
-        "format": first.get("format"), "app_name": app,
-    }), s.user_id))
+    Ok((
+        json!({
+            "kind": s.kind, "title": title, "artist": artist, "album": album, "year": year,
+            "duration": duration, "count": list.len(), "tracks": list,
+            "format": first.get("format"), "app_name": app,
+        }),
+        s.user_id,
+    ))
 }
 
 /// A share link's data, for anyone who has the link: a signed-in listener who has translations on gets
@@ -1996,7 +2895,12 @@ async fn shared_meta(st: &AppState, token: &str, q: &SharePageQ) -> ApiResult<(V
 /// viewer is signed in on this server and made the link (the page offers Add to my playlists and Save a copy
 /// to the others), and for a signed-in viewer who didn't make it, whether they added it to their playlists
 /// already (`added`, `playlist_id`: their entry). The owner's id is never in the answer.
-async fn shared(State(st): State<AppState>, MaybeUser(me): MaybeUser, Path(token): Path<String>, Query(q): Query<SharePageQ>) -> ApiResult<Json<Value>> {
+async fn shared(
+    State(st): State<AppState>,
+    MaybeUser(me): MaybeUser,
+    Path(token): Path<String>,
+    Query(q): Query<SharePageQ>,
+) -> ApiResult<Json<Value>> {
     let (mut v, owner) = shared_meta(&st, &token, &q).await?;
     if v["kind"] == "playlist" {
         v["viewer"] = match &me {
@@ -2021,18 +2925,29 @@ struct SharedTrackQ {
 }
 
 /// GET /api/share/{token}/stream: a song of what the link shares, streamed.
-async fn shared_stream(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<StreamQ>, Query(w): Query<SharedTrackQ>, req: Request) -> ApiResult<Response> {
+async fn shared_stream(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    Query(q): Query<StreamQ>,
+    Query(w): Query<SharedTrackQ>,
+    req: Request,
+) -> ApiResult<Response> {
     // only songs of what the link shares (checked on its own: the artist list changes with plays and a
     // playlist with its owner, so a song a page shows may have left it since); an artist link reads the
     // artist index, so on the blocking pool
-    let id = st.blocking(move |st| {
-        let s = share_row(st, &token)?;
-        match w.track {
-            Some(id) if shared_has(st, &s, id)? => Ok(id),
-            Some(_) => Err(err(404, "Track not found")),
-            None => shared_tracks(st, &s)?.first().map(|t| t.i("id")).ok_or_else(|| err(404, "Track not found")),
-        }
-    }).await?;
+    let id = st
+        .blocking(move |st| {
+            let s = share_row(st, &token)?;
+            match w.track {
+                Some(id) if shared_has(st, &s, id)? => Ok(id),
+                Some(_) => Err(err(404, "Track not found")),
+                None => shared_tracks(st, &s)?
+                    .first()
+                    .map(|t| t.i("id"))
+                    .ok_or_else(|| err(404, "Track not found")),
+            }
+        })
+        .await?;
     // share links play the file (or a plain conversion) – never server processing
     stream_track(&st, id, &q, req, None).await
 }
@@ -2044,28 +2959,51 @@ const SHARE_LIVE_CACHE: &str = "private, no-cache";
 
 /// A playlist link's mosaic or preview video ([`SHARE_LIVE_CACHE`]). The ETag stands for the file's name,
 /// which says which covers, song and versions it holds.
-async fn share_live_file(path: &std::path::Path, req: Request, content_type: &str) -> ApiResult<Response> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+async fn share_live_file(
+    path: &std::path::Path,
+    req: Request,
+    content_type: &str,
+) -> ApiResult<Response> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let etag = format!("\"{}\"", &encore_core::ids::sha256_hex(&name)[..20]);
     let mut r = serve_tagged(path, req, Some(content_type), &etag).await?;
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(SHARE_LIVE_CACHE));
+    r.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(SHARE_LIVE_CACHE),
+    );
     Ok(r)
 }
 
 /// GET /api/share/{token}/cover: the cover of what the link shares.
-async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Query(q): Query<CoverQ>, req: Request) -> ApiResult<Response> {
-    let (cover, live) = st.blocking(move |st| {
-        let s = share_row(st, &token)?;
-        // a playlist's picture comes from its own list (an empty one is not gone, it has no picture)
-        let live = s.kind == "playlist";
-        let tracks = if live { vec![] } else { shared_tracks(st, &s)? };
-        Ok((link_cover(st, &token, &s, &tracks)?.ok_or_else(|| err(404, "No cover"))?, live))
-    }).await?;
+async fn shared_cover(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    Query(q): Query<CoverQ>,
+    req: Request,
+) -> ApiResult<Response> {
+    let (cover, live) = st
+        .blocking(move |st| {
+            let s = share_row(st, &token)?;
+            // a playlist's picture comes from its own list (an empty one is not gone, it has no picture)
+            let live = s.kind == "playlist";
+            let tracks = if live { vec![] } else { shared_tracks(st, &s)? };
+            Ok((
+                link_cover(st, &token, &s, &tracks)?.ok_or_else(|| err(404, "No cover"))?,
+                live,
+            ))
+        })
+        .await?;
     match cover {
         LinkCover::Album(album) => {
             let mut r = cover_response(&st, &album, q.s, &q.v, req).await?;
             if live {
-                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(SHARE_LIVE_CACHE));
+                r.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static(SHARE_LIVE_CACHE),
+                );
             }
             Ok(r)
         }
@@ -2078,8 +3016,15 @@ async fn shared_cover(State(st): State<AppState>, Path(token): Path<String>, Que
 /// every song of the link in its order (not shuffled) at this moment; it doesn't follow the link afterwards.
 /// Liked Songs is saved as "Liked Songs · <owner>", never into the viewer's own Liked Songs. Body `{}`, or
 /// `{"name": …}` for another name.
-async fn shared_copy(State(st): State<AppState>, User(u): User, Path(token): Path<String>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
-    let name = body.and_then(|Json(b)| b["name"].as_str().map(|n| n.trim().to_string())).filter(|n| !n.is_empty());
+async fn shared_copy(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(token): Path<String>,
+    body: Option<Json<Value>>,
+) -> ApiResult<Json<Value>> {
+    let name = body
+        .and_then(|Json(b)| b["name"].as_str().map(|n| n.trim().to_string()))
+        .filter(|n| !n.is_empty());
     st.blocking(move |st| {
         let s = share_row(st, &token)?;
         if s.kind != "playlist" {
@@ -2087,20 +3032,45 @@ async fn shared_copy(State(st): State<AppState>, User(u): User, Path(token): Pat
         }
         let pl = shared_playlist(st, &s)?;
         copy_link(st, &u, &pl, name).map(Json)
-    }).await
+    })
+    .await
 }
 
 /// Save a copy of a shared playlist as it is now (from its link, or from the viewer's entry for it): a new
 /// playlist of `u`'s with every listed song in the link's order, described "Shared by <owner>". Liked Songs is
 /// named "Liked Songs · <owner>" unless `name` says otherwise. → `{id, name, added, duplicates_skipped}`
-pub(super) fn copy_link(st: &AppState, u: &encore_db::Row, pl: &SharedPlaylist, name: Option<String>) -> ApiResult<Value> {
+pub(super) fn copy_link(
+    st: &AppState,
+    u: &encore_db::Row,
+    pl: &SharedPlaylist,
+    name: Option<String>,
+) -> ApiResult<Value> {
     let ids = playlist_song_ids(st, pl, None)?;
     let name = name.unwrap_or_else(|| super::playlist_links::link_playlist_name(pl));
     let bad = |e: anyhow::Error| err(400, e.to_string());
-    let made = encore_sync::playlists::create(st, u.i("id"), &name, &[], "library", None, &format!("Shared by {}", pl.owner), None, false).map_err(bad)?;
+    let made = encore_sync::playlists::create(
+        st,
+        u.i("id"),
+        &name,
+        &[],
+        "library",
+        None,
+        &format!("Shared by {}", pl.owner),
+        None,
+        false,
+    )
+    .map_err(bad)?;
     let pid = made["id"].as_i64().unwrap_or(0);
     let (added, dupes) = encore_sync::playlists::add_library_tracks(st, pid, &ids).map_err(bad)?;
-    st.db.log("info", &format!("{} saved a copy of {}'s playlist '{}' ({added} songs)", u.s("username"), pl.owner, pl.name));
+    st.db.log(
+        "info",
+        &format!(
+            "{} saved a copy of {}'s playlist '{}' ({added} songs)",
+            u.s("username"),
+            pl.owner,
+            pl.name
+        ),
+    );
     Ok(json!({ "id": pid, "name": name, "added": added, "duplicates_skipped": dupes }))
 }
 
@@ -2126,10 +3096,18 @@ const SHARE_VIDEO_RETRY: std::time::Duration = std::time::Duration::from_secs(36
 
 /// "mtime-size" of a file, "0" when it isn't there.
 fn file_version(p: &std::path::Path) -> String {
-    std::fs::metadata(p).ok().map(|m| {
-        let t = m.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-        format!("{t}-{}", m.len())
-    }).unwrap_or_else(|| "0".into())
+    std::fs::metadata(p)
+        .ok()
+        .map(|m| {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{t}-{}", m.len())
+        })
+        .unwrap_or_else(|| "0".into())
 }
 
 /// The "playable" link preview: the cover as a 600x600 still and the first listed song as AAC, in an
@@ -2138,7 +3116,10 @@ fn file_version(p: &std::path::Path) -> String {
 /// build runs in its own task, so a caller that stops waiting (a chat app that gave up) doesn't stop it.
 async fn share_video(st: &AppState, token: &str) -> Option<std::path::PathBuf> {
     let (st, token) = (st.clone(), token.to_string());
-    tokio::spawn(async move { share_video_build(&st, &token).await }).await.ok().flatten()
+    tokio::spawn(async move { share_video_build(&st, &token).await })
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Build the link's preview video: its songs, its cover and the first song's audio.
@@ -2146,24 +3127,41 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
     // the link's songs, its cover album (an artist link reads the artist index) or a playlist's picture, and
     // the cover file, on the blocking pool
     let tk = token.to_string();
-    let (tracks, cover) = st.blocking(move |st| {
-        let s = share_row(st, &tk)?;
-        let tracks = shared_tracks(st, &s)?;
-        let cover = shared_cover_file(st, &tk, &s, &tracks)?;
-        Ok((tracks, cover))
-    }).await.ok()?;
+    let (tracks, cover) = st
+        .blocking(move |st| {
+            let s = share_row(st, &tk)?;
+            let tracks = shared_tracks(st, &s)?;
+            let cover = shared_cover_file(st, &tk, &s, &tracks)?;
+            Ok((tracks, cover))
+        })
+        .await
+        .ok()?;
     // (an empty playlist has no song to play)
     let t = tracks.first()?;
     let audio = t.s("path");
     let meta = std::fs::metadata(&audio).ok()?;
-    let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    let cover_v = cover.as_deref().map(file_version).unwrap_or_else(|| "none".into());
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cover_v = cover
+        .as_deref()
+        .map(file_version)
+        .unwrap_or_else(|| "none".into());
     let dir = st.db.data_dir.join("cache").join("share-video");
     std::fs::create_dir_all(&dir).ok()?;
     let stem = format!("{token}.{}.{mtime}.{}.{cover_v}", t.i("id"), meta.len());
     let out = dir.join(format!("{stem}.mp4"));
     let failed = dir.join(format!("{stem}.fail"));
-    let failed_lately = || std::fs::metadata(&failed).ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|age| age < SHARE_VIDEO_RETRY);
+    let failed_lately = || {
+        std::fs::metadata(&failed)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age < SHARE_VIDEO_RETRY)
+    };
     if out.is_file() {
         return Some(out);
     }
@@ -2172,7 +3170,11 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
     }
     // one build per link: wait for one that is running, then use what it made
     let lock = {
-        let mut g = st.web.share_video_builds.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = st
+            .web
+            .share_video_builds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         g.entry(token.to_string()).or_default().clone()
     };
     let res = {
@@ -2184,7 +3186,8 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
         } else {
             let _slot = st.web.share_video_slots.acquire().await.ok()?;
             share_video_tidy(st, &dir, token, &format!("{stem}.mp4"));
-            let made = share_video_make(&dir, cover.as_deref(), &audio, t.f("duration"), &out).await;
+            let made =
+                share_video_make(&dir, cover.as_deref(), &audio, t.f("duration"), &out).await;
             if made.is_none() {
                 let _ = std::fs::write(&failed, b"");
             }
@@ -2192,7 +3195,11 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
         }
     };
     {
-        let mut g = st.web.share_video_builds.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = st
+            .web
+            .share_video_builds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // nobody else holds it: forget the lock
         if g.get(token).is_some_and(|l| Arc::strong_count(l) <= 2) {
             g.remove(token);
@@ -2205,7 +3212,9 @@ async fn share_video_build(st: &AppState, token: &str) -> Option<std::path::Path
 /// files (song, file or cover changed), files of links that no longer exist, and half-made files a stopped
 /// build left behind.
 fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &str) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut known: HashMap<String, bool> = HashMap::new();
     let prefix = format!("{token}.");
     for e in rd.flatten() {
@@ -2213,12 +3222,23 @@ fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &st
         let gone = if name == keep {
             false
         } else if name.starts_with('.') {
-            name.contains(".tmp.") && e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.elapsed().ok()).is_some_and(|a| a.as_secs() > 900)
+            name.contains(".tmp.")
+                && e.metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|m| m.elapsed().ok())
+                    .is_some_and(|a| a.as_secs() > 900)
         } else if name.starts_with(&prefix) {
             true
         } else {
             let tok = name.split('.').next().unwrap_or("").to_string();
-            !*known.entry(tok.clone()).or_insert_with(|| st.db.one("SELECT 1 FROM shares WHERE token=?", p![tok]).ok().flatten().is_some())
+            !*known.entry(tok.clone()).or_insert_with(|| {
+                st.db
+                    .one("SELECT 1 FROM shares WHERE token=?", p![tok])
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
         };
         if gone {
             let _ = std::fs::remove_file(e.path());
@@ -2231,7 +3251,13 @@ fn share_video_tidy(st: &AppState, dir: &std::path::Path, token: &str, keep: &st
 /// (`--panel` of `:root[data-theme="encore"]` in web-rs/static/css/app.css; a test keeps the two in step).
 pub(crate) const SHARE_VIDEO_BLANK: &str = "#222224";
 
-async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>, audio: &str, duration: f64, out: &std::path::Path) -> Option<std::path::PathBuf> {
+async fn share_video_make(
+    dir: &std::path::Path,
+    cover: Option<&std::path::Path>,
+    audio: &str,
+    duration: f64,
+    out: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     let (kbps, secs) = share_video_budget(duration);
     let tmp = dir.join(format!(".{}.tmp.mp4", encore_core::ids::random_token(6)));
     // H.264 when this ffmpeg has it (what chat apps play), else ffmpeg's default MP4 video codec
@@ -2239,17 +3265,60 @@ async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>
         let mut ff = Ffmpeg::new().quiet().arg("-y").silent();
         let cmd = ff.command();
         match cover {
-            Some(c) => { cmd.args(["-loop", "1", "-framerate", "1", "-i"]).arg(c); }
+            Some(c) => {
+                cmd.args(["-loop", "1", "-framerate", "1", "-i"]).arg(c);
+            }
             // no cover: a plain square in the panel colour of the "encore" theme (`--panel` in web-rs app.css)
-            None => { cmd.args(["-f", "lavfi", "-i", &format!("color=c=0x{}:s=600x600:r=1", SHARE_VIDEO_BLANK.trim_start_matches('#'))]); }
+            None => {
+                cmd.args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!(
+                        "color=c=0x{}:s=600x600:r=1",
+                        SHARE_VIDEO_BLANK.trim_start_matches('#')
+                    ),
+                ]);
+            }
         }
         cmd.arg("-i").arg(audio);
-        cmd.args(["-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=600:600:force_original_aspect_ratio=increase,crop=600:600,format=yuv420p", "-r", "1", "-g", "10"]);
+        cmd.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-vf",
+            "scale=600:600:force_original_aspect_ratio=increase,crop=600:600,format=yuv420p",
+            "-r",
+            "1",
+            "-g",
+            "10",
+        ]);
         if let Some(v) = vcodec {
             cmd.args(["-c:v", v, "-tune", "stillimage"]);
         }
-        cmd.args(["-c:a", "aac", "-b:a", &format!("{kbps}k"), "-ac", "2", "-t", &format!("{secs:.2}"), "-shortest", "-movflags", "+faststart", "-f", "mp4"]).arg(&tmp);
-        let ok = tokio::time::timeout(std::time::Duration::from_secs(300), ff.status()).await.ok().and_then(|r| r.ok()).map(|s| s.success()).unwrap_or(false);
+        cmd.args([
+            "-c:a",
+            "aac",
+            "-b:a",
+            &format!("{kbps}k"),
+            "-ac",
+            "2",
+            "-t",
+            &format!("{secs:.2}"),
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ])
+        .arg(&tmp);
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(300), ff.status())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|s| s.success())
+            .unwrap_or(false);
         let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
         if ok && size > 0 && size <= SHARE_VIDEO_MAX && std::fs::rename(&tmp, out).is_ok() {
             return Some(out.to_path_buf());
@@ -2263,18 +3332,27 @@ async fn share_video_make(dir: &std::path::Path, cover: Option<&std::path::Path>
 }
 
 /// Only in "playable" mode: the other modes never start ffmpeg for a public link.
-async fn shared_video(State(st): State<AppState>, Path(token): Path<String>, req: Request) -> ApiResult<Response> {
+async fn shared_video(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    req: Request,
+) -> ApiResult<Response> {
     let s = share_row(&st, &token)?;
     if st.cfg.str("share_preview").trim() != "playable" {
         return Err(err(404, "No video for this link"));
     }
-    let path = share_video(&st, &token).await.ok_or_else(|| err(404, "No video for this link"))?;
+    let path = share_video(&st, &token)
+        .await
+        .ok_or_else(|| err(404, "No video for this link"))?;
     // a playlist's video holds its first song now: never kept where Stop sharing or a removed song can't reach
     if s.kind == "playlist" {
         return share_live_file(&path, req, "video/mp4").await;
     }
     let mut r = serve_file(&path.to_string_lossy(), req, Some("video/mp4"), None).await?;
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
+    r.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
     Ok(r)
 }
 
@@ -2282,7 +3360,9 @@ async fn shared_video(State(st): State<AppState>, Path(token): Path<String>, req
 pub fn quality_line(m: &Value) -> String {
     let fmt = m["format"].as_str().unwrap_or("").to_uppercase();
     let mut parts = vec![];
-    if !fmt.is_empty() { parts.push(fmt); }
+    if !fmt.is_empty() {
+        parts.push(fmt);
+    }
     if m["lossless"].as_bool().unwrap_or(false) {
         if let (Some(b), Some(r)) = (m["bit_depth"].as_u64(), m["sample_rate"].as_u64()) {
             parts.push(format!("{b}-bit / {} kHz", trim_khz(r)));
@@ -2318,26 +3398,67 @@ const SHARE_PAGE_VIDEO_WAIT: u64 = 6;
 ///
 /// Before that, a listener who can open the thing where they already listen is sent there instead
 /// ([`share_open::jump`]): an Android phone's browser to the app, a browser signed in to this server to the web app.
-async fn share_page(State(st): State<AppState>, Path(token): Path<String>, MaybeUser(me): MaybeUser, req: Request) -> ApiResult<Response> {
+async fn share_page(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    MaybeUser(me): MaybeUser,
+    req: Request,
+) -> ApiResult<Response> {
     // absolute URLs for the preview image and audio (and the app's intent link): the public URL from Settings, else
     // what the browser asked for
     let base = public_base(&st, req.headers());
-    if let Some(to) = share_open::jump(&st, me.as_ref(), &token, req.method(), req.uri(), req.headers(), &base).await {
+    if let Some(to) = share_open::jump(
+        &st,
+        me.as_ref(),
+        &token,
+        req.method(),
+        req.uri(),
+        req.headers(),
+        &base,
+    )
+    .await
+    {
         return Ok(to);
     }
-    let html = tokio::fs::read_to_string(st.static_dir.join("share.html")).await.map_err(|_| err(404, "Not found"))?;
+    let html = tokio::fs::read_to_string(st.static_dir.join("share.html"))
+        .await
+        .map_err(|_| err(404, "Not found"))?;
     let meta = match shared_meta(&st, &token, &SharePageQ::default()).await {
         Ok((m, _)) => m,
-        Err(_) => return Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html.replace("<!--META-->", "")).into_response()),
+        Err(_) => {
+            return Ok((
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html.replace("<!--META-->", ""),
+            )
+                .into_response())
+        }
     };
     let mode = st.cfg.str("share_preview");
     // a chat app waits a few seconds for the page: past that, the small card now and the video (still
     // being made in the background) next time
     let video = mode.trim() == "playable"
-        && tokio::time::timeout(std::time::Duration::from_secs(SHARE_PAGE_VIDEO_WAIT), share_video(&st, &token)).await.ok().flatten().is_some();
-    let discord = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).is_some_and(is_discord_bot);
-    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache"), (header::VARY, "User-Agent, Cookie")],
-        share_page_html(&html, &meta, &base, &token, mode.trim(), video, discord)).into_response())
+        && tokio::time::timeout(
+            std::time::Duration::from_secs(SHARE_PAGE_VIDEO_WAIT),
+            share_video(&st, &token),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    let discord = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(is_discord_bot);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::VARY, "User-Agent, Cookie"),
+        ],
+        share_page_html(&html, &meta, &base, &token, mode.trim(), video, discord),
+    )
+        .into_response())
 }
 
 /// The server's public address, without a trailing `/`: the public URL from Settings, else the host (and scheme) the
@@ -2347,8 +3468,21 @@ fn public_base(st: &AppState, h: &axum::http::HeaderMap) -> String {
     if !b.trim().is_empty() {
         return b.trim().trim_end_matches('/').to_string();
     }
-    let host = h.get("x-forwarded-host").or(h.get(header::HOST)).and_then(|v| v.to_str().ok()).unwrap_or("localhost");
-    let proto = h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or(if host.starts_with("localhost") || host.starts_with("127.") { "http" } else { "https" });
+    let host = h
+        .get("x-forwarded-host")
+        .or(h.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let proto = h
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(
+            if host.starts_with("localhost") || host.starts_with("127.") {
+                "http"
+            } else {
+                "https"
+            },
+        );
     format!("{proto}://{host}")
 }
 
@@ -2360,11 +3494,23 @@ pub(crate) fn is_discord_bot(ua: &str) -> bool {
 
 /// The page with its preview tags (see `share_page`); `video`: the preview video exists; `discord`: for
 /// Discord's crawler, a plain picture (or video) card with no audio or music tags (see `is_discord_bot`).
-pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str, mode: &str, video: bool, discord: bool) -> String {
+pub(crate) fn share_page_html(
+    html: &str,
+    meta: &Value,
+    base: &str,
+    token: &str,
+    mode: &str,
+    video: bool,
+    discord: bool,
+) -> String {
     use encore_core::text::html_escape as esc;
     let e = |v: &Value| esc(v.as_str().unwrap_or(""));
     let kind = meta["kind"].as_str().unwrap_or("track");
-    let ystr = match &meta["year"] { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() };
+    let ystr = match &meta["year"] {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    };
     let title = match kind {
         "artist" => e(&meta["title"]),
         // "Liked Songs · anna", "Road trip · anna"
@@ -2375,21 +3521,35 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
     match kind {
         // a playlist's length is left out: it can be hundreds of hours
         "album" | "artist" | "playlist" => {
-            if kind == "album" && !ystr.is_empty() { desc.push(esc(&ystr)); }
-            if kind == "artist" { desc.push("Artist".to_string()); }
+            if kind == "album" && !ystr.is_empty() {
+                desc.push(esc(&ystr));
+            }
+            if kind == "artist" {
+                desc.push("Artist".to_string());
+            }
             let n = meta["count"].as_u64().unwrap_or(0);
             desc.push(format!("{n} {}", if n == 1 { "song" } else { "songs" }));
             if kind == "album" {
-                if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
+                if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) {
+                    desc.push(mmss(d));
+                }
             }
         }
         _ => {
             if let Some(a) = meta["album"].as_str().filter(|a| !a.is_empty()) {
-                desc.push(if ystr.is_empty() { esc(a) } else { format!("{} ({})", esc(a), esc(&ystr)) });
+                desc.push(if ystr.is_empty() {
+                    esc(a)
+                } else {
+                    format!("{} ({})", esc(a), esc(&ystr))
+                });
             }
             let q = quality_line(meta);
-            if !q.is_empty() { desc.push(q); }
-            if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) { desc.push(mmss(d)); }
+            if !q.is_empty() {
+                desc.push(q);
+            }
+            if let Some(d) = meta["duration"].as_f64().filter(|d| *d > 0.0) {
+                desc.push(mmss(d));
+            }
         }
     }
     desc.push(format!("Shared from {}", e(&meta["app_name"])));
@@ -2397,8 +3557,25 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
     let tok = esc(token);
     let base = esc(base);
     let app = e(&meta["app_name"]);
-    let og_type = if video { "video.other" } else if discord { "website" } else { match kind { "album" => "music.album", "artist" => "profile", "playlist" => "music.playlist", _ => "music.song" } };
-    let card = if video { "player" } else if mode == "large" { "summary_large_image" } else { "summary" };
+    let og_type = if video {
+        "video.other"
+    } else if discord {
+        "website"
+    } else {
+        match kind {
+            "album" => "music.album",
+            "artist" => "profile",
+            "playlist" => "music.playlist",
+            _ => "music.song",
+        }
+    };
+    let card = if video {
+        "player"
+    } else if mode == "large" {
+        "summary_large_image"
+    } else {
+        "summary"
+    };
     let mime = browser_type(meta["format"].as_str().unwrap_or("")).unwrap_or("audio/flac");
     // a playlist with no song in the library has nothing to play and no picture
     let empty = kind == "playlist" && meta["count"].as_u64().unwrap_or(0) == 0;
@@ -2409,17 +3586,20 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
 <meta property="og:url" content="{base}/s/{tok}">
-"#);
+"#
+    );
     if !empty {
         tags.push_str(&format!(
             r#"<meta property="og:image" content="{base}/api/share/{tok}/cover?s=600">
 <meta property="og:image:width" content="600"><meta property="og:image:height" content="600">
-"#));
+"#
+        ));
         if !discord {
             tags.push_str(&format!(
                 r#"<meta property="og:audio" content="{base}/api/share/{tok}/stream">
 <meta property="og:audio:type" content="{mime}">
-"#));
+"#
+            ));
         }
     }
     match kind {
@@ -2440,18 +3620,23 @@ pub(crate) fn share_page_html(html: &str, meta: &Value, base: &str, token: &str,
 <meta name="twitter:player:width" content="600"><meta name="twitter:player:height" content="600">
 <meta name="twitter:player:stream" content="{base}/api/share/{tok}/video.mp4">
 <meta name="twitter:player:stream:content_type" content="video/mp4">
-"#));
+"#
+        ));
     }
     tags.push_str(&format!(
         r#"<meta name="twitter:card" content="{card}">
 <meta name="twitter:title" content="{title}">
 <meta name="twitter:description" content="{desc}">
-"#));
+"#
+    ));
     if !empty {
-        tags.push_str(&format!("<meta name=\"twitter:image\" content=\"{base}/api/share/{tok}/cover?s=600\">\n"));
+        tags.push_str(&format!(
+            "<meta name=\"twitter:image\" content=\"{base}/api/share/{tok}/cover?s=600\">\n"
+        ));
     }
     tags.push_str(&format!(r#"<meta name="description" content="{desc}">"#));
-    html.replace("<title>Shared song</title>", "").replace("<!--META-->", &tags)
+    html.replace("<title>Shared song</title>", "")
+        .replace("<!--META-->", &tags)
 }
 
 #[cfg(test)]

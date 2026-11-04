@@ -2,13 +2,13 @@
 //! cookie upload.
 //! The sign-in itself lives in encore_requests::ytauth.
 use crate::auth::Admin;
-use encore_core::error::{err, ApiResult};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use encore_core::error::{err, ApiResult};
 use encore_db::RowExt;
 use encore_requests::ytauth::*;
 use serde::Deserialize;
@@ -21,12 +21,19 @@ pub fn router() -> Router<AppState> {
         .route("/api/youtube/refresh", post(refresh_now))
         .route("/api/youtube/signout", post(sign_out))
         .route("/api/youtube/extension-token", post(new_token))
-        .route("/api/youtube/extension-cookies", post(extension_cookies).options(preflight))
+        .route(
+            "/api/youtube/extension-cookies",
+            post(extension_cookies).options(preflight),
+        )
 }
 
 /// GET /api/youtube/auth: where the YouTube sign-in stands (admins).
 async fn get_status(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
-    Ok(Json(tokio::task::spawn_blocking(move || status(&st)).await.map_err(|e| err(500, e.to_string()))?))
+    Ok(Json(
+        tokio::task::spawn_blocking(move || status(&st))
+            .await
+            .map_err(|e| err(500, e.to_string()))?,
+    ))
 }
 
 /// "Refresh now": the source in use (the hand-off session and pasted cookies are rotated; the
@@ -47,9 +54,14 @@ async fn refresh_now(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<J
         (true, Some(_)) => "signed in, cookies renewed",
         (true, None) => "signed in",
     };
-    st.db.log("info", &format!("{} refreshed the YouTube sign-in ({what})", u.s("username")));
+    st.db.log(
+        "info",
+        &format!("{} refreshed the YouTube sign-in ({what})", u.s("username")),
+    );
     let st2 = st.clone();
-    let mut v = tokio::task::spawn_blocking(move || status(&st2)).await.map_err(|e| err(500, e.to_string()))?;
+    let mut v = tokio::task::spawn_blocking(move || status(&st2))
+        .await
+        .map_err(|e| err(500, e.to_string()))?;
     v["refreshed"] = json!(r.signed_in);
     // what the refresh renewed (0: Google sent no cookies back, the sign-in was only checked; null: nothing was rotated on purpose)
     v["rotated"] = json!(r.rotated);
@@ -64,21 +76,37 @@ struct SignOutBody {
 }
 
 /// POST /api/youtube/signout: forget a sign-in's cookies (admins).
-async fn sign_out(State(st): State<AppState>, Admin(u): Admin, body: Option<Json<SignOutBody>>) -> ApiResult<Json<Value>> {
-    let which = body.and_then(|b| b.0.source).unwrap_or_else(|| "all".into());
+async fn sign_out(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    body: Option<Json<SignOutBody>>,
+) -> ApiResult<Json<Value>> {
+    let which = body
+        .and_then(|b| b.0.source)
+        .unwrap_or_else(|| "all".into());
     if !["handoff", "extension", "all"].contains(&which.as_str()) {
         return Err(err(400, "Unknown sign-in"));
     }
     encore_requests::ytauth::sign_out(&st, &which).await;
-    st.db.log("info", &format!("{} signed Encore out of YouTube ({which})", u.s("username")));
+    st.db.log(
+        "info",
+        &format!("{} signed Encore out of YouTube ({which})", u.s("username")),
+    );
     let st2 = st.clone();
-    Ok(Json(tokio::task::spawn_blocking(move || status(&st2)).await.map_err(|e| err(500, e.to_string()))?))
+    Ok(Json(
+        tokio::task::spawn_blocking(move || status(&st2))
+            .await
+            .map_err(|e| err(500, e.to_string()))?,
+    ))
 }
 
 /// A new extension token (shown once; the old one stops working). It can only upload cookies.
 async fn new_token(State(st): State<AppState>, Admin(u): Admin) -> ApiResult<Json<Value>> {
     let token = encore_requests::ytauth::new_token(&st);
-    st.db.log("info", &format!("{} made a new YouTube extension token", u.s("username")));
+    st.db.log(
+        "info",
+        &format!("{} made a new YouTube extension token", u.s("username")),
+    );
     Ok(Json(json!({ "token": token })))
 }
 
@@ -93,20 +121,34 @@ async fn preflight() -> Response {
 fn cors(h: &mut HeaderMap) {
     use axum::http::HeaderValue;
     h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
-    h.insert("access-control-allow-methods", HeaderValue::from_static("POST, OPTIONS"));
-    h.insert("access-control-allow-headers", HeaderValue::from_static("authorization, content-type, x-encore-token"));
+    h.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    h.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("authorization, content-type, x-encore-token"),
+    );
 }
 
 /// The browser extension's upload: `{cookies: [chrome.cookies.Cookie…], agent?, handoff?}` with the token.
 /// `handoff: true`: the cookies of a private window signed in for Encore only – they become the
 /// server-owned session. Otherwise: the everyday browser's cookies (never rotated by Encore).
-async fn extension_cookies(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+async fn extension_cookies(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     use axum::response::IntoResponse;
     let s = load(st.data_dir());
     let mut resp = if !token_ok(&headers, s.ext_token.as_deref()) {
         err(401, "Unknown token – make a new one under Settings → Plugins → yt-dlp → YouTube sign-in → Connect the browser extension").into_response()
     } else {
-        let r = if body["handoff"].as_bool() == Some(true) { accept_handoff(&st, &body).await } else { accept_extension(&st, &body).await };
+        let r = if body["handoff"].as_bool() == Some(true) {
+            accept_handoff(&st, &body).await
+        } else {
+            accept_extension(&st, &body).await
+        };
         match r {
             Ok(v) => Json(v).into_response(),
             Err(e) => err(400, e.to_string()).into_response(),

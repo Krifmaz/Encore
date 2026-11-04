@@ -17,11 +17,19 @@ use serde_json::{json, Value};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system/wrapper", get(overview))
-        .route("/api/system/wrapper/app", post(upload_app).layer(DefaultBodyLimit::max(wrapper::BUNDLE_MAX_BYTES as usize + (1 << 20))))
+        .route(
+            "/api/system/wrapper/app",
+            post(upload_app).layer(DefaultBodyLimit::max(
+                wrapper::BUNDLE_MAX_BYTES as usize + (1 << 20),
+            )),
+        )
         .route("/api/system/wrapper/set-up", post(set_up))
         .route("/api/system/wrapper/start", post(start))
         .route("/api/system/wrapper/stop", post(stop))
-        .route("/api/system/wrapper/sign-in", post(sign_in).delete(sign_out))
+        .route(
+            "/api/system/wrapper/sign-in",
+            post(sign_in).delete(sign_out),
+        )
         .route("/api/system/wrapper/sign-in/code", post(sign_in_code))
         .route("/api/system/wrapper/gamdl", post(use_with_gamdl))
         .route("/api/system/wrapper/logs", get(logs))
@@ -41,7 +49,10 @@ fn failed(f: encore_plugins::Failure) -> ApiError {
 /// The plugin has to be installed for its card's actions.
 fn installed(st: &AppState) -> ApiResult<()> {
     if !st.plugins.installed(wrapper::ID) {
-        return Err(err(409, "Install the Apple Music wrapper plugin first (Settings → Plugins)"));
+        return Err(err(
+            409,
+            "Install the Apple Music wrapper plugin first (Settings → Plugins)",
+        ));
     }
     Ok(())
 }
@@ -52,7 +63,11 @@ async fn overview(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
 }
 
 /// The owner's Apple Music for Android app (`.apk` or `.apkm`), as one multipart file, streamed to disk.
-async fn upload_app(State(st): State<AppState>, Admin(u): Admin, mut form: Multipart) -> ApiResult<Json<Value>> {
+async fn upload_app(
+    State(st): State<AppState>,
+    Admin(u): Admin,
+    mut form: Multipart,
+) -> ApiResult<Json<Value>> {
     installed(&st)?;
     let dir = wrapper::data(&st);
     let tmp = dir.join(format!("upload-{}.part", encore_core::ids::random_hex(8)));
@@ -61,8 +76,14 @@ async fn upload_app(State(st): State<AppState>, Admin(u): Admin, mut form: Multi
     // every way out of the loop with an error removes the .part file
     let streamed: Result<(), ApiError> = async {
         use tokio::io::AsyncWriteExt;
-        let mut out = tokio::fs::File::create(&tmp).await.map_err(|e| err(500, e.to_string()))?;
-        while let Some(mut f) = form.next_field().await.map_err(|e| err(400, e.to_string()))? {
+        let mut out = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| err(500, e.to_string()))?;
+        while let Some(mut f) = form
+            .next_field()
+            .await
+            .map_err(|e| err(400, e.to_string()))?
+        {
             if size > 0 {
                 break;
             }
@@ -70,9 +91,17 @@ async fn upload_app(State(st): State<AppState>, Admin(u): Admin, mut form: Multi
             while let Some(chunk) = f.chunk().await.map_err(|e| err(400, e.to_string()))? {
                 size += chunk.len() as u64;
                 if size > wrapper::BUNDLE_MAX_BYTES {
-                    return Err(err(413, format!("The app is larger than {} GB", wrapper::BUNDLE_MAX_BYTES >> 30)));
+                    return Err(err(
+                        413,
+                        format!(
+                            "The app is larger than {} GB",
+                            wrapper::BUNDLE_MAX_BYTES >> 30
+                        ),
+                    ));
                 }
-                out.write_all(&chunk).await.map_err(|e| err(500, e.to_string()))?;
+                out.write_all(&chunk)
+                    .await
+                    .map_err(|e| err(500, e.to_string()))?;
             }
         }
         out.flush().await.map_err(|e| err(500, e.to_string()))?;
@@ -85,11 +114,20 @@ async fn upload_app(State(st): State<AppState>, Admin(u): Admin, mut form: Multi
     }
     if size == 0 {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(err(400, "No file came: choose the Apple Music .apk or .apkm"));
+        return Err(err(
+            400,
+            "No file came: choose the Apple Music .apk or .apkm",
+        ));
     }
     let st2 = st.clone();
-    let info = tokio::task::spawn_blocking(move || wrapper::keep_bundle(&st2, &tmp, &name)).await.map_err(|e| err(500, e.to_string()))?.map_err(|e| err(400, e))?;
-    tracing::info!("{} uploaded the Apple Music app for the wrapper", u.s("username"));
+    let info = tokio::task::spawn_blocking(move || wrapper::keep_bundle(&st2, &tmp, &name))
+        .await
+        .map_err(|e| err(500, e.to_string()))?
+        .map_err(|e| err(400, e))?;
+    tracing::info!(
+        "{} uploaded the Apple Music app for the wrapper",
+        u.s("username")
+    );
     Ok(Json(json!({ "ok": true, "bundle": info })))
 }
 
@@ -102,10 +140,17 @@ struct SetUp {
 
 /// Set up: download, stage, build (or pull) and start, in the background. The card asks /api/system/wrapper
 /// for the job's progress.
-async fn set_up(State(st): State<AppState>, Admin(_): Admin, body: Option<Json<SetUp>>) -> ApiResult<Json<Value>> {
+async fn set_up(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    body: Option<Json<SetUp>>,
+) -> ApiResult<Json<Value>> {
     installed(&st)?;
     if wrapper::mode(&st) != wrapper::Mode::Managed {
-        return Err(err(400, "Set up is for the wrapper Encore runs: choose \"Encore runs it\" first"));
+        return Err(err(
+            400,
+            "Set up is for the wrapper Encore runs: choose \"Encore runs it\" first",
+        ));
     }
     let rebuild = body.map(|b| b.0.rebuild).unwrap_or(false);
     if !wrapper::set_up(&st, rebuild) {
@@ -117,13 +162,17 @@ async fn set_up(State(st): State<AppState>, Admin(_): Admin, body: Option<Json<S
 async fn start(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     installed(&st)?;
     let a = wrapper::start(&st).await.map_err(|e| err(400, e))?;
-    Ok(Json(json!({ "ok": true, "url": a.url, "message": format!("The wrapper runs at {}", a.url) })))
+    Ok(Json(
+        json!({ "ok": true, "url": a.url, "message": format!("The wrapper runs at {}", a.url) }),
+    ))
 }
 
 async fn stop(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     installed(&st)?;
     wrapper::stop(&st).await.map_err(|e| err(400, e))?;
-    Ok(Json(json!({ "ok": true, "message": "The wrapper is stopped" })))
+    Ok(Json(
+        json!({ "ok": true, "message": "The wrapper is stopped" }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -136,10 +185,19 @@ struct SignIn {
 
 /// The first sign-in step. The password is passed on to the wrapper and kept nowhere (not in the settings,
 /// not in a log).
-async fn sign_in(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<SignIn>) -> ApiResult<Json<Value>> {
+async fn sign_in(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Json(b): Json<SignIn>,
+) -> ApiResult<Json<Value>> {
     installed(&st)?;
-    let v = wrapper::sign_in(&st, &b.apple_id, &b.password).await.map_err(failed)?;
-    st.plugins.log(wrapper::ID).line("sign-in", &format!("sign-in: {}", v["state"].as_str().unwrap_or("?")));
+    let v = wrapper::sign_in(&st, &b.apple_id, &b.password)
+        .await
+        .map_err(failed)?;
+    st.plugins.log(wrapper::ID).line(
+        "sign-in",
+        &format!("sign-in: {}", v["state"].as_str().unwrap_or("?")),
+    );
     Ok(Json(v))
 }
 
@@ -150,10 +208,17 @@ struct Code {
 }
 
 /// The second step: the code Apple sent to the owner's devices.
-async fn sign_in_code(State(st): State<AppState>, Admin(_): Admin, Json(b): Json<Code>) -> ApiResult<Json<Value>> {
+async fn sign_in_code(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Json(b): Json<Code>,
+) -> ApiResult<Json<Value>> {
     installed(&st)?;
     let v = wrapper::sign_in_code(&st, &b.code).await.map_err(failed)?;
-    st.plugins.log(wrapper::ID).line("sign-in", &format!("code: {}", v["state"].as_str().unwrap_or("?")));
+    st.plugins.log(wrapper::ID).line(
+        "sign-in",
+        &format!("code: {}", v["state"].as_str().unwrap_or("?")),
+    );
     Ok(Json(v))
 }
 
@@ -161,7 +226,9 @@ async fn sign_out(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json
     installed(&st)?;
     wrapper::sign_out(&st).await.map_err(failed)?;
     st.plugins.log(wrapper::ID).line("sign-in", "signed out");
-    Ok(Json(json!({ "ok": true, "message": "Signed out of Apple Music" })))
+    Ok(Json(
+        json!({ "ok": true, "message": "Signed out of Apple Music" }),
+    ))
 }
 
 /// "Use with gamdl": gamdl's Wrapper URL and decrypt address set to this wrapper's.
@@ -178,8 +245,14 @@ struct Lines {
 
 /// The managed wrapper's container log (the plugin's own log, with the build's lines, is
 /// /api/plugins/wrapper/logs).
-async fn logs(State(st): State<AppState>, Admin(_): Admin, Query(q): Query<Lines>) -> ApiResult<Json<Value>> {
+async fn logs(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Query(q): Query<Lines>,
+) -> ApiResult<Json<Value>> {
     installed(&st)?;
-    let text = wrapper::container_logs(&st, q.lines.unwrap_or(300)).await.map_err(|e| err(400, e))?;
+    let text = wrapper::container_logs(&st, q.lines.unwrap_or(300))
+        .await
+        .map_err(|e| err(400, e))?;
     Ok(Json(json!({ "text": text })))
 }

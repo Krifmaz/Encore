@@ -1,12 +1,12 @@
 //! The playback spot end to end through the real router: check-ins write it (throttled), `/api/remote/spot`
 //! returns it with its song and whether the device is online, and a remote's check-ins leave it alone.
-use encore_db::RowExt;
-use encore_db::p;
 use crate::state::AppState;
+use crate::test_support::call;
 use axum::http::StatusCode;
 use axum::Router;
+use encore_db::p;
+use encore_db::RowExt;
 use serde_json::{json, Value};
-use crate::test_support::call;
 
 const PW: &str = "listener-pass-1";
 
@@ -31,22 +31,42 @@ async fn setup(name: &str, uid: i64) -> Env {
     std::fs::create_dir_all(&dir).unwrap();
     let st = crate::test_support::state_in(&dir);
     let id = crate::auth::create_user(&st, "listener", PW, "user", None, None).unwrap();
-    st.db.execute("UPDATE users SET id=? WHERE id=?", p![uid, id]).unwrap();
+    st.db
+        .execute("UPDATE users SET id=? WHERE id=?", p![uid, id])
+        .unwrap();
     for (i, title) in ["First", "Second", "Third"].iter().enumerate() {
         st.db.execute("INSERT INTO tracks (id, path, title, artist, album, album_id, duration) VALUES (?,?,?,?,?,?,?)",
             p![i as i64 + 1, format!("/m/{i}.flac"), title, "Band", "Record", "alb1", 200.0 + i as f64]).unwrap();
     }
     let app = crate::app(st.clone());
-    let r = call(&app, "POST", "/api/auth/login", "", Some(json!({ "username": "listener", "password": PW }))).await;
+    let r = call(
+        &app,
+        "POST",
+        "/api/auth/login",
+        "",
+        Some(json!({ "username": "listener", "password": PW })),
+    )
+    .await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
     let cookie = r.2.split(';').next().unwrap().to_string();
-    Env { st, app, dir, cookie }
+    Env {
+        st,
+        app,
+        dir,
+        cookie,
+    }
 }
-
 
 impl Env {
     async fn beat(&self, device: &str, name: &str, state: Value) {
-        let r = call(&self.app, "POST", "/api/remote/heartbeat", &self.cookie, Some(json!({ "id": device, "name": name, "state": state }))).await;
+        let r = call(
+            &self.app,
+            "POST",
+            "/api/remote/heartbeat",
+            &self.cookie,
+            Some(json!({ "id": device, "name": name, "state": state })),
+        )
+        .await;
         assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
     }
     async fn spot(&self) -> Value {
@@ -70,13 +90,24 @@ async fn heartbeat_writes_the_spot_throttled_and_get_returns_it() {
     assert_eq!(e.spot().await, Value::Null);
     // nothing playing, or a stream that isn't a library song: nothing written
     e.beat("phone", "Pixel", json!({ "playing": false })).await;
-    e.beat("phone", "Pixel", json!({ "title": "radio", "playing": true, "position": 3.0 })).await;
+    e.beat(
+        "phone",
+        "Pixel",
+        json!({ "title": "radio", "playing": true, "position": 3.0 }),
+    )
+    .await;
     assert!(e.row().is_none());
 
     e.beat("phone", "Pixel", playing(1, 5.0)).await;
     let r = e.row().expect("first check-in while playing writes");
-    assert_eq!((r.i("track_id"), r.f("position"), r.i("idx"), r.s("queue")), (1, 5.0, 0, "[1,2,3]".to_string()));
-    assert_eq!((r.s("device_id"), r.s("device_name"), r.b("playing")), ("phone".into(), "Pixel".into(), true));
+    assert_eq!(
+        (r.i("track_id"), r.f("position"), r.i("idx"), r.s("queue")),
+        (1, 5.0, 0, "[1,2,3]".to_string())
+    );
+    assert_eq!(
+        (r.s("device_id"), r.s("device_name"), r.b("playing")),
+        ("phone".into(), "Pixel".into(), true)
+    );
     let written = r.f("updated_at");
 
     // the next check-in a couple of seconds later: throttled
@@ -121,11 +152,15 @@ async fn heartbeat_writes_the_spot_throttled_and_get_returns_it() {
     assert!(s.get("idx").is_none() && s.get("user_id").is_none());
 
     // a device that isn't in the hub (or not seen lately) is offline
-    e.st.db.execute("UPDATE playback_spot SET device_id='gone'", p![]).unwrap();
+    e.st.db
+        .execute("UPDATE playback_spot SET device_id='gone'", p![])
+        .unwrap();
     assert_eq!(e.spot().await["online"], false);
 
     // a song that left the library: nothing to pick up
-    e.st.db.execute("UPDATE playback_spot SET track_id=99", p![]).unwrap();
+    e.st.db
+        .execute("UPDATE playback_spot SET track_id=99", p![])
+        .unwrap();
     assert_eq!(e.spot().await, Value::Null);
 
     // DELETE clears it, and the next check-in while playing writes again
@@ -134,14 +169,26 @@ async fn heartbeat_writes_the_spot_throttled_and_get_returns_it() {
     assert!(e.row().is_none());
     e.beat("laptop", "Laptop", playing(3, 1.0)).await;
     let s = e.spot().await;
-    assert_eq!((s["track_id"].as_i64(), s["device_name"].as_str(), s["online"].as_bool(), s["device_playing"].as_bool()),
-        (Some(3), Some("Laptop"), Some(true), Some(true)));
+    assert_eq!(
+        (
+            s["track_id"].as_i64(),
+            s["device_name"].as_str(),
+            s["online"].as_bool(),
+            s["device_playing"].as_bool()
+        ),
+        (Some(3), Some("Laptop"), Some(true), Some(true))
+    );
 }
 
 #[tokio::test]
 async fn a_remote_check_in_does_not_write_the_spot() {
     let e = setup("remote-of", 9102).await;
-    e.beat("phone", "Pixel", json!({ "playing": false, "remote_of": "laptop" })).await;
+    e.beat(
+        "phone",
+        "Pixel",
+        json!({ "playing": false, "remote_of": "laptop" }),
+    )
+    .await;
     // even if a remote sends a song, it's the other device's
     let mut s = playing(1, 3.0);
     s["remote_of"] = json!("laptop");
@@ -167,7 +214,15 @@ async fn two_devices_playing_at_once_stay_throttled() {
     e.beat("phone", "Pixel", playing(1, 7.0)).await;
     e.beat("laptop", "Laptop", playing(2, 3.0)).await;
     let r = e.row().unwrap();
-    assert_eq!((r.s("device_id"), r.i("track_id"), r.f("position"), r.f("updated_at")), ("phone".into(), 1, 5.0, first));
+    assert_eq!(
+        (
+            r.s("device_id"),
+            r.i("track_id"),
+            r.f("position"),
+            r.f("updated_at")
+        ),
+        ("phone".into(), 1, 5.0, first)
+    );
     // once the phone pauses, the laptop takes over at once
     let mut paused = playing(1, 9.0);
     paused["playing"] = json!(false);
@@ -175,7 +230,10 @@ async fn two_devices_playing_at_once_stay_throttled() {
     assert_eq!(e.row().unwrap().f("position"), 9.0);
     e.beat("laptop", "Laptop", playing(2, 4.0)).await;
     let r = e.row().unwrap();
-    assert_eq!((r.s("device_id"), r.i("track_id"), r.f("position")), ("laptop".into(), 2, 4.0));
+    assert_eq!(
+        (r.s("device_id"), r.i("track_id"), r.f("position")),
+        ("laptop".into(), 2, 4.0)
+    );
 }
 
 #[tokio::test]
@@ -185,17 +243,57 @@ async fn shuffle_and_repeat_commands_reach_the_device_and_its_state_shows_them()
     s["shuffle"] = json!(true);
     s["repeat"] = json!("one");
     e.beat("phone", "Pixel", s).await;
-    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
-    assert_eq!((d[0]["state"]["shuffle"].clone(), d[0]["state"]["repeat"].clone()), (json!(true), json!("one")), "{d}");
-    for c in [json!({ "action": "shuffle", "value": false }), json!({ "action": "repeat", "value": "all" })] {
-        let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(c)).await;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None)
+        .await
+        .1;
+    assert_eq!(
+        (
+            d[0]["state"]["shuffle"].clone(),
+            d[0]["state"]["repeat"].clone()
+        ),
+        (json!(true), json!("one")),
+        "{d}"
+    );
+    for c in [
+        json!({ "action": "shuffle", "value": false }),
+        json!({ "action": "repeat", "value": "all" }),
+    ] {
+        let r = call(
+            &e.app,
+            "POST",
+            "/api/remote/phone/command",
+            &e.cookie,
+            Some(c),
+        )
+        .await;
         assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
     }
-    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) }))).await;
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/heartbeat",
+        &e.cookie,
+        Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) })),
+    )
+    .await;
     let cmds = r.1["commands"].as_array().unwrap().clone();
-    assert_eq!(cmds.iter().map(|c| (c["action"].clone(), c["value"].clone())).collect::<Vec<_>>(),
-        vec![(json!("shuffle"), json!(false)), (json!("repeat"), json!("all"))]);
-    let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(json!({ "action": "dance" }))).await;
+    assert_eq!(
+        cmds.iter()
+            .map(|c| (c["action"].clone(), c["value"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("shuffle"), json!(false)),
+            (json!("repeat"), json!("all"))
+        ]
+    );
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/phone/command",
+        &e.cookie,
+        Some(json!({ "action": "dance" })),
+    )
+    .await;
     assert_eq!(r.0, StatusCode::BAD_REQUEST);
 }
 
@@ -205,13 +303,34 @@ async fn a_system_volume_command_reaches_the_device_and_its_state_shows_the_leve
     let mut s = playing(1, 5.0);
     s["system_volume"] = json!(0.4);
     e.beat("phone", "Pixel", s).await;
-    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None)
+        .await
+        .1;
     assert_eq!(d[0]["state"]["system_volume"], json!(0.4), "{d}");
-    let r = call(&e.app, "POST", "/api/remote/phone/command", &e.cookie, Some(json!({ "action": "system_volume", "value": 0.75 }))).await;
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/phone/command",
+        &e.cookie,
+        Some(json!({ "action": "system_volume", "value": 0.75 })),
+    )
+    .await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
-    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) }))).await;
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/heartbeat",
+        &e.cookie,
+        Some(json!({ "id": "phone", "name": "Pixel", "state": playing(1, 6.0) })),
+    )
+    .await;
     let cmds = r.1["commands"].as_array().unwrap().clone();
-    assert_eq!(cmds.iter().map(|c| (c["action"].clone(), c["value"].clone())).collect::<Vec<_>>(), vec![(json!("system_volume"), json!(0.75))]);
+    assert_eq!(
+        cmds.iter()
+            .map(|c| (c["action"].clone(), c["value"].clone()))
+            .collect::<Vec<_>>(),
+        vec![(json!("system_volume"), json!(0.75))]
+    );
 }
 
 #[tokio::test]
@@ -220,15 +339,34 @@ async fn a_prefs_command_reaches_the_device_and_its_state_shows_its_normalizatio
     let mut s = playing(1, 5.0);
     s["norm"] = json!({ "mode": "off", "target": -14, "clip": true });
     e.beat("tab", "Chrome on Linux", s).await;
-    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None).await.1;
+    let d = call(&e.app, "GET", "/api/remote/devices", &e.cookie, None)
+        .await
+        .1;
     assert_eq!(d[0]["state"]["norm"]["mode"], json!("off"), "{d}");
     let c = json!({ "action": "prefs", "norm": { "mode": "album", "target": -12 } });
-    let r = call(&e.app, "POST", "/api/remote/tab/command", &e.cookie, Some(c)).await;
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/tab/command",
+        &e.cookie,
+        Some(c),
+    )
+    .await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
-    let r = call(&e.app, "POST", "/api/remote/heartbeat", &e.cookie, Some(json!({ "id": "tab", "name": "Chrome on Linux", "state": playing(1, 6.0) }))).await;
+    let r = call(
+        &e.app,
+        "POST",
+        "/api/remote/heartbeat",
+        &e.cookie,
+        Some(json!({ "id": "tab", "name": "Chrome on Linux", "state": playing(1, 6.0) })),
+    )
+    .await;
     let cmds = r.1["commands"].as_array().unwrap().clone();
     assert_eq!(cmds.len(), 1, "{cmds:?}");
-    assert_eq!((cmds[0]["action"].clone(), cmds[0]["norm"].clone()), (json!("prefs"), json!({ "mode": "album", "target": -12 })));
+    assert_eq!(
+        (cmds[0]["action"].clone(), cmds[0]["norm"].clone()),
+        (json!("prefs"), json!({ "mode": "album", "target": -12 }))
+    );
 }
 
 #[tokio::test]
@@ -240,5 +378,10 @@ async fn songs_carry_each_artist_for_links() {
     let r = call(&e.app, "GET", "/api/library/tracks/10", &e.cookie, None).await;
     assert_eq!(r.0, StatusCode::OK, "{:?}", r.1);
     // the featured singer is an artist of the library too (0.41.1: featured artists have pages of their own)
-    assert_eq!(r.1["artists"], json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": true }]), "{}", r.1);
+    assert_eq!(
+        r.1["artists"],
+        json!([{ "name": "Band", "in_library": true }, { "name": "Guest Singer", "in_library": true }]),
+        "{}",
+        r.1
+    );
 }

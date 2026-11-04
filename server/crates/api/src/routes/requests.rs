@@ -3,17 +3,17 @@
 //! away; the storage health that pauses imports; Download now (one request, or all of them for admins). An
 //! admin looks at everyone's requests or one person's (`user`, with the people who have requests from
 //! `GET /api/requests/users`); a member only ever at their own.
-use crate::enrich::enrich_now;
 use crate::auth::{self, Admin, User};
-use encore_db::{now, Row, RowExt};
-use encore_core::error::{err, ApiError, ApiResult};
+use crate::enrich::enrich_now;
 use crate::state::AppState;
-use encore_requests::worker::{self, ACTIVE};
-use encore_requests::notify;
-use encore_db::p;
 use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use encore_core::error::{err, ApiError, ApiResult};
+use encore_db::p;
+use encore_db::{now, Row, RowExt};
+use encore_requests::notify;
+use encore_requests::worker::{self, ACTIVE};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -34,7 +34,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/clear-waiting", post(clear_waiting))
         .route("/api/requests/retry-failed", post(retry_failed))
         .route("/api/requests/download-now", post(download_all_now))
-        .route("/api/requests/events", get(crate::routes::request_events::events))
+        .route(
+            "/api/requests/events",
+            get(crate::routes::request_events::events),
+        )
         .route("/api/requests/storage", get(storage))
         .route("/api/requests/storage/check", post(storage_check))
         .route("/api/requests/{rid}", delete(remove))
@@ -47,13 +50,19 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/{rid}/cancel", post(cancel))
         .route("/api/requests/{rid}/download-now", post(download_now));
     #[cfg(feature = "fault-io")]
-    let r = r.route("/api/requests/storage/fault", post(fault_set).delete(fault_clear));
+    let r = r.route(
+        "/api/requests/storage/fault",
+        post(fault_set).delete(fault_clear),
+    );
     r
 }
 
 /// A request row with its detail parsed; 404 when there is none.
 pub(crate) fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
-    let mut r = st.db.one("SELECT * FROM requests WHERE id=?", p![id])?.ok_or_else(|| err(404, "Request not found"))?;
+    let mut r = st
+        .db
+        .one("SELECT * FROM requests WHERE id=?", p![id])?
+        .ok_or_else(|| err(404, "Request not found"))?;
     let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
     r.insert("detail".into(), d);
     Ok(Value::Object(r))
@@ -88,8 +97,14 @@ fn user_id(user: Option<&str>) -> Option<i64> {
 }
 
 /// GET /api/requests: the requests the caller may see, newest first.
-async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
-    let mut sql = "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1".to_string();
+async fn list(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(q): Query<ListQ>,
+) -> ApiResult<Json<Value>> {
+    let mut sql =
+        "SELECT r.*, u.username FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE 1=1"
+            .to_string();
     let mut params = vec![];
     if let Some(owner) = whose(&u, q.mine, user_id(q.user.as_deref())) {
         sql += " AND r.user_id=?";
@@ -112,7 +127,8 @@ async fn list(State(st): State<AppState>, User(u): User, Query(q): Query<ListQ>)
         let mut v = json!(list_rows(st, rows, encore_config::perms::is_admin(&u)));
         enrich_now(st, Some(&u), &mut v);
         Ok(Json(v))
-    }).await
+    })
+    .await
 }
 
 /// `GET /api/requests/counts` query: whose requests to count, the same as the list's.
@@ -164,7 +180,11 @@ impl Counts {
 
 /// GET /api/requests/counts: how many of the caller's requests (an admin: everyone's, their own with `mine`,
 /// one person's with `user`) are in each status group, child requests included. → [`Counts`]
-async fn counts(State(st): State<AppState>, User(u): User, Query(q): Query<CountsQ>) -> ApiResult<Json<Counts>> {
+async fn counts(
+    State(st): State<AppState>,
+    User(u): User,
+    Query(q): Query<CountsQ>,
+) -> ApiResult<Json<Counts>> {
     let mut sql = "SELECT status, COUNT(*) AS n FROM requests WHERE 1=1".to_string();
     let mut params = vec![];
     if let Some(owner) = whose(&u, q.mine, user_id(q.user.as_deref())) {
@@ -173,7 +193,9 @@ async fn counts(State(st): State<AppState>, User(u): User, Query(q): Query<Count
     }
     sql += " GROUP BY status";
     let rows = st.db.read_now(|c| c.query(&sql, params))?;
-    Ok(Json(Counts::from_statuses(rows.into_iter().map(|r| (r.s("status"), r.i("n"))))))
+    Ok(Json(Counts::from_statuses(
+        rows.into_iter().map(|r| (r.s("status"), r.i("n"))),
+    )))
 }
 
 /// `GET /api/requests/users` (admins): the people who have requests, for the Requests page's User list. →
@@ -181,7 +203,10 @@ async fn counts(State(st): State<AppState>, User(u): User, Query(q): Query<Count
 async fn users(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let rows = st.db.query("SELECT u.id, u.username, COUNT(r.id) AS count FROM requests r JOIN users u ON u.id=r.user_id
                             GROUP BY u.id, u.username ORDER BY LOWER(u.username), u.id", p![])?;
-    Ok(Json(json!(rows.into_iter().map(|r| json!({ "id": r.i("id"), "username": r.s("username"), "count": r.i("count") })).collect::<Vec<_>>())))
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|r| json!({ "id": r.i("id"), "username": r.s("username"), "count": r.i("count") }))
+        .collect::<Vec<_>>())))
 }
 
 /// The requests list's rows as the page shows them: the `detail` JSON read for the log, the length, the
@@ -246,18 +271,50 @@ fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
 /// other kind and status.
 fn library_links(st: &AppState, rows: &mut [Row]) {
     let done = |r: &Row, kind: &str| r.s("status") == "completed" && r.s("kind") == kind;
-    let albums: Vec<usize> = (0..rows.len()).filter(|i| done(&rows[*i], "album")).collect();
-    let songs: Vec<usize> = (0..rows.len()).filter(|i| done(&rows[*i], "track")).collect();
-    let keys: Vec<(String, String, String)> = albums.iter().map(|i| {
-        let r = &rows[*i];
-        // the worker's `album_title`: the album, else the title
-        let title = if r.s("album").is_empty() { r.s("title") } else { r.s("album") };
-        (r.s("mbid"), r.s("artist"), title)
-    }).collect();
-    let found = if keys.is_empty() { vec![] } else { encore_library::lookup::album_ids_for(&st.db, &keys) };
-    let mut links: Vec<(usize, Value, Value)> = albums.into_iter().zip(found).map(|(i, a)| (i, json!(a), Value::Null)).collect();
-    let keys: Vec<(String, String, String)> = songs.iter().map(|i| (rows[*i].s("mbid"), rows[*i].s("artist"), rows[*i].s("title"))).collect();
-    let found = if keys.is_empty() { vec![] } else { encore_library::lookup::find_tracks(&st.db, &keys) };
+    let albums: Vec<usize> = (0..rows.len())
+        .filter(|i| done(&rows[*i], "album"))
+        .collect();
+    let songs: Vec<usize> = (0..rows.len())
+        .filter(|i| done(&rows[*i], "track"))
+        .collect();
+    let keys: Vec<(String, String, String)> = albums
+        .iter()
+        .map(|i| {
+            let r = &rows[*i];
+            // the worker's `album_title`: the album, else the title
+            let title = if r.s("album").is_empty() {
+                r.s("title")
+            } else {
+                r.s("album")
+            };
+            (r.s("mbid"), r.s("artist"), title)
+        })
+        .collect();
+    let found = if keys.is_empty() {
+        vec![]
+    } else {
+        encore_library::lookup::album_ids_for(&st.db, &keys)
+    };
+    let mut links: Vec<(usize, Value, Value)> = albums
+        .into_iter()
+        .zip(found)
+        .map(|(i, a)| (i, json!(a), Value::Null))
+        .collect();
+    let keys: Vec<(String, String, String)> = songs
+        .iter()
+        .map(|i| {
+            (
+                rows[*i].s("mbid"),
+                rows[*i].s("artist"),
+                rows[*i].s("title"),
+            )
+        })
+        .collect();
+    let found = if keys.is_empty() {
+        vec![]
+    } else {
+        encore_library::lookup::find_tracks(&st.db, &keys)
+    };
     links.extend(songs.into_iter().zip(found).map(|(i, t)| match t {
         Some(t) => (i, json!(t.s("album_id")), json!(t.i("id"))),
         None => (i, Value::Null, Value::Null),
@@ -273,15 +330,34 @@ fn library_links(st: &AppState, rows: &mut [Row]) {
 }
 
 /// POST /api/requests: make a request (within the caller's quota).
-async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequest>) -> ApiResult<Json<Value>> {
+async fn create(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<NewRequest>,
+) -> ApiResult<Json<Value>> {
     quota(&st, &u, 1)?;
     let id = create_request(&st, &u, &b, None, None)?;
     let r = get_request(&st, id)?;
     if r["status"] == "pending" {
-        let what = [&r["title"], &r["artist"], &r["url"]].iter().find_map(|v| v.as_str().filter(|s| !s.is_empty())).unwrap_or("").to_string();
-        let (st2, who, kind, cover) = (st.clone(), u.s("username"), b.kind.clone(), b.cover_url.clone());
+        let what = [&r["title"], &r["artist"], &r["url"]]
+            .iter()
+            .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_string();
+        let (st2, who, kind, cover) = (
+            st.clone(),
+            u.s("username"),
+            b.kind.clone(),
+            b.cover_url.clone(),
+        );
         tokio::spawn(async move {
-            notify::send(&st2, "🎵 New request awaiting approval", &format!("{who} requested {kind}: {what}"), cover.as_deref()).await;
+            notify::send(
+                &st2,
+                "🎵 New request awaiting approval",
+                &format!("{who} requested {kind}: {what}"),
+                cover.as_deref(),
+            )
+            .await;
         });
     }
     Ok(Json(r))
@@ -297,52 +373,108 @@ struct LinkBody {
 }
 
 /// Request every song behind a link (one song, an album or a playlist) from the best source.
-async fn from_link_inner(st: &AppState, u: &Row, url: &str, album_mode: Option<String>) -> ApiResult<Value> {
-    let data = encore_requests::sources::links::fetch_as(st, url, Some(u.i("id"))).await.map_err(|e| err(400, e.to_string()))?;
+async fn from_link_inner(
+    st: &AppState,
+    u: &Row,
+    url: &str,
+    album_mode: Option<String>,
+) -> ApiResult<Value> {
+    let data = encore_requests::sources::links::fetch_as(st, url, Some(u.i("id")))
+        .await
+        .map_err(|e| err(400, e.to_string()))?;
     quota(st, u, 1)?;
     let (mut made, mut skipped) = (vec![], 0);
-    for t in data["tracks"].as_array().cloned().unwrap_or_default().iter().take(500) {
+    for t in data["tracks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .take(500)
+    {
         let s = |k: &str| t[k].as_str().filter(|x| !x.is_empty()).map(String::from);
-        let b = NewRequest { kind: "track".into(), artist: s("artist"), title: s("title"), album: s("album"), cover_url: s("cover"),
-            length: t["duration"].as_f64(), isrc: s("isrc"), mbid: s("mbid"), album_mode: album_mode.clone(), ..Default::default() };
+        let b = NewRequest {
+            kind: "track".into(),
+            artist: s("artist"),
+            title: s("title"),
+            album: s("album"),
+            cover_url: s("cover"),
+            length: t["duration"].as_f64(),
+            isrc: s("isrc"),
+            mbid: s("mbid"),
+            album_mode: album_mode.clone(),
+            ..Default::default()
+        };
         match create_request(st, u, &b, None, None) {
             Ok(id) => made.push(id),
             Err(e) if e.status.as_u16() == 409 => skipped += 1,
             Err(e) => return Err(e),
         }
     }
-    let status = match made.first() { Some(id) => get_request(st, *id)?["status"].clone(), None => Value::Null };
-    Ok(json!({ "requested": made.len(), "already_requested": skipped, "name": data["name"], "status": status, "ids": made }))
+    let status = match made.first() {
+        Some(id) => get_request(st, *id)?["status"].clone(),
+        None => Value::Null,
+    };
+    Ok(
+        json!({ "requested": made.len(), "already_requested": skipped, "name": data["name"], "status": status, "ids": made }),
+    )
 }
 
 /// POST /api/requests/from-link: request every song behind a link.
-async fn from_link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
-    Ok(Json(from_link_inner(&st, &u, b.url.trim(), b.album_mode).await?))
+async fn from_link(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        from_link_inner(&st, &u, b.url.trim(), b.album_mode).await?,
+    ))
 }
 
 // links that only describe music (no downloadable audio) → matched song by song
 /// Links that only describe music (no downloadable audio): matched song by song.
-static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|amazon\.[a-z.]+/music/player/|amzn\.to/|music\.youtube\.com/(playlist|browse)").unwrap());
+static METADATA_ONLY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)open\.spotify\.com|spotify\.link|^spotify:|music\.apple\.com|listenbrainz\.org|last\.fm/|tidal\.com|qobuz\.com|deezer\.com|deezer\.page\.link|music\.amazon\.|amazon\.[a-z.]+/music/player/|amzn\.to/|music\.youtube\.com/(playlist|browse)").unwrap()
+});
 /// Links streamrip can rip directly.
-static RIP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
+static RIP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"qobuz\.com|tidal\.com|deezer\.com").unwrap());
 
 /// One box for any link: streaming-service links are matched song by song (best quality from any source);
 /// Qobuz/Tidal/Deezer rip directly when streamrip is set up; everything else downloads as-is with yt-dlp.
-async fn link(State(st): State<AppState>, User(u): User, Json(b): Json<LinkBody>) -> ApiResult<Json<Value>> {
+async fn link(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
     let url = b.url.trim().to_string();
     if !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("spotify:")) {
         return Err(err(400, "Paste a full link (https://…)"));
     }
     // whether streamrip runs asks its program for its version the first time: on the blocking pool
-    let rip = RIP.is_match(&url) && st.blocking(|st| Ok(encore_requests::sources::streamrip::enabled(st))).await?;
+    let rip = RIP.is_match(&url)
+        && st
+            .blocking(|st| Ok(encore_requests::sources::streamrip::enabled(st)))
+            .await?;
     if METADATA_ONLY.is_match(&url) && !rip {
         let mut r = from_link_inner(&st, &u, &url, b.album_mode).await?;
         r["mode"] = json!("matched");
         return Ok(Json(r));
     }
     quota(&st, &u, 1)?;
-    let id = create_request(&st, &u, &NewRequest { kind: "url".into(), url: Some(url), ..Default::default() }, None, None)?;
-    Ok(Json(json!({ "requested": 1, "already_requested": 0, "ids": [id], "status": get_request(&st, id)?["status"], "mode": "direct" })))
+    let id = create_request(
+        &st,
+        &u,
+        &NewRequest {
+            kind: "url".into(),
+            url: Some(url),
+            ..Default::default()
+        },
+        None,
+        None,
+    )?;
+    Ok(Json(
+        json!({ "requested": 1, "already_requested": 0, "ids": [id], "status": get_request(&st, id)?["status"], "mode": "direct" }),
+    ))
 }
 
 /// A request the caller may act on: their own, or any for admins; 403 otherwise.
@@ -357,23 +489,45 @@ pub fn get_owned(st: &AppState, id: i64, u: &Row) -> ApiResult<Value> {
 /// A request and its child requests (an album's songs).
 fn family(st: &AppState, id: i64) -> Vec<i64> {
     let mut v = vec![id];
-    v.extend(st.db.query("SELECT id FROM requests WHERE parent_id=?", p![id]).unwrap_or_default().into_iter().map(|r| r.i("id")));
+    v.extend(
+        st.db
+            .query("SELECT id FROM requests WHERE parent_id=?", p![id])
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.i("id")),
+    );
     v
 }
 
 /// Set a request's status and message, and tell the listeners.
 fn set(st: &AppState, id: i64, status: &str, message: &str) -> Result<i64, ApiError> {
-    let n = st.db.execute("UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?", p![status, message, now(), id])?;
+    let n = st.db.execute(
+        "UPDATE requests SET status=?, message=?, updated_at=? WHERE id=?",
+        p![status, message, now(), id],
+    )?;
     encore_requests::events::emit(st, id);
     Ok(n)
 }
 
 /// POST /api/requests/{rid}/approve: approve a pending request and its songs (admins).
-async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn approve(
+    State(st): State<AppState>,
+    Admin(_): Admin,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     for i in family(&st, rid) {
         if let Ok(r) = get_request(&st, i) {
             if r["status"] == "pending" {
-                set(&st, i, if r["kind"] == "playlist" { "completed" } else { "queued" }, "Approved")?;
+                set(
+                    &st,
+                    i,
+                    if r["kind"] == "playlist" {
+                        "completed"
+                    } else {
+                        "queued"
+                    },
+                    "Approved",
+                )?;
             }
         }
     }
@@ -381,7 +535,11 @@ async fn approve(State(st): State<AppState>, Admin(_): Admin, Path(rid): Path<i6
 }
 
 /// POST /api/requests/{rid}/deny: deny a pending request and its songs (admins).
-async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn deny(
+    State(st): State<AppState>,
+    Admin(a): Admin,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     for i in family(&st, rid) {
         if let Ok(r) = get_request(&st, i) {
             if r["status"] == "pending" {
@@ -393,7 +551,11 @@ async fn deny(State(st): State<AppState>, Admin(a): Admin, Path(rid): Path<i64>)
 }
 
 /// POST /api/requests/{rid}/retry: queue a request again.
-async fn retry(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn retry(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
     retry_request(&st, &u, rid, &r)?;
     Ok(Json(json!({ "ok": true })))
@@ -410,7 +572,11 @@ struct RetryFailedBody {
     user: Option<i64>,
 }
 /// POST /api/requests/retry-failed: queue every failed request again.
-async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Json<RetryFailedBody>>) -> ApiResult<Json<Value>> {
+async fn retry_failed(
+    State(st): State<AppState>,
+    User(u): User,
+    body: Option<Json<RetryFailedBody>>,
+) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let mut sql = "SELECT id FROM requests WHERE parent_id IS NULL AND status='failed'".to_string();
     let mut params: Vec<Value> = vec![];
@@ -422,13 +588,20 @@ async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Js
     let mut why: Option<String> = None;
     for row in st.db.query(&sql, params)? {
         let id = row.i("id");
-        let Ok(r) = get_request(&st, id) else { continue };
+        let Ok(r) = get_request(&st, id) else {
+            continue;
+        };
         match retry_request(&st, &u, id, &r) {
             Ok(()) => retried += 1,
-            Err(e) => { skipped += 1; why.get_or_insert(e.detail.clone()); }
+            Err(e) => {
+                skipped += 1;
+                why.get_or_insert(e.detail.clone());
+            }
         }
     }
-    Ok(Json(json!({ "retried": retried, "skipped": skipped, "why": why })))
+    Ok(Json(
+        json!({ "retried": retried, "skipped": skipped, "why": why }),
+    ))
 }
 
 /// Queue one finished request again (the per-row Retry and Retry failed share this). A request whose
@@ -436,7 +609,10 @@ async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Js
 /// playlist's songs each the same way.
 fn retry_request(st: &AppState, u: &Row, rid: i64, r: &Value) -> ApiResult<()> {
     if r["kind"] == "playlist" {
-        for c in st.db.query("SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')", p![rid])? {
+        for c in st.db.query(
+            "SELECT id FROM requests WHERE parent_id=? AND status IN ('failed','cancelled')",
+            p![rid],
+        )? {
             // a song that can't be queued again (it changed meanwhile) doesn't hold up the others
             if let Ok(child) = get_request(st, c.i("id")) {
                 let _ = requeue(st, c.i("id"), &child);
@@ -472,7 +648,12 @@ fn requeue(st: &AppState, rid: i64, r: &Value) -> ApiResult<()> {
             keep[k] = r["detail"][k].clone();
         }
     }
-    let keep = detail_for_retry(&r["detail"], status, r["message"].as_str().unwrap_or(""), keep);
+    let keep = detail_for_retry(
+        &r["detail"],
+        status,
+        r["message"].as_str().unwrap_or(""),
+        keep,
+    );
     st.db.execute(reset, p![keep.to_string(), now(), rid])?;
     encore_requests::events::emit(st, rid);
     Ok(())
@@ -483,15 +664,26 @@ fn requeue(st: &AppState, rid: i64, r: &Value) -> ApiResult<()> {
 /// downloading anything again or counting an attempt. → `{ok, status: "waiting"}`. An import that hasn't
 /// moved for 15 minutes (or whose task is gone: `import_stalled`) is stopped and imports its kept files at
 /// once ([`worker::stall::import_again`]); 409 while it still moves. → `{ok, status}`
-async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn import_again(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
     if r["status"] == "importing" {
-        worker::stall::import_again(&st, rid, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
-        let status = get_request(&st, rid).map(|r| r["status"].clone()).unwrap_or(json!("importing"));
+        worker::stall::import_again(&st, rid, &u.s("username"))
+            .await
+            .map_err(|(code, why)| err(code, why))?;
+        let status = get_request(&st, rid)
+            .map(|r| r["status"].clone())
+            .unwrap_or(json!("importing"));
         return Ok(Json(json!({ "ok": true, "status": status })));
     }
     worker::storage::import_again(&st, rid).map_err(|e| err(400, e))?;
-    st.db.log("info", &format!("{} asked to import request #{rid} again", u.s("username")));
+    st.db.log(
+        "info",
+        &format!("{} asked to import request #{rid} again", u.s("username")),
+    );
     Ok(Json(json!({ "ok": true, "status": "waiting" })))
 }
 
@@ -517,20 +709,34 @@ fn may_fix(st: &AppState, u: &Row, rid: i64, refused: &str) -> ApiResult<()> {
 /// Keep anyway (`POST /api/requests/{id}/keep-anyway`, `{rejected?: id}`): the download the audio check
 /// turned away is imported without the check at the queue's next look and its songs are marked as
 /// confirmed by the caller; a running request stops what it does first. → `{ok, status: "waiting"}`
-async fn keep_anyway(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, body: Option<Json<AnywayBody>>) -> ApiResult<Json<Value>> {
+async fn keep_anyway(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+    body: Option<Json<AnywayBody>>,
+) -> ApiResult<Json<Value>> {
     may_fix(&st, &u, rid, "Ask an admin to keep it anyway")?;
     let which = body.map(|j| j.0).unwrap_or_default().rejected;
-    worker::rejected::keep_anyway(&st, rid, which, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
+    worker::rejected::keep_anyway(&st, rid, which, &u.s("username"))
+        .await
+        .map_err(|(code, why)| err(code, why))?;
     Ok(Json(json!({ "ok": true, "status": "waiting" })))
 }
 
 /// Download anyway (`POST /api/requests/{id}/download-anyway`, `{rejected?: id}`): the rejected download's
 /// source and link are asked for again as a hand pick with the audio check off for this request, its songs
 /// marked as confirmed by the caller. → `{ok, status: "queued"}`
-async fn download_anyway(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, body: Option<Json<AnywayBody>>) -> ApiResult<Json<Value>> {
+async fn download_anyway(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+    body: Option<Json<AnywayBody>>,
+) -> ApiResult<Json<Value>> {
     may_fix(&st, &u, rid, "Ask an admin to download it anyway")?;
     let which = body.map(|j| j.0).unwrap_or_default().rejected;
-    worker::rejected::download_anyway(&st, rid, which, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
+    worker::rejected::download_anyway(&st, rid, which, &u.s("username"))
+        .await
+        .map_err(|(code, why)| err(code, why))?;
     Ok(Json(json!({ "ok": true, "status": "queued" })))
 }
 
@@ -538,7 +744,8 @@ async fn download_anyway(State(st): State<AppState>, User(u): User, Path(rid): P
 /// folder, the operation and the error; everyone else whether imports are paused and the plain words.
 async fn storage(State(st): State<AppState>, User(u): User) -> ApiResult<Json<Value>> {
     let admin = encore_config::perms::is_admin(&u);
-    st.blocking(move |st| Ok(Json(worker::storage::status(st, admin)))).await
+    st.blocking(move |st| Ok(Json(worker::storage::status(st, admin))))
+        .await
 }
 
 /// `POST /api/requests/storage/check` (admins): Check again – every folder probed now; the answer is the new
@@ -551,14 +758,24 @@ async fn storage_check(State(st): State<AppState>, Admin(_): Admin) -> ApiResult
 /// makes `op` ("mkdir", "copy", "*" …) on a path under `prefix` fail with `errno`.
 #[cfg(feature = "fault-io")]
 async fn fault_set(Admin(_): Admin, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
-    let prefix = b["prefix"].as_str().filter(|p| !p.is_empty()).ok_or_else(|| err(400, "prefix is required"))?;
-    encore_core::fsx::fault::fail(prefix, b["op"].as_str().unwrap_or("*"), b["errno"].as_i64().unwrap_or(5) as i32);
+    let prefix = b["prefix"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| err(400, "prefix is required"))?;
+    encore_core::fsx::fault::fail(
+        prefix,
+        b["op"].as_str().unwrap_or("*"),
+        b["errno"].as_i64().unwrap_or(5) as i32,
+    );
     Ok(Json(fault_list()))
 }
 
 /// Clear the faults (`?prefix=` one prefix, else all).
 #[cfg(feature = "fault-io")]
-async fn fault_clear(Admin(_): Admin, Query(q): Query<std::collections::HashMap<String, String>>) -> ApiResult<Json<Value>> {
+async fn fault_clear(
+    Admin(_): Admin,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
     match q.get("prefix") {
         Some(p) => encore_core::fsx::fault::clear(p),
         None => encore_core::fsx::fault::clear_all(),
@@ -575,10 +792,16 @@ fn fault_list() -> Value {
 /// source's line goes first, a wait with a timer is tried now, a Soulseek download queued at its user switches
 /// to one with a free upload slot, a torrent with no progress goes to the next source – never more at once than
 /// a source allows. → `{ok, action, text, at?, line?, status}`; 409 with why not.
-async fn download_now(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn download_now(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     get_owned(&st, rid, &u)?;
     let admin = encore_config::perms::is_admin(&u);
-    let v = worker::now::download_now(&st, rid, &u.s("username"), admin).await.map_err(|(code, why)| err(code, why))?;
+    let v = worker::now::download_now(&st, rid, &u.s("username"), admin)
+        .await
+        .map_err(|(code, why)| err(code, why))?;
     Ok(Json(v))
 }
 
@@ -595,14 +818,24 @@ struct AllNowBody {
 /// Download all now (`POST /api/requests/download-now`, admins, `{mine?, user?}`): every request in a line
 /// moves up in the order it stands (only the admin's own with `mine`, one person's with `user`), the waits with
 /// a timer are tried once. → `{ok, pressed, woken, later, lines, text}`
-async fn download_all_now(State(st): State<AppState>, Admin(a): Admin, body: Option<Json<AllNowBody>>) -> ApiResult<Json<Value>> {
+async fn download_all_now(
+    State(st): State<AppState>,
+    Admin(a): Admin,
+    body: Option<Json<AllNowBody>>,
+) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let owner = whose(&a, b.mine, b.user);
-    Ok(Json(worker::now::download_all_now(&st, &a.s("username"), owner, owner == Some(a.i("id"))).await))
+    Ok(Json(
+        worker::now::download_all_now(&st, &a.s("username"), owner, owner == Some(a.i("id"))).await,
+    ))
 }
 
 /// POST /api/requests/{rid}/cancel: cancel a request and its songs.
-async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>) -> ApiResult<Json<Value>> {
+async fn cancel(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+) -> ApiResult<Json<Value>> {
     get_owned(&st, rid, &u)?;
     for i in family(&st, rid) {
         if let Ok(c) = get_request(&st, i) {
@@ -610,7 +843,12 @@ async fn cancel(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>)
             if s == "pending" || ACTIVE.contains(&s) {
                 // no step starts on the old state before it says cancelled
                 let _hold = worker::cancel_holding(&st, i).await;
-                set(&st, i, "cancelled", &format!("Cancelled by {}", u.s("username")))?;
+                set(
+                    &st,
+                    i,
+                    "cancelled",
+                    &format!("Cancelled by {}", u.s("username")),
+                )?;
             }
         }
     }
@@ -624,17 +862,24 @@ fn delete_files(st: &AppState, r: &Value) -> usize {
         .unwrap_or_default().into_iter().map(|t| t.i("id")).collect();
     let mut n = encore_library::delete_tracks(st, &ids, None);
     for i in family(st, id) {
-        let stage = std::path::PathBuf::from(st.cfg.str("staging_path")).join(format!("request-{i}"));
+        let stage =
+            std::path::PathBuf::from(st.cfg.str("staging_path")).join(format!("request-{i}"));
         if stage.is_dir() {
             let _ = std::fs::remove_dir_all(&stage);
             n += 1;
         }
     }
     let idx = r["detail"]["slskd"]["idx"].as_i64().unwrap_or(-1);
-    if let (Some(c), true) = (r["detail"]["slskd"]["candidates"].get(idx.max(0) as usize), idx >= 0 && r["status"] != "completed") {
+    if let (Some(c), true) = (
+        r["detail"]["slskd"]["candidates"].get(idx.max(0) as usize),
+        idx >= 0 && r["status"] != "completed",
+    ) {
         let root = encore_requests::slskd_managed::download_dir(st); // where the files landed (the fallback folder when that is in use)
         for f in c["files"].as_array().cloned().unwrap_or_default() {
-            if let Some(pth) = encore_requests::sources::slskd::local_path(st, f["filename"].as_str().unwrap_or("")) {
+            if let Some(pth) = encore_requests::sources::slskd::local_path(
+                st,
+                f["filename"].as_str().unwrap_or(""),
+            ) {
                 let _ = std::fs::remove_file(&pth);
                 encore_library::prune_empty(pth.parent().unwrap(), &root);
                 n += 1;
@@ -654,21 +899,36 @@ struct FilesQ {
 
 /// Remove a request from the list; files=true also deletes what it downloaded (admins only). Encore's own
 /// staging folder of the request goes either way; files in a download client's folder only with files=true.
-async fn remove(State(st): State<AppState>, User(u): User, Path(rid): Path<i64>, Query(q): Query<FilesQ>) -> ApiResult<Json<Value>> {
+async fn remove(
+    State(st): State<AppState>,
+    User(u): User,
+    Path(rid): Path<i64>,
+    Query(q): Query<FilesQ>,
+) -> ApiResult<Json<Value>> {
     let r = get_owned(&st, rid, &u)?;
     if q.files && !encore_config::perms::is_admin(&u) {
         return Err(err(403, "Only admins can delete files"));
     }
     // no step starts on the old state before the row is gone
-    let _hold = if ACTIVE.contains(&r["status"].as_str().unwrap_or("")) { Some(worker::cancel_holding(&st, rid).await) } else { None };
+    let _hold = if ACTIVE.contains(&r["status"].as_str().unwrap_or("")) {
+        Some(worker::cancel_holding(&st, rid).await)
+    } else {
+        None
+    };
     let n = if q.files { delete_files(&st, &r) } else { 0 };
     for i in family(&st, rid) {
         worker::storage::remove_staging(&st, i);
         worker::rejected::remove(&st, i); // the downloads the audio check turned away go with it
     }
-    st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![rid, rid])?;
+    st.db.execute(
+        "DELETE FROM requests WHERE id=? OR parent_id=?",
+        p![rid, rid],
+    )?;
     if n > 0 {
-        st.db.log("info", &format!("{} deleted request #{rid} and {n} file(s)", u.s("username")));
+        st.db.log(
+            "info",
+            &format!("{} deleted request #{rid} and {n} file(s)", u.s("username")),
+        );
     }
     Ok(Json(json!({ "ok": true, "deleted_files": n })))
 }
@@ -688,22 +948,38 @@ struct ClearBody {
 }
 impl Default for ClearBody {
     fn default() -> Self {
-        ClearBody { statuses: vec!["completed".into(), "denied".into(), "cancelled".into()], files: false, mine: false, user: None }
+        ClearBody {
+            statuses: vec!["completed".into(), "denied".into(), "cancelled".into()],
+            files: false,
+            mine: false,
+            user: None,
+        }
     }
 }
 
 /// Clear finished requests from the list (everyone's for admins, or one person's with `user`), optionally
 /// deleting their files.
-async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<ClearBody>>) -> ApiResult<Json<Value>> {
+async fn clear(
+    State(st): State<AppState>,
+    User(u): User,
+    body: Option<Json<ClearBody>>,
+) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
-    let statuses: Vec<String> = b.statuses.into_iter().filter(|s| ["completed", "failed", "denied", "cancelled"].contains(&s.as_str())).collect();
+    let statuses: Vec<String> = b
+        .statuses
+        .into_iter()
+        .filter(|s| ["completed", "failed", "denied", "cancelled"].contains(&s.as_str()))
+        .collect();
     if statuses.is_empty() {
         return Err(err(400, "Nothing to clear"));
     }
     if b.files && !encore_config::perms::is_admin(&u) {
         return Err(err(403, "Only admins can delete files"));
     }
-    let mut sql = format!("SELECT id FROM requests WHERE parent_id IS NULL AND status IN ({})", vec!["?"; statuses.len()].join(","));
+    let mut sql = format!(
+        "SELECT id FROM requests WHERE parent_id IS NULL AND status IN ({})",
+        vec!["?"; statuses.len()].join(",")
+    );
     let mut params: Vec<Value> = statuses.iter().map(|s| json!(s)).collect();
     if let Some(owner) = whose(&u, b.mine, b.user) {
         sql += " AND user_id=?";
@@ -717,10 +993,13 @@ async fn clear(State(st): State<AppState>, User(u): User, body: Option<Json<Clea
                 files += delete_files(&st, &r);
             }
         }
-        st.db.execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![id, id])?;
+        st.db
+            .execute("DELETE FROM requests WHERE id=? OR parent_id=?", p![id, id])?;
         removed += 1;
     }
-    Ok(Json(json!({ "ok": true, "removed": removed, "deleted_files": files })))
+    Ok(Json(
+        json!({ "ok": true, "removed": removed, "deleted_files": files }),
+    ))
 }
 
 /// What "Clear waiting" cancels: requests nothing has started downloading yet. Never one downloading,
@@ -750,7 +1029,11 @@ struct ClearWaitingBody {
 
 /// "Cancelled 612 waiting requests" (`done`), "612 waiting requests" (a dry run), "Nothing is waiting".
 pub fn waiting_text(n: usize, done: bool) -> String {
-    let what = if n == 1 { "1 waiting request".to_string() } else { format!("{n} waiting requests") };
+    let what = if n == 1 {
+        "1 waiting request".to_string()
+    } else {
+        format!("{n} waiting requests")
+    };
     match (n, done) {
         (0, _) => "Nothing is waiting".into(),
         (_, true) => format!("Cancelled {what}"),
@@ -763,7 +1046,11 @@ pub fn waiting_text(n: usize, done: bool) -> String {
 /// everyone's for an admin unless `mine` (their own) or `user` (that person's). Each one the way Cancel does it: its place in the worker's queue held
 /// while it is written (a search under way stops), then "Cancelled by <name>". `dry_run` only counts (the
 /// question before it). → `{count, text}`
-async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<Json<ClearWaitingBody>>) -> ApiResult<Json<Value>> {
+async fn clear_waiting(
+    State(st): State<AppState>,
+    User(u): User,
+    body: Option<Json<ClearWaitingBody>>,
+) -> ApiResult<Json<Value>> {
     let b = body.map(|j| j.0).unwrap_or_default();
     let marks = vec!["?"; WAITING.len()].join(",");
     let mut sql = format!("SELECT id, detail FROM requests WHERE status IN ({marks})");
@@ -773,17 +1060,30 @@ async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<J
         params.push(json!(owner));
     }
     sql += " ORDER BY id";
-    let ids: Vec<i64> = st.db.query(&sql, params)?.into_iter().filter(|r| !holds_files(&r.s("detail"))).map(|r| r.i("id")).collect();
+    let ids: Vec<i64> = st
+        .db
+        .query(&sql, params)?
+        .into_iter()
+        .filter(|r| !holds_files(&r.s("detail")))
+        .map(|r| r.i("id"))
+        .collect();
     if b.dry_run {
-        return Ok(Json(json!({ "count": ids.len(), "text": waiting_text(ids.len(), false) })));
+        return Ok(Json(
+            json!({ "count": ids.len(), "text": waiting_text(ids.len(), false) }),
+        ));
     }
     let by = format!("Cancelled by {}", u.s("username"));
     let mut n = 0;
     for id in ids {
         // (it may have moved on since the list was read: a download that started keeps going)
         let waits = |st: &AppState| {
-            st.db.one("SELECT status, detail FROM requests WHERE id=?", p![id]).ok().flatten()
-                .is_some_and(|r| WAITING.contains(&r.s("status").as_str()) && !holds_files(&r.s("detail")))
+            st.db
+                .one("SELECT status, detail FROM requests WHERE id=?", p![id])
+                .ok()
+                .flatten()
+                .is_some_and(|r| {
+                    WAITING.contains(&r.s("status").as_str()) && !holds_files(&r.s("detail"))
+                })
         };
         if !waits(&st) {
             continue;
@@ -796,7 +1096,10 @@ async fn clear_waiting(State(st): State<AppState>, User(u): User, body: Option<J
         n += 1;
     }
     if n > 0 {
-        st.db.log("info", &format!("{} cancelled {n} waiting request(s)", u.s("username")));
+        st.db.log(
+            "info",
+            &format!("{} cancelled {n} waiting request(s)", u.s("username")),
+        );
     }
     Ok(Json(json!({ "count": n, "text": waiting_text(n, true) })))
 }
@@ -823,8 +1126,14 @@ mod ext_id_tests {
 
     #[test]
     fn ext_ids_name_their_catalogues() {
-        assert_eq!(ext_from_id("ext-d302127"), Some(json!({ "deezer": 302127 })));
-        assert_eq!(ext_from_id("ext-d2-a3"), Some(json!({ "deezer": 2, "apple": 3 })));
+        assert_eq!(
+            ext_from_id("ext-d302127"),
+            Some(json!({ "deezer": 302127 }))
+        );
+        assert_eq!(
+            ext_from_id("ext-d2-a3"),
+            Some(json!({ "deezer": 2, "apple": 3 }))
+        );
         assert_eq!(ext_from_id("ext-x"), None);
         assert_eq!(ext_from_id("9e1f2c84-1111-2222-3333-444455556666"), None);
     }

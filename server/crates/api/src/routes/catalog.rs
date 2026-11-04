@@ -1,17 +1,17 @@
 //! /api/discover/…/catalog: an artist's releases that MusicBrainz is missing (Deezer, Apple Music, Bandcamp,
 //! Discogs) and the track lists of such releases, marked with the library and the requests. The merge
 //! itself lives in encore_library::catalog.
-use crate::enrich::enrich;
 use crate::auth::User;
-use encore_core::error::{err, ApiResult};
+use crate::enrich::enrich;
 use crate::state::AppState;
-use encore_http::mb;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use encore_core::error::{err, ApiResult};
 use encore_core::json::s;
-use encore_library::catalog::*;
 use encore_db::{p, RowExt};
+use encore_http::mb;
+use encore_library::catalog::*;
 use serde_json::{json, Value};
 
 /// The Discover catalog routes.
@@ -25,13 +25,20 @@ pub fn router() -> Router<AppState> {
 /// Track list of a Deezer / Apple / Bandcamp / Discogs album, each song marked with its library copy
 /// (`in_library`, `library`, playable) and any request for it. The body is the album's `ext`, plus
 /// `artist` for track lists without artists.
-async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Json<Value>) -> ApiResult<Json<Value>> {
-    let mut tracks = tracklist(&st, &ext).await.map_err(|e| err(502, format!("Could not load the track list: {e}")))?;
+async fn catalog_tracks(
+    State(st): State<AppState>,
+    User(_): User,
+    Json(ext): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut tracks = tracklist(&st, &ext)
+        .await
+        .map_err(|e| err(502, format!("Could not load the track list: {e}")))?;
     let fallback = s(&ext["artist"]);
     st.blocking(move |st| {
         annotate_tracks(st, &mut tracks, &fallback);
         Ok(Json(json!(tracks)))
-    }).await
+    })
+    .await
 }
 
 /// Each song of a track list from another catalogue (or typed in by hand): its library copy (`in_library`,
@@ -39,10 +46,15 @@ async fn catalog_tracks(State(st): State<AppState>, User(_): User, Json(ext): Js
 /// gets `fallback` (the album's artist). One query per 500 songs for the library copies and one for the
 /// requests (encore_library::lookup).
 pub(crate) fn annotate_tracks(st: &AppState, tracks: &mut [Value], fallback: &str) {
-    let keys: Vec<(String, String, String, Option<f64>)> = tracks.iter().map(|t| {
-        let artist = Some(s(&t["artist"])).filter(|a| !a.is_empty()).unwrap_or(fallback.to_string());
-        (s(&t["isrc"]), artist, s(&t["title"]), t["length"].as_f64())
-    }).collect();
+    let keys: Vec<(String, String, String, Option<f64>)> = tracks
+        .iter()
+        .map(|t| {
+            let artist = Some(s(&t["artist"]))
+                .filter(|a| !a.is_empty())
+                .unwrap_or(fallback.to_string());
+            (s(&t["isrc"]), artist, s(&t["title"]), t["length"].as_f64())
+        })
+        .collect();
     let libs = encore_library::lookup::library_tracks_for(&st.db, &keys);
     let pairs: Vec<(String, String)> = keys.iter().map(|k| (k.1.clone(), k.2.clone())).collect();
     let reqs = encore_library::lookup::Requests::read(&st.db, "track", &pairs, &[]);
@@ -52,7 +64,14 @@ pub(crate) fn annotate_tracks(st: &AppState, tracks: &mut [Value], fallback: &st
         if s(&t["artist"]).is_empty() {
             t["artist"] = json!(artist);
         }
-        let rq = reqs.by_name(&artist, &title, true, false).map(|(status, message)| (status.clone(), encore_requests::events::label(&status, &message).to_string()));
+        let rq = reqs
+            .by_name(&artist, &title, true, false)
+            .map(|(status, message)| {
+                (
+                    status.clone(),
+                    encore_requests::events::label(&status, &message).to_string(),
+                )
+            });
         t["request_status"] = rq.as_ref().map(|r| json!(r.0)).unwrap_or(Value::Null);
         t["request_label"] = rq.map(|r| json!(r.1)).unwrap_or(Value::Null);
     }
@@ -87,14 +106,22 @@ struct RestBody {
 /// → `{requested, already_requested, in_library, status, ids}`: how many were asked for, how many were
 /// already asked for, how many are in the library, and the status of the new requests ("queued" or
 /// "pending" approval; null when none was made).
-async fn request_rest(State(st): State<AppState>, User(u): User, Json(b): Json<RestBody>) -> ApiResult<Json<Value>> {
+async fn request_rest(
+    State(st): State<AppState>,
+    User(u): User,
+    Json(b): Json<RestBody>,
+) -> ApiResult<Json<Value>> {
     use encore_library::rest_of_album::{typed_tracklist, MAX_TRACKS};
     use encore_requests::create::{create_request, quota, NewRequest};
     let (artist, album) = (b.artist.trim().to_string(), b.album.trim().to_string());
     if artist.is_empty() || album.is_empty() {
         return Err(err(400, "Artist and album title are required"));
     }
-    let mut tracks: Vec<Value> = if b.tracks.is_empty() { typed_tracklist(&b.text, b.artist_lines) } else { b.tracks.into_iter().take(MAX_TRACKS).collect() };
+    let mut tracks: Vec<Value> = if b.tracks.is_empty() {
+        typed_tracklist(&b.text, b.artist_lines)
+    } else {
+        b.tracks.into_iter().take(MAX_TRACKS).collect()
+    };
     tracks.retain(|t| !s(&t["title"]).trim().is_empty());
     if tracks.is_empty() {
         return Err(err(400, "Add the album's songs, one per line"));
@@ -135,7 +162,10 @@ async fn request_rest(State(st): State<AppState>, User(u): User, Json(b): Json<R
 /// requests without a MusicBrainz id). One query per 500 albums for each (encore_library::lookup).
 pub(crate) fn annotate(st: &AppState, items: &mut [Value]) {
     use encore_library::lookup;
-    let keys: Vec<(String, String, String)> = items.iter().map(|m| (String::new(), s(&m["artist"]), s(&m["title"]))).collect();
+    let keys: Vec<(String, String, String)> = items
+        .iter()
+        .map(|m| (String::new(), s(&m["artist"]), s(&m["title"])))
+        .collect();
     let libs = lookup::album_ids_for(&st.db, &keys);
     let pairs: Vec<(String, String)> = keys.iter().map(|k| (k.1.clone(), k.2.clone())).collect();
     let reqs = lookup::Requests::read(&st.db, "album", &pairs, &[]);
@@ -144,12 +174,18 @@ pub(crate) fn annotate(st: &AppState, items: &mut [Value]) {
         m["library_album_id"] = lib.map(|a| json!(a)).unwrap_or(Value::Null);
         let rq = reqs.by_name(&artist, &title, false, true);
         m["request_status"] = rq.as_ref().map(|r| json!(r.0)).unwrap_or(Value::Null);
-        m["request_label"] = rq.map(|(status, message)| json!(encore_requests::events::label(&status, &message))).unwrap_or(Value::Null);
+        m["request_label"] = rq
+            .map(|(status, message)| json!(encore_requests::events::label(&status, &message)))
+            .unwrap_or(Value::Null);
     }
 }
 
 /// GET /api/discover/artist/{mbid}/catalog: the artist's releases on other services that MusicBrainz lacks, enriched.
-async fn artist_catalog(State(st): State<AppState>, User(viewer): User, Path(mbid): Path<String>) -> ApiResult<Json<Value>> {
+async fn artist_catalog(
+    State(st): State<AppState>,
+    User(viewer): User,
+    Path(mbid): Path<String>,
+) -> ApiResult<Json<Value>> {
     let mut v = artist_catalog_answer(State(st.clone()), User(viewer.clone()), Path(mbid)).await?;
     enrich(&st, Some(&viewer), &mut v).await;
     Ok(Json(v))
@@ -157,16 +193,27 @@ async fn artist_catalog(State(st): State<AppState>, User(viewer): User, Path(mbi
 
 /// The catalog answer before enrichment: the releases found elsewhere, marked with library copies and requests,
 /// without those already in MusicBrainz.
-async fn artist_catalog_answer(State(st): State<AppState>, User(_): User, Path(mbid): Path<String>) -> ApiResult<Value> {
+async fn artist_catalog_answer(
+    State(st): State<AppState>,
+    User(_): User,
+    Path(mbid): Path<String>,
+) -> ApiResult<Value> {
     if !st.cfg.bool("discover_catalog_merge") {
         return Ok(json!({ "enabled": false, "releases": [] }));
     }
     let filter = encore_config::release_types::ReleaseFilter::for_artist(&st.cfg, &mbid);
-    let a = mb::artist(&st, &mbid).await.map_err(crate::routes::discover::mb_err)?;
+    let a = mb::artist(&st, &mbid)
+        .await
+        .map_err(crate::routes::discover::mb_err)?;
     // a dozen MusicBrainz look-ups (the artist's barcodes, ISRCs) for a section shown under the page: after any
     // page someone opens meanwhile (the album they tap next doesn't wait for them)
     let found = mb::with_priority(mb::Priority::Section, merged(&st, &a)).await;
-    let rgs: std::collections::HashSet<String> = a["release_groups"].as_array().into_iter().flatten().map(|g| s(&g["id"])).collect();
+    let rgs: std::collections::HashSet<String> = a["release_groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| s(&g["id"]))
+        .collect();
     // the library and the requests for every release: on the blocking pool
     let mut rel = st.blocking(move |st| {
         let mut rel = found;

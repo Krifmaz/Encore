@@ -1,9 +1,9 @@
 //! Play anything owned, live request labels: status events on every change, owned songs of an album.
-use encore_db::p;
 use crate::state::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
+use encore_db::p;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -29,13 +29,34 @@ async fn setup(name: &str) -> Env {
     let st = crate::test_support::state_in(&dir);
     crate::auth::create_user(&st, "labeller", PW, "user", None, None).unwrap();
     let app = crate::app(st.clone());
-    let (status, _, cookie) = call(&app, "POST", "/api/auth/login", "", Some(json!({ "username": "labeller", "password": PW }))).await;
+    let (status, _, cookie) = call(
+        &app,
+        "POST",
+        "/api/auth/login",
+        "",
+        Some(json!({ "username": "labeller", "password": PW })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    Env { st, app, dir, cookie }
+    Env {
+        st,
+        app,
+        dir,
+        cookie,
+    }
 }
 
-async fn call(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<Value>) -> (StatusCode, Value, String) {
-    let mut b = Request::builder().method(method).uri(uri).header("x-requested-with", "encore");
+async fn call(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    cookie: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value, String) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-requested-with", "encore");
     if !cookie.is_empty() {
         b = b.header("cookie", cookie);
     }
@@ -48,9 +69,23 @@ async fn call(app: &Router, method: &str, uri: &str, cookie: &str, body: Option<
     };
     let resp = app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
     let status = resp.status();
-    let set = resp.headers().get("set-cookie").and_then(|v| v.to_str().ok()).unwrap_or("").split(';').next().unwrap_or("").to_string();
-    let bytes = axum::body::to_bytes(resp.into_body(), 10 << 20).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null), set)
+    let set = resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), 10 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        set,
+    )
 }
 
 /// The next event about request `id` (other tests share the channel).
@@ -63,7 +98,9 @@ async fn next_for(rx: &mut tokio::sync::broadcast::Receiver<(i64, Value)>, id: i
             }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(5), wait).await.expect("no event for the request")
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .expect("no event for the request")
 }
 
 #[tokio::test]
@@ -75,34 +112,78 @@ async fn status_events_on_every_change() {
     assert_eq!(s, StatusCode::OK, "{r}");
     let id = r["id"].as_i64().unwrap();
     let ev = next_for(&mut rx, id).await;
-    assert!(["queued", "pending"].contains(&ev["status"].as_str().unwrap()), "{ev}");
-    let keys: Vec<&str> = ev["keys"].as_array().unwrap().iter().filter_map(|k| k.as_str()).collect();
-    assert!(keys.contains(&"rg:rg-rodeo-1") && keys.contains(&"a:travisscott|rodeo"), "{keys:?}");
+    assert!(
+        ["queued", "pending"].contains(&ev["status"].as_str().unwrap()),
+        "{ev}"
+    );
+    let keys: Vec<&str> = ev["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k.as_str())
+        .collect();
+    assert!(
+        keys.contains(&"rg:rg-rodeo-1") && keys.contains(&"a:travisscott|rodeo"),
+        "{keys:?}"
+    );
 
     // the worker's steps: searching → downloading → importing → in library
-    for (status, label) in [("searching", "Searching"), ("downloading", "Downloading"), ("importing", "Importing"), ("completed", "In library")] {
-        e.st.db.execute("UPDATE requests SET status=? WHERE id=?", p![status, id]).unwrap();
+    for (status, label) in [
+        ("searching", "Searching"),
+        ("downloading", "Downloading"),
+        ("importing", "Importing"),
+        ("completed", "In library"),
+    ] {
+        e.st.db
+            .execute("UPDATE requests SET status=? WHERE id=?", p![status, id])
+            .unwrap();
         encore_requests::events::emit(&e.st, id);
         let ev = next_for(&mut rx, id).await;
-        assert_eq!((ev["status"].as_str().unwrap(), ev["label"].as_str().unwrap()), (status, label));
+        assert_eq!(
+            (
+                ev["status"].as_str().unwrap(),
+                ev["label"].as_str().unwrap()
+            ),
+            (status, label)
+        );
     }
     e.st.db.execute("UPDATE requests SET status='failed', message='All sources exhausted (slskd: no results)' WHERE id=?", p![id]).unwrap();
     encore_requests::events::emit(&e.st, id);
     assert_eq!(next_for(&mut rx, id).await["label"], "Not found");
 
     // retry and cancel through the API emit too
-    let (s, _, _) = call(&e.app, "POST", &format!("/api/requests/{id}/cancel"), &e.cookie, None).await;
+    let (s, _, _) = call(
+        &e.app,
+        "POST",
+        &format!("/api/requests/{id}/cancel"),
+        &e.cookie,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     // failed can't be cancelled; a new song request can
     let (_, r2, _) = call(&e.app, "POST", "/api/requests", &e.cookie,
         Some(json!({ "kind": "track", "artist": "Travis Scott", "title": "90210", "isrc": "USSM11504270" }))).await;
     let id2 = r2["id"].as_i64().unwrap();
     assert_eq!(next_for(&mut rx, id2).await["kind"], "track");
-    let (s, _, _) = call(&e.app, "POST", &format!("/api/requests/{id2}/cancel"), &e.cookie, None).await;
+    let (s, _, _) = call(
+        &e.app,
+        "POST",
+        &format!("/api/requests/{id2}/cancel"),
+        &e.cookie,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let ev = next_for(&mut rx, id2).await;
     assert_eq!(ev["status"], "cancelled");
-    assert!(ev["keys"].as_array().unwrap().contains(&json!("t:travisscott|90210")), "{ev}");
+    assert!(
+        ev["keys"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("t:travisscott|90210")),
+        "{ev}"
+    );
 }
 
 #[tokio::test]
@@ -130,18 +211,50 @@ async fn album_plays_when_only_some_songs_are_owned() {
     assert!(tracks[0]["request_status"].is_null());
 
     // ext (Deezer / Apple) songs: same ISRC, else title + artist within 3 s
-    assert!(encore_library::catalog::library_track_for(&e.st.db, "USSM11505412", "Someone", "Other", None).is_some());
-    assert!(encore_library::catalog::library_track_for(&e.st.db, "", "travis scott", "90210", Some(340.0)).is_some());
-    assert!(encore_library::catalog::library_track_for(&e.st.db, "", "Travis Scott", "90210", Some(200.0)).is_none());
+    assert!(encore_library::catalog::library_track_for(
+        &e.st.db,
+        "USSM11505412",
+        "Someone",
+        "Other",
+        None
+    )
+    .is_some());
+    assert!(encore_library::catalog::library_track_for(
+        &e.st.db,
+        "",
+        "travis scott",
+        "90210",
+        Some(340.0)
+    )
+    .is_some());
+    assert!(encore_library::catalog::library_track_for(
+        &e.st.db,
+        "",
+        "Travis Scott",
+        "90210",
+        Some(200.0)
+    )
+    .is_none());
 }
 
 #[tokio::test]
 async fn request_event_stream_opens() {
     let e = setup("sse").await;
-    let req = Request::builder().method("GET").uri("/api/requests/events").header("x-requested-with", "encore").header("cookie", &e.cookie).body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/requests/events")
+        .header("x-requested-with", "encore")
+        .header("cookie", &e.cookie)
+        .body(Body::empty())
+        .unwrap();
     let resp = e.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").starts_with("text/event-stream"));
+    assert!(resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .starts_with("text/event-stream"));
     let (s, _, _) = call(&e.app, "GET", "/api/requests/events", "", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

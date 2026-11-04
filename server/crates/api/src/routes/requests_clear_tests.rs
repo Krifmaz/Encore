@@ -10,7 +10,13 @@ use std::time::Duration;
 
 /// An account without a password (signed in with a session made here; bcrypt would cost a second each).
 fn account(st: &AppState, name: &str, role: &str) -> (i64, String) {
-    let id = st.db.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, '-', ?, ?)", p![name, role, now()]).unwrap();
+    let id = st
+        .db
+        .execute(
+            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, '-', ?, ?)",
+            p![name, role, now()],
+        )
+        .unwrap();
     let (t, _) = crate::auth::create_session(st, id, "test", "1.2.3.4").unwrap();
     (id, format!("encore_session={t}"))
 }
@@ -22,11 +28,26 @@ fn insert(st: &AppState, owner: i64, title: &str, status: &str) -> i64 {
 }
 
 fn status(st: &AppState, id: i64) -> (String, String) {
-    let r = st.db.one("SELECT status, message FROM requests WHERE id=?", p![id]).unwrap().unwrap();
+    let r = st
+        .db
+        .one("SELECT status, message FROM requests WHERE id=?", p![id])
+        .unwrap()
+        .unwrap();
     (r.s("status"), r.s("message"))
 }
 
-const ALL: [&str; 10] = ["pending", "queued", "waiting", "searching", "downloading", "monitoring", "importing", "completed", "failed", "cancelled"];
+const ALL: [&str; 10] = [
+    "pending",
+    "queued",
+    "waiting",
+    "searching",
+    "downloading",
+    "monitoring",
+    "importing",
+    "completed",
+    "failed",
+    "cancelled",
+];
 
 #[test]
 fn the_words() {
@@ -54,7 +75,11 @@ async fn clear_waiting_cancels_only_what_waits_and_only_what_is_yours() {
     let untouched = |rows: &[(i64, i64, &str)], which: &dyn Fn(i64, &str) -> bool| {
         for (id, owner, s) in rows {
             if !which(*owner, s) {
-                assert_eq!(status(&st, *id).0, *s, "request {id} ({s} of {owner}) was left as it was");
+                assert_eq!(
+                    status(&st, *id).0,
+                    *s,
+                    "request {id} ({s} of {owner}) was left as it was"
+                );
             }
         }
     };
@@ -65,24 +90,58 @@ async fn clear_waiting_cancels_only_what_waits_and_only_what_is_yours() {
     st.db.execute("UPDATE requests SET progress=100, detail=? WHERE id=?",
         p![json!({ "kept": { "root": "/staging/1", "files": ["/staging/1/a.flac"] }, "wait": { "reason": "storage_import", "next_try_at": 1.0 } }).to_string(), kept]).unwrap();
     let kept_files = insert(&st, pat, "kept of pat", "waiting");
-    st.db.execute("UPDATE requests SET detail=? WHERE id=?", p![json!({ "kept": { "files": ["/staging/2/b.flac"] } }).to_string(), kept_files]).unwrap();
-    let searching_sam = rows.iter().find(|(_, o, s)| *o == sam && *s == "searching").unwrap().0;
-    let hold = worker::hold_idle(&st, searching_sam, Duration::from_secs(1)).await.unwrap();
+    st.db
+        .execute(
+            "UPDATE requests SET detail=? WHERE id=?",
+            p![
+                json!({ "kept": { "files": ["/staging/2/b.flac"] } }).to_string(),
+                kept_files
+            ],
+        )
+        .unwrap();
+    let searching_sam = rows
+        .iter()
+        .find(|(_, o, s)| *o == sam && *s == "searching")
+        .unwrap()
+        .0;
+    let hold = worker::hold_idle(&st, searching_sam, Duration::from_secs(1))
+        .await
+        .unwrap();
     let search = worker::take_turn(&st, searching_sam, hold, std::future::pending::<()>());
     assert!(st.requests.tasks.taken(searching_sam));
 
     // a member: the dry run counts only their own waiting ones, and changes nothing
-    let (code, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &sam_c, Some(json!({ "dry_run": true }))).await;
+    let (code, v, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        &sam_c,
+        Some(json!({ "dry_run": true })),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v, json!({ "count": 4, "text": "4 waiting requests" }));
     untouched(&rows, &|_, _| false);
     // … and even asking for everyone's (mine false) a member clears only their own
-    let (code, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &sam_c, Some(json!({ "mine": false }))).await;
+    let (code, v, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        &sam_c,
+        Some(json!({ "mine": false })),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    assert_eq!(v, json!({ "count": 4, "text": "Cancelled 4 waiting requests" }));
+    assert_eq!(
+        v,
+        json!({ "count": 4, "text": "Cancelled 4 waiting requests" })
+    );
     for (id, owner, s) in &rows {
         if *owner == sam && WAITING.contains(s) {
-            assert_eq!(status(&st, *id), ("cancelled".to_string(), "Cancelled by sam".to_string()));
+            assert_eq!(
+                status(&st, *id),
+                ("cancelled".to_string(), "Cancelled by sam".to_string())
+            );
         }
     }
     untouched(&rows, &|o, s| o == sam && WAITING.contains(&s));
@@ -90,20 +149,47 @@ async fn clear_waiting_cancels_only_what_waits_and_only_what_is_yours() {
     assert!(search.await.unwrap_err().is_cancelled());
     assert!(!st.requests.tasks.taken(searching_sam));
     // again: nothing is waiting
-    let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &sam_c, Some(json!({}))).await;
+    let (_, v, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        &sam_c,
+        Some(json!({})),
+    )
+    .await;
     assert_eq!(v, json!({ "count": 0, "text": "Nothing is waiting" }));
 
     // an admin with Only mine: their own (none)
-    let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &boss_c, Some(json!({ "mine": true, "dry_run": true }))).await;
+    let (_, v, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        &boss_c,
+        Some(json!({ "mine": true, "dry_run": true })),
+    )
+    .await;
     assert_eq!(v["count"], 0);
     // an admin: everyone's
-    let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &boss_c, Some(json!({ "dry_run": true }))).await;
+    let (_, v, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        &boss_c,
+        Some(json!({ "dry_run": true })),
+    )
+    .await;
     assert_eq!(v, json!({ "count": 4, "text": "4 waiting requests" }));
     let (_, v, _) = call(&app, "POST", "/api/requests/clear-waiting", &boss_c, None).await;
-    assert_eq!(v, json!({ "count": 4, "text": "Cancelled 4 waiting requests" }));
+    assert_eq!(
+        v,
+        json!({ "count": 4, "text": "Cancelled 4 waiting requests" })
+    );
     for (id, owner, s) in &rows {
         if *owner == pat && WAITING.contains(s) {
-            assert_eq!(status(&st, *id), ("cancelled".to_string(), "Cancelled by boss".to_string()));
+            assert_eq!(
+                status(&st, *id),
+                ("cancelled".to_string(), "Cancelled by boss".to_string())
+            );
         }
     }
     // downloads, monitoring and imports already running keep going; finished ones stay finished
@@ -113,7 +199,14 @@ async fn clear_waiting_cancels_only_what_waits_and_only_what_is_yours() {
         assert_eq!(status(&st, id).0, "waiting", "request {id} keeps its files");
     }
     // signed out: 401
-    let (code, _, _) = call(&app, "POST", "/api/requests/clear-waiting", "", Some(json!({ "dry_run": true }))).await;
+    let (code, _, _) = call(
+        &app,
+        "POST",
+        "/api/requests/clear-waiting",
+        "",
+        Some(json!({ "dry_run": true })),
+    )
+    .await;
     assert_eq!(code, StatusCode::UNAUTHORIZED);
     ts.remove();
 }

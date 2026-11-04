@@ -1673,10 +1673,14 @@ name = "kit-server-bugreports"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "image",
  "kit-server-core",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
+ "urlencoding",
+ "zip",
 ]
 
 [[package]]

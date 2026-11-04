@@ -98,7 +98,11 @@ pub fn register(st: &AppState) -> Arc<AppState> {
     let anchor = Arc::new(st.clone());
     for m in encore_plugins::catalog::catalog() {
         if let Some(kind) = Kind::of(m.id()) {
-            st.plugins.register(Arc::new(Builtin { m: m.clone(), kind, st: Arc::downgrade(&anchor) }));
+            st.plugins.register(Arc::new(Builtin {
+                m: m.clone(),
+                kind,
+                st: Arc::downgrade(&anchor),
+            }));
         }
     }
     anchor
@@ -106,25 +110,42 @@ pub fn register(st: &AppState) -> Arc<AppState> {
 
 /// An error as a plugin failure: NotFound when something isn't installed, else Internal.
 fn fail(e: anyhow::Error) -> Failure {
-    let code = if e.to_string().contains("not installed") { Code::NotFound } else { Code::Internal };
+    let code = if e.to_string().contains("not installed") {
+        Code::NotFound
+    } else {
+        Code::Internal
+    };
     Failure::new(code, encore_core::fsx::explain(&e))
 }
 
 /// A section test's answer (`{ok, message}`) as the Test button's.
 fn tested(v: Value) -> Result<String, Failure> {
     let m = v["message"].as_str().unwrap_or("").to_string();
-    if v["ok"].as_bool().unwrap_or(false) { Ok(m) } else { Err(Failure::internal(if m.is_empty() { "The test failed".into() } else { m })) }
+    if v["ok"].as_bool().unwrap_or(false) {
+        Ok(m)
+    } else {
+        Err(Failure::internal(if m.is_empty() {
+            "The test failed".into()
+        } else {
+            m
+        }))
+    }
 }
 
 /// A status answer.
 fn ready(message: impl Into<String>, signed_in: Option<bool>) -> Result<Status, Failure> {
-    Ok(Status { message: message.into(), signed_in })
+    Ok(Status {
+        message: message.into(),
+        signed_in,
+    })
 }
 
 impl Builtin {
     /// The server's state; an error once it is stopping.
     fn state(&self) -> Result<Arc<AppState>, Failure> {
-        self.st.upgrade().ok_or_else(|| Failure::internal("Encore is stopping"))
+        self.st
+            .upgrade()
+            .ok_or_else(|| Failure::internal("Encore is stopping"))
     }
 
     /// The settings section a builtin's Test runs (routes::system::run_test).
@@ -150,13 +171,17 @@ impl Builtin {
                 let st2 = st.clone();
                 let id2 = id.to_string();
                 let found = tokio::task::spawn_blocking(move || {
-                    let custom = (id2 == "streamrip").then(|| streamrip::binary(&st2)).flatten();
+                    let custom = (id2 == "streamrip")
+                        .then(|| streamrip::binary(&st2))
+                        .flatten();
                     match custom.filter(|_| !st2.cfg.str("streamrip_bin").trim().is_empty()) {
                         Some(p) => Some((p, None, "your own copy")),
                         None => encore_system::tools::resolve(&st2, &id2).map(|(p, v, from)| {
                             let at = match from {
                                 encore_system::tools::CopyFrom::Plugin => "installed by the plugin",
-                                encore_system::tools::CopyFrom::Adopted => "kept from before plugins (config/tools/venv)",
+                                encore_system::tools::CopyFrom::Adopted => {
+                                    "kept from before plugins (config/tools/venv)"
+                                }
                                 encore_system::tools::CopyFrom::Bundled => "from the image",
                                 encore_system::tools::CopyFrom::System => "the system's",
                             };
@@ -167,26 +192,51 @@ impl Builtin {
                 .await
                 .map_err(|e| Failure::internal(e.to_string()))?;
                 let Some((_, v, at)) = found else {
-                    return Err(Failure::new(Code::NotFound, format!("{} is not installed here – Update installs it", self.m.plugin.name)));
+                    return Err(Failure::new(
+                        Code::NotFound,
+                        format!(
+                            "{} is not installed here – Update installs it",
+                            self.m.plugin.name
+                        ),
+                    ));
                 };
-                let line = format!("{} {} ({at})", self.m.plugin.name, v.unwrap_or_default()).replace("  ", " ");
+                let line = format!("{} {} ({at})", self.m.plugin.name, v.unwrap_or_default())
+                    .replace("  ", " ");
                 if self.kind == Kind::Ytdlp {
                     return ready(line, None);
                 }
-                let signed = streamrip::deezer_arl_set(st) || streamrip::tidal_signed_in(st) || streamrip::qobuz_login(st).is_some();
-                let accounts: Vec<&str> = [("Deezer", streamrip::deezer_arl_set(st)), ("Tidal", streamrip::tidal_signed_in(st)), ("Qobuz", streamrip::qobuz_login(st).is_some())]
-                    .iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
-                let who = if accounts.is_empty() { "no account signed in".to_string() } else { format!("signed in: {}", accounts.join(", ")) };
+                let signed = streamrip::deezer_arl_set(st)
+                    || streamrip::tidal_signed_in(st)
+                    || streamrip::qobuz_login(st).is_some();
+                let accounts: Vec<&str> = [
+                    ("Deezer", streamrip::deezer_arl_set(st)),
+                    ("Tidal", streamrip::tidal_signed_in(st)),
+                    ("Qobuz", streamrip::qobuz_login(st).is_some()),
+                ]
+                .iter()
+                .filter(|(_, on)| *on)
+                .map(|(n, _)| *n)
+                .collect();
+                let who = if accounts.is_empty() {
+                    "no account signed in".to_string()
+                } else {
+                    format!("signed in: {}", accounts.join(", "))
+                };
                 // a lookup that failed within the hour ("Deezer lookup failed: Quota limit exceeded") shows here
                 // too, so the card doesn't look fine while every request ends "not found"
-                let problem = streamrip::last_lookup_problem(st).map(|p| format!(" · {p}")).unwrap_or_default();
+                let problem = streamrip::last_lookup_problem(st)
+                    .map(|p| format!(" · {p}"))
+                    .unwrap_or_default();
                 ready(format!("{line} · {who}{problem}"), Some(signed))
             }
             Kind::Slskd => {
                 let s = st.requests.slskd.status();
                 let configured = encore_requests::slskd_managed::configured(st);
                 let state = s["state"].as_str().unwrap_or("off");
-                let ver = s["version"].as_str().map(|v| format!(" {v}")).unwrap_or_default();
+                let ver = s["version"]
+                    .as_str()
+                    .map(|v| format!(" {v}"))
+                    .unwrap_or_default();
                 let line = match state {
                     "running" => format!("slskd{ver} runs"),
                     "starting" => format!("slskd{ver} is starting"),
@@ -197,11 +247,21 @@ impl Builtin {
                 ready(line, Some(configured))
             }
             Kind::Torznab => {
-                if st.cfg.str("prowlarr_url").is_empty() || st.cfg.str("prowlarr_api_key").is_empty() {
+                if st.cfg.str("prowlarr_url").is_empty()
+                    || st.cfg.str("prowlarr_api_key").is_empty()
+                {
                     return ready("Prowlarr needs its address and API key", Some(false));
                 }
-                let clients: Vec<&str> = [Client::torrent(st), Client::usenet(st)].into_iter().filter(|c| st.plugins.enabled(c.plugin_id()) && c.ready(st)).map(|c| c.name()).collect();
-                let line = if clients.is_empty() { "Prowlarr is set up; no download client is ready".to_string() } else { format!("Prowlarr with {}", clients.join(" and ")) };
+                let clients: Vec<&str> = [Client::torrent(st), Client::usenet(st)]
+                    .into_iter()
+                    .filter(|c| st.plugins.enabled(c.plugin_id()) && c.ready(st))
+                    .map(|c| c.name())
+                    .collect();
+                let line = if clients.is_empty() {
+                    "Prowlarr is set up; no download client is ready".to_string()
+                } else {
+                    format!("Prowlarr with {}", clients.join(" and "))
+                };
                 ready(line, Some(true))
             }
             Kind::Client(c) => {
@@ -209,16 +269,31 @@ impl Builtin {
                 let line = match (chosen, c.ready(st)) {
                     (true, true) => format!("{} is the chosen client", c.name()),
                     (true, false) => format!("{} is chosen but not set up yet", c.name()),
-                    (false, _) => format!("{} is not the chosen client (Torrents & Usenet)", c.name()),
+                    (false, _) => {
+                        format!("{} is not the chosen client (Torrents & Usenet)", c.name())
+                    }
                 };
                 ready(line, None)
             }
             Kind::Cadenza => {
                 let st2 = st.clone();
-                let e = tokio::task::spawn_blocking(move || st2.playback.cadenza.external_of(&st2.plugins)).await.map_err(|e| Failure::internal(e.to_string()))?;
+                let e = tokio::task::spawn_blocking(move || {
+                    st2.playback.cadenza.external_of(&st2.plugins)
+                })
+                .await
+                .map_err(|e| Failure::internal(e.to_string()))?;
                 match e {
-                    Some(p) => ready(format!("Cadenza {} (downloaded) runs server processing", p.version), None),
-                    None => ready(format!("The engine built into Encore ({}) runs server processing", encore_playback::cadenza::builtin_cadenza_version()), None),
+                    Some(p) => ready(
+                        format!("Cadenza {} (downloaded) runs server processing", p.version),
+                        None,
+                    ),
+                    None => ready(
+                        format!(
+                            "The engine built into Encore ({}) runs server processing",
+                            encore_playback::cadenza::builtin_cadenza_version()
+                        ),
+                        None,
+                    ),
                 }
             }
             Kind::Translator => {
@@ -233,9 +308,18 @@ impl Builtin {
             Kind::Connection => {
                 let url = st.cfg.str(&format!("{}_url", self.m.id()));
                 if url.trim().is_empty() {
-                    ready(format!("{} needs its address (Settings → Integrations)", self.m.plugin.name), Some(false))
+                    ready(
+                        format!(
+                            "{} needs its address (Settings → Integrations)",
+                            self.m.plugin.name
+                        ),
+                        Some(false),
+                    )
                 } else {
-                    ready(format!("{} at {}", self.m.plugin.name, url.trim()), Some(true))
+                    ready(
+                        format!("{} at {}", self.m.plugin.name, url.trim()),
+                        Some(true),
+                    )
                 }
             }
         }
@@ -252,8 +336,15 @@ impl Builtin {
                 let m = self.m.clone();
                 let (reg, st2) = (st.plugins.clone(), st.clone());
                 tokio::task::spawn_blocking(move || {
-                    let (bin, tag) = encore_library::translate::llama::installed(&st2).ok_or_else(|| Failure::new(Code::NotFound, "llama.cpp is not installed here"))?;
-                    let p = encore_plugins::ProgramAt { version: tag.clone(), path: bin, adopted: false };
+                    let (bin, tag) =
+                        encore_library::translate::llama::installed(&st2).ok_or_else(|| {
+                            Failure::new(Code::NotFound, "llama.cpp is not installed here")
+                        })?;
+                    let p = encore_plugins::ProgramAt {
+                        version: tag.clone(),
+                        path: bin,
+                        adopted: false,
+                    };
                     reg.program_runs(&m, &p).map_err(Failure::internal)?;
                     Ok(format!("llama.cpp {tag} runs"))
                 })
@@ -261,22 +352,55 @@ impl Builtin {
                 .map_err(|e| Failure::internal(e.to_string()))?
             }
             Kind::Connection => {
-                let (id, url) = (self.m.id(), st.cfg.str(&format!("{}_url", self.m.id())).trim().trim_end_matches('/').to_string());
+                let (id, url) = (
+                    self.m.id(),
+                    st.cfg
+                        .str(&format!("{}_url", self.m.id()))
+                        .trim()
+                        .trim_end_matches('/')
+                        .to_string(),
+                );
                 if url.is_empty() {
-                    return Err(Failure::new(Code::Auth, format!("{} needs its address (Settings → Integrations)", self.m.plugin.name)));
+                    return Err(Failure::new(
+                        Code::Auth,
+                        format!(
+                            "{} needs its address (Settings → Integrations)",
+                            self.m.plugin.name
+                        ),
+                    ));
                 }
                 let req = match id {
                     "jellyfin" => st.http.get(format!("{url}/System/Info/Public")),
-                    "plex" => st.http.get(format!("{url}/identity")).header("Accept", "application/json").header("X-Plex-Token", st.cfg.str("plex_token")),
-                    _ => st.http.get(format!("{url}/rest/ping")).query(&[("v", "1.16.1"), ("c", "encore"), ("f", "json")]),
+                    "plex" => st
+                        .http
+                        .get(format!("{url}/identity"))
+                        .header("Accept", "application/json")
+                        .header("X-Plex-Token", st.cfg.str("plex_token")),
+                    _ => st.http.get(format!("{url}/rest/ping")).query(&[
+                        ("v", "1.16.1"),
+                        ("c", "encore"),
+                        ("f", "json"),
+                    ]),
                 };
                 match req.timeout(std::time::Duration::from_secs(15)).send().await {
-                    Ok(r) if r.status().is_success() => Ok(format!("{} answers at {url}", self.m.plugin.name)),
-                    Ok(r) => Err(Failure::internal(format!("{} answered {}", self.m.plugin.name, r.status()))),
-                    Err(e) => Err(Failure::new(Code::Network, format!("{} can't be reached: {e}", self.m.plugin.name))),
+                    Ok(r) if r.status().is_success() => {
+                        Ok(format!("{} answers at {url}", self.m.plugin.name))
+                    }
+                    Ok(r) => Err(Failure::internal(format!(
+                        "{} answered {}",
+                        self.m.plugin.name,
+                        r.status()
+                    ))),
+                    Err(e) => Err(Failure::new(
+                        Code::Network,
+                        format!("{} can't be reached: {e}", self.m.plugin.name),
+                    )),
                 }
             }
-            _ => crate::routes::system::run_test(st, self.section(), None).await.map_err(fail).and_then(tested),
+            _ => crate::routes::system::run_test(st, self.section(), None)
+                .await
+                .map_err(fail)
+                .and_then(tested),
         }
     }
 
@@ -294,15 +418,32 @@ impl Builtin {
             (Kind::Slskd, _) => "slskd",
             (Kind::Torznab, _) => "torznab",
             (Kind::Streamrip, Some(s @ ("qobuz" | "tidal" | "deezer"))) => s,
-            (Kind::Streamrip, _) => streamrip::services(st).first().map(String::as_str).and_then(|s| ["qobuz", "tidal", "deezer"].into_iter().find(|x| *x == s)).unwrap_or("deezer"),
-            _ => return Err(Failure::unsupported(format!("{} does not search", self.m.plugin.name))),
+            (Kind::Streamrip, _) => streamrip::services(st)
+                .first()
+                .map(String::as_str)
+                .and_then(|s| ["qobuz", "tidal", "deezer"].into_iter().find(|x| *x == s))
+                .unwrap_or("deezer"),
+            _ => {
+                return Err(Failure::unsupported(format!(
+                    "{} does not search",
+                    self.m.plugin.name
+                )))
+            }
         };
         let s = |k: &str| request[k].as_str().unwrap_or("").to_string();
         let b = SearchBody {
             source: source.into(),
-            kind: if s("kind") == "album" { "album".into() } else { "track".into() },
+            kind: if s("kind") == "album" {
+                "album".into()
+            } else {
+                "track".into()
+            },
             artist: s("artist"),
-            title: if s("kind") == "album" && s("title").is_empty() { s("album") } else { s("title") },
+            title: if s("kind") == "album" && s("title").is_empty() {
+                s("album")
+            } else {
+                s("title")
+            },
             query: request["query"].as_str().map(String::from),
             album: request["album"].as_str().map(String::from),
             track_count: request["track_count"].as_u64().map(|n| n as usize),
@@ -325,10 +466,34 @@ impl Builtin {
     }
 
     /// Download a request's link with this builtin into `folder`.
-    async fn download_of(&self, st: &AppState, call: &Call, request: &Value, folder: &Path) -> Result<Downloaded, Failure> {
-        let url = request["payload"]["url"].as_str().or(request["url"].as_str()).unwrap_or("").to_string();
+    async fn download_of(
+        &self,
+        st: &AppState,
+        call: &Call,
+        request: &Value,
+        folder: &Path,
+    ) -> Result<Downloaded, Failure> {
+        let url = request["payload"]["url"]
+            .as_str()
+            .or(request["url"].as_str())
+            .unwrap_or("")
+            .to_string();
         let entries = |files: Vec<std::path::PathBuf>| -> Vec<FileEntry> {
-            files.into_iter().map(|path| FileEntry { size: std::fs::metadata(&path).ok().map(|m| m.len()), path, title: None, artist: None, album: None, track: None, disc: None, duration: None, format: None, isrc: None }).collect()
+            files
+                .into_iter()
+                .map(|path| FileEntry {
+                    size: std::fs::metadata(&path).ok().map(|m| m.len()),
+                    path,
+                    title: None,
+                    artist: None,
+                    album: None,
+                    track: None,
+                    disc: None,
+                    duration: None,
+                    format: None,
+                    isrc: None,
+                })
+                .collect()
         };
         match self.kind {
             Kind::Zotify => zotify::download(st, call, request, folder).await,
@@ -418,27 +583,42 @@ impl Plugin for Builtin {
         })
     }
 
-    fn search<'a>(&'a self, _call: &'a Call, request: &'a Value) -> BoxFuture<'a, Result<Vec<Value>, Failure>> {
+    fn search<'a>(
+        &'a self,
+        _call: &'a Call,
+        request: &'a Value,
+    ) -> BoxFuture<'a, Result<Vec<Value>, Failure>> {
         Box::pin(async move {
             let st = self.state()?;
             self.search_of(&st, request).await
         })
     }
 
-    fn download<'a>(&'a self, call: &'a Call, request: &'a Value, folder: &'a Path) -> BoxFuture<'a, Result<Downloaded, Failure>> {
+    fn download<'a>(
+        &'a self,
+        call: &'a Call,
+        request: &'a Value,
+        folder: &'a Path,
+    ) -> BoxFuture<'a, Result<Downloaded, Failure>> {
         Box::pin(async move {
             let st = self.state()?;
             self.download_of(&st, call, request, folder).await
         })
     }
 
-    fn installed<'a>(&'a self, _call: &'a Call, _version: Option<&'a str>) -> BoxFuture<'a, Result<(), Failure>> {
+    fn installed<'a>(
+        &'a self,
+        _call: &'a Call,
+        _version: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<(), Failure>> {
         Box::pin(async move {
             let st = self.state()?;
             self.refresh(&st, false, true).await;
             if self.kind == Kind::Translator {
                 // a model chosen after the plugin's install files were fetched
-                encore_library::translate::llama::ensure_model(&*st).await.map_err(fail)?;
+                encore_library::translate::llama::ensure_model(&*st)
+                    .await
+                    .map_err(fail)?;
             }
             Ok(())
         })
@@ -471,7 +651,10 @@ mod tests {
             assert!(Kind::of(m.id()).is_some(), "{} has no adapter", m.id());
         }
         assert_eq!(Kind::of("qbittorrent"), Some(Kind::Client(Client::Qbit)));
-        assert_eq!(Kind::of("usenet-blackhole"), Some(Kind::Client(Client::NzbHole)));
+        assert_eq!(
+            Kind::of("usenet-blackhole"),
+            Some(Kind::Client(Client::NzbHole))
+        );
         assert_eq!(Kind::of("example-tone"), None);
     }
 }
