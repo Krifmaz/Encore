@@ -12,7 +12,9 @@
 //! day (`check_updates`). "Update now" needs the Docker socket mounted into the container; selfupdate.rs does
 //! the container swap. "Restart server" ends the process with exit code 75: the image's entrypoint starts it
 //! again at once, and a service unit can do the same (`RestartForceExitStatus=75`). The routes are the API's
-//! (encore_api); this module is what they call.
+//! (encore_api, served by the kit's `kit_server_updates::router`); this module is what they call. The release
+//! rules (what a release and a hotfix are, the newest of them, notes cut, newer by number) and the restart
+//! planning are the kit's (`kit_server_updates`); the Docker self-update is Encore's own.
 use crate::docker::{self, Docker};
 use crate::selfupdate::{self, IMAGE};
 use crate::Ctx;
@@ -21,57 +23,45 @@ use encore_db::{self as db, p};
 use encore_jobs::Supervisor;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use kit_server_updates::server::{is_newer, Channel};
+pub use kit_server_updates::{Restart, EXIT_RESTART, HOTFIX_PREFIX};
+
 /// The GitHub repository releases are looked up in.
 pub const REPO: &str = "Krifmaz/Encore";
-/// The exit code that asks for a restart (docker/entrypoint.sh starts the server again).
-pub const EXIT_RESTART: i32 = 75;
 /// A build without ENCORE_VERSION (cargo build on a desk) is not a release: any release counts as newer.
 pub const DEV: bool = option_env!("ENCORE_VERSION").is_none();
 /// The oldest image that has the self-update helper in it.
 const FIRST_SELF_UPDATING: &str = "0.28.0";
 /// How long a release check is trusted before GitHub is asked again (seconds).
 const FRESH_SECS: f64 = 3600.0;
-/// The longest release notes kept (characters; longer ones are cut).
-const NOTES_MAX: usize = 4000;
 /// Where the last answer from GitHub is kept (sync_state, connection 0), one per channel.
 const SCOPE: &str = "encore:update";
 /// Where the last answer of the hotfix channel is kept.
 const SCOPE_HOTFIX: &str = "encore:update:hotfix";
-/// The tag prefix of the builds CI publishes on every push (.github/workflows/hotfix.yml).
-pub const HOTFIX_PREFIX: &str = "hotfix-";
 /// How many releases the hotfix channel looks through (newest first).
 const HOTFIX_PAGE: usize = 30;
 
-/// Which builds Update now offers (the `update_channel` setting).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Channel {
-    /// tagged releases
-    Stable,
-    /// the builds of every push to main (`hotfix-…` tags)
-    Hotfix,
+/// The channel the `update_channel` setting names (`Channel` is the kit's: anything but `hotfix` is stable).
+pub fn channel(st: &impl Ctx) -> Channel {
+    Channel::parse(&st.cfg().str("update_channel"))
 }
 
-impl Channel {
-    /// The channel a setting value names (anything but `hotfix` is stable).
-    pub fn parse(s: &str) -> Channel {
-        if s.trim().eq_ignore_ascii_case("hotfix") { Channel::Hotfix } else { Channel::Stable }
+/// Where a channel's last answer is kept (`sync_state` scope).
+fn scope(c: Channel) -> &'static str {
+    match c {
+        Channel::Stable => SCOPE,
+        Channel::Hotfix => SCOPE_HOTFIX,
     }
-    /// The channel the `update_channel` setting names.
-    pub fn of(st: &impl Ctx) -> Channel {
-        Channel::parse(&st.cfg().str("update_channel"))
-    }
-    /// The channel's name in the API.
-    pub fn name(self) -> &'static str {
-        match self { Channel::Stable => "stable", Channel::Hotfix => "hotfix" }
-    }
-    /// Where the channel's last answer is kept (`sync_state` scope).
-    fn scope(self) -> &'static str {
-        match self { Channel::Stable => SCOPE, Channel::Hotfix => SCOPE_HOTFIX }
-    }
+}
+
+/// Encore's repository, as the kit's release rules take it.
+pub fn repo() -> kit_server_updates::feed::Repo {
+    let (owner, app) = REPO.split_once('/').unwrap_or((REPO, REPO));
+    kit_server_updates::feed::Repo::new(owner, app)
 }
 /// Cache key of the self-update check (an hour).
 const DOCKER_CACHE: &str = "update:docker";
@@ -83,61 +73,32 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 // ---- the newest release -----------------------------------------------------------------------------
 
 
-/// GitHub's release JSON → what is kept: {tag, latest, notes, notes_cut, url, published_at, checked_at}.
+/// GitHub's release JSON → what is kept: {tag, latest, notes, notes_cut, url, published_at, checked_at}
+/// (the kit's `server::parse_release` for Encore's repository).
 pub fn parse_release(v: &Value, now: f64) -> Option<Value> {
-    let tag = v["tag_name"].as_str().map(str::trim).filter(|t| !t.is_empty())?;
-    let hotfix = tag.starts_with(HOTFIX_PREFIX);
-    let body = v["body"].as_str().unwrap_or("").replace("\r\n", "\n");
-    let cut = body.chars().count() > NOTES_MAX;
-    let notes: String = body.chars().take(NOTES_MAX).collect();
-    Some(json!({
-        "tag": tag,
-        "latest": tag.trim_start_matches(HOTFIX_PREFIX).trim_start_matches(['v', 'V']),
-        "hotfix": hotfix,
-        "notes": notes.trim_end(),
-        "notes_cut": cut,
-        "url": v["html_url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{REPO}/releases/tag/{tag}")),
-        "published_at": v["published_at"],
-        "checked_at": now as i64,
-    }))
+    kit_server_updates::server::parse_release(v, now, &repo())
 }
 
 /// The hotfix channel's pick from GitHub's release list: the highest version among the full releases and the
 /// hotfix prereleases (drafts and other prereleases don't count).
 pub fn pick_newest(list: &Value, now: f64) -> Option<Value> {
-    list.as_array()?.iter()
-        .filter(|v| v["draft"] != true)
-        .filter(|v| {
-            let hotfix = v["tag_name"].as_str().is_some_and(|t| t.starts_with(HOTFIX_PREFIX));
-            if v["prerelease"] == true { hotfix } else { !hotfix }
-        })
-        .filter_map(|v| parse_release(v, now))
-        .filter(|r| !encore_core::version::parts(r["latest"].as_str().unwrap_or("")).is_empty())
-        .max_by(|a, b| encore_core::version::compare(a["latest"].as_str().unwrap_or(""), b["latest"].as_str().unwrap_or("")))
-}
-
-/// Whether `latest` is newer than the running version (a dev build: any release is).
-pub fn is_newer(latest: &str, current: &str, dev: bool) -> bool {
-    if latest.trim().is_empty() {
-        return false;
-    }
-    dev || encore_core::version::newer(latest, current)
+    kit_server_updates::server::pick_newest(list, now, &repo())
 }
 
 /// The last answer from GitHub kept in the database, for the channel the settings name.
 pub fn stored(st: &impl Ctx) -> Option<Value> {
-    let row = st.db().one("SELECT value FROM sync_state WHERE connection_id=0 AND scope=?", p![Channel::of(st).scope()]).ok().flatten()?;
+    let row = st.db().one("SELECT value FROM sync_state WHERE connection_id=0 AND scope=?", p![scope(channel(st))]).ok().flatten()?;
     serde_json::from_str::<Value>(row.get("value")?.as_str()?).ok().filter(|v| v["latest"].is_string())
 }
 
 /// Keep `release` as the channel's last answer.
 fn store(st: &impl Ctx, channel: Channel, release: &Value) {
-    let _ = st.db().execute("INSERT OR REPLACE INTO sync_state (connection_id, scope, value) VALUES (0,?,?)", p![channel.scope(), release.to_string()]);
+    let _ = st.db().execute("INSERT OR REPLACE INTO sync_state (connection_id, scope, value) VALUES (0,?,?)", p![scope(channel), release.to_string()]);
 }
 
 /// Ask GitHub (the ETag makes an unchanged answer free) and keep the answer.
 pub async fn fetch(st: &impl Ctx) -> anyhow::Result<Value> {
-    let channel = Channel::of(st);
+    let channel = channel(st);
     let path = match channel {
         Channel::Stable => format!("{}/repos/{REPO}/releases/latest", st.system().github_api),
         Channel::Hotfix => format!("{}/repos/{REPO}/releases?per_page={HOTFIX_PAGE}", st.system().github_api),
@@ -322,28 +283,15 @@ pub async fn self_update(st: &impl Ctx, force: bool) -> SelfUpdate {
 
 // ---- the answer -------------------------------------------------------------------------------------------
 
-/// GET /api/system/update's answer from the kept release and the socket check.
+/// GET /api/system/update's answer from the kept release (the kit's shared part) and the socket check.
 pub fn answer(release: Option<&Value>, su: &SelfUpdate, current: &str, dev: bool) -> Value {
-    let r = release.cloned().unwrap_or(Value::Null);
-    let latest = r["latest"].as_str().map(String::from);
-    json!({
-        "current": current,
-        "dev": dev,
-        "latest": latest,
-        "tag": r["tag"],
-        "hotfix": r["hotfix"] == true,
-        "is_newer": latest.as_deref().is_some_and(|l| is_newer(l, current, dev)),
-        "notes": r["notes"].as_str().unwrap_or(""),
-        "notes_cut": r["notes_cut"] == true,
-        "url": r["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{REPO}/releases")),
-        "published_at": r["published_at"],
-        "checked_at": r["checked_at"],
-        "restart": "ready",
-        "self_update": if su.ready { "ready" } else { "unavailable" },
-        "self_update_reason": su.reason,
-        "image": latest.as_ref().map(|l| format!("{IMAGE}:{l}")),
-        "container_image": su.image,
-    })
+    let mut out = kit_server_updates::server::answer(release, current, dev, &repo());
+    let latest = out["latest"].as_str().map(String::from);
+    out["self_update"] = json!(if su.ready { "ready" } else { "unavailable" });
+    out["self_update_reason"] = json!(su.reason);
+    out["image"] = json!(latest.as_ref().map(|l| format!("{IMAGE}:{l}")));
+    out["container_image"] = json!(su.image);
+    out
 }
 
 /// The update card: installed and newest version, release notes, whether "Update now" works (`force` asks
@@ -353,7 +301,7 @@ pub async fn status(st: &impl Ctx, force: bool) -> Value {
     let mut out = answer(release.as_ref(), &su, VERSION, DEV);
     out["error"] = json!(error);
     out["check_updates"] = json!(st.cfg().bool("check_updates"));
-    out["channel"] = json!(Channel::of(st).name());
+    out["channel"] = json!(channel(st).name());
     out
 }
 
@@ -455,54 +403,9 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
 
 // ---- Restart server ---------------------------------------------------------------------------------------
 
-/// A restart asked for: `schedule` sets it off after a delay (so the 202 answer gets out first), `requested`
-/// waits for it. Clones share it.
-#[derive(Clone)]
-pub struct Restart(Arc<RestartInner>);
-
-/// The state behind [`Restart`].
-struct RestartInner {
-    /// a restart is scheduled
-    pending: AtomicBool,
-    /// turns true when the restart is due
-    tx: tokio::sync::watch::Sender<bool>,
-}
-
-impl Default for Restart {
-    fn default() -> Self {
-        Restart(Arc::new(RestartInner { pending: AtomicBool::new(false), tx: tokio::sync::watch::channel(false).0 }))
-    }
-}
-
-impl Restart {
-    /// False when a restart is already on its way.
-    pub fn schedule(&self, delay: Duration) -> bool {
-        if self.0.pending.swap(true, Ordering::SeqCst) {
-            return false;
-        }
-        let me = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            me.0.tx.send_replace(true);
-        });
-        true
-    }
-
-    /// Whether the restart is due now.
-    pub fn is_requested(&self) -> bool {
-        *self.0.tx.borrow()
-    }
-
-    /// Wait until the restart is due.
-    pub async fn requested(&self) {
-        let mut rx = self.0.tx.subscribe();
-        let _ = rx.wait_for(|r| *r).await;
-    }
-}
-
 /// "Restart server" asked for by `who`: the restart half a second later, so the 202 answer gets out first.
 pub fn restart(st: &impl Ctx, who: &str) {
-    if st.system().restart.schedule(Duration::from_millis(500)) {
+    if st.system().restart.schedule(kit_server_updates::RESTART_DELAY) {
         st.db().log("warning", &format!("{who} restarted the server"));
         tracing::info!("restart asked for by {who}");
     }

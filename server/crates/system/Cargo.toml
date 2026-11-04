@@ -13,6 +13,7 @@ encore-http = { workspace = true }
 encore-jobs = { workspace = true }
 encore-playback = { workspace = true }
 encore-plugins = { workspace = true }
+kit-server-updates = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 flate2 = { workspace = true }
