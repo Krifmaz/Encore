@@ -1687,7 +1687,6 @@ dependencies = [
  "kit-server-core",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -1716,10 +1715,7 @@ name = "kit-server-health"
 version = "0.1.0"
 dependencies = [
  "axum",
- "kit-server-core",
- "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

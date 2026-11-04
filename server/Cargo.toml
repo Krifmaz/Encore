@@ -30,7 +30,7 @@ encore-plugins = { path = "crates/plugins" }
 # the shared server crates of Krifmaz/kit (health, What's new, notices, bug reports, diagnostics, settings, updates)
 kit-server-core = { path = "../../kit/crates/kit-server-core" }
 kit-server-health = { path = "../../kit/crates/kit-server-health" }
-kit-server-changelog = { path = "../../kit/crates/kit-server-changelog" }
+kit-server-changelog = { path = "../../kit/crates/kit-server-changelog", default-features = false }
 kit-server-notices = { path = "../../kit/crates/kit-server-notices" }
 kit-server-bugreports = { path = "../../kit/crates/kit-server-bugreports" }
 kit-server-diagnostics = { path = "../../kit/crates/kit-server-diagnostics" }

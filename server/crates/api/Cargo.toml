@@ -22,7 +22,7 @@ encore-files = { workspace = true }
 encore-plugins = { workspace = true }
 kit-server-core = { workspace = true }
 kit-server-health = { workspace = true }
-kit-server-changelog = { workspace = true }
+kit-server-changelog = { workspace = true, features = ["server"] }
 kit-server-notices = { workspace = true }
 kit-server-bugreports = { workspace = true }
 kit-server-diagnostics = { workspace = true }
@@ -58,6 +58,10 @@ regex = { workspace = true }
 flate2 = { workspace = true }
 cadenza-dsp = { workspace = true }
 libc = { workspace = true }
+
+[build-dependencies]
+# embeds docs/releases (the notes half of the kit's What's new crate, without its server dependencies)
+kit-server-changelog = { workspace = true }
 
 [dev-dependencies]
 # the fault seam (a file operation on a path fails with a chosen errno): EIO on the move into the library

@@ -31,8 +31,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::response::Redirect;
 use axum::routing::get;
-use axum::{Json, Router};
-use serde_json::json;
+use axum::Router;
 use state::AppState;
 use std::path::PathBuf;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
@@ -78,21 +77,19 @@ fn hashed_asset(path: &str) -> bool {
 /// `encore-web-<hash>.js` (the same hash sw.js makes its cache name from). `/api/health` sends it as `web`, so
 /// an open tab can tell that the server now serves another build than the one it runs (web-rs/src/update.rs)
 /// and reload itself. None when the folder has no such file (a server without the web app, the tests).
+/// The kit's `kit_server_health::web_build` for Encore's script name.
 pub fn web_build(static_dir: &std::path::Path) -> Option<String> {
-    let mut found: Vec<String> = std::fs::read_dir(static_dir).ok()?
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter_map(|name| web_build_of(&name).map(str::to_string))
-        .collect();
-    // one build per folder; should an old script linger next to the new one, the answer is still stable
-    found.sort();
-    found.pop()
+    kit_server_health::web_build(static_dir, WEB_SCRIPT)
 }
+
+/// The start of the name of trunk's script for Encore's web app (`encore-web-<hash>.js`).
+const WEB_SCRIPT: &str = "encore-web-";
 
 /// The hash of a file name `encore-web-<hash>.js` (not the `_bg.wasm`, not a `.js.br` copy); None for any
 /// other name. Trunk drops leading zeros of the hash, so 12 hex digits or more count, as in [`hashed_asset`].
+#[cfg(test)]
 fn web_build_of(name: &str) -> Option<&str> {
-    let hash = name.strip_prefix("encore-web-")?.strip_suffix(".js")?;
-    (hash.len() >= 12 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
+    kit_server_health::web_build_of(name, WEB_SCRIPT)
 }
 
 /// `/next/` was the Rust UI's address while the JavaScript UI lived at `/`; an alias for one release (0.26).
@@ -124,7 +121,7 @@ pub fn app(st: AppState) -> Router {
         .route("/next/", get(next_alias))
         .route("/next/{*rest}", get(next_alias))
         // `web`: the build of the web app served here (null without one); open tabs reload when it changes
-        .route("/api/health", get(move || async move { Json(json!({ "ok": true, "version": crate::VERSION, "server": "rust", "web": web })) }))
+        .merge(kit_server_health::router(kit_server_health::Health::new(crate::VERSION, web)))
         .merge(routes::auth::router())
         .merge(routes::admin::router())
         .merge(routes::library::router())
