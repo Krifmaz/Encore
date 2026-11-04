@@ -5,6 +5,12 @@
  */
 package app.encore.android.ui.tv
 
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.SolidColor
+import app.encore.android.ui.ElapsedTime
+import app.encore.android.ui.drawPlayed
+import app.encore.android.ui.fractionOf
+import app.encore.android.ui.rememberLivePosition
 import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -281,7 +287,9 @@ private fun RowScope.ControlsHalf(
 @Composable
 private fun RowScope.PanelHalf(nav: Nav, panel: SidePanel, lyrics: LyricsLoad, onClose: () -> Unit) {
     val p = MaterialTheme.palette
-    val position by nav.player.positionMs.collectAsState()
+    // the lyrics follow the live position (read only to find the line sung now); no frame loop while Up next shows
+    val live = rememberLivePosition(nav.player, running = panel == SidePanel.LYRICS)
+    val position = remember(live) { { live.longValue } }
     val group by GroupListen.state.collectAsState()
     Column(
         Modifier
@@ -340,11 +348,12 @@ private fun PanelTab(label: String, on: Boolean, onClick: () -> Unit) {
 @Composable
 private fun TvSeek(nav: Nav, modifier: Modifier = Modifier) {
     val p = MaterialTheme.palette
-    val position by nav.player.positionMs.collectAsState()
+    // the position is read where it is drawn and once a second for the time played: no recomposition per tick
+    val live = rememberLivePosition(nav.player)
     val duration by nav.player.durationMs.collectAsState()
     var focused by remember { mutableStateOf(false) }
     val dur = duration.coerceAtLeast(0L)
-    val frac = if (dur > 0) (position.toFloat() / dur).coerceIn(0f, 1f) else 0f
+    val played = remember(p.accent) { SolidColor(p.accent) }
     Column(modifier) {
         Box(
             Modifier
@@ -358,7 +367,7 @@ private fun TvSeek(nav: Nav, modifier: Modifier = Modifier) {
                         Key.DirectionLeft -> false
                         else -> return@onKeyEvent false
                     }
-                    if (dur > 0) nav.player.seekTo(TvRules.seekTarget(position, dur, forward))
+                    if (dur > 0) nav.player.seekTo(TvRules.seekTarget(live.longValue, dur, forward))
                     true
                 }
                 .focusable()
@@ -366,12 +375,17 @@ private fun TvSeek(nav: Nav, modifier: Modifier = Modifier) {
             contentAlignment = Alignment.CenterStart,
         ) {
             // thicker while focused, so it's clear Left / Right will move it
-            Box(Modifier.fillMaxWidth().height(if (focused) 8.dp else 4.dp).clip(RoundedCornerShape(4.dp)).background(p.border)) {
-                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(p.accent))
-            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(if (focused) 8.dp else 4.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(p.border)
+                    .drawBehind { drawPlayed(played, fractionOf(live.longValue, dur)) },
+            )
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-            Text(formatDuration(position).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
+            ElapsedTime { live.longValue }
             Spacer(Modifier.weight(1f))
             if (focused) Text("◀ ▶ 10 s", style = MaterialTheme.typography.bodySmall, color = p.muted)
             Spacer(Modifier.weight(1f))

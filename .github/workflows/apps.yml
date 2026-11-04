@@ -141,6 +141,23 @@ jobs:
             unzip -l "$APK" | grep -q "lib/$abi/libencore_cadenza.so" || { echo "::error::lib/$abi/libencore_cadenza.so is missing from the APK (did :cadenza:cargoNdkBuild run?)"; unzip -l "$APK" | grep ' lib/' || true; exit 1; }
           done
           cp "$APK" "Encore-android-$ENCORE_VERSION.apk" && ls -la Encore-android-*.apk
+      - name: Baseline Profile
+        # The app's own Baseline Profile and startup profile (clients/android/PERFORMANCE.md, README "Baseline
+        # Profile") must be committed and compiled into the APK: assets/dexopt/baseline.prof(m) is what
+        # profileinstaller installs on first launch. Library profiles alone (Compose ships one) also make a
+        # baseline.prof, so the generated sources are checked too.
+        run: |
+          APK="Encore-android-$ENCORE_VERSION.apk"
+          G=clients/android/app/src/main/generated/baselineProfiles
+          for f in "$G/baseline-prof.txt" "$G/startup-prof.txt"; do
+            [ -s "$f" ] || { echo "::error::$f is missing or empty: regenerate it (clients/android/README.md, Baseline Profile)"; exit 1; }
+          done
+          grep -q '^[HSP]*Lapp/encore/android/' "$G/baseline-prof.txt" \
+            || { echo "::error::$G/baseline-prof.txt has no rules for Encore's own classes"; exit 1; }
+          for f in assets/dexopt/baseline.prof assets/dexopt/baseline.profm; do
+            unzip -l "$APK" | grep -q " $f\$" || { echo "::error::$f is not in the APK (is androidx.baselineprofile applied to :app?)"; exit 1; }
+          done
+          echo "Baseline Profile: $(wc -l < "$G/baseline-prof.txt") rules, startup profile: $(wc -l < "$G/startup-prof.txt") rules"
       - name: 16 KB pages
         # Phones with 16 KB memory pages (Android 15+) load a native library only when every LOAD segment is aligned
         # to 16 KB (cadenza/rust/build.rs links with -z max-page-size=16384) and the APK keeps the uncompressed .so

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -76,6 +77,7 @@ import app.encore.android.ui.Screen
 import app.encore.android.data.repo.Me
 import app.encore.android.features.library.openAlbum
 import app.encore.android.features.library.openLibraryAlbum
+import app.encore.android.ui.components.ListKeys
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.MenuEntry
 import app.encore.android.ui.components.MoreButton
@@ -338,14 +340,19 @@ private sealed interface DiscoTile {
     /** The release's year for the newest-first order, as the server sorts MusicBrainz's: no year sorts first. */
     val yearKey: String
 
+    /** The tile's list key: the release group's MusicBrainz id, or the other catalogue's title and year. */
+    val key: String
+
     /** A MusicBrainz release group. */
     data class Mb(val rg: CatalogAlbum) : DiscoTile {
         override val yearKey get() = yearOf(rg.year, rg.date)
+        override val key get() = "mb:${rg.id}"
     }
 
     /** A Deezer / Apple Music / Bandcamp / Discogs release MusicBrainz doesn't have (tagged "Not in MusicBrainz"). */
     data class Ext(val m: ExtRelease) : DiscoTile {
         override val yearKey get() = yearOf(m.year, m.date)
+        override val key get() = "ext:${m.title}/${m.year}"
     }
 }
 
@@ -480,14 +487,17 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
             val sim = (similar.state.value as? Loadable.Ready)?.value
             val extReleases = (ext.state.value as? Loadable.Ready)?.value
             val extLoading = ext.state.value is Loadable.Loading
-            val groups = a.releaseGroups.groupBy { groupKey(it) }
-            val keys = groups.keys.sortedBy { groupRank(it) }
-            val owned = a.releaseGroups.count { it.inLibrary }
+            // grouped and matched once per artist page, not on every recomposition (request statuses, expanding a section)
+            val groups = remember(a) { a.releaseGroups.groupBy { groupKey(it) } }
+            val keys = remember(groups) { groups.keys.sortedBy { groupRank(it) } }
+            val owned = remember(a) { a.releaseGroups.count { it.inLibrary } }
             val firstCover = if (byName) d.libraryAlbums.firstOrNull()?.let { api.coverUrl(it.id, 400) } ?: ""
                 else a.releaseGroups.firstOrNull { it.type == "Album" && it.secondary.isEmpty() }?.cover ?: ""
-            val rgIds = a.releaseGroups.map { it.id }.toSet()
-            val titles = a.releaseGroups.map { it.title.lowercase() }.toSet()
-            val localOnly = a.libraryAlbums.filter { l -> !(l.rgid.isNotEmpty() && l.rgid in rgIds) && l.album.lowercase() !in titles }
+            val localOnly = remember(a) {
+                val rgIds = a.releaseGroups.map { it.id }.toSet()
+                val titles = a.releaseGroups.map { it.title.lowercase() }.toSet()
+                a.libraryAlbums.filter { l -> !(l.rgid.isNotEmpty() && l.rgid in rgIds) && l.album.lowercase() !in titles }
+            }
             val artistKeys = listOf("ar:${a.id}")
             val status = statuses.statusOf(artistKeys, a.requestStatus)
             val statusText = statuses.labelOf(artistKeys, a.requestLabel)
@@ -795,8 +805,10 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                             tileRows(list, 2, key = "rg-$k", content = tile)
                         } else {
                             item(key = "rail-$k") {
+                                // keyed tiles: a release filtered in or out moves the others along instead of re-making them
+                                val tileKeys = ListKeys.unique(list) { it.key }
                                 LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                    items(list) { t -> Box(Modifier.width(RAIL_TILE_WIDTH)) { tile(t) } }
+                                    itemsIndexed(list, key = { i, _ -> tileKeys[i] }) { _, t -> Box(Modifier.width(RAIL_TILE_WIDTH)) { tile(t) } }
                                 }
                             }
                         }
@@ -1131,8 +1143,10 @@ internal fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuse
                                 }
                             }
                         }
+                        // the release's track number and title (made unique) as the row key
+                        val trackKeys = remember(tracks) { ListKeys.unique(tracks) { "${it.track}/${it.title}" } }
                         LazyColumn(Modifier.fillMaxWidth().height(if (tracks.size > 8) 420.dp else (tracks.size * 52 + 8).dp)) {
-                            items(tracks.size) { i ->
+                            items(tracks.size, key = { trackKeys[it] }) { i ->
                                 val t = tracks[i]
                                 val lib = t.library
                                 val keys = listOf(songNameKey(t.artist.ifEmpty { artistName }, t.title))

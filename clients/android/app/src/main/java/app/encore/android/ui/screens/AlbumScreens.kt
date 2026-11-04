@@ -274,7 +274,8 @@ fun AlbumScreen(nav: Nav, albumId: String, playTrack: Long = 0L) {
             val detail = page.detail
             val album = detail.album
             val tracks = detail.tracks
-            val multiDisc = tracks.map { it.disc }.distinct().size > 1
+            // worked out once per track list: the page recomposes as the playing song or the likes change
+            val multiDisc = remember(tracks) { tracks.map { it.disc }.distinct().size > 1 }
             // a shared song's link: play it once (saveable, so turning the phone doesn't start it again)
             var sharedPlayed by rememberSaveable(albumId, playTrack) { mutableStateOf(false) }
             LaunchedEffect(tracks, playTrack) {
@@ -283,8 +284,10 @@ fun AlbumScreen(nav: Nav, albumId: String, playTrack: Long = 0L) {
                 val i = tracks.indexOfFirst { it.id == playTrack }
                 if (i >= 0) nav.player.play(tracks, i)
             }
-            val formats = if (surround && album.quality.isNotEmpty()) album.quality
+            val formats = remember(tracks, surround, album.quality) {
+                if (surround && album.quality.isNotEmpty()) album.quality
                 else tracks.map { it.format.uppercase() }.filter { it.isNotEmpty() }.distinct().joinToString(" / ")
+            }
             LazyColumn(Modifier.fillMaxSize().padding(padding).testTag(PerfTags.ALBUM_TRACKS)) {
                 // .detail-head
                 item {

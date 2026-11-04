@@ -544,7 +544,8 @@ private fun AlbumsTab(nav: Nav, sort: LibSort, q: String = "", admin: Boolean = 
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                items(paged.rows.size) { i ->
+                // placeholders and loaded rows reuse only their own kind of node while scrolling
+                items(paged.rows.size, contentType = { i -> if (paged.rows[i] == null) "placeholder" else "album" }) { i ->
                     val a = paged.rows[i]
                     if (a == null) {
                         Placeholder(paged, i) { AlbumPlaceholder() }
@@ -601,7 +602,8 @@ private fun SurroundTab(nav: Nav, q: String = "") {
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        items(paged.rows.size) { i ->
+        // placeholders and loaded rows reuse only their own kind of node while scrolling
+        items(paged.rows.size, contentType = { i -> if (paged.rows[i] == null) "placeholder" else "album" }) { i ->
             val a = paged.rows[i]
             if (a == null) {
                 Placeholder(paged, i) { AlbumPlaceholder() }
@@ -690,7 +692,8 @@ private fun SongsTab(nav: Nav, sort: LibSort, q: String = "") {
     }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), state = list) {
-            items(paged.rows.size) { i ->
+            // placeholders and loaded rows reuse only their own kind of node while scrolling
+            items(paged.rows.size, contentType = { i -> if (paged.rows[i] == null) "placeholder" else "track" }) { i ->
                 val t = paged.rows[i]
                 if (t == null) {
                     Placeholder(paged, i) { TrackPlaceholder() }

@@ -23,6 +23,7 @@ import app.encore.android.playback.MediaItems
 import app.encore.android.playback.StreamInfo
 import app.encore.android.remote.Link
 import app.encore.android.remote.RemoteDevice
+import app.encore.android.ui.components.ListKeys
 import app.encore.android.ui.components.PlayerMenuActions
 import app.encore.android.ui.components.Toasts
 import com.google.common.util.concurrent.ListenableFuture
@@ -40,6 +41,14 @@ import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.concurrent.Executor
+
+/**
+ * The queue's songs with one key per entry ([PlayerConnection.keyedQueue]), in one value so the two never disagree.
+ *
+ * @property tracks the songs, in queue order (the same list as [PlayerConnection.queue]).
+ * @property keys one key per song, different for every entry (a song queued twice has two keys).
+ */
+data class KeyedQueue(val tracks: List<Track>, val keys: List<Long>)
 
 /** What the player UI shows; rebuilt from the MediaController whenever the player changes. */
 data class PlayerUiState(
@@ -93,10 +102,26 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     private val _positionMs = MutableStateFlow(0L)
     /** The position in song time, refreshed twice a second while playing and on every player event. */
     val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
+    private val _clock = MutableStateFlow(PlaybackClock(0L, 0L, playing = false, speed = 1f))
+    /**
+     * The position with the moment it was read, whether it moves on and how fast (the playback speed): the UI draws
+     * the position between the half-second ticks from it ([rememberLivePosition]). New on every tick and player event.
+     */
+    val clock: StateFlow<PlaybackClock> = _clock.asStateFlow()
+    /** This phone's playback speed (1 while this phone shows a linked device), for [clock]. */
+    private var speed = 1f
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
     private val _queue = MutableStateFlow<List<Track>>(emptyList())
     val queue: StateFlow<List<Track>> = _queue.asStateFlow()
+    private val _keyedQueue = MutableStateFlow(KeyedQueue(emptyList(), emptyList()))
+    /**
+     * The queue with a key per entry that stays with the entry while songs are added, removed or moved, also when the
+     * same song is queued twice: the Up next list's item keys (and so its row animations). Set with [queue].
+     */
+    val keyedQueue: StateFlow<KeyedQueue> = _keyedQueue.asStateFlow()
+    /** The next queue entry key never used before ([ListKeys.carry]). */
+    private var nextQueueKey = 0L
     private val _queueIndex = MutableStateFlow(-1)
     val queueIndex: StateFlow<Int> = _queueIndex.asStateFlow()
     private val _qualityBadge = MutableStateFlow<String?>(null)
@@ -142,11 +167,26 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         updateQuality()
     }
 
+    /** Sets the queue the UI shows, and [keyedQueue] with it (the entries that stayed keep their keys). */
+    private fun setQueue(list: List<Track>) {
+        _queue.value = list
+        val old = _keyedQueue.value
+        if (old.tracks == list) return
+        val keys = ListKeys.carry(old.tracks.map { it.id }, old.keys, list.map { it.id }) { nextQueueKey++ }
+        _keyedQueue.value = KeyedQueue(list, keys)
+    }
+
+    /** Sets the position the UI shows, and [clock] with it (read now, moving on if the player plays). */
+    private fun setPosition(ms: Long) {
+        _positionMs.value = ms
+        _clock.value = PlaybackClock(ms, System.nanoTime(), playing = _isPlaying.value, speed = speed)
+    }
+
     private val positionTick = object : Runnable {
         override fun run() {
             if (linked() != null) return
             val c = controller ?: return
-            _positionMs.value = c.currentPosition.coerceAtLeast(0L) + offsetMs()
+            setPosition(c.currentPosition.coerceAtLeast(0L) + offsetMs())
             if (c.isPlaying) mainHandler.postDelayed(this, 500L)
         }
     }
@@ -279,7 +319,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     private val linkTick = object : Runnable {
         override fun run() {
             val l = linked() ?: return
-            _positionMs.value = Math.round(l.positionSec() * 1000)
+            setPosition(Math.round(l.positionSec() * 1000))
             if (l.playing) mainHandler.postDelayed(this, 500L)
         }
     }
@@ -299,9 +339,9 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
                 _nowPlaying.value = null
                 _isPlaying.value = false
                 _durationMs.value = 0L
-                _queue.value = emptyList()
+                setQueue(emptyList())
                 _queueIndex.value = -1
-                _positionMs.value = 0L
+                setPosition(0L)
                 _shuffle.value = false
                 _repeat.value = "off"
                 _state.value = PlayerUiState(connected = false)
@@ -316,11 +356,12 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
         if (t != null && (index !in queue.indices || queue[index].id != t.id)) index = queue.indexOfFirst { it.id == t.id }
         val dur = Math.round(l.durationSec * 1000)
         _nowPlaying.value = t
+        speed = 1f
         _isPlaying.value = l.playing
         _durationMs.value = dur
-        _queue.value = queue
+        setQueue(queue)
         _queueIndex.value = index
-        _positionMs.value = Math.round(l.positionSec() * 1000)
+        setPosition(Math.round(l.positionSec() * 1000))
         _shuffle.value = l.shuffle
         _repeat.value = l.repeat
         val label = l.signalLabel
@@ -491,7 +532,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
     fun seekTo(positionMs: Long) {
         if (groupDenied()) return
         if (viaLink("seek") { put("value", positionMs.coerceAtLeast(0L) / 1000.0) }) {
-            _positionMs.value = positionMs.coerceAtLeast(0L)
+            setPosition(positionMs.coerceAtLeast(0L))
             return
         }
         withController { c ->
@@ -502,7 +543,7 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
             } else {
                 c.seekTo(pos)
             }
-            _positionMs.value = pos
+            setPosition(pos)
         }
     }
 
@@ -721,11 +762,12 @@ class PlayerConnection(private val context: Context, private val api: EncoreApi)
             error = c.playerError?.message,
         )
         // the seam flows (read by the design's screens)
+        speed = c.playbackParameters.speed
         _isPlaying.value = c.isPlaying
         _durationMs.value = duration
-        _queue.value = queue
+        setQueue(queue)
         _queueIndex.value = if (current == null) -1 else c.currentMediaItemIndex
-        _positionMs.value = c.currentPosition.coerceAtLeast(0L) + offsetMs()
+        setPosition(c.currentPosition.coerceAtLeast(0L) + offsetMs())
         _shuffle.value = c.shuffleModeEnabled
         _repeat.value = when (c.repeatMode) {
             Player.REPEAT_MODE_ALL -> "all"

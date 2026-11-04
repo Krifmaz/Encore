@@ -57,7 +57,10 @@ python3 benchmark/ci/summarize.py "$OUT" "${LABEL:-}" | tee benchmark/build/summ
 if [ "${STRICTMODE:-0}" = 1 ]; then
   # the debug build (StrictMode and JankStats on, core/DevPerf.kt) through each journey once, uncompiled
   quiet_gradle benchmark/build/gradle-install-debug.log --no-daemon :app:installDebug || true
+  # the whole log of the pass, streamed to a file (the device's ring buffer would drop the start of a long pass)
   adb logcat -c
+  adb logcat -v brief > benchmark/build/debug-logcat.txt 2>/dev/null &
+  LOGCAT_PID=$!
   rm -rf "$RESULTS" "$OUT"
   # the arguments this pass sets itself are left out of ARGS (Gradle keeps the first of a repeated -P)
   DEBUG_ARGS=()
@@ -71,7 +74,8 @@ if [ "${STRICTMODE:-0}" = 1 ]; then
     "-P$A.encore.iterations=1" \
     "-Pencore.suppressErrors=${SUPPRESS:+$SUPPRESS,}DEBUGGABLE" || echo "the debug pass failed (its log is still summarised)"
   python3 benchmark/ci/failures.py "$RESULTS" "$OUT" || true
-  adb logcat -d -v brief > benchmark/build/debug-logcat.txt || true
+  kill "$LOGCAT_PID" 2>/dev/null || true
+  echo "debug pass log: $(wc -l < benchmark/build/debug-logcat.txt) lines, $(grep -c StrictMode benchmark/build/debug-logcat.txt || true) StrictMode, $(grep -c EncoreJank benchmark/build/debug-logcat.txt || true) EncoreJank"
   python3 benchmark/ci/strictmode.py benchmark/build/debug-logcat.txt | tee benchmark/build/strictmode.md || true
 fi
 exit "$STATUS"

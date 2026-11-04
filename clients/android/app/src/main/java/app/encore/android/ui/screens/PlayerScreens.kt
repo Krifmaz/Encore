@@ -1,5 +1,14 @@
 package app.encore.android.ui.screens
 
+import androidx.compose.material3.SliderState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.SolidColor
+import app.encore.android.ui.ElapsedTime
+import app.encore.android.ui.drawPlayed
+import app.encore.android.ui.fractionOf
+import app.encore.android.ui.rememberLivePosition
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -168,23 +177,34 @@ fun rememberPlayerMenuActions(
     }
 }
 
-/** The bar above the tabs (the web's `.player` on phones): cover, title, play/pause, next and a thin progress line. */
+/**
+ * The bar above the tabs (the web's `.player` on phones): cover, title, play/pause, next and a thin progress line.
+ *
+ * The position is read only where the progress line is drawn ([rememberLivePosition], in `drawBehind`), so a playing
+ * song redraws that line on each frame and recomposes nothing (cover, title and buttons stay as they are).
+ *
+ * @param covered true while the full player is open over it: the line then stops moving with the frames.
+ */
 @Composable
-fun MiniPlayer(nav: Nav, onOpen: () -> Unit) {
+fun MiniPlayer(nav: Nav, onOpen: () -> Unit, covered: Boolean = false) {
     val t by nav.player.nowPlaying.collectAsState()
     val track = t ?: return
     val isPlaying by nav.player.isPlaying.collectAsState()
-    val position by nav.player.positionMs.collectAsState()
     val duration by nav.player.durationMs.collectAsState()
     val queue by nav.player.queue.collectAsState()
     val index by nav.player.queueIndex.collectAsState()
     val p = MaterialTheme.palette
-    val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val live = rememberLivePosition(nav.player, running = !covered)
+    val played = p.gradient
     Column(Modifier.fillMaxWidth().background(p.bg2)) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
-        Box(Modifier.fillMaxWidth().height(3.dp).background(p.border)) {
-            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(p.gradient))
-        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(p.border)
+                .drawBehind { drawPlayed(played, fractionOf(live.longValue, duration)) },
+        )
         Row(
             Modifier.fillMaxWidth().testTag(PerfTags.MINI_PLAYER).clickable(onClick = onOpen).padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -238,9 +258,12 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
     val t by nav.player.nowPlaying.collectAsState()
     val track = t ?: return
     val isPlaying by nav.player.isPlaying.collectAsState()
-    val position by nav.player.positionMs.collectAsState()
     val duration by nav.player.durationMs.collectAsState()
     val link by nav.player.remote.link.collectAsState()
+    // the position, moving with the frames while the song plays: only the seek bars, the time played and the lyrics read
+    // it (in the draw phase or through derivedStateOf), so the cover, title and buttons don't recompose as it plays
+    val live = rememberLivePosition(nav.player)
+    val positionMs = remember(live) { { live.longValue } }
     val p = MaterialTheme.palette
     val context = LocalContext.current
     // the window's shape: LocalConfiguration follows a turn of the phone without the activity being made again
@@ -326,7 +349,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     actions = actions,
                     onClose = onClose,
                     lyrics = lyrics,
-                    positionMs = position,
+                    positionMs = positionMs,
                     coverUrl = coverUrl,
                     added = added,
                     onMenuOpen = { askAdded = true },
@@ -369,8 +392,8 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                                 )
                             }
                         }
-                        ThinSeek(position, duration, onSeek = { ms -> nav.player.seekTo(ms) }, Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp))
-                        LyricsPane(nav, lyrics, position, Modifier.weight(1f).fillMaxWidth(), onReport = lyricsReport(track, lyrics), onOtherTiming = lyricsOtherTiming(track, lyrics))
+                        ThinSeek(positionMs, duration, onSeek = { ms -> nav.player.seekTo(ms) }, Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp))
+                        LyricsPane(nav, lyrics, positionMs, Modifier.weight(1f).fillMaxWidth(), onReport = lyricsReport(track, lyrics), onOtherTiming = lyricsOtherTiming(track, lyrics))
                     }
                 }
                 Box(
@@ -409,7 +432,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
                     // .np-meta
                     PlayerMeta(nav, track, actions, onClose, center = true, Modifier.fillMaxWidth().padding(horizontal = 28.dp))
                     // .np-seek
-                    PlayerSeek(nav)
+                    PlayerSeek(nav, positionMs)
                     // .np-ctrls
                     PlayerButtons(nav, Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp))
                     // linked: the other device's volume
@@ -437,7 +460,7 @@ fun FullPlayer(nav: Nav, actions: PlayerMenuActions, onClose: () -> Unit) {
  * too short for all of it scrolls the right half instead of cutting buttons off.
  *
  * @param lyrics the song's lyrics as they load (the player keeps them, so turning the phone doesn't load them again).
- * @param positionMs where the song is, for the synced lines.
+ * @param positionMs where the song is (a live read, see [rememberLivePosition]), for the synced lines and the seek bar.
  * @param coverUrl the album's cover (null: the song has no album, [Cover] draws its placeholder).
  * @param added the ⋯ menu's "Added by … on …" line ("" until the server said).
  * @param onMenuOpen called when the ⋯ menu opens, to ask who added the song.
@@ -450,7 +473,7 @@ private fun LandscapeBody(
     actions: PlayerMenuActions,
     onClose: () -> Unit,
     lyrics: LyricsLoad,
-    positionMs: Long,
+    positionMs: () -> Long,
     coverUrl: String?,
     added: String,
     onMenuOpen: () -> Unit,
@@ -486,7 +509,7 @@ private fun LandscapeBody(
                         )
                     }
                 }
-                PlayerSeek(nav)
+                PlayerSeek(nav, positionMs)
                 PlayerButtons(nav, Modifier.fillMaxWidth().padding(top = 2.dp))
                 // linked: the other device's volume
                 LinkedVolume(nav, Modifier.fillMaxWidth().padding(horizontal = 48.dp))
@@ -536,25 +559,35 @@ internal fun PlayerMeta(nav: Nav, track: Track, actions: PlayerMenuActions, onCl
     }
 }
 
-/** The seek bar with the time played and the song's length under it (the web's `.np-seek`); a drag seeks on release. */
+/**
+ * The seek bar with the time played and the song's length under it (the web's `.np-seek`); a drag seeks on release.
+ *
+ * The bar's position is set from [positionMs] outside composition (a [SliderState] the slider reads while it lays
+ * out and draws), and the time played recomposes once a second ([ElapsedTime]), so a playing song moves the thumb
+ * smoothly without recomposing the player.
+ *
+ * @param positionMs where the song is (a live read, see [rememberLivePosition]).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerSeek(nav: Nav) {
+private fun PlayerSeek(nav: Nav, positionMs: () -> Long) {
     val p = MaterialTheme.palette
-    val position by nav.player.positionMs.collectAsState()
     val duration by nav.player.durationMs.collectAsState()
-    // where the thumb is while it is dragged (0–1); null: it follows the song
-    var dragging by remember { mutableStateOf<Float?>(null) }
+    val dur = duration.coerceAtLeast(0L)
+    val durNow by rememberUpdatedState(dur)
+    // 0–1; the slider moves its own thumb while it is dragged, and seeks when let go
+    val slider = remember {
+        SliderState().also { s ->
+            s.onValueChangeFinished = { if (durNow > 0) nav.player.seekTo((s.value * durNow).toLong()) }
+        }
+    }
+    // the thumb follows the song (every frame while it plays), but not while a finger holds it
+    LaunchedEffect(slider) {
+        snapshotFlow { fractionOf(positionMs(), durNow) }.collect { f -> if (!slider.isDragging) slider.value = f }
+    }
     Column(Modifier.fillMaxWidth()) {
-        val dur = duration.coerceAtLeast(0L)
-        val shown = dragging ?: if (dur > 0) (position.toFloat() / dur).coerceIn(0f, 1f) else 0f
         Slider(
-            value = shown,
-            onValueChange = { dragging = it },
-            onValueChangeFinished = {
-                val d = dragging
-                if (d != null && dur > 0) nav.player.seekTo((d * dur).toLong())
-                dragging = null
-            },
+            state = slider,
             enabled = dur > 0,
             colors = SliderDefaults.colors(
                 thumbColor = p.text,
@@ -567,8 +600,8 @@ private fun PlayerSeek(nav: Nav) {
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp),
         )
         Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp)) {
-            val cur = dragging?.let { (it * dur).toLong() } ?: position
-            Text(formatDuration(cur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
+            // while dragged: the time under the thumb
+            ElapsedTime { if (slider.isDragging) (slider.value * durNow).toLong() else positionMs() }
             Spacer(Modifier.weight(1f))
             Text(formatDuration(dur).ifEmpty { "0:00" }, style = MaterialTheme.typography.bodySmall, color = p.faint)
         }
@@ -736,13 +769,15 @@ internal fun PlayerActions(
 /**
  * The thin seek line of lyrics mode: the played part in the accent colour; a tap or a drag along it seeks (the
  * position follows the finger while dragging and is sent when you let go).
+ *
+ * @param positionMs where the song is (a live read, see [rememberLivePosition]); read only while drawing.
  */
 @Composable
-private fun ThinSeek(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier) {
+private fun ThinSeek(positionMs: () -> Long, durationMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier) {
     val p = MaterialTheme.palette
     val dur = durationMs.coerceAtLeast(0L)
     var drag by remember { mutableStateOf<Float?>(null) }
-    val frac = drag ?: if (dur > 0) (positionMs.toFloat() / dur).coerceIn(0f, 1f) else 0f
+    val played = remember(p.accent) { SolidColor(p.accent) }
     Box(
         modifier
             .fillMaxWidth()
@@ -764,9 +799,15 @@ private fun ThinSeek(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit,
             },
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.fillMaxWidth().height(if (drag != null) 5.dp else 3.dp).clip(RoundedCornerShape(3.dp)).background(p.border)) {
-            Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(p.accent))
-        }
+        // the played part is drawn from the live position (draw phase only: no recomposition as the song plays)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(if (drag != null) 5.dp else 3.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(p.border)
+                .drawBehind { drawPlayed(played, drag ?: fractionOf(positionMs(), dur)) },
+        )
     }
 }
 
@@ -799,7 +840,9 @@ fun UpNextSheet(nav: Nav, onDismiss: () -> Unit) {
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class) // testTagsAsResourceId, experimental in older Compose
 @Composable
 fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, showTitle: Boolean = true) {
-    val queue by nav.player.queue.collectAsState()
+    // the queue with a key per entry (a song queued twice is two rows), so a removed or moved row animates
+    val keyed by nav.player.keyedQueue.collectAsState()
+    val queue = keyed.tracks
     val index by nav.player.queueIndex.collectAsState()
     val settings by nav.graph.store.settings.collectAsState()
     val p = MaterialTheme.palette
@@ -823,10 +866,11 @@ fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, sho
     }
     // the sheet is a window of its own, outside MainActivity's testTagsAsResourceId: set it here for the journeys
     LazyColumn(modifier.semantics { testTagsAsResourceId = true }.testTag(PerfTags.UP_NEXT)) {
-        itemsIndexed(upNext) { k, q ->
+        itemsIndexed(upNext, key = { k, _ -> keyed.keys[index + 1 + k] }, contentType = { _, _ -> "song" }) { k, q ->
             val i = index + 1 + k
             Row(
-                Modifier.fillMaxWidth().clickable { nav.player.skipTo(i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                // a removal or a move slides the rows below into place instead of jumping
+                Modifier.animateItem().fillMaxWidth().clickable { nav.player.skipTo(i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Cover(
@@ -847,7 +891,7 @@ fun UpNextList(nav: Nav, onLeave: () -> Unit, modifier: Modifier = Modifier, sho
             }
         }
         if (upNext.isEmpty()) {
-            item {
+            item(key = "nothing-queued") {
                 Text(
                     if (settings.autoplay) "Nothing queued – a shuffle of your library plays next." else "Nothing queued.",
                     style = MaterialTheme.typography.bodySmall,

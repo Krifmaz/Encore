@@ -413,7 +413,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             bottomBar = {
                 Column {
                     stateBar()
-                    if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true })
+                    if (nowPlaying != null) MiniPlayer(nav, onOpen = { showPlayer = true }, covered = showPlayer)
                     Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
                     NavigationBar(containerColor = p.bg2, tonalElevation = 0.dp) {
                         for (t in Tab.entries) {

@@ -67,7 +67,32 @@ To build, do one of these:
 CI is the `android-native` job of `.github/workflows/apps.yml`: the JNI crate's host tests, `assembleRelease`, the
 unit tests in `app/src/test` (`:app:testDebugUnitTest`, JUnit 4, plain Kotlin with no Android classes),
 `apksigner verify`, the Cadenza library present for both ABIs, and the 16 KB page checks (every LOAD segment of a
-`.so` aligned to 0x4000 by `llvm-readelf -l`, and `zipalign -c -P 16 -v 4` on the APK).
+`.so` aligned to 0x4000 by `llvm-readelf -l`, and `zipalign -c -P 16 -v 4` on the APK), and the Baseline Profile
+check (below).
+
+### Baseline Profile
+
+The release APK carries a Baseline Profile and a startup profile (`app/src/main/generated/baselineProfiles/`:
+`baseline-prof.txt` and `startup-prof.txt`). ART compiles the code they list ahead of time, and the startup profile
+orders the DEX files so a launch reads the classes it needs together, so the app starts faster and its lists and
+player don't stutter while code is still interpreted. `androidx.profileinstaller` installs the profile on first launch,
+so it works for an APK installed by hand or by the in-app updater, not only from a store. The numbers are in
+`PERFORMANCE.md`.
+
+The profile is generated from the journeys in `journeys/` (sign in, start, Library albums, an album, the full player,
+Up next) by the `:baselineprofile` module, and **committed**; a normal build never generates it. Regenerate it after
+larger changes to those screens:
+
+- On a phone (Android 13+, or a rooted Android 9+) or emulator with USB debugging, signed in to a server with some
+  albums, or with the sign-in passed as arguments:
+  `gradle -p clients/android :app:generateBaselineProfile -Pandroid.testInstrumentationRunnerArguments.encore.server=https://music.example.com -Pandroid.testInstrumentationRunnerArguments.encore.user=me -Pandroid.testInstrumentationRunnerArguments.encore.password=…`
+  It writes both files into `app/src/main/generated/baselineProfiles/`; commit them.
+- Or in CI: Actions → Android performance → Run workflow with "Regenerate the Baseline Profile" ticked (or a commit
+  message with `[baseline-profile]` on a `claude/**` or `perf/**` branch). It generates the profile on an emulator
+  against a server with a made-up library and commits it to the branch.
+
+`apps.yml` fails a build whose profile files are missing or empty, have no rules for Encore's own classes, or whose
+APK lacks `assets/dexopt/baseline.prof` and `baseline.profm`.
 
 ### Versions and signing
 
@@ -195,14 +220,16 @@ settings card's runs), tested in `PluginRulesTest.kt`; the web's page is `web-rs
 
 ## Code layout
 
-Two Gradle modules: `:app` (packages under `app.encore.android`) and `:cadenza` (the JNI binding `CadenzaNative` and
-the Rust crate in `cadenza/rust`). No DI framework: `AppGraph` (`EncoreApp.kt`) builds the singletons by hand, and
+Two Gradle modules make the APK: `:app` (packages under `app.encore.android`) and `:cadenza` (the JNI binding
+`CadenzaNative` and the Rust crate in `cadenza/rust`). Three more are for performance only (`PERFORMANCE.md`):
+`:journeys` (the user journeys as UiAutomator steps), `:benchmark` (Macrobenchmark of them) and `:baselineprofile`
+(the Baseline Profile generator). No DI framework: `AppGraph` (`EncoreApp.kt`) builds the singletons by hand, and
 navigation is a typed back stack in `ui/EncoreRoot.kt`. Comments that cite "PLAN §n" refer to the original plan, now
 `docs/archive/android-native/PLAN.md`.
 
 | Package | What |
 |---|---|
-| `core` | `Json.kt`: the one lenient JSON layer. `EncoreJson`, the `JsonObject` readers (`str`, `dbl`, `int`, `bool`, `obj`, `arr`, `objects` …) and the `L…` field types for `@Serializable` models (a missing, null or odd value becomes the empty value, `Items` lists skip a bad row, `Checked` leaves out rows without what they need). SQLite rows have dynamic types, so everything read from the network goes through it. |
+| `core` | `Json.kt`: the one lenient JSON layer. `EncoreJson`, the `JsonObject` readers (`str`, `dbl`, `int`, `bool`, `obj`, `arr`, `objects` …) and the `L…` field types for `@Serializable` models (a missing, null or odd value becomes the empty value, `Items` lists skip a bad row, `Checked` leaves out rows without what they need). SQLite rows have dynamic types, so everything read from the network goes through it. `DevPerf.kt`: debug builds only, StrictMode (main-thread disk and network) and JankStats (janky frames with the screen's name), read with `adb logcat -s StrictMode EncoreJank`. |
 | `data.api` | `EncoreApi` (OkHttp), `EncoreHttp` (one client, auth, User-Agent), library models (`Track`, `Album` …), `CoverVersions`, `Translations` |
 | `data.repo` | `FeaturesApi` and `FeatureModels`: Discover, For you, Requests, picker, playlists, account, leaderboard, as `@Serializable` models |
 | `data.prefs` | `PlaybackPrefs` (the web's playback settings, synced with the account), `PhonePrefs` (this phone's Cadenza and USB settings, device-only), `PrefsRepository`, `DspInfo` |

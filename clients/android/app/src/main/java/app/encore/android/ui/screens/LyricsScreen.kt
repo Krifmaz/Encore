@@ -28,9 +28,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -54,7 +54,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -301,11 +300,12 @@ fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
  * large (28 sp, the others 22 sp) and kept in the middle with a smooth scroll, the lines already sung dimmed; a tap on
  * a line seeks there. Plain lyrics scroll.
  *
- * While time-synced lines play, the position is read ten times a second ([livePosition]) rather than the player's
- * half-second tick, so a line lights up when it is sung – on this phone and while it controls another device (the
- * TV's own position, moved on from its last check-in).
+ * The line sung now is worked out from the live position on every frame ([lineAt] through `derivedStateOf`), so a
+ * line lights up when it is sung – on this phone and while it controls another device (the TV's own position, moved
+ * on from its last check-in) – and the pane recomposes only when the line changes, not as the song plays.
  *
- * @param positionMs where the song is (the player's tick; read live while it plays).
+ * @param positionMs where the song is: a live read ([app.encore.android.ui.rememberLivePosition]), called only to
+ *   find the current line.
  * @param onReport the "Report lyrics" button in the bottom corner while lyrics are shown (wrong words or timing); null
  *   leaves it out (the TV, a Surround song, a file outside the library), and with it the timing nudge.
  * @param onOtherTiming "Other timing" beside "Report lyrics" under time-synced lines: the report sheet with Lyrics out of sync ticked; null leaves
@@ -315,7 +315,7 @@ fun rememberLyrics(nav: Nav, trackId: Long?, active: Boolean): LyricsLoad {
 fun LyricsPane(
     nav: Nav,
     load: LyricsLoad,
-    positionMs: Long,
+    positionMs: () -> Long,
     modifier: Modifier = Modifier,
     onReport: (() -> Unit)? = null,
     onOtherTiming: (() -> Unit)? = null,
@@ -333,8 +333,8 @@ fun LyricsPane(
             l == null -> Empty("No lyrics found for this song.", p.muted)
             l.instrumental -> Empty("Instrumental", p.muted)
             l.lines.isNotEmpty() -> {
-                val live = livePosition(nav, positionMs)
-                SyncedLines(l, live / 1000.0, onSeek = { sec -> nav.player.seekTo((sec * 1000).toLong()) })
+                val current by remember(l, positionMs) { derivedStateOf { lineAt(l, positionMs()) } }
+                SyncedLines(l, current, onSeek = { sec -> nav.player.seekTo((sec * 1000).toLong()) })
             }
             l.plain.isNotBlank() -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp)) {
                 Text(
@@ -373,21 +373,14 @@ fun LyricsPane(
 }
 
 /**
- * The song's position for time-synced lines: [tickMs] (the player's half-second tick) while paused, and while it
- * plays the player's own position ([app.encore.android.ui.PlayerConnection.positionMs] – the linked device's,
- * moved on from its last check-in, while this phone is a remote) read every 100 ms.
+ * The index of the time-synced line sung at [positionMs] (-1 before the first): the last line starting at most 0.3 s
+ * later, so a line lights up as it starts to be sung.
  */
-@Composable
-private fun livePosition(nav: Nav, tickMs: Long): Long {
-    val playing by nav.player.isPlaying.collectAsState()
-    val live by produceState(tickMs, playing) {
-        if (!playing) return@produceState
-        while (isActive) {
-            value = nav.player.positionMs()
-            delay(100L)
-        }
-    }
-    return if (playing) live else tickMs
+internal fun lineAt(l: Lyrics, positionMs: Long): Int {
+    val at = positionMs / 1000.0 + 0.3
+    var current = -1
+    for (i in l.lines.indices) if (l.lines[i].timeSec <= at) current = i else break
+    return current
 }
 
 /**
@@ -424,13 +417,10 @@ private fun Empty(text: String, color: androidx.compose.ui.graphics.Color) {
  * already sung dimmed. While you drag the list it stays where you put it; the next line brings it back.
  */
 @Composable
-private fun SyncedLines(l: Lyrics, positionSec: Double, onSeek: (Double) -> Unit) {
+private fun SyncedLines(l: Lyrics, current: Int, onSeek: (Double) -> Unit) {
     val p = MaterialTheme.palette
     val listState = rememberLazyListState()
     val dragged by listState.interactionSource.collectIsDraggedAsState()
-    val at = positionSec + 0.3
-    var current = -1
-    for (i in l.lines.indices) if (l.lines[i].timeSec <= at) current = i else break
     LaunchedEffect(current) {
         if (current < 0 || dragged) return@LaunchedEffect
         val info = listState.layoutInfo

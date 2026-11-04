@@ -655,7 +655,8 @@ fun GroupUpNextSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
                 val i = index + 1 + k
                 val q = e.track
                 Row(
-                    Modifier.fillMaxWidth().clickable { GroupListen.jump(e, i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    // a removal or a move (↑ / ↓) slides the rows into place instead of jumping
+                    Modifier.animateItem().fillMaxWidth().clickable { GroupListen.jump(e, i) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Cover(

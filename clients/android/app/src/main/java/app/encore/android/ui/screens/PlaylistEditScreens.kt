@@ -220,7 +220,7 @@ fun MergeIntoDialog(nav: Nav, id: Long, name: String, onDismiss: () -> Unit) {
                 }
                 LoadableContent(loader) { targets ->
                     LazyColumn(Modifier.fillMaxWidth().height(if (targets.size > 5) 280.dp else (targets.size.coerceAtLeast(1) * 52).dp)) {
-                        items(targets.size) { i ->
+                        items(targets.size, key = { targets[it].id }) { i ->
                             val pl = targets[i]
                             EncoreButton(PlaylistMergeRules.label(pl), enabled = !busy, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { merge(pl.id, pl.name) }
                         }

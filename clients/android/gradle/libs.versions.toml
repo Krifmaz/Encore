@@ -12,6 +12,7 @@ coil = "3.5.0"                     # 3.6 needs compileSdk 37 and pulls Compose 1
 datastore = "1.2.1"               # plain DataStore (the session token is app-private, allowBackup=false)
 carApp = "1.7.0"                  # androidx.car.app (Encore Lyrics car app): MapWithContentTemplate needs 1.7 / car API level 7
 junit = "4.13.2"                  # unit tests only (app/src/test: the pure rules of offline, updates, bug reports)
+profileinstaller = "1.4.1"        # installs the Baseline Profile on first launch (sideloaded and updater installs)
 metrics = "1.0.0"                 # JankStats (debug builds log janky frames, core/DevPerf.kt)
 benchmark = "1.5.0"               # Macrobenchmark (:benchmark) and the Baseline Profile Gradle plugin (:baselineprofile, :app)
 uiautomator = "2.4.0"             # the journeys (:journeys) drive the app with UiAutomator
@@ -36,6 +37,7 @@ coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref 
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 coil-network-cache-control = { group = "io.coil-kt.coil3", name = "coil-network-cache-control", version.ref = "coil" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 androidx-metrics-performance = { group = "androidx.metrics", name = "metrics-performance", version.ref = "metrics" }
 androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmark" }
 androidx-test-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }

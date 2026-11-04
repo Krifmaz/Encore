@@ -207,12 +207,12 @@ fun PlaylistsScreen(nav: Nav) {
         },
     ) { padding ->
         LoadableContent(loader) { (playlists, invites) ->
-            val sorted = playlists.sortedByDescending { it.isLiked }
+            val sorted = remember(playlists) { playlists.sortedByDescending { it.isLiked } }
             if (sorted.isEmpty() && invites.isEmpty()) {
                 EmptyState(R.drawable.ic_queue_music, "No playlists yet", modifier = Modifier.padding(padding))
                 return@LoadableContent
             }
-            val shown = PlaylistSearchRules.filterPlaylists(sorted, query)
+            val shown = remember(sorted, query) { PlaylistSearchRules.filterPlaylists(sorted, query) }
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(140.dp),
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -348,7 +348,8 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
             // Liked Songs lists the liked songs: the hearts follow what it says (a song found in the library since
             // the last refresh of the likes showed an empty heart here)
             if (pl.isLiked) LaunchedEffect(detail) { nav.graph.likes.adopt(tracks.map { it.id }.toSet()) }
-            val covers = rows.mapNotNull { it.track?.albumId?.takeIf { a -> a.isNotEmpty() } }.distinct().take(4).map { api.coverUrl(it, 400) }
+            // once per list of rows, not on every recomposition (a 5000-song Liked Songs walks every row)
+            val covers = remember(rows) { rows.mapNotNull { it.track?.albumId?.takeIf { a -> a.isNotEmpty() } }.distinct().take(4).map { api.coverUrl(it, 400) } }
             // every row's position in the playlist, in the order the Sort chip shows them
             val ordered = remember(rows, sort) { PlaylistSortRules.order(rows, sort) }
             // the rows the search keeps, by their position in the playlist, in that order (all of them while it is empty)
@@ -464,7 +465,9 @@ fun PlaylistScreen(nav: Nav, id: Long, name: String) {
                         else -> item { EmptyState(R.drawable.ic_note, "Empty playlist", "Add tracks from an album page or from a link.") }
                     }
                 }
-                items(shown.size) { k ->
+                // keyed by the row's place in the playlist, which a sort or a search doesn't change: the rows move along
+                // instead of every row recomposing with another song
+                items(shown.size, key = { k -> shown[k] }, contentType = { "song" }) { k ->
                     // `i` is the row's position in the whole playlist, whatever the sort and the search do
                     val i = shown[k]
                     val row = rows[i]

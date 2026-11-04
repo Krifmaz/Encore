@@ -55,6 +55,7 @@ import app.encore.android.features.group.ListeningTogetherRow
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
+import app.encore.android.ui.components.ListKeys
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.Avatar
 import app.encore.android.ui.components.Badge
@@ -243,8 +244,10 @@ fun HomeScreen(nav: Nav, session: Session) {
             if (data.madeForYou.isNotEmpty()) {
                 item { SectionHead("Made for you", subtitle = "ListenBrainz builds these from what you listen to") }
                 item {
+                    // stable keys: a playlist added or dropped on refresh doesn't recompose the tiles after it
+                    val keys = remember(data.madeForYou) { ListKeys.unique(data.madeForYou) { "${it.kind}/${it.title}" } }
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        items(data.madeForYou) { pl ->
+                        itemsIndexed(data.madeForYou, key = { i, _ -> keys[i] }) { _, pl ->
                             Tile(
                                 title = pl.title,
                                 subtitle = MFY_KIND[pl.kind] ?: "From ListenBrainz",
@@ -292,8 +295,10 @@ fun HomeScreen(nav: Nav, session: Session) {
             if (releases.isNotEmpty()) {
                 item { SectionHead("New releases", subtitle = "From artists in your library") }
                 item {
+                    // the release group's MusicBrainz id when it has one, else its artist and title (made unique)
+                    val keys = remember(releases) { ListKeys.unique(releases) { r -> r.str("mbid").ifEmpty { r.str("artist") + "/" + r.str("title") } } }
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        items(releases) { r ->
+                        itemsIndexed(releases, key = { i, _ -> keys[i] }) { _, r ->
                             val type = r.str("type")
                             Tile(
                                 title = r.str("title"),
@@ -317,8 +322,11 @@ fun HomeScreen(nav: Nav, session: Session) {
             if (data.played.isNotEmpty()) {
                 item { SectionHead("Recently played") }
                 item {
+                    // the song's id (numbered when it was played twice): a song played since moves the row's tiles along
+                    // instead of every tile changing its song
+                    val keys = remember(data.played) { ListKeys.unique(data.played) { it.id } }
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        itemsIndexed(data.played, key = { i, t -> "${t.id}-$i" }) { i, t ->
+                        itemsIndexed(data.played, key = { i, _ -> keys[i] }) { i, t ->
                             Tile(
                                 title = t.title,
                                 subtitle = t.artist,
