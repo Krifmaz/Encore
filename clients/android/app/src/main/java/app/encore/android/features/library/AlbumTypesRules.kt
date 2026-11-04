@@ -1,13 +1,13 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.int
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
-import app.encore.android.core.strings
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
+import dev.krifmaz.kit.compose.core.strings
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive

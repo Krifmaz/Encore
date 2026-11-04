@@ -27,8 +27,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.cadenza.CadenzaCatalog
-import app.encore.android.core.int
-import app.encore.android.core.stringOnly
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.stringOnly
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.Quality
 import app.encore.android.playback.StreamInfo
@@ -55,7 +55,7 @@ class TrackInfo(val codec: String, val sampleRate: Int, val bitDepth: Int, val c
                 o.stringOnly("codec"), o.int("sample_rate"), o.int("bit_depth"), o.int("channels"), o.int("bitrate"),
                 when (l) { "true" -> true; "false" -> false; else -> null },
                 (o["gain"] as? JsonObject)?.stringOnly("source") ?: "",
-                app.encore.android.features.library.OwnFileRules.note(o["own_file"] as? JsonObject) { app.encore.android.ui.components.formatDay(it) },
+                app.encore.android.features.library.OwnFileRules.note(o["own_file"] as? JsonObject) { dev.krifmaz.kit.compose.core.formatDay(it) },
             )
         }
     }

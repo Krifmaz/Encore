@@ -7,20 +7,20 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.webkit.MimeTypeMap
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.R
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.int
-import app.encore.android.core.long
-import app.encore.android.core.obj
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.graph
 import app.encore.android.ui.MainActivity
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -279,7 +279,7 @@ class OfflineWorker(private val app: Context, private val store: OfflineStore) {
             .build()
         infoHttp.newCall(req).execute().use { res ->
             if (!res.isSuccessful) throw Fail(OfflineIndex.statusWords(res.code))
-            return try { EncoreJson.parseToJsonElement(res.body.string()) as? JsonObject } catch (_: Exception) { null }
+            return try { KitJson.parseToJsonElement(res.body.string()) as? JsonObject } catch (_: Exception) { null }
                 ?: throw Fail("Unexpected reply from the server")
         }
     }
@@ -311,7 +311,7 @@ class OfflineWorker(private val app: Context, private val store: OfflineStore) {
         infoHttp.newCall(req).execute().use { res ->
             if (!res.isSuccessful) return false
             val text = res.body.string()
-            val o = EncoreJson.parseToJsonElement(text) as? JsonObject ?: return false
+            val o = KitJson.parseToJsonElement(text) as? JsonObject ?: return false
             if (o.str("lyrics").isBlank()) return false
             val f = store.lyricsFile(server, id)
             f.parentFile?.mkdirs()

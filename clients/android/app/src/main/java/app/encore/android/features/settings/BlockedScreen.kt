@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -21,22 +22,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.dbl
-import app.encore.android.core.long
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.settingsApi
-import app.encore.android.data.repo.formatAgo
+import dev.krifmaz.kit.compose.core.formatAgo
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ErrorBox
 import app.encore.android.ui.components.ReportUi
-import app.encore.android.ui.components.RowDivider
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.RowDivider
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -45,6 +46,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * Settings → Blocked (web-rs/src/pages/report.rs): the quality check of every download, the reports with Try again

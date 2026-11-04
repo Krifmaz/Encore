@@ -1,6 +1,6 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -8,7 +8,7 @@ import org.junit.Test
 
 /** [ShareOpenRules]: the app links the server's share page sends, the browser fallback, and the server's answers. */
 class ShareOpenRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
 
     private val token = "AbC12_xY-9876543"
 

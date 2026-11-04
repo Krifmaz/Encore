@@ -75,21 +75,21 @@ import app.encore.android.AppGraph
 import app.encore.android.R
 import app.encore.android.data.api.ApiException
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.Gutter
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.PopMenu
-import app.encore.android.ui.components.RowDivider
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.components.formatDay
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Gutter
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.PopMenu
+import dev.krifmaz.kit.compose.widgets.RowDivider
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.core.formatDay
 import app.encore.android.ui.components.formatDuration
-import app.encore.android.ui.components.formatSize
-import app.encore.android.ui.screens.EncoreField
+import dev.krifmaz.kit.compose.core.formatSize
+import dev.krifmaz.kit.compose.widgets.KitField
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -399,7 +399,7 @@ private fun FolderView(
                 modifier = Modifier.padding(horizontal = Gutter, vertical = 2.dp),
             )
         }
-        EncoreField(
+        KitField(
             value = query,
             onValueChange = { q ->
                 query = q

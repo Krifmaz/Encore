@@ -31,15 +31,16 @@ import app.encore.android.R
 import app.encore.android.data.repo.Board
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
+import dev.krifmaz.kit.compose.widgets.EmptyState
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.SectionHead
+import dev.krifmaz.kit.compose.widgets.SectionHead
 import app.encore.android.ui.components.formatLongDuration
 import app.encore.android.ui.components.formatNumber
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
+import dev.krifmaz.kit.compose.widgets.CardBox
 
 private val MEDAL = listOf("🥇", "🥈", "🥉")
 

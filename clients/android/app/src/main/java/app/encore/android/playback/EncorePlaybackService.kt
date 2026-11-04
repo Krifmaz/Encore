@@ -39,7 +39,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import app.encore.android.AppGraph
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.EncoreApp
 import app.encore.android.R
 import app.encore.android.cadenza.CadenzaEngine
@@ -669,7 +669,7 @@ class EncorePlaybackService : MediaLibraryService() {
                 PlayerErrors.Action.STREAM -> {
                     // the downloaded copy would not play: this session the song streams from the server, from the same spot
                     resolver.copyFailed(t.id)
-                    app.encore.android.ui.components.Toasts.show("This download would not play – playing the song from the server", "info")
+                    dev.krifmaz.kit.compose.toasts.Toasts.show("This download would not play – playing the song from the server", "info")
                     current.reopen(t, rung = null, dsp = null, offsetSec = groupSpot(spot, resolver.reopenVariant(t, null, null, 0.0)), prepareFirst = true)
                 }
                 PlayerErrors.Action.NO_DSP -> {

@@ -54,19 +54,19 @@ import app.encore.android.features.requests.rememberRequestActions
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
+import dev.krifmaz.kit.compose.widgets.EmptyState
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.Gutter
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.PopMenu
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Gutter
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.PopMenu
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -77,6 +77,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 private val FILTERS = listOf("all" to "All", "active" to "Active", "pending" to "Awaiting approval", "completed" to "Available", "failed" to "Failed")
 
@@ -473,7 +476,7 @@ fun RequestsScreen(nav: Nav, asTab: Boolean = false) {
             // a new request: paste a link (the web's Downloader) or search Discover
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    EncoreField(
+                    KitField(
                         value = link,
                         onValueChange = { link = it; probe = null; probeError = null },
                         placeholder = "Paste a link: Spotify, YouTube, Deezer, Tidal, Qobuz, Amazon Music, Bandcamp…",

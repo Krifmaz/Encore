@@ -77,25 +77,25 @@ import app.encore.android.data.repo.Me
 import app.encore.android.features.library.openAlbum
 import app.encore.android.features.library.openLibraryAlbum
 import app.encore.android.ui.components.AlbumCard
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MoreButton
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MoreButton
 import kotlinx.coroutines.CancellationException
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
 import app.encore.android.ui.components.FastScroller
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.RoundCover
 import app.encore.android.ui.components.ScrollerTarget
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.components.Tile
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.formatLongDuration
@@ -114,6 +114,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.widgets.CardBox
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 // ---- artist (web/js/pages/discover.js renderArtist) --------------------------------------------------------------
 
@@ -193,9 +196,9 @@ private fun DiscographySheet(a: ArtistPage, ext: List<ExtRelease>, statuses: Req
         Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
             Text("Request discography", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
             Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Cancel") { onDismiss() }
+                KitButton("Cancel") { onDismiss() }
                 val n = ticked.size
-                EncoreButton("Request $n release${if (n == 1) "" else "s"}", iconRes = R.drawable.ic_download, primary = true) {
+                KitButton("Request $n release${if (n == 1) "" else "s"}", iconRes = R.drawable.ic_download, primary = true) {
                     if (ticked.isEmpty()) {
                         Toasts.show("Tick at least one release", "err")
                     } else {
@@ -249,9 +252,9 @@ private fun ReleaseTypesSheet(a: ArtistPage, onDismiss: () -> Unit, onSave: (Lis
         Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
             Text("Release types", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
             Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                if (a.releaseTypesOwn) EncoreButton("Use settings") { onSave(null, emptyList()) }
-                EncoreButton("Cancel") { onDismiss() }
-                EncoreButton("Save", primary = true) {
+                if (a.releaseTypesOwn) KitButton("Use settings") { onSave(null, emptyList()) }
+                KitButton("Cancel") { onDismiss() }
+                KitButton("Save", primary = true) {
                     if (kinds.isEmpty()) Toasts.show("Tick at least one kind", "err")
                     else onSave(a.releaseKinds.map { it.key }.filter { it in kinds }, a.releaseSkip.map { it.key }.filter { it in skip })
                 }
@@ -611,8 +614,8 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                             }
                             Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (byName || a.libraryTracks > 0) {
-                                    EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
-                                    EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
+                                    KitButton("Play", iconRes = R.drawable.ic_play, primary = true) { playAll(false) }
+                                    KitButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playAll(true) }
                                 }
                             }
                             // requests, the counts and the links need MusicBrainz
@@ -620,7 +623,7 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                                 if (status.isNotEmpty()) {
                                     LiveBadge(status, statusText)
                                 } else {
-                                    EncoreButton("Request discography", iconRes = R.drawable.ic_download) {
+                                    KitButton("Request discography", iconRes = R.drawable.ic_download) {
                                         // the releases to tick, for this request (older servers have no release types: the plain request)
                                         if (a.releaseKinds.isNotEmpty()) {
                                             discoSheet = true
@@ -636,7 +639,7 @@ private fun ArtistPageScreen(nav: Nav, mbid: String, name: String) {
                                 // the artist's own release types: compilations, greatest hits, live … off for them alone
                                 if (me?.isAdmin == true && a.releaseKinds.isNotEmpty()) {
                                     Spacer(Modifier.width(8.dp))
-                                    EncoreButton(if (a.releaseTypesOwn) "Release types (own)" else "Release types") { typesSheet = true }
+                                    KitButton(if (a.releaseTypesOwn) "Release types (own)" else "Release types") { typesSheet = true }
                                 }
                             }
                             if (!byName) Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1089,7 +1092,7 @@ internal fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuse
             val seedable = (m.ext as? kotlinx.serialization.json.JsonObject)?.let { o -> listOf("deezer", "apple").any { k -> o[k] != null && o[k] !is JsonNull } } == true
             if (seedable) {
                 Row(Modifier.padding(horizontal = 22.dp, vertical = 4.dp)) {
-                    EncoreButton("Add to MusicBrainz", iconRes = R.drawable.ic_open_in_new) {
+                    KitButton("Add to MusicBrainz", iconRes = R.drawable.ic_open_in_new) {
                         scope.launch {
                             try {
                                 val url = withContext(Dispatchers.IO) { nav.features.mbSeedLink(m.ext, artistMbid, artistName) }
@@ -1115,8 +1118,8 @@ internal fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuse
                     } else {
                         if (queue.isNotEmpty()) {
                             Row(Modifier.padding(horizontal = 22.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { nav.player.play(queue, 0) }
-                                EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { nav.player.play(queue, 0, shuffle = true) }
+                                KitButton("Play", iconRes = R.drawable.ic_play, primary = true) { nav.player.play(queue, 0) }
+                                KitButton("Shuffle", iconRes = R.drawable.ic_shuffle) { nav.player.play(queue, 0, shuffle = true) }
                             }
                             NoteText("${owned.size} of ${tracks.size} songs in your library", Modifier.padding(bottom = 6.dp))
                         }
@@ -1126,7 +1129,7 @@ internal fun ExtTracksSheet(nav: Nav, artistName: String, m: ExtRelease, statuse
                         }
                         if (missing.isNotEmpty() && releaseStatus.isEmpty()) {
                             Row(Modifier.padding(horizontal = 22.dp, vertical = 6.dp)) {
-                                EncoreButton(RestOfAlbumRules.requestAllLabel(missing.size), iconRes = R.drawable.ic_add, primary = true) {
+                                KitButton(RestOfAlbumRules.requestAllLabel(missing.size), iconRes = R.drawable.ic_add, primary = true) {
                                     scope.launch { requestMissingSongs(nav, m, artistName, missing, statuses) }
                                 }
                             }
@@ -1246,15 +1249,15 @@ fun CatalogAlbumScreen(nav: Nav, rgid: String) {
                         // songs you own play right here, in album order, even when only some of the album is in the library
                         Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (queue.isNotEmpty()) {
-                                EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true) { playOwned(0) }
-                                EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playOwned(0, true) }
+                                KitButton("Play", iconRes = R.drawable.ic_play, primary = true) { playOwned(0) }
+                                KitButton("Shuffle", iconRes = R.drawable.ic_shuffle) { playOwned(0, true) }
                             }
                             if (a.inLibrary) {
                                 if (a.libraryAlbumId.isEmpty()) Availability(true, "")
                             } else if (albumStatus.isNotEmpty()) {
                                 LiveBadge(albumStatus, statuses.labelOf(albumKeyList, a.requestLabel))
                             } else {
-                                EncoreButton("Request album", iconRes = R.drawable.ic_add, primary = true) {
+                                KitButton("Request album", iconRes = R.drawable.ic_add, primary = true) {
                                     scope.launch {
                                         val body = buildJsonObject {
                                             put("kind", "album"); put("mbid", a.id); put("artist", a.artist); put("title", a.title); put("album", a.title)
@@ -1270,8 +1273,8 @@ fun CatalogAlbumScreen(nav: Nav, rgid: String) {
                             Text("${queue.size} of ${tracks.size} songs in your library", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(top = 6.dp))
                         }
                         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (a.libraryAlbumId.isNotEmpty()) EncoreButton("Open in library", iconRes = R.drawable.ic_disc) { nav.open(Screen.Album(a.libraryAlbumId)) }
-                            EncoreButton("Pick download", iconRes = R.drawable.ic_search) {
+                            if (a.libraryAlbumId.isNotEmpty()) KitButton("Open in library", iconRes = R.drawable.ic_disc) { nav.open(Screen.Album(a.libraryAlbumId)) }
+                            KitButton("Pick download", iconRes = R.drawable.ic_search) {
                                 nav.open(Screen.Picker(PickerOpts(
                                     kind = "album", mbid = a.id, artist = a.artist, artistMbid = a.artistId, title = a.title, album = a.title,
                                     year = a.year, coverUrl = a.cover, trackCount = tracks.size,

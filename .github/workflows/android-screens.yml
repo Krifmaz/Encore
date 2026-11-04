@@ -1,0 +1,71 @@
+name: android-screens
+
+# Before/after screenshots for the switch to the Krifmaz kit: the same scenes (every theme, the widgets, Details,
+# a confirm, toasts, the updater) rendered by the app before the switch and after it on one emulator, then compared
+# pixel by pixel. Runs when its own files change, or by hand with the commit to compare against.
+on:
+  pull_request:
+    paths:
+      - ".github/android-screens/**"
+      - ".github/workflows/android-screens.yml"
+  workflow_dispatch:
+    inputs:
+      before:
+        description: "Commit of the app before the change"
+        default: "5c0bdcb"
+
+permissions:
+  contents: read
+
+jobs:
+  screens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BEFORE: ${{ inputs.before || '5c0bdcb' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: after
+          fetch-depth: 0
+      - name: Before checkout
+        run: git -C after worktree add "$GITHUB_WORKSPACE/before" "$BEFORE"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+      - name: Gradle version
+        id: gradle
+        run: echo "version=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip.*/\1/p' after/clients/android/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle.outputs.version }}
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Screenshots
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            bash after/.github/android-screens/run.sh before "$GITHUB_WORKSPACE/before" "$GITHUB_WORKSPACE/shots/before"
+            bash after/.github/android-screens/run.sh after "$GITHUB_WORKSPACE/after" "$GITHUB_WORKSPACE/shots/after"
+      - name: Compare
+        run: |
+          pip install --quiet pillow
+          python3 after/.github/android-screens/compare.py shots/before shots/after
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-screens
+          path: shots/
+          if-no-files-found: ignore

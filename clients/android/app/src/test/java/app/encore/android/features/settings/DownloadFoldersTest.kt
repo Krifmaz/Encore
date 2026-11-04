@@ -1,6 +1,6 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -8,7 +8,7 @@ import org.junit.Test
 
 /** The Download folders of Diagnostics (servers since 0.33), as the web's `folder_lines`. */
 class DownloadFoldersTest {
-    private val d = EncoreJson.parseToJsonElement("""{"version": "0.33.0", "uid": 1000, "checks": [], "download_folders": {"ok": false, "roots": [
+    private val d = KitJson.parseToJsonElement("""{"version": "0.33.0", "uid": 1000, "checks": [], "download_folders": {"ok": false, "roots": [
         {"key": "staging_path", "label": "Staging folder (yt-dlp, streamrip, links)", "path": "/downloads/encore", "state": "read_only", "result": "Read-only", "ok": false,
          "text": "The downloads folder /downloads/encore is read-only – check the disk (dmesg, fsck) or the mount", "checked_at": 20, "since": 10},
         {"key": "qbit_download_path", "label": "Torrent downloads (qBittorrent)", "path": "/downloads/torrents", "state": "denied", "result": "Permission denied", "ok": true,
@@ -31,7 +31,7 @@ class DownloadFoldersTest {
         // on the page the result is said once (the badge); no time before the first probe
         assertEquals(Pair("Permission denied – Encore may not write here, which is fine", "Checked t20"), DownloadFolderRules.shownLines(f[1], date))
         assertEquals(Pair<String?, String?>(null, null), DownloadFolderRules.shownLines(f[2], date))
-        val fine = EncoreJson.parseToJsonElement("""{"state": "ok", "result": "Writable", "ok": true, "checked_at": 20}""") as JsonObject
+        val fine = KitJson.parseToJsonElement("""{"state": "ok", "result": "Writable", "ok": true, "checked_at": 20}""") as JsonObject
         assertEquals(Pair<String?, String?>(null, "Checked t20"), DownloadFolderRules.shownLines(fine, date))
     }
 

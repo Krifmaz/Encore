@@ -25,15 +25,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.repo.ExtRelease
 import app.encore.android.data.repo.ExtTrack
 import app.encore.android.data.repo.PickerOpts
 import app.encore.android.features.library.RestOfAlbumRules
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +44,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.widgets.KitField
 
 // "Get the rest of the album" for albums MusicBrainz doesn't list (the web's web-rs/src/pages/rest_of_album.rs): another
 // catalogue's track list opens in [ExtTracksSheet] (Request on each missing song, and all of them at once); when no
@@ -119,7 +120,7 @@ fun RestTypedDialog(nav: Nav, ask: RestAsk, isAdmin: Boolean, onDismiss: () -> U
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(RestOfAlbumRules.notFound(ask.album, ask.message), style = MaterialTheme.typography.bodyMedium)
-                EncoreField(
+                KitField(
                     text, { text = it }, placeholder = "1. First song", label = "The album's songs, one per line",
                     singleLine = false, minLines = 6, maxLines = 12, imeAction = ImeAction.Default, modifier = Modifier.fillMaxWidth(),
                 )
@@ -136,7 +137,7 @@ fun RestTypedDialog(nav: Nav, ask: RestAsk, isAdmin: Boolean, onDismiss: () -> U
                     Text("Lines are “Artist - Title”", color = p.text, style = MaterialTheme.typography.bodyMedium)
                 }
                 // the whole album by name: each download source searches for it, and the songs already here don't stop it
-                EncoreButton("Search downloads for the album", iconRes = R.drawable.ic_download, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                KitButton("Search downloads for the album", iconRes = R.drawable.ic_download, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                     val body = buildJsonObject {
                         put("kind", "album")
                         put("artist", ask.artist)
@@ -151,7 +152,7 @@ fun RestTypedDialog(nav: Nav, ask: RestAsk, isAdmin: Boolean, onDismiss: () -> U
                     }
                 }
                 if (isAdmin) {
-                    EncoreButton("Pick a download", iconRes = R.drawable.ic_search, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    KitButton("Pick a download", iconRes = R.drawable.ic_search, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                         onDismiss()
                         nav.open(Screen.Picker(PickerOpts(kind = "album", artist = ask.artist, title = ask.album, album = ask.album)))
                     }

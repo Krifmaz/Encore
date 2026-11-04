@@ -1,8 +1,8 @@
 package app.encore.android.data.api
 
 import app.encore.android.AppGraph
-import app.encore.android.core.parseJsonObject
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject

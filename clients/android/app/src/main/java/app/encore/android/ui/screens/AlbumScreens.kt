@@ -45,10 +45,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.encore.android.R
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.AlbumDetail
 import app.encore.android.data.api.EncoreApi
@@ -57,22 +57,22 @@ import app.encore.android.data.api.Track
 import app.encore.android.data.api.Tr
 import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuEntry
 import app.encore.android.ui.components.ReportUi
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.TrackRow
-import app.encore.android.ui.components.formatDay
+import dev.krifmaz.kit.compose.core.formatDay
 import app.encore.android.ui.components.formatLongDuration
-import app.encore.android.ui.components.formatSize
+import dev.krifmaz.kit.compose.core.formatSize
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.components.shareLinkOf
 import app.encore.android.ui.theme.palette
@@ -94,7 +94,7 @@ import app.encore.android.features.library.SurroundUi
 import app.encore.android.features.library.SurroundVersions
 import app.encore.android.features.library.VerifyBadge
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -102,21 +102,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
-/** A back arrow and a title, for pages stacked on a tab (kept for screens that don't use a scrolling top bar). */
-@Composable
-fun BackBar(title: String, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 4.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "Back") }
-        Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
 /** Play and Shuffle for a list of songs (the web's `.btn.primary` Play and `.btn` Shuffle). */
 @Composable
 fun PlayButtons(nav: Nav, tracks: List<Track>, modifier: Modifier = Modifier, trailing: @Composable () -> Unit = {}) {
     Row(modifier.padding(horizontal = Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        EncoreButton("Play", iconRes = R.drawable.ic_play, primary = true, enabled = tracks.isNotEmpty()) { nav.player.play(tracks) }
-        EncoreButton("Shuffle", iconRes = R.drawable.ic_shuffle, enabled = tracks.isNotEmpty()) { nav.player.play(tracks, shuffle = true) }
+        KitButton("Play", iconRes = R.drawable.ic_play, primary = true, enabled = tracks.isNotEmpty()) { nav.player.play(tracks) }
+        KitButton("Shuffle", iconRes = R.drawable.ic_shuffle, enabled = tracks.isNotEmpty()) { nav.player.play(tracks, shuffle = true) }
         trailing()
     }
 }

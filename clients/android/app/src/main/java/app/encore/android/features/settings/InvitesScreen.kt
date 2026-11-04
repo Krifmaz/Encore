@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,17 +26,17 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.dbl
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.settingsApi
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.formatDay
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.core.formatDay
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * Settings → Invites (web-rs/src/settings/invites.rs): the sign-up mode, the invites with their uses, role, expiry
@@ -75,7 +82,7 @@ fun InvitesScreen(nav: Nav, onBack: () -> Unit) {
     val link = { code: String -> SettingsRules.inviteLink(base, code) }
 
     SettingsPage("Invites", onBack, subtitle = "Share an invite link so friends can create an account.") {
-        EncoreButton("New invite", iconRes = R.drawable.ic_add, primary = true, modifier = Modifier.padding(bottom = 12.dp)) { making = true }
+        KitButton("New invite", iconRes = R.drawable.ic_add, primary = true, modifier = Modifier.padding(bottom = 12.dp)) { making = true }
         val s = settings
         SetCard(Modifier.padding(bottom = 14.dp)) {
             Text("Sign-up mode", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
@@ -86,7 +93,7 @@ fun InvitesScreen(nav: Nav, onBack: () -> Unit) {
             SegRow(modes, s?.str("signup_mode").orEmpty(), enabled = s != null && !locked) { m ->
                 scope.serverCall(after = { r: JsonObject ->
                     settings = r
-                    app.encore.android.ui.components.Toasts.show("Sign-ups: ${modes.first { it.first == m }.second}", "ok")
+                    dev.krifmaz.kit.compose.toasts.Toasts.show("Sign-ups: ${modes.first { it.first == m }.second}", "ok")
                 }) { api.putSettings(JsonObject(mapOf("signup_mode" to JsonPrimitive(m)))) }
             }
             if (s != null && locked) EnvLockedNote(SchemaRules.envVar(s, "signup_mode"), Modifier)

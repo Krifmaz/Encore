@@ -11,6 +11,7 @@ kotlinxCoroutines = "1.11.0"
 coil = "3.5.0"                     # 3.6 needs compileSdk 37 and pulls Compose 1.12
 datastore = "1.2.1"               # plain DataStore (the session token is app-private, allowBackup=false)
 carApp = "1.7.0"                  # androidx.car.app (Encore Lyrics car app): MapWithContentTemplate needs 1.7 / car API level 7
+kit = "0.1.0"                     # dev.krifmaz.kit:kit-compose, built from the kit's source at kit.properties (settings.gradle.kts)
 junit = "4.13.2"                  # unit tests only (app/src/test: the pure rules of offline, updates, bug reports)
 
 [libraries]
@@ -30,6 +31,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 coil-network-cache-control = { group = "io.coil-kt.coil3", name = "coil-network-cache-control", version.ref = "coil" }
+kit-compose = { group = "dev.krifmaz.kit", name = "kit-compose", version.ref = "kit" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]

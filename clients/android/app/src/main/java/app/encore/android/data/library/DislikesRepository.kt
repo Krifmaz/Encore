@@ -2,7 +2,7 @@ package app.encore.android.data.library
 
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.features.offline.OfflineMode
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow

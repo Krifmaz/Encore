@@ -61,8 +61,8 @@ import app.encore.android.data.prefs.NormPrefs
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.playback.Normalization
 import app.encore.android.data.prefs.Quality
-import app.encore.android.core.long
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.settingsApi
 import app.encore.android.data.session.Session
 import app.encore.android.features.files.FilesAccess
@@ -78,16 +78,16 @@ import app.encore.android.features.settings.LanguageScreen
 import app.encore.android.features.settings.PluginRules
 import app.encore.android.features.settings.PluginsScreen
 import app.encore.android.features.settings.SECTION_TITLES
-import app.encore.android.features.settings.SchemaFormState
+import dev.krifmaz.kit.compose.settings.SchemaFormState
 import app.encore.android.features.settings.ServerSchema
 import app.encore.android.features.settings.ServerSectionScreen
 import app.encore.android.features.settings.SettingsRules
 import app.encore.android.features.settings.ThisDeviceScreen
 import app.encore.android.features.settings.UsersScreen
 import app.encore.android.features.settings.appearanceSummary
-import app.encore.android.features.settings.loadState
-import app.encore.android.features.settings.schemaApi
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.settings.loadState
+import app.encore.android.schemaApi
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.cadenza.CadenzaCatalog
 import app.encore.android.cadenza.CadenzaEngine
 import app.encore.android.playback.CarPrefs
@@ -105,6 +105,7 @@ import app.encore.android.ui.tv.rememberIsTvDevice
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.widgets.BackBar
 
 /**
  * Settings: the web's sections in the web's order (web-rs/src/settings/mod.rs), as a list that opens one page at a

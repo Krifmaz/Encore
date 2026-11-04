@@ -136,7 +136,7 @@
 
         <!-- Updates: the install session's outcome (only the session's own PendingIntent reaches it) -->
         <receiver
-            android:name=".features.update.UpdateInstallReceiver"
+            android:name="dev.krifmaz.kit.compose.update.UpdateInstallReceiver"
             android:exported="false" />
 
         <!-- Bug reports: an export (cacheDir/shared/) handed to the share sheet (res/xml/file_paths.xml) -->

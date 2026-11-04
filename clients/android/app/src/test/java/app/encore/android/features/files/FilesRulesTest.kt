@@ -1,6 +1,6 @@
 package app.encore.android.features.files
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -16,7 +16,7 @@ import org.junit.Test
  * web's (web-rs/src/pages/files/logic.rs tests).
  */
 class FilesRulesTest {
-    private fun json(s: String): JsonElement = EncoreJson.parseToJsonElement(s)
+    private fun json(s: String): JsonElement = KitJson.parseToJsonElement(s)
     private fun obj(s: String): JsonObject = json(s) as JsonObject
 
     @Test
@@ -285,9 +285,9 @@ class FilesRulesTest {
         assertTrue(FilesRules.deleteBody(true, 30).startsWith("You can restore them from Trash for 30 days"))
         assertEquals("Deleted 3 items", FilesRules.deletedLine(3, false))
         assertEquals("Files you delete wait here for 30 days, then they are deleted for good.", FilesRules.trashEmptyLine(true, 30))
-        val off = FileRoot.from(EncoreJson.parseToJsonElement("""{"id": "trash", "name": "Trash", "path": "/t", "keep": false, "days": 7}""") as JsonObject)!!
+        val off = FileRoot.from(KitJson.parseToJsonElement("""{"id": "trash", "name": "Trash", "path": "/t", "keep": false, "days": 7}""") as JsonObject)!!
         assertFalse(off.keep)
         assertEquals(7, off.days)
-        assertTrue(FileRoot.from(EncoreJson.parseToJsonElement("""{"id": "trash"}""") as JsonObject)!!.keep)
+        assertTrue(FileRoot.from(KitJson.parseToJsonElement("""{"id": "trash"}""") as JsonObject)!!.keep)
     }
 }

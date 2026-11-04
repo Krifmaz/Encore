@@ -13,7 +13,7 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.MediaSource
 import app.encore.android.cadenza.CadenzaEngine
-import app.encore.android.core.dbl
+import dev.krifmaz.kit.compose.core.dbl
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.playback.output.EffectsAudioProcessor

@@ -20,7 +20,7 @@ import app.encore.android.features.group.GroupListen
 import app.encore.android.features.library.PlaylistLinkUi
 import app.encore.android.features.library.ShareOpen
 import app.encore.android.features.library.ShareOpenRules
-import app.encore.android.features.update.Updater
+import dev.krifmaz.kit.compose.update.Updater
 import app.encore.android.graph
 import app.encore.android.ui.theme.EncoreTheme
 import app.encore.android.ui.theme.isDarkTheme
