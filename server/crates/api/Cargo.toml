@@ -20,6 +20,14 @@ encore-system = { workspace = true }
 encore-requests = { workspace = true }
 encore-files = { workspace = true }
 encore-plugins = { workspace = true }
+kit-server-core = { workspace = true }
+kit-server-health = { workspace = true }
+kit-server-changelog = { workspace = true }
+kit-server-notices = { workspace = true }
+kit-server-bugreports = { workspace = true }
+kit-server-diagnostics = { workspace = true }
+kit-server-settings = { workspace = true }
+kit-server-updates = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
 tokio = { workspace = true }

@@ -11,6 +11,7 @@ pub mod contribute;
 pub mod covers;
 pub mod email;
 pub mod enrich;
+pub mod kit;
 /// The HTTP routes, one router per area.
 pub mod routes;
 pub mod scheduler;
