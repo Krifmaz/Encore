@@ -4,7 +4,7 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
 import app.encore.android.AppGraph
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.EncoreApi
 import kotlinx.serialization.json.JsonObject

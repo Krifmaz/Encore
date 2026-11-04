@@ -1,8 +1,8 @@
 package app.encore.android.features.files
 
-import app.encore.android.core.arr
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 

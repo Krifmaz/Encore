@@ -1,5 +1,7 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.AppCrashesSection
+import dev.krifmaz.kit.compose.settings.DiagnosticsScreen as KitDiagnosticsScreen
 import android.Manifest
 import android.content.Context
 import android.net.Uri
@@ -36,29 +38,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.AppGraph
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.SettingsApi
 import app.encore.android.data.api.settingsApi
-import app.encore.android.data.repo.formatAgo
+import dev.krifmaz.kit.compose.core.formatAgo
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.CopyIconButton
-import app.encore.android.ui.components.DetailsDialog
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.RowDivider
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.components.formatDay
-import app.encore.android.ui.components.formatSize
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.details.CopyIconButton
+import dev.krifmaz.kit.compose.details.DetailsDialog
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.RowDivider
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.core.formatDay
+import dev.krifmaz.kit.compose.core.formatSize
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -74,166 +76,52 @@ import okio.BufferedSink
 import okio.source
 import java.text.DateFormat
 import java.util.Date
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import dev.krifmaz.kit.compose.settings.Dot
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.PageSection
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.TextLink
 
 /**
- * Settings → Diagnostics (web-rs/src/settings/diagnostics.rs): the server's own update card first, right under
- * Copy report / Run checks (admins: Check now, Restart server, Update now, and the wait until the server is back);
- * then every connection, folder and tool check with the raw answers, the Server block and where settings come from
- * (folded away until tapped); the database backups (Back up now, Upload a backup…, Download into the phone's
- * Downloads folder, Restore…); and the phone app's crash reports.
+ * Settings → Diagnostics (web-rs/src/settings/diagnostics.rs), drawn by the kit's diagnostics screen: the server's own
+ * update card first, right under Copy report / Run checks (admins: Check now, Restart server, Update now, and the
+ * wait until the server is back); then every connection, folder and tool check with the raw answers, the Server block,
+ * the download folders and where settings come from (folded away until tapped); the database backups (Back up now,
+ * Upload a backup…, Download into the phone's Downloads folder, Restore…); and the phone app's crash reports.
  */
 @Composable
 fun DiagnosticsScreen(nav: Nav, onBack: () -> Unit) {
     val api = nav.graph.settingsApi
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var run by remember { mutableIntStateOf(0) }
-    var data by remember { mutableStateOf<JsonObject?>(null) }
-    var checking by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf("") }
-    LaunchedEffect(run) {
-        checking = true
-        try {
-            data = withContext(Dispatchers.IO) {
-                val d = api.diagnostics()
-                // Encore's VPN for Soulseek as one more connection check (older servers have no /system/vpn)
-                val vpn = try { api.vpn() } catch (_: Exception) { null }
-                if (vpn == null) d else {
-                    val checks = (d.arr("checks") ?: kotlinx.serialization.json.JsonArray(emptyList())) + SettingsRules.vpnCheck(vpn)
-                    JsonObject(d + ("checks" to kotlinx.serialization.json.JsonArray(checks)))
-                }
-            }
-            error = ""
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            error = e.message ?: "Something went wrong"
-        }
-        checking = false
-    }
-    SettingsPage(
-        "Diagnostics",
-        onBack,
+    KitDiagnosticsScreen(
+        title = "Diagnostics",
         subtitle = "Runs every connection, folder and tool check from inside the Encore container and shows the raw answers. Keys are hidden.",
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-            EncoreButton("Copy report", iconRes = R.drawable.ic_content_copy, enabled = data != null) {
-                data?.let { copyToClipboard(context, SettingsRules.diagnosticsReport(it, ::dateTime) { b -> formatSize(b.toLong()) }) }
+        onBack = onBack,
+        load = {
+            val d = api.diagnostics()
+            // Encore's VPN for Soulseek as one more connection check (older servers have no /system/vpn)
+            val vpn = try { api.vpn() } catch (_: Exception) { null }
+            if (vpn == null) d else {
+                val checks = (d.arr("checks") ?: kotlinx.serialization.json.JsonArray(emptyList())) + SettingsRules.vpnCheck(vpn)
+                JsonObject(d + ("checks" to kotlinx.serialization.json.JsonArray(checks)))
             }
-            EncoreButton("Run checks", iconRes = R.drawable.ic_refresh, primary = true, enabled = !checking) { run += 1 }
-        }
+        },
+        report = { SettingsRules.diagnosticsReport(it, ::dateTime) { b -> formatSize(b.toLong()) } },
+        serverRows = { m -> SettingsRules.serverRows(m) { b -> formatSize(b.toLong()) } },
+        appName = "Encore",
         // Updates sit at the top: it is the part people come here for most, and it no longer hides under the checks
-        ServerUpdateCard(api, onServerBack = { run += 1 })
-        val d = data
-        when {
-            checking && d == null -> Row(verticalAlignment = Alignment.CenterVertically) { Spinner(18.dp); Spacer(Modifier.width(8.dp)); Muted("Checking…") }
-            d == null -> ErrorBox(error) { run += 1 }
-            else -> Checks(d)
-        }
-        Backups(nav.graph, api)
-        Crashes(api)
-    }
+        top = { rerun -> ServerUpdateCard(api, onServerBack = rerun) },
+        afterChecks = { d -> DownloadFolders(d, ::dateTime) },
+        bottom = {
+            Backups(nav.graph, api)
+            AppCrashesSection(load = { api.crashes() }, clear = { api.clearCrashes() })
+        },
+    )
 }
 
 private fun dateTime(t: Double): String = if (t <= 0) "—" else DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date((t * 1000).toLong()))
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun Checks(d: JsonObject) {
-    val checks = d.arr("checks").objectsOf()
-    val bad = checks.count { !it.bool("ok") }
-    SetCard(Modifier.padding(bottom = 4.dp)) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Badge(if (bad > 0) "$bad problem${if (bad > 1) "s" else ""}" else "All good", kind = if (bad > 0) "err" else "ok")
-            Muted("Encore ${d.str("version")} · running as uid ${SettingsRules.jsStr(d, "uid")} · ${dateTime(d.dbl("time"))}")
-        }
-    }
-    d.obj("machine")?.let { m ->
-        PageSection("Server", "What Encore sees of the machine it runs on")
-        SetCard(flat = true) {
-            for ((k, v) in SettingsRules.serverRows(m) { b -> formatSize(b.toLong()) }) {
-                Row(Modifier.fillMaxWidth()) {
-                    Muted(k, Modifier.width(150.dp))
-                    Text(v, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                }
-            }
-        }
-    }
-    for ((kind, title) in SettingsRules.CHECK_KINDS) {
-        val group = checks.filter { it.str("kind") == kind }
-        if (group.isEmpty()) continue
-        PageSection(title)
-        SetCard(flat = true) {
-            group.forEachIndexed { i, c ->
-                if (i > 0) RowDivider(startIndent = 0.dp)
-                CheckItem(c)
-            }
-        }
-    }
-    DownloadFolders(d, ::dateTime)
-    SettingsSources(d)
-}
-
-/**
- * "Where settings come from": every setting key with its source badge (env VAR or saved in Encore) and its value.
- * The list is long, so it starts folded: the heading is a toggle with a chevron, and the rows show once it is tapped.
- * The open/closed choice lasts while the page is on screen (a Run checks keeps it).
- */
-@Composable
-private fun SettingsSources(d: JsonObject) {
-    val p = MaterialTheme.palette
-    var open by remember { mutableStateOf(false) }
-    val rows = d.arr("settings").objectsOf()
-    Column(Modifier.fillMaxWidth().clickable { open = !open }) {
-        PageSection("Where settings come from", "Environment variables always win over values saved in Encore") {
-            Icon(
-                painterResource(R.drawable.ic_expand_more),
-                contentDescription = if (open) "Hide settings" else "Show ${rows.size} settings",
-                tint = p.muted,
-                // the chevron points down while folded and flips up once the list is open
-                modifier = Modifier.rotate(if (open) 180f else 0f),
-            )
-        }
-    }
-    if (!open) return
-    SetCard(flat = true) {
-        rows.forEachIndexed { i, s ->
-            if (i > 0) RowDivider(startIndent = 0.dp)
-            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Mono(s.str("key"), Modifier.weight(1f))
-                    if (s.str("source") == "env") Badge("env ${s.str("env")}", kind = "info") else Badge("saved in Encore")
-                }
-                Mono(SettingsRules.jsStr(s, "value"), color = p.muted)
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun CheckItem(c: JsonObject) {
-    val p = MaterialTheme.palette
-    val ok = c.bool("ok")
-    var raw by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
-        Dot(ok, Modifier.padding(top = 6.dp))
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(c.str("name"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                if (SchemaRules.truthy(c["status"])) Badge("HTTP ${c.str("status")}", kind = if (ok) "ok" else "err")
-                if (!SettingsRules.nullish(c, "ms")) Muted("${c.str("ms")} ms", color = p.faint)
-            }
-            if (c.str("request").isNotEmpty()) Mono(c.str("request"), color = p.faint)
-            Muted(c.str("detail"), color = if (ok) p.muted else EncoreColors.Err)
-            if (c.str("body").isNotEmpty()) {
-                TextLink("Raw response", color = p.muted) { raw = !raw }
-                if (raw) Mono(c.str("body").take(4000), color = p.muted)
-            }
-        }
-    }
-}
 
 // ---- the server's update ------------------------------------------------------------------------------------------
 
@@ -574,67 +462,3 @@ private fun streamBody(context: Context, uri: Uri): RequestBody = object : Reque
 
 
 // ---- the phone app's crashes -------------------------------------------------------------------------------------------
-
-@Composable
-private fun Crashes(api: SettingsApi) {
-    val p = MaterialTheme.palette
-    val scope = rememberCoroutineScope()
-    var version by remember { mutableIntStateOf(0) }
-    var list by remember { mutableStateOf<List<JsonObject>?>(null) }
-    var error by remember { mutableStateOf("") }
-    var asking by remember { mutableStateOf(false) }
-    // the crash opened whole: (kind, text)
-    var whole by remember { mutableStateOf<Pair<String, String>?>(null) }
-    LaunchedEffect(version) {
-        try {
-            list = withContext(Dispatchers.IO) { api.crashes() }.arr("crashes").objectsOf()
-            error = ""
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            error = e.message ?: "Something went wrong"
-        }
-    }
-    PageSection("App crashes") { SmallButton("Clear", enabled = !list.isNullOrEmpty()) { asking = true } }
-    SetCard(flat = true) {
-        Muted("The phone app sends a report the next time it opens after it crashed or the system closed it. The newest 50 are kept.")
-        val l = list
-        when {
-            l == null && error.isNotEmpty() -> Muted(error)
-            l == null -> Spinner(16.dp)
-            l.isEmpty() -> Muted("No app crashes reported.")
-            else -> l.forEachIndexed { i, c ->
-                if (i > 0) RowDivider(startIndent = 0.dp)
-                var open by remember(c) { mutableStateOf(false) }
-                val first = c.str("first_line").ifEmpty { "Crash" }
-                val kind = SettingsRules.crashKind(c.str("kind"))
-                val meta = listOf("device", "app_version", "os", "user").map { c.str(it) }.filter { it.isNotEmpty() }
-                // the whole report to read and copy: the cut-off first line opens it, Copy takes all of it
-                val full = SettingsRules.crashText(first, kind, meta.joinToString(" · "), dateTime(c.dbl("time")), c.str("text"))
-                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
-                    Dot(false, Modifier.padding(top = 6.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                first, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, maxLines = 2,
-                                modifier = Modifier.weight(1f, fill = false).clickable(onClickLabel = "Details") { whole = kind to full },
-                            )
-                            Badge(kind)
-                            CopyIconButton(full, size = 28.dp)
-                        }
-                        Muted("${meta.joinToString(" · ")} · ${dateTime(c.dbl("time"))}")
-                        TextLink("Full report", color = p.muted) { open = !open }
-                        if (open) Mono(c.str("text").take(20000), color = p.muted)
-                    }
-                }
-            }
-        }
-    }
-    whole?.let { (kind, text) -> DetailsDialog(kind, text, onDismiss = { whole = null }) }
-    if (asking) {
-        ConfirmDialog("Clear app crashes?", "All crash reports from the phone app are removed.", "Clear", danger = true, onDismiss = { asking = false }) {
-            scope.serverCall(after = { _: Unit -> version += 1 }, onError = { msg -> Toasts.show(msg, "err"); version += 1 }) { api.clearCrashes() }
-        }
-    }
-}

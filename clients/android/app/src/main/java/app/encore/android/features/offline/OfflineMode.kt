@@ -1,14 +1,15 @@
 package app.encore.android.features.offline
 
+import dev.krifmaz.kit.compose.offline.probeHealth
 import app.encore.android.data.api.ServerRoute
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import app.encore.android.AppGraph
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.data.api.ApiException
 import app.encore.android.graph
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -24,6 +25,10 @@ import okhttp3.Request
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import dev.krifmaz.kit.compose.offline.OfflineReason
+import dev.krifmaz.kit.compose.offline.OutLike
+import dev.krifmaz.kit.compose.offline.OutPlay
+import dev.krifmaz.kit.compose.offline.Outbox
 
 /**
  * Offline mode (the web's offline/mode.rs, for the phone): the signed-in server can't be reached. The app then shows
@@ -186,21 +191,7 @@ object OfflineMode {
      * Asks `/api/health` once. Null when it answered (any status but 502–504: a proxy saying the server behind it is
      * down counts as no answer); otherwise why not, in words ([OfflineReason]).
      */
-    private fun probe(graph: AppGraph, server: String): String? {
-        val client = graph.http.newBuilder()
-            .connectTimeout(WAIT_SECONDS, TimeUnit.SECONDS)
-            .callTimeout(WAIT_SECONDS, TimeUnit.SECONDS)
-            .cache(null)
-            .build()
-        return try {
-            client.newCall(Request.Builder().url("$server/api/health").build()).execute().use {
-                if (it.code in 502..504) OfflineReason.of(phoneOnline = true, code = it.code, error = null, seconds = WAIT_SECONDS) else null
-            }
-        } catch (e: Exception) {
-            // still asked without a network (a VPN or a LAN can answer anyway); without one, that is the reason
-            OfflineReason.of(phoneOnline = online, code = null, error = e, seconds = WAIT_SECONDS)
-        }
-    }
+    private fun probe(graph: AppGraph, server: String): String? = probeHealth(graph.http, server, online, WAIT_SECONDS)
 
     /** A failure that means the server could not be reached (no answer, or a proxy saying it is down). */
     fun unreachable(e: Throwable): Boolean = when (e) {

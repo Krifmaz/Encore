@@ -1,6 +1,6 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.SurroundAlbums
 import app.encore.android.data.api.SurroundRequest
@@ -15,7 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SurroundRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
     private fun track(json: String): Track = Track.from(obj(json))!!
 
     @Test

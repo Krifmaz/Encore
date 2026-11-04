@@ -1,7 +1,7 @@
 package app.encore.android.cadenza
 
-import app.encore.android.core.arr
-import app.encore.android.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.parseJsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject

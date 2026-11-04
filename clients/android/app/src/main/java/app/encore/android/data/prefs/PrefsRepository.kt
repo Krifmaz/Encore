@@ -2,10 +2,10 @@ package app.encore.android.data.prefs
 
 import android.content.Context
 import app.encore.android.cadenza.CadenzaCatalog
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.parseJsonObject
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.session.SessionStore
 import kotlinx.coroutines.CoroutineScope

@@ -1,6 +1,6 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.api.Track
 import app.encore.android.data.repo.Me
 import app.encore.android.features.requests.RequestRules
@@ -12,7 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LibraryFixRulesTest {
-    private fun track(json: String): Track = Track.from(EncoreJson.parseToJsonElement(json) as JsonObject)!!
+    private fun track(json: String): Track = Track.from(KitJson.parseToJsonElement(json) as JsonObject)!!
 
     @Test
     fun songsCarryTheirRequestAndCheck() {

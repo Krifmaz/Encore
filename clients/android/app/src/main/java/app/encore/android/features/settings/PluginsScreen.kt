@@ -59,22 +59,22 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
-import app.encore.android.core.strings
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
+import dev.krifmaz.kit.compose.core.strings
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.CopyIconButton
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.details.CopyIconButton
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.screens.openUrl
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -93,6 +93,24 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody
 import okio.BufferedSink
 import okio.source
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import app.encore.android.schemaApi
+import dev.krifmaz.kit.compose.settings.AdvancedToggle
+import dev.krifmaz.kit.compose.settings.CardHead
+import dev.krifmaz.kit.compose.settings.CardSlots
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.ResultLine
+import dev.krifmaz.kit.compose.settings.ResultLines
+import dev.krifmaz.kit.compose.settings.SchemaApi
+import dev.krifmaz.kit.compose.settings.SchemaCardScope
+import dev.krifmaz.kit.compose.settings.SchemaFields
+import dev.krifmaz.kit.compose.settings.SchemaFormState
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
+import dev.krifmaz.kit.compose.settings.SettingsSchema
+import dev.krifmaz.kit.compose.settings.TextLink
 
 // Settings → Server → Plugins (0.32), the web's web-rs/src/settings/plugins.rs on the phone: the head card with Check
 // for updates and the sandbox line; each installed plugin as a card (kind, version, badges, status line, Update,
@@ -838,7 +856,7 @@ private fun PluginForm(page: PluginsPage, c: JsonObject, answer: JsonObject, sta
         slots.below?.invoke(this, cardScope)
         if (id == "torznab") ChosenClients(page, state)
         Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.End) {
-            EncoreButton("Save", iconRes = R.drawable.ic_check, primary = true, enabled = state.saving[group.id] != true && page.acting[id] != "test") {
+            KitButton("Save", iconRes = R.drawable.ic_check, primary = true, enabled = state.saving[group.id] != true && page.acting[id] != "test") {
                 scope.launch { page.save(id) }
             }
         }
@@ -950,7 +968,7 @@ private fun AddCard(page: PluginsPage) {
         Text("Add a plugin", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Muted("A plugin is a zip with a plugin.toml and its program, for example one made with Encore's plugin SDK (docs/plugins in Encore's repository). Plugins you add are not made by Encore: install only plugins you trust.")
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            EncoreButton("Upload plugin", iconRes = R.drawable.ic_upload, enabled = !busy) {
+            KitButton("Upload plugin", iconRes = R.drawable.ic_upload, enabled = !busy) {
                 pick.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*"))
             }
             Muted("A .zip of at most $max MB", Modifier.weight(1f))
@@ -969,7 +987,7 @@ private fun AddCard(page: PluginsPage) {
             ),
             modifier = Modifier.fillMaxWidth(),
         )
-        EncoreButton("Install from URL", iconRes = R.drawable.ic_link, enabled = !busy) {
+        KitButton("Install from URL", iconRes = R.drawable.ic_link, enabled = !busy) {
             val problem = PluginRules.urlProblem(url)
             if (problem != null) {
                 page.addError = problem

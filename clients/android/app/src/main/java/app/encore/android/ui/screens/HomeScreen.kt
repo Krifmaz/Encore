@@ -36,9 +36,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.features.library.OnSongFixed
 import app.encore.android.R
-import app.encore.android.core.bool
-import app.encore.android.core.int
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.Album
 import app.encore.android.data.api.Track
 import app.encore.android.data.api.User
@@ -57,19 +57,19 @@ import app.encore.android.ui.Screen
 import app.encore.android.ui.Tab
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.Avatar
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.ui.components.Collage
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.PopMenu
-import app.encore.android.ui.components.SectionHead
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.PopMenu
+import dev.krifmaz.kit.compose.widgets.SectionHead
 import app.encore.android.ui.components.Tile
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import androidx.compose.foundation.layout.offset
@@ -224,11 +224,11 @@ fun HomeScreen(nav: Nav, session: Session) {
             }
             item {
                 Row(Modifier.padding(horizontal = Gutter, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    EncoreButton("Shuffle library", iconRes = R.drawable.ic_shuffle, primary = true) {
+                    KitButton("Shuffle library", iconRes = R.drawable.ic_shuffle, primary = true) {
                         scope.launch { shuffleLibrary(nav) }
                     }
                     if (data.played.isNotEmpty()) {
-                        EncoreButton("Play recent", iconRes = R.drawable.ic_play) { nav.player.play(data.played) }
+                        KitButton("Play recent", iconRes = R.drawable.ic_play) { nav.player.play(data.played) }
                     }
                 }
             }

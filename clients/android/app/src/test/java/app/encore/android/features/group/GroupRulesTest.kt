@@ -1,6 +1,6 @@
 package app.encore.android.features.group
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GroupRulesTest {
-    private fun state(json: String): GroupState = GroupState.from(EncoreJson.parseToJsonElement(json))!!
+    private fun state(json: String): GroupState = GroupState.from(KitJson.parseToJsonElement(json))!!
 
     private val two = """
         {"id": "g1", "code": "k7qm4x", "rev": 4,
@@ -48,7 +48,7 @@ class GroupRulesTest {
         assertTrue(s.youCanControl)
         assertEquals(-1, s.index)
         assertNull(s.track)
-        assertNull(GroupState.from(EncoreJson.parseToJsonElement("""{"code": "X"}""")))
+        assertNull(GroupState.from(KitJson.parseToJsonElement("""{"code": "X"}""")))
     }
 
     @Test
@@ -170,7 +170,7 @@ class GroupRulesTest {
     /** §2.1's three fields on a queue row, as the server's enrichment (encore_library::loudness::stamp) writes them. */
     @Test
     fun queueRowsCarryLoudnessAndFormat() {
-        fun entry(json: String) = GroupEntry.from(EncoreJson.parseToJsonElement(json) as kotlinx.serialization.json.JsonObject, 0)!!
+        fun entry(json: String) = GroupEntry.from(KitJson.parseToJsonElement(json) as kotlinx.serialization.json.JsonObject, 0)!!
         val hires = entry(
             """{"id": 7, "title": "Crazy", "album_id": "al_7", "format": "flac", "duration": 178.4, "qid": "q4",
                 "added_by": {"user": 5, "name": "Sam", "guest": false},
@@ -218,7 +218,7 @@ class GroupRulesTest {
 
     @Test
     fun theListAndTheEnd() {
-        val g = GroupSummary.from(EncoreJson.parseToJsonElement(
+        val g = GroupSummary.from(KitJson.parseToJsonElement(
             """{"id": "g1", "host": {"name": "Alex"}, "track": {"title": "One", "artist": "A", "album_id": "al"}, "playing": true, "members_count": 3, "visibility": "anyone", "mine": false}""",
         ) as kotlinx.serialization.json.JsonObject)
         assertNotNull(g)

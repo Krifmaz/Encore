@@ -24,7 +24,7 @@ import app.encore.android.playback.StreamInfo
 import app.encore.android.remote.Link
 import app.encore.android.remote.RemoteDevice
 import app.encore.android.ui.components.PlayerMenuActions
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job

@@ -44,26 +44,28 @@ import app.encore.android.data.repo.FyTrack
 import app.encore.android.data.repo.Tags
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
 import app.encore.android.ui.components.PageTitle
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.components.Tile
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.krifmaz.kit.compose.widgets.CardBox
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 /** web/js/pages/foryou.js `KIND`: what each ListenBrainz / Last.fm list is. */
 private val FY_KIND = mapOf(
@@ -490,7 +492,7 @@ fun TagScreen(nav: Nav, tag: String) {
                 if (hasMore && d.artists.size >= 40) {
                     item {
                         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.Center) {
-                            EncoreButton("Load more", enabled = !loadingMore) {
+                            KitButton("Load more", enabled = !loadingMore) {
                                 loadingMore = true
                                 scope.launch {
                                     try {

@@ -44,24 +44,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.long
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.repo.AlbumMatch
 import app.encore.android.data.repo.ArtCandidate
 import app.encore.android.data.repo.MatchPreview
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.EncoreField
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -158,11 +158,11 @@ fun AlbumMatchSheet(nav: Nav, albumId: String, artist: String, album: String, on
             ChoiceRow(PROVIDERS.map { it.second }, provider, onSelect = { provider = it })
             Column(Modifier.padding(horizontal = 22.dp)) {
                 Text(providerHelp(PROVIDERS[provider].first), style = MaterialTheme.typography.bodySmall, color = p.muted)
-                EncoreField(qArtist, { qArtist = it }, placeholder = "Artist", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                EncoreField(qAlbum, { qAlbum = it }, placeholder = "Album", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                EncoreField(link, { link = it }, placeholder = "…or paste a MusicBrainz / Deezer / Apple / Discogs link", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                KitField(qArtist, { qArtist = it }, placeholder = "Artist", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                KitField(qAlbum, { qAlbum = it }, placeholder = "Album", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                KitField(link, { link = it }, placeholder = "…or paste a MusicBrainz / Deezer / Apple / Discogs link", modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 Row(Modifier.padding(top = 8.dp)) {
-                    EncoreButton("Search", iconRes = R.drawable.ic_search, enabled = !loading) {
+                    KitButton("Search", iconRes = R.drawable.ic_search, enabled = !loading) {
                         val rid = LibraryFixRules.releaseIdOf(link.trim())
                         if (rid != null) showPreview(rid) else search()
                     }
@@ -221,8 +221,8 @@ fun AlbumMatchSheet(nav: Nav, albumId: String, artist: String, album: String, on
                             Text("Rename & move files using naming template", style = MaterialTheme.typography.bodyMedium)
                         }
                         Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                            EncoreButton("Back") { preview = null; if (found == null) search() }
-                            EncoreButton(if (applying) "Writing tags…" else "Apply tags", iconRes = R.drawable.ic_check, primary = true, enabled = !applying) {
+                            KitButton("Back") { preview = null; if (found == null) search() }
+                            KitButton(if (applying) "Writing tags…" else "Apply tags", iconRes = R.drawable.ic_check, primary = true, enabled = !applying) {
                                 applying = true
                                 scope.launch {
                                     try {
@@ -311,16 +311,16 @@ fun AlbumEditSheet(nav: Nav, albumId: String, onDismiss: () -> Unit) {
                 return@Column
             }
             listOf("Album artist", "Album", "Year / date", "Genre").forEachIndexed { i, label ->
-                EncoreField(head[i], { head[i] = it }, label = label, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                KitField(head[i], { head[i] = it }, label = label, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
             }
             rows.forEachIndexed { i, r ->
                 Column(Modifier.padding(top = 14.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        EncoreField(r.disc, { rows[i] = EditRow(r.id, it, r.track, r.title, r.artist) }, label = "Disc", modifier = Modifier.width(84.dp))
-                        EncoreField(r.track, { rows[i] = EditRow(r.id, r.disc, it, r.title, r.artist) }, label = "#", modifier = Modifier.width(84.dp))
+                        KitField(r.disc, { rows[i] = EditRow(r.id, it, r.track, r.title, r.artist) }, label = "Disc", modifier = Modifier.width(84.dp))
+                        KitField(r.track, { rows[i] = EditRow(r.id, r.disc, it, r.title, r.artist) }, label = "#", modifier = Modifier.width(84.dp))
                     }
-                    EncoreField(r.title, { rows[i] = EditRow(r.id, r.disc, r.track, it, r.artist) }, label = "Title", modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
-                    EncoreField(r.artist, { rows[i] = EditRow(r.id, r.disc, r.track, r.title, it) }, label = "Artist", modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                    KitField(r.title, { rows[i] = EditRow(r.id, r.disc, r.track, it, r.artist) }, label = "Title", modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                    KitField(r.artist, { rows[i] = EditRow(r.id, r.disc, r.track, r.title, it) }, label = "Artist", modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                 }
             }
             Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -329,8 +329,8 @@ fun AlbumEditSheet(nav: Nav, albumId: String, onDismiss: () -> Unit) {
                 Text("Move and rename the files to match (naming template)", style = MaterialTheme.typography.bodyMedium)
             }
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Cancel") { onDismiss() }
-                EncoreButton("Save", primary = true, enabled = !saving) {
+                KitButton("Cancel") { onDismiss() }
+                KitButton("Save", primary = true, enabled = !saving) {
                     saving = true
                     val ids = rows.map { it.id }
                     val album = mapOf("albumartist" to head[0].trim(), "album" to head[1].trim(), "date" to head[2].trim(), "genre" to head[3].trim())
@@ -478,10 +478,10 @@ fun AlbumArtworkSheet(nav: Nav, albumId: String, album: String, onDismiss: () ->
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 24.dp)) {
             Text("Change artwork", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
-            EncoreField(q, { q = it }, placeholder = "Album title to search for", onAction = { search() }, modifier = Modifier.fillMaxWidth())
+            KitField(q, { q = it }, placeholder = "Album title to search for", onAction = { search() }, modifier = Modifier.fillMaxWidth())
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EncoreButton("Search", primary = true, enabled = !loading) { search() }
-                EncoreButton("Upload…", enabled = !applying) { upload.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                KitButton("Search", primary = true, enabled = !loading) { search() }
+                KitButton("Upload…", enabled = !applying) { upload.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
             }
             Text(
                 "Cover Art Archive, Deezer, Apple Music, YouTube Music and Discogs. The picture is embedded in every song and saved as cover.jpg.",

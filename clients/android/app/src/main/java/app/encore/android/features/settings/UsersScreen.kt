@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -27,23 +28,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.long
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.settingsApi
-import app.encore.android.data.repo.formatAgo
+import dev.krifmaz.kit.compose.core.formatAgo
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Avatar
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.PageSection
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * Settings → Users & permissions (web-rs/src/settings/users.rs): every account with its role, weekly limit,
@@ -90,15 +96,15 @@ fun UsersScreen(nav: Nav, meId: Long, onBack: () -> Unit, onOpenInvites: () -> U
         defaults = try { withContext(Dispatchers.IO) { api.adminSettings() } } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
     }
     fun patch(id: String, body: JsonObject, after: () -> Unit = {}) {
-        scope.serverCall(ok = "Saved", onError = { msg -> app.encore.android.ui.components.Toasts.show(msg, "err"); version += 1 }, after = { _: Unit -> version += 1; after() }) {
+        scope.serverCall(ok = "Saved", onError = { msg -> dev.krifmaz.kit.compose.toasts.Toasts.show(msg, "err"); version += 1 }, after = { _: Unit -> version += 1; after() }) {
             api.patchUser(id, body)
         }
     }
 
     SettingsPage("Users", onBack, subtitle = "Manage who can access your library and what they can request.") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-            EncoreButton("Invites", iconRes = R.drawable.ic_link) { onOpenInvites() }
-            EncoreButton("Add user", iconRes = R.drawable.ic_add, primary = true) { adding = true }
+            KitButton("Invites", iconRes = R.drawable.ic_link) { onOpenInvites() }
+            KitButton("Add user", iconRes = R.drawable.ic_add, primary = true) { adding = true }
         }
         val list = users
         when {

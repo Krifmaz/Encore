@@ -27,11 +27,11 @@ import app.encore.android.data.repo.SharedPlaylistCheck
 import app.encore.android.data.session.Session
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.EncoreField
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.KitField
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -97,7 +97,7 @@ fun AddSharedPlaylistDialog(nav: Nav, onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(PlaylistLinkRules.ADD_SHARED_HINT, style = MaterialTheme.typography.bodyMedium)
-                EncoreField(
+                KitField(
                     link,
                     { link = it },
                     placeholder = PlaylistLinkRules.PLACEHOLDER,

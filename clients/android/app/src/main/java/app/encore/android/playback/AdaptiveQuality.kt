@@ -8,7 +8,7 @@ import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.prefs.PlaybackPrefs
 import app.encore.android.data.prefs.Quality
 import app.encore.android.features.group.GroupQuality
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.ExecutorService

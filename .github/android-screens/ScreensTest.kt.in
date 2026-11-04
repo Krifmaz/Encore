@@ -1,0 +1,147 @@
+package app.encore.android
+
+import android.graphics.Bitmap
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.unit.dp
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import app.encore.android.data.session.Settings
+import app.encore.android.data.session.ThemeChoice
+import app.encore.android.ui.theme.EncoreTheme
+import app.encore.android.ui.theme.palette
+@IMPORTS@
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
+
+/**
+ * Before/after screenshots for the switch to the Krifmaz kit (.github/workflows/android-screens.yml): the same scenes
+ * drawn by the app before and after, as the phone shows them (every window, so toasts and dialogs too).
+ */
+@RunWith(AndroidJUnit4::class)
+class ScreensTest {
+    @get:Rule
+    val rule = createComposeRule()
+
+    private fun shot(name: String) {
+        rule.waitForIdle()
+        Thread.sleep(1500)
+        rule.waitForIdle()
+        val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        val dir = File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "screens")
+        dir.mkdirs()
+        FileOutputStream(File(dir, "$name.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    @Composable
+    private fun Swatches() {
+        val p = MaterialTheme.palette
+        val s = MaterialTheme.colorScheme
+        Column(Modifier.fillMaxSize().background(p.bg).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Encore", style = MaterialTheme.typography.headlineMedium)
+            Text("Section title", style = MaterialTheme.typography.titleLarge)
+            Text("Body text 14px, the web's player", style = MaterialTheme.typography.bodyMedium)
+            Text("small muted", style = MaterialTheme.typography.bodySmall, color = p.muted)
+            for (row in listOf(
+                listOf(p.bg, p.bg2, p.panel, p.panel2, p.border, p.text),
+                listOf(p.muted, p.faint, p.accent, p.accent2, p.onAccent, Color.Transparent),
+                listOf(s.primary, s.onPrimary, s.surface, s.surfaceContainer, s.outline, s.error),
+            )) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { for (c in row) Box(Modifier.size(48.dp).background(c)) }
+            }
+            Box(Modifier.fillMaxWidth().padding(top = 4.dp).size(24.dp).background(p.gradient))
+            SmallButton("Small") {}
+            @BUTTON@("Primary", primary = true) {}
+        }
+    }
+
+    private fun themeShot(name: String, settings: Settings) {
+        rule.setContent { EncoreTheme(settings) { Swatches() } }
+        shot(name)
+    }
+
+    @Test fun themeEncore() = themeShot("theme-encore", Settings())
+    @Test fun themeDark() = themeShot("theme-dark", Settings(theme = ThemeChoice.DARK, accent = "violet", background = "fade"))
+    @Test fun themeOled() = themeShot("theme-oled", Settings(theme = ThemeChoice.OLED, accent = "custom", custom = "#ff7a00"))
+    @Test fun themeLight() = themeShot("theme-light", Settings(theme = ThemeChoice.LIGHT, accent = "sky", background = "fade"))
+
+    @Test
+    fun widgets() {
+        rule.setContent {
+            EncoreTheme(Settings()) {
+                Column(Modifier.fillMaxSize().padding(vertical = 8.dp)) {
+                    SectionHead("Section head", "A line under it", action = "Action") {}
+                    ChoiceRow(listOf("Albums", "Artists", "Songs"), 1, {})
+                    Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        @BUTTON@("Play", primary = true) {}
+                        @BUTTON@("Shuffle") {}
+                        SmallButton("Delete", danger = true) {}
+                    }
+                    Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Badge("muted"); Badge("ok", "ok"); Badge("warn", "warn"); Badge("err", "err"); Badge("info", "info"); Badge("accent", "accent")
+                    }
+                    Box(Modifier.padding(16.dp)) { CardBox { Text("A card with some text in it") } }
+                    Box(Modifier.padding(horizontal = 16.dp)) { @FIELD@("Typed text", {}, placeholder = "Search") }
+                    RowDivider()
+                    Box(Modifier.fillMaxWidth().padding(16.dp)) { Spinner() }
+                    Box(Modifier.size(360.dp, 160.dp)) { ErrorBox("The server answered 502: Bad Gateway") {} }
+                }
+            }
+        }
+        shot("widgets")
+    }
+
+    @Test
+    fun details() {
+        rule.setContent {
+            EncoreTheme(Settings()) {
+                DetailsDialog("Download failed", "java.io.IOException: unexpected end of stream on http://10.0.0.2:8080/...\n\tat okhttp3.internal.http1.Http1ExchangeCodec.readResponseHeaders(Http1ExchangeCodec.kt:210)") {}
+            }
+        }
+        shot("details")
+    }
+
+    @Test
+    fun confirm() {
+        rule.setContent { EncoreTheme(Settings()) { ConfirmDialog("Delete playlist?", "Road trip will be gone for everyone it's shared with.", "Delete", danger = true, onDismiss = {}, onConfirm = {}) } }
+        shot("confirm")
+    }
+
+    @Test
+    fun toasts() {
+        rule.setContent {
+            EncoreTheme(Settings()) {
+                Box(Modifier.fillMaxSize()) { ToastHost(bottomPadding = 16.dp) }
+            }
+        }
+        rule.runOnIdle {
+            Toasts.show("Added to Road trip")
+            Toasts.show("Saved", "ok")
+            Toasts.show("Moved to the Trash", action = "Undo") {}
+            Toasts.show("Couldn't reach the server: timeout after 30 s", "err")
+        }
+        shot("toasts")
+    }
+
+    @Test
+    fun updates() {
+        rule.setContent { EncoreTheme(Settings()) { Column(Modifier.fillMaxSize().padding(16.dp)) { UpdatesSection() } } }
+        shot("updates")
+    }
+}

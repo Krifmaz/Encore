@@ -42,8 +42,8 @@ import app.encore.android.data.api.PlaybackSpot
 import app.encore.android.data.api.Track
 import app.encore.android.data.session.Session
 import app.encore.android.playback.ResumeStore
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.theme.palette
 import androidx.lifecycle.Lifecycle

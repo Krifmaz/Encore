@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.Handler
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.PlaybackPrefs

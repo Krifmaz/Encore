@@ -35,8 +35,13 @@ import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.data.session.AuthState
 import app.encore.android.data.session.Session
-import app.encore.android.features.bugs.BugReportScreen
-import app.encore.android.features.bugs.BugReportsScreen
+import app.encore.android.bugReports
+import app.encore.android.data.repo.features
+import coil3.ImageLoader
+import dev.krifmaz.kit.compose.bugs.BugReportScreen
+import dev.krifmaz.kit.compose.bugs.BugReportsApi
+import dev.krifmaz.kit.compose.bugs.BugReportsHost
+import dev.krifmaz.kit.compose.bugs.BugReportsScreen
 import app.encore.android.features.offline.OfflineBanner
 import app.encore.android.features.offline.OfflineMenu
 import app.encore.android.features.offline.OfflineMode
@@ -49,16 +54,16 @@ import app.encore.android.remote.DevicesSheet
 import app.encore.android.remote.LinkedBar
 import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.components.AddToPlaylistSheet
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.formatDay
-import app.encore.android.ui.components.PopMenu
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.core.formatDay
+import dev.krifmaz.kit.compose.widgets.PopMenu
 import app.encore.android.ui.components.ReportHost
 import app.encore.android.ui.components.ReportUi
-import app.encore.android.ui.components.ToastHost
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.ToastHost
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.data.repo.PickerOpts
 import app.encore.android.ui.screens.AccountScreen
-import app.encore.android.ui.theme.focusRing
+import dev.krifmaz.kit.compose.theme.focusRing
 import app.encore.android.ui.screens.AlbumScreen
 import app.encore.android.ui.screens.ArtistScreen
 import app.encore.android.ui.screens.AuthFlow
@@ -331,8 +336,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             is Screen.PlaylistImport -> PlaylistImportScreen(nav, top.into, top.url, top.requestMissing, top.albumMode)
             is Screen.Activity -> ActivityScreen(nav)
             is Screen.SettingsAt -> SettingsScreen(nav, session, startAt = top.id)
-            is Screen.BugReports -> BugReportsScreen(nav, top.from)
-            is Screen.BugReport -> BugReportScreen(nav, top.id)
+            is Screen.BugReports -> BugReportsScreen(nav.bugHost, top.from)
+            is Screen.BugReport -> BugReportScreen(nav.bugHost, top.id)
             is Screen.Files -> FilesScreen(nav, top.startRoot)
             null -> when (tab) {
                 Tab.HOME -> HomeScreen(nav, session)
@@ -517,3 +522,23 @@ private fun TrackMenu(nav: Nav, req: TrackMenuRequest, offlineMenu: OfflineMenu,
         )
     }
 }
+
+/** What the kit's bug report screens need from the app: the API, covers, the admin check and navigation. */
+val Nav.bugHost: BugReportsHost
+    get() {
+        val nav = this
+        return object : BugReportsHost {
+            override val bugReports: BugReportsApi get() = nav.graph.bugReports
+            override val imageLoader: ImageLoader get() = nav.graph.imageLoader
+
+            override fun url(path: String): String = nav.graph.api.url(path)
+
+            override fun isAdmin(): Boolean = nav.graph.features.me().isAdmin
+
+            override fun openList(from: String) = nav.open(Screen.BugReports(from))
+
+            override fun openReport(id: Long) = nav.open(Screen.BugReport(id))
+
+            override fun back() = nav.back()
+        }
+    }

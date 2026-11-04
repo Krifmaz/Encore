@@ -1,6 +1,6 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.features.settings.SettingsRules.Back
 import app.encore.android.features.settings.SettingsRules.Wait
 import app.encore.android.ui.theme.Appearance
@@ -15,7 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json).jsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json).jsonObject
 
     // the web's update_tests (web-rs/src/settings/diagnostics.rs), word for word
     @Test

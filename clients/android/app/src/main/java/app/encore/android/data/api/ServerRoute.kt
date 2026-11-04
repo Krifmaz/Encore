@@ -3,9 +3,9 @@ package app.encore.android.data.api
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
-import app.encore.android.CrashLog
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.bugs.CrashLog
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.graph
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -245,7 +245,7 @@ object ServerRoute {
         return try {
             probeClient.newCall(Request.Builder().url("$base/api/auth/info").header("Accept", "application/json").build()).execute().use { res ->
                 if (!res.isSuccessful) return false
-                val o = EncoreJson.parseToJsonElement(res.body.string()) as? JsonObject
+                val o = KitJson.parseToJsonElement(res.body.string()) as? JsonObject
                 o?.str("server_id") == serverId
             }
         } catch (_: Exception) {
