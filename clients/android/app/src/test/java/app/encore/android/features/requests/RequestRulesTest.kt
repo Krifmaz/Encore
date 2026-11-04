@@ -1,7 +1,7 @@
 package app.encore.android.features.requests
 
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.decodeModel
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.decodeModel
 import app.encore.android.data.repo.ClearWaitingResult
 import app.encore.android.data.repo.DownloadAllNowResult
 import app.encore.android.data.repo.DownloadNowResult
@@ -27,7 +27,7 @@ import org.junit.Test
 
 class RequestRulesTest {
     private fun row(json: String): RequestRow =
-        (EncoreJson.parseToJsonElement(json) as JsonObject).decodeModel(RequestRow.serializer())!!
+        (KitJson.parseToJsonElement(json) as JsonObject).decodeModel(RequestRow.serializer())!!
 
     // the Illuminate EP row of the Oct 19 screenshot, as GET /api/requests sends it
     private val illuminate = """{"id": 41, "kind": "album", "artist": "Duumu", "title": "Illuminate EP", "status": "failed",
@@ -326,7 +326,7 @@ class RequestRulesTest {
         assertEquals("Waiting – the downloads folder can't be written now", RequestRules.statusText(r))
         assertEquals("Waiting", RequestRules.badgeLabel(row("""{"id": 22, "status": "waiting", "wait_reason": "soulseek"}""")))
         assertEquals("Failed", RequestRules.badgeLabel(row("""{"id": 23, "status": "failed", "wait_reason": "waiting_disk"}""")))
-        val s = (EncoreJson.parseToJsonElement("""{"ok": true, "downloads": {"ok": false, "waiting": 2,
+        val s = (KitJson.parseToJsonElement("""{"ok": true, "downloads": {"ok": false, "waiting": 2,
             "text": "The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount"}}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
         assertEquals("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount", RequestRules.downloadsBanner(s, admin = true))
         assertEquals("The downloads folder /downloads is read-only – check the disk (dmesg, fsck) or the mount", RequestRules.banner(s, admin = true))
@@ -345,13 +345,13 @@ class RequestRulesTest {
         assertNull(RequestRules.downloadsBanner(StorageHealth(ok = true), admin = true))
         assertFalse(RequestRules.failing(StorageHealth(ok = true)))
         // the server's JSON as it comes
-        val decoded = (EncoreJson.parseToJsonElement("""{"ok": false, "since": 1792426891.6, "checked_at": 1792426891.6, "next_check_at": 1792427491.6, "path": "/music", "op": "mkdir",
+        val decoded = (KitJson.parseToJsonElement("""{"ok": false, "since": 1792426891.6, "checked_at": 1792426891.6, "next_check_at": 1792427491.6, "path": "/music", "op": "mkdir",
             "error": "Input/output error (os error 5)", "errno": 5, "step": "import", "waiting": 3, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
         assertTrue(decoded.paused)
         assertEquals("5", decoded.errno)
         assertEquals(3, decoded.waiting)
         assertEquals("Imports are paused: /music is not writable – mkdir: Input/output error (os error 5).", RequestRules.storageBanner(decoded, admin = true))
-        val ok = (EncoreJson.parseToJsonElement("""{"ok": true, "since": null, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
+        val ok = (KitJson.parseToJsonElement("""{"ok": true, "since": null, "text": null}""") as JsonObject).decodeModel(StorageHealth.serializer())!!
         assertFalse(ok.paused)
     }
 
@@ -728,7 +728,7 @@ class RequestRulesTest {
     }
 
     private fun answer(json: String): DownloadNowResult =
-        (EncoreJson.parseToJsonElement(json) as JsonObject).decodeModel(DownloadNowResult.serializer())!!
+        (KitJson.parseToJsonElement(json) as JsonObject).decodeModel(DownloadNowResult.serializer())!!
 
     @Test
     fun downloadNowToastIsTheServersWords() {
@@ -753,7 +753,7 @@ class RequestRulesTest {
     @Test
     fun downloadAllNowToastIsTheServersWords() {
         val text = "Woke 3 waiting requests; 8 stay in line: Deezer 1 download at a time (6 in line), YouTube 2 downloads at a time (2 in line). Soulseek asked Encore to wait – next attempt at 14:20"
-        val r = (EncoreJson.parseToJsonElement("""{"ok": true, "pressed": 8, "woken": 3, "later": 1,
+        val r = (KitJson.parseToJsonElement("""{"ok": true, "pressed": 8, "woken": 3, "later": 1,
             "lines": [{"source": "streamrip", "label": "Deezer", "limit": 1, "running": 1, "waiting": 6},
                       {"source": "ytdlp", "label": "YouTube", "limit": 2, "running": 2, "waiting": 2}, "odd"],
             "text": "$text"}""") as JsonObject).decodeModel(DownloadAllNowResult.serializer())!!
@@ -855,7 +855,7 @@ class RequestRulesTest {
         assertEquals("All 20", RequestRules.filterLabel("all", "All", c))
         assertEquals(listOf("12 remaining" to "info", "2 failed" to "err"), RequestRules.countBadges(c))
         assertTrue(RequestRules.countBadges(RequestCounts(all = 4, completed = 4)).isEmpty())
-        val decoded = (EncoreJson.parseToJsonElement("""{"all":3,"remaining":1,"pending":1,"active":2,"completed":0,"failed":1}""") as JsonObject)
+        val decoded = (KitJson.parseToJsonElement("""{"all":3,"remaining":1,"pending":1,"active":2,"completed":0,"failed":1}""") as JsonObject)
             .decodeModel(RequestCounts.serializer())!!
         assertEquals(RequestCounts(3, 1, 1, 2, 0, 1), decoded)
     }

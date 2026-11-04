@@ -39,7 +39,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import app.encore.android.AppGraph
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.EncoreApp
 import app.encore.android.R
 import app.encore.android.cadenza.CadenzaEngine

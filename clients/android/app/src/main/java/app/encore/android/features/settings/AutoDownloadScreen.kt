@@ -24,20 +24,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.settingsApi
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatNumber
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Spinner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -45,6 +45,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.PageSection
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
+import dev.krifmaz.kit.compose.settings.TextLink
 
 private val SWITCHES: Map<String, Pair<String, String>> = mapOf(
     "auto_request_likes" to ("Liked songs" to "A song liked in Finamp, Plexamp, YouTube Music, Spotify, Tidal, Deezer… that isn’t in the library yet gets downloaded."),
@@ -100,7 +106,7 @@ fun AutoDownloadScreen(nav: Nav, onBack: () -> Unit, onOpen: (String) -> Unit) {
             return@SettingsPage
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-            EncoreButton("Run now", iconRes = R.drawable.ic_refresh) {
+            KitButton("Run now", iconRes = R.drawable.ic_refresh) {
                 scope.launch {
                     try {
                         withContext(Dispatchers.IO) {
@@ -115,7 +121,7 @@ fun AutoDownloadScreen(nav: Nav, onBack: () -> Unit, onOpen: (String) -> Unit) {
                     }
                 }
             }
-            EncoreButton("Save", iconRes = R.drawable.ic_check, primary = true) {
+            KitButton("Save", iconRes = R.drawable.ic_check, primary = true) {
                 scope.serverCall(ok = "Auto-download rules saved", after = { r: JsonObject -> data = r }) { api.putAutodownload(collect()) }
             }
         }

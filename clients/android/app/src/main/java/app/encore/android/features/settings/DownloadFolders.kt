@@ -21,17 +21,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
-import app.encore.android.core.arr
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.RowDivider
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.RowDivider
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.serialization.json.JsonObject
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.PageSection
+import dev.krifmaz.kit.compose.settings.SetCard
 
 /**
  * The download folders in Settings → Diagnostics (diagnostics.rs `download_folders_html`, servers since 0.33, backlog

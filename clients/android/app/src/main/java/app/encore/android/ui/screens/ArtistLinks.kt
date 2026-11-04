@@ -16,7 +16,7 @@ import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

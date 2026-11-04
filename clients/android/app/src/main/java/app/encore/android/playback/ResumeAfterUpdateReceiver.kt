@@ -4,7 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 
 /**
  * The music plays on after an update of Encore is installed (Android's `MY_PACKAGE_REPLACED`, sent to the new

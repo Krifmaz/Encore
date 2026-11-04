@@ -1,7 +1,7 @@
 package app.encore.android.cadenza
 
-import app.encore.android.core.parseJsonObject
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.str
 import java.nio.Buffer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

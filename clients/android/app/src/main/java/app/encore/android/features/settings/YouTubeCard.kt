@@ -22,13 +22,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.obj
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -36,6 +36,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
 
 /**
  * Settings → Plugins → yt-dlp → YouTube sign-in (Settings → Downloads on a server before 0.32), above its fields

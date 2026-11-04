@@ -4,12 +4,17 @@ import android.app.Application
 import android.content.Context
 import app.encore.android.data.api.ApiCache
 import app.encore.android.data.api.EncoreApi
+import app.encore.android.data.api.USER_AGENT
 import app.encore.android.data.api.buildHttpClient
 import app.encore.android.data.library.LikesRepository
 import app.encore.android.data.library.DislikesRepository
 import app.encore.android.data.prefs.PrefsRepository
 import app.encore.android.data.session.SessionStore
 import coil3.ImageLoader
+import dev.krifmaz.kit.compose.KitApp
+import dev.krifmaz.kit.compose.bugs.CrashLog
+import dev.krifmaz.kit.compose.update.UpdateRules
+import dev.krifmaz.kit.compose.update.UpdateSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,12 +26,16 @@ class EncoreApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // first, so a crash while building the graph is written too (CrashLog.kt)
+        // who the app is, for the kit's words and requests (kit-compose: crash log, updates, bug reports), and where
+        // its releases are (in-app updates)
+        KitApp.init(name = "Encore", versionName = BuildConfig.VERSION_NAME, versionCode = BuildConfig.VERSION_CODE, userAgent = USER_AGENT)
+        UpdateRules.source = UpdateSource.ENCORE
+        // next, so a crash while building the graph is written too (the kit's CrashLog)
         CrashLog.install(this)
         app.encore.android.data.api.Translations.init(this)
         graph = AppGraph(this)
         // reports from earlier runs (our own, and native crashes / ANRs the system recorded) go to the server
-        CrashLog.uploadPending(this, graph)
+        CrashLog.uploadPending(this, graph.crashHost)
     }
 }
 

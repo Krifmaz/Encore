@@ -1,11 +1,11 @@
 package app.encore.android.features.offline
 
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.int
-import app.encore.android.core.long
-import app.encore.android.core.parseJson
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.parseJson
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject

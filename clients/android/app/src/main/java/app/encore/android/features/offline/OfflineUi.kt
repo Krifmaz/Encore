@@ -1,5 +1,8 @@
 package app.encore.android.features.offline
 
+import dev.krifmaz.kit.compose.offline.OfflineBanner as KitOfflineBanner
+import dev.krifmaz.kit.compose.offline.OfflineSheet as KitOfflineSheet
+import dev.krifmaz.kit.compose.offline.Outbox
 import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,7 +23,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
-import app.encore.android.ui.components.SectionHead
+import dev.krifmaz.kit.compose.widgets.SectionHead
 import app.encore.android.ui.components.Tile
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -59,17 +62,17 @@ import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.Gutter
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.PopMenu
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.Gutter
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.PopMenu
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.TrackRow
-import app.encore.android.ui.components.formatSize
-import app.encore.android.ui.screens.ConfirmDialog
+import dev.krifmaz.kit.compose.core.formatSize
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
 import app.encore.android.ui.screens.PlayButtons
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -100,49 +103,17 @@ fun OfflineBanner() {
     if (!active) return
     val trying by OfflineMode.trying.collectAsState()
     val context = LocalContext.current
-    val p = MaterialTheme.palette
     // the sheet with the full message, opened by a tap anywhere on the banner but Retry
     var details by remember { mutableStateOf(false) }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(EncoreColors.Warn.copy(alpha = 0.16f))
-            // after the background: the tint fills the status bar, the content stays below it
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .clickable(onClickLabel = "Offline details") { details = true }
-            .heightIn(min = 48.dp)
-            .padding(start = Gutter, end = 8.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(painterResource(R.drawable.ic_cloud_off), contentDescription = null, tint = p.text, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(OfflineMode.BANNER_TITLE, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = p.text, maxLines = 1)
-            Text(OfflineMode.BANNER_LINE, style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Spacer(Modifier.width(8.dp))
-        RetryButton(trying) { OfflineMode.retry(context) }
-    }
+    KitOfflineBanner(active, trying, OfflineMode.BANNER_TITLE, OfflineMode.BANNER_LINE, onRetry = { OfflineMode.retry(context) }, onDetails = { details = true })
     if (details) OfflineSheet(onDismiss = { details = false })
 }
 
 /**
- * The banner's and the sheet's Retry: a 48 dp touch target around the small button (Material's minimum), reading
- * "Trying…" and not tappable while a check is on its way.
+ * The sheet the offline banner opens (the kit's): the full offline message, why the last check failed
+ * ([OfflineMode.reason]), how many songs are saved here and how many plays and likes wait, Retry, and Close. Closes by
+ * itself once the server answers again.
  */
-@Composable
-private fun RetryButton(trying: Boolean, onRetry: () -> Unit) {
-    Box(Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp), contentAlignment = Alignment.Center) {
-        SmallButton(if (trying) "Trying…" else "Retry", iconRes = R.drawable.ic_refresh, enabled = !trying, onClick = onRetry)
-    }
-}
-
-/**
- * The sheet the offline banner opens: the full offline message, why the last check failed ([OfflineMode.reason]),
- * how many songs are saved here and how many plays and likes wait, Retry, and Close. Closes by itself once the server
- * answers again.
- */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OfflineSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -157,37 +128,11 @@ fun OfflineSheet(onDismiss: () -> Unit) {
         val (plays, likes) = withContext(Dispatchers.IO) { OfflineMode.pending() }
         waiting = Outbox.countsText(plays, likes)
     }
-    // back online: nothing left to say
-    LaunchedEffect(active) { if (!active) onDismiss() }
-    val p = MaterialTheme.palette
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = p.panel, contentColor = p.text) {
-        Column(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, bottom = 24.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(painterResource(R.drawable.ic_cloud_off), contentDescription = null, tint = EncoreColors.Warn, modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(10.dp))
-                Text("You're offline", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            }
-            Text(OfflineMode.BANNER, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 12.dp))
-            Text("Why: $reason", style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(top = 8.dp))
-            Text(
-                listOf(
-                    "${OfflineIndex.songs(store.songs(all).size)} saved on this phone",
-                    if (waiting.isNotEmpty()) "$waiting will be sent when the server is back" else "",
-                ).filter { it.isNotEmpty() }.joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
-                color = p.muted,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text("The app asks the server again every 30 seconds.", style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 4.dp))
-            Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                EncoreButton(if (trying) "Trying…" else "Retry", iconRes = R.drawable.ic_refresh, primary = true, enabled = !trying) {
-                    OfflineMode.retry(context)
-                }
-                EncoreButton("Close", onClick = onDismiss)
-            }
-        }
-    }
+    val status = listOf(
+        "${OfflineIndex.songs(store.songs(all).size)} saved on this phone",
+        if (waiting.isNotEmpty()) "$waiting will be sent when the server is back" else "",
+    ).filter { it.isNotEmpty() }.joinToString(" · ")
+    KitOfflineSheet(active, trying, OfflineMode.BANNER, reason, status, onRetry = { OfflineMode.retry(context) }, onDismiss = onDismiss)
 }
 
 // ---- Home's "Saved on this phone" row --------------------------------------------------------------------------
@@ -538,7 +483,7 @@ fun OfflineStorageSection(nav: Nav) {
         }
         if (all.isNotEmpty()) {
             Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EncoreButton("Remove all", iconRes = R.drawable.ic_delete) { confirmAll = true }
+                KitButton("Remove all", iconRes = R.drawable.ic_delete) { confirmAll = true }
             }
         }
     }

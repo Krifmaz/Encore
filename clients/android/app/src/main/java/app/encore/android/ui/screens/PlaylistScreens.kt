@@ -59,16 +59,16 @@ import app.encore.android.R
 import app.encore.android.data.api.Playlist
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.ui.components.Collage
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.MoreButton
+import dev.krifmaz.kit.compose.widgets.MoreButton
 import app.encore.android.features.offline.rememberOfflineMenu
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.TrackRow
@@ -497,6 +497,6 @@ private fun LinkedHead(pl: Playlist, count: Int, onRemove: () -> Unit) {
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 4.dp),
         )
-        EncoreButton(PlaylistLinkRules.REMOVE, modifier = Modifier.padding(top = 14.dp), iconRes = R.drawable.ic_delete, onClick = onRemove)
+        KitButton(PlaylistLinkRules.REMOVE, modifier = Modifier.padding(top = 14.dp), iconRes = R.drawable.ic_delete, onClick = onRemove)
     }
 }

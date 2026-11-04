@@ -1,10 +1,10 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.dbl
-import app.encore.android.core.long
-import app.encore.android.core.obj
-import app.encore.android.core.objects
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objects
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.repo.Me
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive

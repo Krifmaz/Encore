@@ -86,19 +86,19 @@ import app.encore.android.features.offline.OfflineStore
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
-import app.encore.android.ui.components.ChoiceRow
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.PopMenu
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.PopMenu
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.components.Tile
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.rememberLoad
@@ -794,7 +794,7 @@ private fun LibraryResults(nav: Nav, q: String, onShowAll: (Int) -> Unit) {
         }
         f.isEmpty -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             EmptyState(R.drawable.ic_search, "Nothing in your library matches “$q”")
-            EncoreButton("Search everywhere", iconRes = R.drawable.ic_explore, primary = true) { nav.open(Screen.DiscoverSearch(q)) }
+            KitButton("Search everywhere", iconRes = R.drawable.ic_explore, primary = true) { nav.open(Screen.DiscoverSearch(q)) }
         }
         else -> LazyColumn(Modifier.fillMaxSize()) {
             val c = f.counts

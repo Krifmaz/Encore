@@ -55,27 +55,30 @@ import app.encore.android.data.api.AuthInfo
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.SessionRow
 import app.encore.android.data.repo.TotpSetup
-import app.encore.android.data.repo.formatAgo
+import dev.krifmaz.kit.compose.core.formatAgo
 import app.encore.android.data.api.settingsApi
 import app.encore.android.data.session.Session
 import app.encore.android.features.settings.AboutEncore
 import app.encore.android.playback.ResumeStore
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Avatar
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.krifmaz.kit.compose.widgets.CardBox
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.KitField
 
 private class AccountData(val me: Me, val info: AuthInfo)
 
@@ -181,13 +184,13 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                                 }
                                 if (nameOpen && has("rename")) {
                                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        EncoreField(nameValue, { nameValue = it }, placeholder = "Username", imeAction = ImeAction.Done, modifier = Modifier.fillMaxWidth())
+                                        KitField(nameValue, { nameValue = it }, placeholder = "Username", imeAction = ImeAction.Done, modifier = Modifier.fillMaxWidth())
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            EncoreButton("Save", primary = true) {
+                                            KitButton("Save", primary = true) {
                                                 val n = nameValue.trim()
                                                 run({ features.updateProfile(username = n) }, "You're now $n") { nameOpen = false; version += 1 }
                                             }
-                                            EncoreButton("Cancel") { nameOpen = false; nameValue = me.username }
+                                            KitButton("Cancel") { nameOpen = false; nameValue = me.username }
                                         }
                                         Text("What you sign in with and what others see. 3–32 letters, numbers, . _ -", style = MaterialTheme.typography.bodySmall, color = p.muted)
                                         if (me.email.isEmpty()) {
@@ -227,9 +230,9 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                                     SmallButton(if (pwOpen) "Cancel" else "Change password") { pwOpen = !pwOpen; if (!pwOpen) { pwCurrent = ""; pwNew = "" } }
                                 }
                                 if (pwOpen) {
-                                    EncoreField(pwCurrent, { pwCurrent = it }, label = "Current password", password = true, keyboardType = KeyboardType.Password, imeAction = ImeAction.Next, modifier = Modifier.fillMaxWidth())
-                                    EncoreField(pwNew, { pwNew = it }, label = "New password", password = true, keyboardType = KeyboardType.Password, imeAction = ImeAction.Done, modifier = Modifier.fillMaxWidth())
-                                    EncoreButton("Update password", primary = true, enabled = pwCurrent.isNotEmpty() && pwNew.length >= 8) {
+                                    KitField(pwCurrent, { pwCurrent = it }, label = "Current password", password = true, keyboardType = KeyboardType.Password, imeAction = ImeAction.Next, modifier = Modifier.fillMaxWidth())
+                                    KitField(pwNew, { pwNew = it }, label = "New password", password = true, keyboardType = KeyboardType.Password, imeAction = ImeAction.Done, modifier = Modifier.fillMaxWidth())
+                                    KitButton("Update password", primary = true, enabled = pwCurrent.isNotEmpty() && pwNew.length >= 8) {
                                         run({ features.changePassword(pwCurrent, pwNew) }, "Password updated – other sessions signed out") {
                                             pwOpen = false; pwCurrent = ""; pwNew = ""; sessionsVersion += 1
                                         }
@@ -247,9 +250,9 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                                 Text("Email", style = MaterialTheme.typography.titleMedium)
                                 Text("Used only to send you a link if you forget your password.", style = MaterialTheme.typography.bodySmall, color = p.muted)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    EncoreField(email ?: "", { email = it }, placeholder = "you@example.com", keyboardType = KeyboardType.Email, imeAction = ImeAction.Done, modifier = Modifier.weight(1f))
+                                    KitField(email ?: "", { email = it }, placeholder = "you@example.com", keyboardType = KeyboardType.Email, imeAction = ImeAction.Done, modifier = Modifier.weight(1f))
                                     Spacer(Modifier.width(8.dp))
-                                    EncoreButton("Save", primary = true) { run({ features.updateProfile(email = (email ?: "").trim()) }, "Email saved") { version += 1 } }
+                                    KitButton("Save", primary = true) { run({ features.updateProfile(email = (email ?: "").trim()) }, "Email saved") { version += 1 } }
                                 }
                             }
                         }
@@ -270,12 +273,12 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                                     val setup = totp
                                     when {
                                         me.totpEnabled && totpOffOpen -> {
-                                            EncoreField(totpPassword, { totpPassword = it }, placeholder = "Your password", password = true, keyboardType = KeyboardType.Password, modifier = Modifier.fillMaxWidth())
-                                            EncoreButton("Turn off two-step sign-in", enabled = totpPassword.isNotEmpty()) {
+                                            KitField(totpPassword, { totpPassword = it }, placeholder = "Your password", password = true, keyboardType = KeyboardType.Password, modifier = Modifier.fillMaxWidth())
+                                            KitButton("Turn off two-step sign-in", enabled = totpPassword.isNotEmpty()) {
                                                 run({ features.totpDisable(totpPassword) }, "Two-step sign-in is off") { totpOffOpen = false; totpPassword = ""; version += 1 }
                                             }
                                         }
-                                        me.totpEnabled -> EncoreButton("Turn off") { totpOffOpen = true }
+                                        me.totpEnabled -> KitButton("Turn off") { totpOffOpen = true }
                                         setup != null -> {
                                             val bitmap = remember(setup.qrBase64) {
                                                 try {
@@ -291,14 +294,14 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                                             Text("Scan the code with your authenticator app, or enter this key:", style = MaterialTheme.typography.bodySmall, color = p.muted)
                                             Text(setup.secret, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                                EncoreField(totpCode, { totpCode = it }, placeholder = "6-digit code", keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done, modifier = Modifier.width(160.dp))
+                                                KitField(totpCode, { totpCode = it }, placeholder = "6-digit code", keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done, modifier = Modifier.width(160.dp))
                                                 Spacer(Modifier.width(8.dp))
-                                                EncoreButton("Turn on", primary = true, enabled = totpCode.isNotEmpty()) {
+                                                KitButton("Turn on", primary = true, enabled = totpCode.isNotEmpty()) {
                                                     run({ features.totpEnable(totpCode) }, "Two-step sign-in is on") { totp = null; totpCode = ""; version += 1 }
                                                 }
                                             }
                                         }
-                                        else -> EncoreButton("Set up", primary = true) {
+                                        else -> KitButton("Set up", primary = true) {
                                             scope.launch {
                                                 try { totp = withContext(Dispatchers.IO) { features.totpSetup() } } catch (e: Exception) { Toasts.show(e.message ?: "That didn't work", "err") }
                                             }
@@ -344,7 +347,7 @@ fun AccountScreen(nav: Nav, session: Session, onBack: () -> Unit = nav.back) {
                 }
                 item {
                     Row(Modifier.fillMaxWidth().padding(Gutter), horizontalArrangement = Arrangement.Center) {
-                        EncoreButton("Sign out", iconRes = R.drawable.ic_logout) { confirmSignOut = true }
+                        KitButton("Sign out", iconRes = R.drawable.ic_logout) { confirmSignOut = true }
                     }
                 }
                 item { Spacer(Modifier.height(24.dp)) }

@@ -1,7 +1,7 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.int
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 

@@ -72,8 +72,8 @@ import app.encore.android.remote.LinkedVolume
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Cover
 import app.encore.android.ui.components.PlayerMenuActions
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.formatDay
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.core.formatDay
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.screens.LyricsLoad
 import app.encore.android.ui.screens.LyricsPane
@@ -82,7 +82,7 @@ import app.encore.android.ui.screens.PlayerButtons
 import app.encore.android.ui.screens.PlayerMeta
 import app.encore.android.ui.screens.UpNextList
 import app.encore.android.ui.screens.rememberLyrics
-import app.encore.android.ui.theme.focusRing
+import dev.krifmaz.kit.compose.theme.focusRing
 import app.encore.android.ui.theme.palette
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.CancellationException

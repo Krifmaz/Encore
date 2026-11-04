@@ -27,8 +27,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.cadenza.CadenzaCatalog
-import app.encore.android.core.int
-import app.encore.android.core.stringOnly
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.stringOnly
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.Quality
 import app.encore.android.playback.StreamInfo

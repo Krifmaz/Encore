@@ -15,12 +15,12 @@ import android.provider.MediaStore
 import androidx.annotation.RequiresApi
 import app.encore.android.AppGraph
 import app.encore.android.R
-import app.encore.android.core.parseJsonObject
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.SettingsApi
 import app.encore.android.data.session.SessionStore
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

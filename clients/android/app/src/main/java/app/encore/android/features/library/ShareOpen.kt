@@ -10,9 +10,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
-import app.encore.android.core.bool
-import app.encore.android.core.long
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.session.Session
 import app.encore.android.ui.Nav

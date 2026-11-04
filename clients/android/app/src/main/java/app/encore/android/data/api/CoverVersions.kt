@@ -1,6 +1,6 @@
 package app.encore.android.data.api
 
-import app.encore.android.core.stringOnly
+import dev.krifmaz.kit.compose.core.stringOnly
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject

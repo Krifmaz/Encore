@@ -25,13 +25,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.features.settings.copyToClipboard
+import dev.krifmaz.kit.compose.details.copyToClipboard
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.EncoreField
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.KitField
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -109,7 +109,7 @@ fun CollabMembersDialog(nav: Nav, id: Long, onChanged: () -> Unit, onLeft: () ->
                 if (d.isOwner) {
                     Text(PlaylistCollabRules.OWNER_HINT, style = MaterialTheme.typography.bodyMedium)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        EncoreField(
+                        KitField(
                             username,
                             { username = it },
                             placeholder = PlaylistCollabRules.USER_PLACEHOLDER,

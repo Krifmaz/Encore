@@ -31,14 +31,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.obj
-import app.encore.android.core.objects
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objects
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.PopMenu
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.PopMenu
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -127,8 +127,8 @@ private fun ReplaceSheet(nav: Nav, song: OwnFileUi.Song) {
                 style = MaterialTheme.typography.bodySmall, color = p.muted)
             if (line.isNotEmpty()) Text(line, style = MaterialTheme.typography.bodySmall, color = if (busy) p.muted else if (ok) EncoreColors.Ok else EncoreColors.Err, modifier = Modifier.padding(top = 10.dp))
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Close") { OwnFileUi.close() }
-                if (!ok) EncoreButton(if (busy) "Uploading…" else "Choose a file", iconRes = R.drawable.ic_upload, primary = true, enabled = !busy) { pick.launch(OwnFileRules.MIME_TYPES) }
+                KitButton("Close") { OwnFileUi.close() }
+                if (!ok) KitButton(if (busy) "Uploading…" else "Choose a file", iconRes = R.drawable.ic_upload, primary = true, enabled = !busy) { pick.launch(OwnFileRules.MIME_TYPES) }
             }
         }
     }
@@ -188,7 +188,7 @@ private fun BulkSheet(nav: Nav) {
             Text("Upload your own files", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 8.dp))
             Text("Choose your own copies of songs that are in the library. Each file is matched to its song by its tags (artist, title, album, length) and replaces that song's file for everyone, keeping its plays, likes, playlists and lyrics. Replaced files are deleted, or kept in the Trash while Keep deleted files in Trash is on.",
                 style = MaterialTheme.typography.bodySmall, color = p.muted)
-            if (!applied) EncoreButton("Choose files", iconRes = R.drawable.ic_upload, enabled = !applying, modifier = Modifier.padding(top = 12.dp)) { pick.launch(OwnFileRules.MIME_TYPES) }
+            if (!applied) KitButton("Choose files", iconRes = R.drawable.ic_upload, enabled = !applying, modifier = Modifier.padding(top = 12.dp)) { pick.launch(OwnFileRules.MIME_TYPES) }
             for (r in rows) {
                 Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
                     Text(r.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
@@ -205,8 +205,8 @@ private fun BulkSheet(nav: Nav) {
                 }
             }
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Close") { OwnFileUi.close() }
-                if (!applied) EncoreButton(OwnFileRules.applyLabel(chosen), primary = true, enabled = chosen > 0 && !uploading && !applying) {
+                KitButton("Close") { OwnFileUi.close() }
+                if (!applied) KitButton(OwnFileRules.applyLabel(chosen), primary = true, enabled = chosen > 0 && !uploading && !applying) {
                     applying = true
                     val items = rows.mapNotNull { r -> r.staged?.str("token")?.let { t -> r.pick?.let { t to it } } }
                     scope.launch {

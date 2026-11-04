@@ -36,14 +36,14 @@ import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.SongMatch
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.EncoreField
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -220,7 +220,7 @@ private fun SongFixSheet(nav: Nav, e: SongFixUi.Edit, onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall, color = p.muted,
             )
             FIELDS.forEachIndexed { i, (_, label) ->
-                EncoreField(values[i], { values[i] = it }, label = label, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                KitField(values[i], { values[i] = it }, label = label, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
             }
             Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Switch(checked = move, onCheckedChange = { move = it })
@@ -228,7 +228,7 @@ private fun SongFixSheet(nav: Nav, e: SongFixUi.Edit, onDismiss: () -> Unit) {
                 Text("Move the file to match (Artist/Album/NN Title)", style = MaterialTheme.typography.bodyMedium)
             }
             Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EncoreButton("Identify by its audio", iconRes = R.drawable.ic_flag, enabled = !listening) {
+                KitButton("Identify by its audio", iconRes = R.drawable.ic_flag, enabled = !listening) {
                     listening = true
                     idMessage = "Listening…"
                     scope.launch {
@@ -268,8 +268,8 @@ private fun SongFixSheet(nav: Nav, e: SongFixUi.Edit, onDismiss: () -> Unit) {
                 }
             }
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Cancel") { onDismiss() }
-                EncoreButton("Save", primary = true, enabled = !saving) {
+                KitButton("Cancel") { onDismiss() }
+                KitButton("Save", primary = true, enabled = !saving) {
                     saving = true
                     scope.launch {
                         try {

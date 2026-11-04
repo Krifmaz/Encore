@@ -1,18 +1,23 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.decodeModel
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.parseJson
-import app.encore.android.core.str
-import app.encore.android.core.strings
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.decodeModel
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.parseJson
+import dev.krifmaz.kit.compose.core.str
+import dev.krifmaz.kit.compose.core.strings
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.settings.ResultLine
+import dev.krifmaz.kit.compose.settings.SchemaField
+import dev.krifmaz.kit.compose.settings.SchemaGroup
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SettingsSchema
 
 /**
  * What Settings → Server → Plugins (0.32) needs without Android: the words of a plugin's card, its badges, status

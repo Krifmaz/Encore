@@ -30,12 +30,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +43,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.TextLink
 
 /** How long the phone asks about a Tidal sign-in: two device-code steps of 5 minutes each, and some margin. */
 private const val TIDAL_WAIT_MS = 11 * 60_000L

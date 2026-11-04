@@ -1,6 +1,6 @@
 package app.encore.android.features.picker
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.repo.FeaturesApi
 import app.encore.android.data.repo.PickSearch
 import app.encore.android.data.repo.PickerOpts
@@ -28,7 +28,7 @@ class PickerRulesTest {
 
     @Test
     fun todaysBareArrayIsALiveAnswer() {
-        val r = pickSearchOf(EncoreJson.parseToJsonElement("""[{"source": "deezer", "title": "Illuminate EP", "quality": "FLAC (Deezer HiFi)", "lossless": true, "tracks": 4, "payload": {"id": 1}}, {"source": "deezer"}]"""))
+        val r = pickSearchOf(KitJson.parseToJsonElement("""[{"source": "deezer", "title": "Illuminate EP", "quality": "FLAC (Deezer HiFi)", "lossless": true, "tracks": 4, "payload": {"id": 1}}, {"source": "deezer"}]"""))
         assertEquals(1, r.items.size)   // a row without a title is left out
         assertEquals("Illuminate EP", r.items[0].title)
         assertFalse(r.kept)
@@ -38,7 +38,7 @@ class PickerRulesTest {
 
     @Test
     fun theKeptAnswersFieldsAreRead() {
-        val r = pickSearchOf(EncoreJson.parseToJsonElement(
+        val r = pickSearchOf(KitJson.parseToJsonElement(
             """{"items": [{"source": "slskd", "title": "Illuminate EP", "quality": "FLAC", "lossless": true, "tracks": 4, "payload": {}}],
                "from": "cache", "cached_at": ${at(19, 14, 2)}, "found": "Found at 14:02", "query": "Duumu Illuminate EP",
                "can_search": true, "notice": null}""",
@@ -51,16 +51,16 @@ class PickerRulesTest {
         assertTrue(r.canSearch)
         assertEquals("", r.notice)
         // a live object answer, and one with every extra field missing
-        assertFalse(pickSearchOf(EncoreJson.parseToJsonElement("""{"items": [], "from": "live", "cached_at": null}""")).kept)
-        val bare = pickSearchOf(EncoreJson.parseToJsonElement("""{"items": []}"""))
+        assertFalse(pickSearchOf(KitJson.parseToJsonElement("""{"items": [], "from": "live", "cached_at": null}""")).kept)
+        val bare = pickSearchOf(KitJson.parseToJsonElement("""{"items": []}"""))
         assertFalse(bare.kept)
         assertTrue(bare.canSearch)
         // can_search false, as 0 or false
-        assertFalse(pickSearchOf(EncoreJson.parseToJsonElement("""{"from": "cache", "can_search": false}""")).canSearch)
-        assertFalse(pickSearchOf(EncoreJson.parseToJsonElement("""{"from": "cache", "can_search": 0}""")).canSearch)
+        assertFalse(pickSearchOf(KitJson.parseToJsonElement("""{"from": "cache", "can_search": false}""")).canSearch)
+        assertFalse(pickSearchOf(KitJson.parseToJsonElement("""{"from": "cache", "can_search": 0}""")).canSearch)
         // anything else is an empty answer
         assertEquals(0, pickSearchOf(null).items.size)
-        assertEquals(0, pickSearchOf(EncoreJson.parseToJsonElement("\"oops\"")).items.size)
+        assertEquals(0, pickSearchOf(KitJson.parseToJsonElement("\"oops\"")).items.size)
     }
 
     private fun foundLineOf(f: PickSearch?, typed: String = "Duumu Illuminate EP", empty: Boolean = false) =
@@ -112,7 +112,7 @@ class PickerRulesTest {
     @Test
     fun theServersFinalAnswerReads() {
         // package B's answer as the server sends it (R2): cached_at in whole seconds, found on the server's clock
-        val kept = pickSearchOf(EncoreJson.parseToJsonElement(
+        val kept = pickSearchOf(KitJson.parseToJsonElement(
             """{"items": [{"source": "slskd", "key": "alice|Music/Duumu/Illuminate EP", "title": "Duumu/Illuminate EP", "subtitle": "Music / Duumu / Illuminate EP",
                  "quality": "FLAC 16-bit", "lossless": true, "tracks": 2, "size": 60000000, "duration": null, "info": "alice · free slot · 2.0 MB/s", "score": 93.0,
                  "payload": {"username": "alice", "directory": "Music/Duumu/Illuminate EP", "format": "flac", "bitrate": 0, "files": []}}],
@@ -132,13 +132,13 @@ class PickerRulesTest {
         assertEquals(FoundLine("Found at 14:02", again = true), foundLineOf(kept.copy(query = "Ke\$ha Tik Tok"), typed = "Ke\$ha Tik Tok"))
         assertEquals(FoundLine("Found at 14:02 for \"Days Before Rodeo\"", again = true), foundLineOf(kept.copy(query = "Days Before Rodeo"), typed = "Travis Scott Days Before Rodeo"))
         // kept rows while Soulseek isn't connected: no Search again, the server's reason instead
-        val down = pickSearchOf(EncoreJson.parseToJsonElement(
+        val down = pickSearchOf(KitJson.parseToJsonElement(
             """{"items": [], "from": "cache", "cached_at": 1760875320, "found": "Found yesterday at 22:10", "query": "Duumu Illuminate EP",
                "can_search": false, "notice": "Soulseek isn't connected – next attempt at 14:20"}""",
         ))
         assertEquals(FoundLine("No results. · Found yesterday at 22:10 · Soulseek isn't connected – next attempt at 14:20", again = false), foundLineOf(down, empty = true))
         // a live answer of every other source: nothing to say
-        val live = pickSearchOf(EncoreJson.parseToJsonElement("""{"items": [], "from": "live", "cached_at": null, "found": null, "query": "Duumu Illuminate EP", "can_search": true, "notice": null}"""))
+        val live = pickSearchOf(KitJson.parseToJsonElement("""{"items": [], "from": "live", "cached_at": null, "found": null, "query": "Duumu Illuminate EP", "can_search": true, "notice": null}"""))
         assertFalse(live.kept)
         assertNull(foundLineOf(live))
     }

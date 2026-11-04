@@ -95,6 +95,9 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil.network.cache.control)   // covers follow the server's Cache-Control / ETag
 
+    // Krifmaz kit: Encore's look and ease-of-use parts, shared with the other apps (settings.gradle.kts, kit.properties)
+    implementation(libs.kit.compose)
+
     // Cadenza on the phone (JNI binding + libencore_cadenza.so when built with cargo-ndk); CadenzaEngine adapts it
     implementation(project(":cadenza"))
 

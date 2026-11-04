@@ -1,6 +1,6 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -11,17 +11,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import dev.krifmaz.kit.compose.settings.ResultLine
+import dev.krifmaz.kit.compose.settings.SchemaField
+import dev.krifmaz.kit.compose.settings.SchemaGroup
+import dev.krifmaz.kit.compose.settings.SchemaOption
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SchemaSection
+import dev.krifmaz.kit.compose.settings.SettingsSchema
 
 /** Settings → Plugins (PluginRules.kt): the same rules and words as web-rs/src/settings/plugins.rs. */
 class PluginRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json).jsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json).jsonObject
 
     /** The schema the web's tests use, recorded from GET /api/admin/settings/schema (null when the repo is not there). */
     private fun recordedSchema(): SettingsSchema? =
         listOf("../../../web-rs", "../../web-rs", "web-rs", "../web-rs")
             .map { File(it, "src/settings/fixtures/settings-schema.json") }
             .firstOrNull { it.isFile }
-            ?.let { EncoreJson.decodeFromString(SettingsSchema.serializer(), it.readText()) }
+            ?.let { KitJson.decodeFromString(SettingsSchema.serializer(), it.readText()) }
 
     @Test
     fun oldLinksOpenThePluginsPage() {

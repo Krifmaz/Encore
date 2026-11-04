@@ -4,9 +4,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.unit.dp
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Spinner
 import kotlinx.serialization.json.JsonObject
+import app.encore.android.schemaApi
+import dev.krifmaz.kit.compose.settings.CardSlots
+import dev.krifmaz.kit.compose.settings.SchemaApi
+import dev.krifmaz.kit.compose.settings.SchemaFormState
+import dev.krifmaz.kit.compose.settings.SchemaPage
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 // Settings → Server pages drawn from the server's settings schema (General, Library, Downloads, Integrations, Server
 // processing, Email & notifications, and the Playlists & sync card of Scheduled tasks): SchemaPage (SchemaForm.kt)

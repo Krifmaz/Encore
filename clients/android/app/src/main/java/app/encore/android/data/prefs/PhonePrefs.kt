@@ -1,7 +1,7 @@
 package app.encore.android.data.prefs
 
-import app.encore.android.core.bool
-import app.encore.android.core.stringOnly
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.stringOnly
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put

@@ -1,8 +1,8 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.api.OneOffs
-import app.encore.android.ui.components.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuEntry
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -11,7 +11,7 @@ import org.junit.Test
 
 /** Library types, Select / Delete… and who added it (0.36): the same words and rules as the web and the desktop. */
 class AlbumTypesRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
 
     /** §2.4 of the contract, verbatim (DAY passed in as a string). */
     @Test
@@ -152,7 +152,7 @@ class AlbumTypesRulesTest {
         assertEquals("Deleted 1 album", AlbumTypesRules.deletedText(1, 1, ""))
         assertEquals("Deleted 10 of 12 albums – 2 couldn't be deleted: X", AlbumTypesRules.deletedText(10, 12, "X"))
         assertEquals("Delete", AlbumTypesRules.goLabel(false))
-        val off = EncoreJson.parseToJsonElement("""{"text": "Delete 1 album (1 MB)?", "keep": false, "days": 30}""") as kotlinx.serialization.json.JsonObject
+        val off = KitJson.parseToJsonElement("""{"text": "Delete 1 album (1 MB)?", "keep": false, "days": 30}""") as kotlinx.serialization.json.JsonObject
         assertEquals(AlbumTypesRules.TrashDialog("Delete 1 album (1 MB)?", AlbumTypesRules.DELETE_BODY, true, false), AlbumTypesRules.trashDialog(off))
         assertEquals("Deleted 2 albums", AlbumTypesRules.Moved(2, "", keep = false).text(2))
         assertEquals(

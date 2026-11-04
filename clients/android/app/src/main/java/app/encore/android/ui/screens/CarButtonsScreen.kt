@@ -57,9 +57,10 @@ import app.encore.android.playback.CarButtonRules.Id
 import app.encore.android.playback.CarButtonRules.Layout
 import app.encore.android.playback.CarPrefs
 import app.encore.android.playback.LyricsStripRules
-import app.encore.android.ui.components.Gutter
-import app.encore.android.ui.components.SectionHead
+import dev.krifmaz.kit.compose.widgets.Gutter
+import dev.krifmaz.kit.compose.widgets.SectionHead
 import app.encore.android.ui.theme.palette
+import dev.krifmaz.kit.compose.widgets.BackBar
 
 // Settings → Android Auto (also Settings → Playback → In the car → Car buttons): the car's buttons are picked here on
 // the phone, as horizontal rows like Home's Recently added (ButtonShelfRules): the car player's buttons

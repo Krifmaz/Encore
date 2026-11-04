@@ -1,6 +1,6 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.repo.Me
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -11,7 +11,7 @@ import org.junit.Test
 
 /** Bring your own music's rules: who may, the words of what changed, the Signal path note and the batch's choices. */
 class OwnFileRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
 
     @Test
     fun whoMayReplaceASongsFile() {

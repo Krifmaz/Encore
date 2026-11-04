@@ -1,8 +1,8 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.bool
-import app.encore.android.core.obj
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonObject
 import java.net.URI
 

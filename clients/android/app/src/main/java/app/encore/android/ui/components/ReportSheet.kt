@@ -27,7 +27,7 @@ import androidx.compose.ui.unit.dp
 import app.encore.android.R
 import app.encore.android.data.repo.features
 import app.encore.android.ui.Nav
-import app.encore.android.ui.screens.EncoreField
+import dev.krifmaz.kit.compose.widgets.KitField
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +36,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.KitButton
 
 /**
  * ⋯ → Report a problem (web/js/pages/report.js `reportModal`): what is wrong with a song or an album. The server
@@ -140,10 +142,10 @@ private fun ReportSheet(nav: Nav, req: ReportUi.Request, onDismiss: () -> Unit) 
                     }
                 }
             }
-            EncoreField(note, { note = it }, placeholder = if (ReportRules.isLyrics(reason)) "Optional – e.g. the lyrics are for the remix" else "Optional – e.g. the intro is missing", label = "Note", singleLine = false, minLines = 2, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+            KitField(note, { note = it }, placeholder = if (ReportRules.isLyrics(reason)) "Optional – e.g. the lyrics are for the remix" else "Optional – e.g. the intro is missing", label = "Note", singleLine = false, minLines = 2, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
             Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                EncoreButton("Cancel") { onDismiss() }
-                EncoreButton("Report", iconRes = R.drawable.ic_flag, primary = true, enabled = !busy) {
+                KitButton("Cancel") { onDismiss() }
+                KitButton("Report", iconRes = R.drawable.ic_flag, primary = true, enabled = !busy) {
                     when {
                         reason.isEmpty() -> Toasts.show("Pick what is wrong", "err")
                         reason == "other" && note.isBlank() -> Toasts.show("Say what is wrong", "err")

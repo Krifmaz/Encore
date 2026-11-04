@@ -27,16 +27,16 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.objectsOf
-import app.encore.android.core.arr
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.RowDivider
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.RowDivider
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -46,6 +46,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.settings.CardHead
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
 
 /**
  * Settings → Scheduled tasks, above the page's Playlists & sync card (web-rs/src/settings/tasks.rs): every

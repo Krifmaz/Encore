@@ -1,7 +1,7 @@
 package app.encore.android.data.api
 
 import android.content.Context
-import app.encore.android.CrashLog
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.data.session.Session
 import java.io.File
 import java.security.MessageDigest
