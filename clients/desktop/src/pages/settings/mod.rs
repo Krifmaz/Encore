@@ -141,7 +141,7 @@ impl Section {
                 let g = fields::group_of(id)?;
                 let section = Section::ALL.into_iter().find(|s| s.id() == g.id)?;
                 if let Some(c) = fields::card(id) {
-                    *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.id);
+                    *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(&c.id);
                 }
                 Some(section)
             }

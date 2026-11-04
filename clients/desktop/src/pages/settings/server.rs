@@ -9,18 +9,16 @@
 
 use super::fields::{self, Card, Field};
 use super::{autodownload, blocked, contribute, tasks, tools, Section};
-use super::{env_locked, help, input, input_locked, is_masked, link_muted, result_line_copy, select_table, switch_maybe, vs};
+use super::{env_locked, help};
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El};
 use crate::theme::{self, Btn};
-use crate::widgets::text_area::text_area;
-use crate::widgets::{self, btn, btn_icon, btn_sm, icon, icon_btn, modal, t, Icon};
-use iced::widget::text_editor;
-use iced::widget::{button, checkbox, column, container, row};
+use crate::widgets::{self, btn, btn_icon, icon_btn, modal, t, Icon};
+use iced::widget::{column, container, row};
 use iced::{Alignment, Length, Subscription, Task};
+use kit_iced::form::{self, Form};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
@@ -31,26 +29,8 @@ pub enum Dialog {
 #[derive(Debug, Default)]
 pub struct State {
     section: Option<Section>,
-    /// `/api/admin/settings` (with `_meta`).
-    values: Option<Value>,
-    error: String,
-    /// Text typed into inputs, by key (absent = the saved value shows).
-    edits: HashMap<String, String>,
-    /// Secrets shown in clear.
-    shown: HashSet<String>,
-    /// Secrets fetched from the server to show (emptied again when hidden).
-    revealed: HashSet<String>,
-    bools: HashMap<String, bool>,
-    checks: HashMap<String, Vec<String>>,
-    areas: HashMap<String, text_editor::Content>,
-    /// Plain (not secret) text areas typed into: they keep their text when the values come again.
-    typed: HashSet<String>,
-    open: HashSet<&'static str>,
-    /// Test and save results under a card.
-    flash: HashMap<&'static str, Vec<(bool, String)>>,
-    busy: HashSet<&'static str>,
-    /// The card a link asked for: unfolded instead of the first one.
-    focus: Option<&'static str>,
+    /// The settings form (the kit's): the values, what was typed, the open and busy cards.
+    form: Form,
     api_key: Option<String>,
     key_shown: bool,
     dialog: Option<Dialog>,
@@ -65,22 +45,8 @@ pub struct State {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Values(Result<Value, ApiError>),
-    Toggle(&'static str),
-    Edit(String, String),
-    Bool(String, bool),
-    Check(String, String, bool),
-    Area(String, text_editor::Action),
-    Reveal(String),
-    Revealed(String, Result<Value, ApiError>),
-    Hide(String),
-    Copy(String),
-    Copied(Result<Value, ApiError>),
-    Clear(String),
-    Save(&'static str),
-    Saved(&'static str, Result<Value, ApiError>),
-    Test(&'static str),
-    Tested(&'static str, Result<(Value, Result<Value, ApiError>), ApiError>),
+    /// The settings form's own messages (kit_iced::form).
+    Form(form::Msg),
     VpnSaved(Result<Value, ApiError>),
     ApiKey(Result<Value, ApiError>),
     ShowKey(bool),
@@ -120,22 +86,14 @@ fn group_id(s: Section) -> Option<&'static str> {
 
 fn load_values(ctx: &Ctx) -> Task<Message> {
     let api = ctx.api.clone();
-    Task::perform(async move { api.get("/admin/settings").await }, Message::Values)
+    Task::perform(async move { api.get("/admin/settings").await }, |r| Message::Form(form::Msg::Values(r.map_err(|e| e.message))))
 }
 
 pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message> {
     state.section = Some(section);
-    state.error.clear();
-    state.edits.clear();
-    state.shown.clear();
-    state.revealed.clear();
-    state.bools.clear();
-    state.checks.clear();
-    state.areas.clear();
-    state.typed.clear();
-    state.flash.clear();
-    state.busy.clear();
-    state.open.clear();
+    // the WireGuard private key never comes back from the server: no Show saved / Copy
+    state.form = std::mem::take(&mut state.form).never_shown(["vpn_wireguard_config"]);
+    state.form.open(std::iter::empty::<String>(), None);
     state.dialog = None;
     match section {
         Section::Autodownload => return autodownload::open(&mut state.autodownload, ctx).map(Message::Autodownload),
@@ -143,9 +101,9 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
         Section::Blocked => return blocked::open(&mut state.blocked, ctx).map(Message::Blocked),
         _ => {}
     }
-    state.values = None;
     let group = group_id(section).and_then(fields::group);
-    state.focus = super::take_focus().filter(|f| group.is_some_and(|g| g.sections().any(|s| s == *f)));
+    let focus = super::take_focus().filter(|f| group.is_some_and(|g| g.sections().any(|s| s == *f)));
+    state.form.open(group.map(|g| g.sections().collect::<Vec<_>>()).unwrap_or_default(), focus.map(String::from));
     let mut tasks = vec![load_values(ctx)];
     match section {
         Section::Tasks => tasks.push(tasks::open(&mut state.tasks, ctx).map(Message::Tasks)),
@@ -166,309 +124,80 @@ pub fn open(state: &mut State, section: Section, ctx: &mut Ctx) -> Task<Message>
     Task::batch(tasks)
 }
 
-/// The card that starts unfolded: the one a link asked for, else the first this server has
-/// (the web skips cards whose settings the server does not know).
-fn first_open(state: &State) -> Option<&'static str> {
-    if state.focus.is_some() {
-        return state.focus;
-    }
-    let values = state.values.as_ref()?;
-    let group = state.section.and_then(group_id).and_then(fields::group)?;
-    group
-        .sections()
-        .find(|id| fields::card(id).is_some_and(|c| c.fields.iter().any(|f| values.get(f.key).is_some())))
-}
-
-/// After the values arrived: a text box per textarea field the server has.
-fn make_areas(state: &mut State, values: &Value) {
-    for c in fields::SECTIONS {
-        for f in c.fields.iter().filter(|f| f.kind == "textarea" && values.get(f.key).is_some()) {
-            if f.is_secret() {
-                state.areas.entry(f.key.to_string()).or_default();
-            } else if !state.typed.contains(f.key) {
-                // a plain text area shows what is saved, so a Save sends it back whole (a secret
-                // one starts empty and is sent only when something was pasted)
-                state.areas.insert(f.key.to_string(), text_editor::Content::with_text(&vs(&values[f.key])));
-            }
-        }
-    }
-}
-
-/// The value an input shows: what was typed, else the saved value.
-fn current(state: &State, values: &Value, key: &str) -> String {
-    state.edits.get(key).cloned().unwrap_or_else(|| vs(&values[key]))
-}
-
-/// The `when` rule: shown only while the select it names has one of the values.
-fn visible(state: &State, values: &Value, f: &Field) -> bool {
-    match f.when {
-        None => true,
-        Some((k, vals)) => vals.contains(&current(state, values, k).as_str()),
-    }
-}
-
-/// The ticked options of a `checks` field.
-fn checked(state: &State, values: &Value, key: &str) -> Vec<String> {
-    match state.checks.get(key) {
-        Some(c) => c.clone(),
-        None => vs(&values[key]).split(',').map(fields::type_key).filter(|s| !s.is_empty()).collect(),
-    }
-}
-
-/// The body of a card's Save, as the web builds it: every field the server has that the
-/// environment does not lock; secrets only when typed (an empty box keeps the saved value).
-pub fn save_body(state: &State, values: &Value, card: &Card) -> Map<String, Value> {
-    let mut body = Map::new();
-    for f in card.fields.iter().filter(|f| values.get(f.key).is_some()) {
-        if env_locked(values, f.key) {
-            continue;
-        }
-        match f.kind {
-            "checks" => {
-                let on = checked(state, values, f.key);
-                let joined: Vec<&str> = f.options.iter().filter(|(v, _)| on.contains(&fields::type_key(v))).map(|(v, _)| *v).collect();
-                body.insert(f.key.into(), Value::String(joined.join(",")));
-            }
-            "bool" => {
-                let on = state.bools.get(f.key).copied().unwrap_or_else(|| super::truthy(&values[f.key]));
-                body.insert(f.key.into(), Value::Bool(on));
-            }
-            "textarea" => {
-                let text = state.areas.get(f.key).map(|c| c.text()).unwrap_or_default();
-                if f.is_secret() && (text.trim().is_empty() || is_masked(&text)) {
-                    continue;
-                }
-                body.insert(f.key.into(), Value::String(text.trim().to_string()));
-            }
-            "password" => {
-                let text = state.edits.get(f.key).cloned().unwrap_or_default();
-                if text.trim().is_empty() || is_masked(&text) || state.revealed.contains(f.key) {
-                    continue;
-                }
-                body.insert(f.key.into(), Value::String(text.trim().to_string()));
-            }
-            _ => {
-                let text = current(state, values, f.key);
-                if is_masked(&text) {
-                    continue;
-                }
-                body.insert(f.key.into(), Value::String(text));
-            }
-        }
-    }
-    if card.id == "cadenza" && !env_locked(values, "cadenza_engine_settings") {
+/// A card's Save body with what the form does not hold: Cadenza's engine settings (drawn by `tools.rs`).
+fn with_engine(state: &State, card: &str, body: &mut Map<String, Value>) {
+    if card == "cadenza" && !state.form.values().is_some_and(|v| env_locked(v, "cadenza_engine_settings")) {
         if let Some(e) = tools::engine_settings_value(&state.tools) {
             body.insert("cadenza_engine_settings".into(), Value::String(e));
         }
     }
-    body
 }
 
-/// Forget the typed values of a card (its saved values show again).
-fn settle(state: &mut State, card: &Card) {
-    for f in card.fields {
-        state.edits.remove(f.key);
-        state.bools.remove(f.key);
-        state.checks.remove(f.key);
-        state.shown.remove(f.key);
-        state.revealed.remove(f.key);
-        if f.kind == "textarea" {
-            state.typed.remove(f.key);
-            let saved = match &state.values {
-                Some(v) if !f.is_secret() => vs(&v[f.key]),
-                _ => String::new(),
-            };
-            if let Some(c) = state.areas.get_mut(f.key) {
-                *c = text_editor::Content::with_text(&saved);
-            }
+/// Runs what the form asks for: the requests, the clipboard and the toasts.
+fn run(state: &State, out: form::Out, ctx: &mut Ctx) -> Task<Message> {
+    let api = ctx.api.clone();
+    let put = |body: Map<String, Value>| {
+        let api = api.clone();
+        async move { api.put("/admin/settings", Value::Object(body)).await }
+    };
+    match out {
+        form::Out::Save { card, mut body } => {
+            with_engine(state, &card, &mut body);
+            Task::perform(put(body), move |r| Message::Form(form::Msg::Saved(card.clone(), r.map_err(|e| e.message))))
+        }
+        form::Out::Test { card, test, mut body } => {
+            with_engine(state, &card, &mut body);
+            Task::perform(
+                async move {
+                    let saved = api.put("/admin/settings", Value::Object(body)).await?;
+                    let tested = api.post_empty(&format!("/system/test/{test}")).await;
+                    Ok((saved, tested.map_err(|e| e.message)))
+                },
+                move |r: Result<(Value, Result<Value, String>), ApiError>| Message::Form(form::Msg::Tested(card.clone(), r.map_err(|e| e.message))),
+            )
+        }
+        form::Out::Clear { body, .. } => Task::perform(put(body), |r| Message::Form(form::Msg::Cleared(r.map_err(|e| e.message)))),
+        form::Out::Reveal { key } => {
+            let k = key.clone();
+            Task::perform(
+                async move { api.get(&format!("/admin/settings/secret/{}", crate::pages::urlencode(&k))).await },
+                move |r| Message::Form(form::Msg::Revealed(key.clone(), r.map_err(|e| e.message))),
+            )
+        }
+        form::Out::CopySecret { key } => Task::perform(
+            async move { api.get(&format!("/admin/settings/secret/{}", crate::pages::urlencode(&key))).await },
+            |r| Message::Form(form::Msg::Copied(r.map_err(|e| e.message))),
+        ),
+        form::Out::Copy(text) => {
+            ctx.copy(text);
+            Task::none()
+        }
+        form::Out::CopyText(text) => {
+            ctx.copy_text(text);
+            Task::none()
+        }
+        form::Out::ToastOk(text) => {
+            ctx.toast_ok(text);
+            Task::none()
+        }
+        form::Out::ToastErr(text) => {
+            ctx.toast_err(text);
+            Task::none()
         }
     }
-}
-
-/// `{ok, message}` of a test answer as words.
-fn test_words(r: &Value) -> (bool, String) {
-    let ok = fmt::truthy(r, "ok");
-    let m = if fmt::truthy(r, "message") {
-        fmt::s(r, "message")
-    } else if ok {
-        "Connected".into()
-    } else {
-        "Failed".into()
-    };
-    (ok, m)
-}
-
-fn take_values(state: &mut State, mut v: Value) -> Vec<String> {
-    let warnings: Vec<String> = fmt::items(&v["_warnings"]).iter().map(|w| fmt::s(w, "message")).filter(|m| !m.is_empty()).collect();
-    if let Some(o) = v.as_object_mut() {
-        o.remove("_warnings");
-    }
-    make_areas(state, &v);
-    state.values = Some(v);
-    warnings
 }
 
 pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     match msg {
-        Message::Values(Ok(v)) => {
-            take_values(state, v);
-            if state.open.is_empty() {
-                if let Some(id) = first_open(state) {
-                    state.open.insert(id);
-                }
-            }
-        }
-        Message::Values(Err(e)) => state.error = e.message,
-        Message::Toggle(id) => {
-            if !state.open.remove(id) {
-                state.open.insert(id);
-            }
-        }
-        Message::Edit(k, v) => {
-            state.revealed.remove(&k);
-            state.edits.insert(k, v);
-        }
-        Message::Bool(k, on) => {
-            state.bools.insert(k, on);
-        }
-        Message::Check(k, option, on) => {
-            let values = state.values.clone().unwrap_or(Value::Null);
-            let mut list = checked(state, &values, &k);
-            let key = fields::type_key(&option);
-            list.retain(|x| *x != key);
-            if on {
-                list.push(key);
-            }
-            state.checks.insert(k, list);
-        }
-        Message::Area(k, a) => {
-            if a.is_edit() {
-                state.typed.insert(k.clone());
-            }
-            if let Some(c) = state.areas.get_mut(&k) {
-                c.perform(a);
-            }
-        }
-        Message::Reveal(k) => {
-            if state.edits.get(&k).is_some_and(|v| !v.is_empty()) {
-                state.shown.insert(k);
-                return Task::none();
-            }
-            let api = ctx.api.clone();
-            let key = k.clone();
-            return Task::perform(
-                async move { api.get(&format!("/admin/settings/secret/{}", crate::pages::urlencode(&key))).await },
-                move |r| Message::Revealed(k.clone(), r),
-            );
-        }
-        Message::Revealed(k, Ok(r)) => {
-            let value = fmt::s(&r, "value");
-            if let Some(c) = state.areas.get_mut(&k) {
-                *c = text_editor::Content::with_text(&value);
-            } else {
-                state.edits.insert(k.clone(), value);
-            }
-            state.revealed.insert(k.clone());
-            state.shown.insert(k);
-        }
-        Message::Revealed(_, Err(e)) => ctx.toast_err(e.message),
-        Message::Hide(k) => {
-            state.shown.remove(&k);
-            if state.revealed.remove(&k) {
-                state.edits.remove(&k);
-                if let Some(c) = state.areas.get_mut(&k) {
-                    *c = text_editor::Content::new();
-                }
-            }
-        }
-        Message::Copy(k) => {
-            let typed = state.edits.get(&k).cloned().or_else(|| state.areas.get(&k).map(|c| c.text())).unwrap_or_default();
-            if !typed.trim().is_empty() {
-                ctx.copy(typed);
-                ctx.toast_ok("Copied to clipboard");
-                return Task::none();
-            }
-            let api = ctx.api.clone();
-            return Task::perform(
-                async move { api.get(&format!("/admin/settings/secret/{}", crate::pages::urlencode(&k))).await },
-                Message::Copied,
-            );
-        }
-        Message::Copied(Ok(r)) => {
-            ctx.copy(fmt::s(&r, "value"));
-            ctx.toast_ok("Copied to clipboard");
-        }
-        Message::Copied(Err(e)) => ctx.toast_err(e.message),
-        Message::Clear(k) => {
-            let api = ctx.api.clone();
-            let mut body = Map::new();
-            body.insert(k, Value::String(String::new()));
-            return Task::perform(async move { api.put("/admin/settings", Value::Object(body)).await }, |r| Message::Saved("", r));
-        }
-        Message::Save(id) => {
-            let (Some(values), Some(card)) = (&state.values, fields::card(id)) else { return Task::none() };
-            let body = save_body(state, values, card);
-            state.busy.insert(id);
-            state.flash.remove(id);
-            let api = ctx.api.clone();
-            return Task::perform(async move { api.put("/admin/settings", Value::Object(body)).await }, move |r| Message::Saved(id, r));
-        }
-        Message::Saved(id, Ok(v)) => {
-            state.busy.remove(id);
-            let warnings = take_values(state, v);
-            if id.is_empty() {
-                ctx.toast_ok("Cleared");
-            } else {
-                if let Some(card) = fields::card(id) {
-                    settle(state, card);
-                }
-                ctx.toast_ok("Settings saved");
-                if !warnings.is_empty() {
-                    state.flash.insert(id, warnings.into_iter().map(|w| (false, w)).collect());
-                }
-            }
-        }
-        Message::Saved(id, Err(e)) => {
-            state.busy.remove(id);
-            ctx.toast_err(e.message);
-        }
-        Message::Test(id) => {
-            let (Some(values), Some(card)) = (&state.values, fields::card(id)) else { return Task::none() };
-            let Some(test) = card.test else { return Task::none() };
-            let body = save_body(state, values, card);
-            state.busy.insert(id);
-            state.open.insert(id);
-            state.flash.insert(id, vec![(true, "Testing…".into())]);
-            let api = ctx.api.clone();
-            return Task::perform(
-                async move {
-                    let saved = api.put("/admin/settings", Value::Object(body)).await?;
-                    let tested = api.post_empty(&format!("/system/test/{test}")).await;
-                    Ok((saved, tested))
-                },
-                move |r| Message::Tested(id, r),
-            );
-        }
-        Message::Tested(id, Ok((saved, tested))) => {
-            state.busy.remove(id);
-            let mut lines: Vec<(bool, String)> = take_values(state, saved).into_iter().map(|w| (false, w)).collect();
-            if let Some(card) = fields::card(id) {
-                settle(state, card);
-            }
-            match tested {
-                Ok(r) => lines.push(test_words(&r)),
-                Err(e) => lines.push((false, if e.message.is_empty() { "Test failed".into() } else { e.message })),
-            }
-            state.flash.insert(id, lines);
-        }
-        Message::Tested(id, Err(e)) => {
-            state.busy.remove(id);
-            state.flash.insert(id, vec![(false, if e.message.is_empty() { "Test failed".into() } else { e.message })]);
+        Message::Form(m) => {
+            let outs = state.form.update(m, fields::SECTIONS);
+            let tasks: Vec<Task<Message>> = outs.into_iter().map(|o| run(state, o, ctx)).collect();
+            return Task::batch(tasks);
         }
         Message::VpnSaved(Ok(v)) => {
-            take_values(state, v);
+            state.form.take_values(v, fields::SECTIONS);
             if let Some(card) = fields::card("slskd") {
-                settle(state, card);
+                state.form.settle(card);
             }
             return tools::start_vpn_test(&mut state.tools, ctx).map(Message::Tools);
         }
@@ -498,8 +227,8 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
         Message::GoPlugins => ctx.navigate(crate::pages::Page::Settings(Section::Plugins)),
         Message::Tools(tools::Message::VpnTest) => {
             // save the Soulseek card first, then run the test
-            let (Some(values), Some(card)) = (&state.values, fields::card("slskd")) else { return Task::none() };
-            let body = save_body(state, values, card);
+            let (Some(values), Some(card)) = (state.form.values(), fields::card("slskd")) else { return Task::none() };
+            let body = state.form.save_body(values, card);
             state.tools.vpn_testing_started();
             let api = ctx.api.clone();
             return Task::perform(async move { api.put("/admin/settings", Value::Object(body)).await }, Message::VpnSaved);
@@ -542,209 +271,35 @@ fn page_parts(group: &fields::Group, section: Section, no_plugins: bool) -> Vec<
     parts
 }
 
-/// The note under a field about where its value comes from.
-fn source_note<'a>(f: &Field, values: &Value) -> Option<El<'a, Message>> {
-    let m = &values["_meta"][f.key];
-    let set = super::truthy(&values[f.key]);
-    if let Some(note) = super::env_note(values, f.key) {
-        return Some(help(note).into());
-    }
-    if f.is_secret() && set {
-        return Some(
-            row![help("Saved ✓ (hidden) ·"), link_muted("clear", Message::Clear(f.key.to_string()))]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into(),
-        );
-    }
-    if f.is_secret() {
-        let env = if fmt::truthy(m, "env") { format!(" – or set {} in your compose file", fmt::s(m, "env")) } else { String::new() };
-        return Some(help(format!("Not set{env}")).into());
-    }
-    if m["source"].as_str() == Some("ui") {
-        return None;
-    }
-    if fmt::truthy(m, "env") {
-        return Some(widgets::faint(format!("Default · env var {}", fmt::s(m, "env"))).size(12).into());
-    }
-    None
-}
-
-fn field_view<'a>(state: &'a State, values: &'a Value, f: &'static Field, reveal: bool) -> El<'a, Message> {
-    let key = f.key.to_string();
-    let locked = env_locked(values, f.key);
-    let v = &values[f.key];
-    let mut lines: Vec<El<'a, Message>> = Vec::new();
-    match f.kind {
-        "bool" => {
-            let on = state.bools.get(f.key).copied().unwrap_or_else(|| super::truthy(v));
-            let k = key.clone();
-            lines.push(switch_maybe(on, f.label, (!locked).then_some(move |x| Message::Bool(k.clone(), x))));
-        }
-        "checks" => {
-            let on = checked(state, values, f.key);
-            let mut boxes = row![].spacing(14);
-            for (val, lab) in f.options {
-                let is = on.contains(&fields::type_key(val));
-                let (k, o) = (key.clone(), val.to_string());
-                boxes = boxes.push(checkbox(is).label(*lab).size(16).text_size(13).spacing(6).on_toggle_maybe((!locked).then_some(move |x| Message::Check(k.clone(), o.clone(), x))));
-            }
-            lines.push(widgets::small_muted(f.label).font(theme::semibold()).into());
-            lines.push(boxes.wrap().into());
-        }
-        "select" => {
-            let cur = current(state, values, f.key);
-            let k = key.clone();
-            let picker: El<'a, Message> = if locked {
-                help(f.options.iter().find(|(x, _)| *x == cur).map(|(_, l)| *l).unwrap_or(cur.as_str()).to_string()).into()
-            } else {
-                select_table(f.options, &cur, move |x| Message::Edit(k.clone(), x))
-            };
-            lines.push(widgets::field(f.label, picker));
-        }
-        "textarea" => {
-            lines.push(widgets::small_muted(f.label).font(theme::semibold()).into());
-            if let Some(c) = state.areas.get(f.key) {
-                let k = key.clone();
-                let placeholder = if f.is_secret() && super::truthy(v) { "Saved – paste to replace" } else { "" };
-                lines.push(text_area(c, placeholder, 5, move |a| Message::Area(k.clone(), a)));
-            }
-            if reveal && f.is_secret() && super::truthy(v) && f.key != "vpn_wireguard_config" && !locked {
-                let shown = state.shown.contains(f.key);
-                lines.push(
-                    row![
-                        btn_sm(if shown { "Hide" } else { "Show saved" }, Btn::Default, Some(if shown { Message::Hide(key.clone()) } else { Message::Reveal(key.clone()) })),
-                        btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Message::Copy(key.clone()))),
-                    ]
-                    .spacing(8)
-                    .into(),
-                );
-            }
-        }
-        "password" => {
-            let text = state.edits.get(f.key).cloned().unwrap_or_default();
-            let placeholder = if locked {
-                "set by environment"
-            } else if super::truthy(v) {
-                "saved – paste a new value to replace"
-            } else {
-                "not set"
-            };
-            let shown = state.shown.contains(f.key);
-            let k = key.clone();
-            let mut r = row![].spacing(6).align_y(Alignment::Center);
-            if locked {
-                r = r.push(input_locked::<Message>("").width(Length::Fill));
-            } else {
-                r = r.push(input(placeholder, &text, move |x| Message::Edit(k.clone(), x)).secure(!shown).width(Length::Fill));
-            }
-            if reveal && super::truthy(v) {
-                r = r.push(icon_btn(if shown { Icon::X } else { Icon::Search }, if shown { "Hide" } else { "Show" }, Some(if shown { Message::Hide(key.clone()) } else { Message::Reveal(key.clone()) })));
-                r = r.push(icon_btn(Icon::Copy, "Copy", Some(Message::Copy(key.clone()))));
-            }
-            lines.push(widgets::field(f.label, r));
-        }
-        _ => {
-            let text = current(state, values, f.key);
-            let k = key.clone();
-            let b: El<'a, Message> = if locked {
-                input_locked::<Message>(&text).width(Length::Fill).into()
-            } else {
-                input("", &text, move |x| Message::Edit(k.clone(), x)).width(Length::Fill).into()
-            };
-            lines.push(widgets::field(f.label, b));
-        }
-    }
-    if let Some(h) = f.help {
-        lines.push(help(h).into());
-    }
-    if let Some(n) = source_note(f, values) {
-        lines.push(n);
-    }
-    column(lines).spacing(4).width(Length::Fill).into()
-}
-
-/// The fields of a card two per row (`.form-grid`), the spanning ones on a row of their own.
-fn grid<'a>(state: &'a State, values: &'a Value, fields: &[&'static Field], reveal: bool) -> El<'a, Message> {
-    let mut rows = column![].spacing(14);
-    let mut pending: Option<El<'a, Message>> = None;
-    for f in fields {
-        let el = field_view(state, values, f, reveal);
-        if f.spans() {
-            if let Some(p) = pending.take() {
-                rows = rows.push(super::two(p, None));
-            }
-            rows = rows.push(el);
-        } else if let Some(p) = pending.take() {
-            rows = rows.push(super::two(p, Some(el)));
-        } else {
-            pending = Some(el);
-        }
-    }
-    if let Some(p) = pending.take() {
-        rows = rows.push(super::two(p, None));
-    }
-    rows.width(Length::Fill).into()
-}
-
+/// A card of the form, with the blocks of its own the Soulseek, YouTube, streamrip and Cadenza cards carry.
 fn card_view<'a>(state: &'a State, values: &'a Value, card: &'static Card, ctx: &Ctx<'a>) -> El<'a, Message> {
-    let p = ctx.look;
-    let fields: Vec<&'static Field> = card.fields.iter().filter(|f| values.get(f.key).is_some() && visible(state, values, f)).collect();
-    let open = state.open.contains(card.id);
-    let busy = state.busy.contains(card.id);
     let reveal = ctx.has_feature("reveal") && ctx.session.is_owner();
-    let mut head_words = column![widgets::h2(card.title)].spacing(4);
-    if !card.desc.is_empty() {
-        head_words = head_words.push(help(card.desc));
-    }
-    let header = button(row![head_words.width(Length::Fill), container(icon(if open { Icon::Chevron } else { Icon::More }, 18.0, p.muted)).padding([4, 0])].spacing(10).align_y(Alignment::Start))
-        .padding(0)
-        .width(Length::Fill)
-        .style(theme::btn(Btn::Row))
-        .on_press(Message::Toggle(card.id));
-    let mut head = row![header].spacing(10).align_y(Alignment::Start);
-    if card.test.is_some() {
-        head = head.push(btn_icon(Icon::Refresh, card.test_label.unwrap_or("Test connection"), Btn::Default, (!busy).then_some(Message::Test(card.id))));
-    }
-    let mut body = column![head].spacing(14).width(Length::Fill);
-    if open {
-        if let Some(lines) = state.flash.get(card.id) {
-            for (ok, m) in lines {
-                body = body.push(result_line_copy(*ok, m, Message::CopyText));
-            }
-        }
-        if card.id == "youtube" {
-            body = body.push(tools::youtube_block(&state.tools).map(Message::Tools));
-        }
-        if card.id == "slskd" {
-            let (vpn, rest): (Vec<&'static Field>, Vec<&'static Field>) = fields.iter().copied().partition(|f| f.key.starts_with("vpn_"));
-            body = body.push(grid(state, values, &rest, reveal));
+    let f = &state.form;
+    let mut slots = form::Slots::default();
+    match &*card.id {
+        "youtube" => slots.top.push(tools::youtube_block(&state.tools).map(Message::Tools)),
+        "slskd" => {
+            let (vpn, rest): (Vec<&'static Field>, Vec<&'static Field>) = f.visible_fields(card).into_iter().partition(|f| f.key.starts_with("vpn_"));
+            let mut c = column![f.grid(&rest, reveal).map(Message::Form)].spacing(14).width(Length::Fill);
             if !vpn.is_empty() {
-                body = body.push(tools::vpn_block(
+                c = c.push(tools::vpn_block(
                     &state.tools,
-                    grid(state, values, &vpn, reveal),
+                    f.grid(&vpn, reveal).map(Message::Form),
                     (!state.tools.vpn_testing()).then_some(Message::Tools(tools::Message::VpnTest)),
                     Message::CopyText,
                 ));
             }
-            body = body.push(tools::soulseek_block(&state.tools).map(Message::Tools));
-        } else {
-            body = body.push(grid(state, values, &fields, reveal));
+            c = c.push(tools::soulseek_block(&state.tools).map(Message::Tools));
+            slots.body = Some(c.into());
         }
-        if card.id == "streamrip" {
-            body = body.push(tools::tidal_block(&state.tools).map(Message::Tools));
-            body = body.push(tools::streamrip_block(&state.tools).map(Message::Tools));
+        "streamrip" => {
+            slots.bottom.push(tools::tidal_block(&state.tools).map(Message::Tools));
+            slots.bottom.push(tools::streamrip_block(&state.tools).map(Message::Tools));
         }
-        if card.id == "cadenza" {
-            body = body.push(tools::cadenza_block(&state.tools, values).map(Message::Tools));
-        }
-        body = body.push(
-            container(btn_icon(Icon::Check, if busy { "Saving…" } else { "Save" }, Btn::Primary, (!busy).then_some(Message::Save(card.id))))
-                .width(Length::Fill)
-                .align_x(Alignment::End),
-        );
+        "cadenza" => slots.bottom.push(tools::cadenza_block(&state.tools, values).map(Message::Tools)),
+        _ => {}
     }
-    widgets::card(body).width(Length::Fill).into()
+    f.card_view(card, reveal, Message::Form, slots)
 }
 
 fn api_key_card<'a>(state: &'a State) -> Option<El<'a, Message>> {
@@ -813,10 +368,10 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         Section::Blocked => return blocked::view(&state.blocked, ctx).map(Message::Blocked),
         _ => {}
     }
-    if !state.error.is_empty() {
-        return widgets::error_box(&state.error);
+    if !state.form.error().is_empty() {
+        return widgets::error_box(state.form.error());
     }
-    let Some(values) = &state.values else {
+    let Some(values) = state.form.values() else {
         return widgets::skeleton_rows(6);
     };
     let Some(group) = group_id(section).and_then(fields::group) else {
@@ -830,13 +385,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         let cards: Vec<&'static Card> = ids
             .iter()
             .filter_map(|id| fields::card(id))
-            .filter(|c| c.fields.iter().any(|f| values.get(f.key).is_some()))
+            .filter(|c| c.shown(values))
             .collect();
         if cards.is_empty() {
             continue;
         }
         if !label.is_empty() {
-            page = page.push(container(t(label).size(11).color(ctx.look.faint).font(theme::bold())).padding(widgets::pad(10.0, 4.0, 0.0, 4.0)));
+            page = page.push(form::part_heading(label));
         }
         for c in cards {
             page = page.push(card_view(state, values, c, ctx));
@@ -899,30 +454,41 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The form after `GET /admin/settings` answered `values`.
+    fn loaded(values: &Value) -> Form {
+        let mut f = Form::new();
+        f.update(form::Msg::Values(Ok(values.clone())), fields::SECTIONS);
+        f
+    }
+
+    /// Replace what a text area holds, as typing does.
+    fn type_into(f: &mut Form, key: &str, text: &str) {
+        use iced::widget::text_editor::{Action, Edit};
+        f.update(form::Msg::Area(key.into(), Action::SelectAll), fields::SECTIONS);
+        f.update(form::Msg::Area(key.into(), Action::Edit(Edit::Paste(std::sync::Arc::new(text.into())))), fields::SECTIONS);
+    }
+
+    // The rules themselves are tested in kit-iced (form.rs); these run them on this app's table.
     #[test]
     fn a_plain_text_area_keeps_what_is_saved() {
         let values = json!({ "library_path": "/music", "library_extra_roots": "/mnt/a\n/mnt/b", "staging_path": "/s" });
         let card = fields::card("library").unwrap();
-        let mut st = State::default();
-        take_values(&mut st, values.clone());
-        assert_eq!(save_body(&st, &values, card)["library_extra_roots"], "/mnt/a\n/mnt/b", "an untouched Save keeps the folders");
+        let mut st = loaded(&values);
+        assert_eq!(st.save_body(&values, card)["library_extra_roots"], "/mnt/a\n/mnt/b", "an untouched Save keeps the folders");
         // a value changed on the server (an in-place import) shows when the values come again
         let newer = json!({ "library_path": "/music", "library_extra_roots": "/mnt/a\n/mnt/b\n/mnt/c", "staging_path": "/s" });
-        take_values(&mut st, newer.clone());
-        assert_eq!(save_body(&st, &newer, card)["library_extra_roots"], "/mnt/a\n/mnt/b\n/mnt/c");
+        st.take_values(newer.clone(), fields::SECTIONS);
+        assert_eq!(st.save_body(&newer, card)["library_extra_roots"], "/mnt/a\n/mnt/b\n/mnt/c");
         // what was typed stays until it is saved
-        st.areas.insert("library_extra_roots".into(), text_editor::Content::with_text("/x"));
-        st.typed.insert("library_extra_roots".into());
-        take_values(&mut st, newer.clone());
-        assert_eq!(save_body(&st, &newer, card)["library_extra_roots"], "/x");
-        st.values = Some(newer.clone());
-        settle(&mut st, card);
-        assert_eq!(st.areas["library_extra_roots"].text().trim(), "/mnt/a\n/mnt/b\n/mnt/c");
+        type_into(&mut st, "library_extra_roots", "/x");
+        st.take_values(newer.clone(), fields::SECTIONS);
+        assert_eq!(st.save_body(&newer, card)["library_extra_roots"], "/x");
+        st.settle(card);
+        assert_eq!(st.save_body(&newer, card)["library_extra_roots"], "/mnt/a\n/mnt/b\n/mnt/c");
         // a secret one still starts empty and is left out until something is pasted
         let wg = json!({ "vpn_wireguard_config": "•••• (saved)" });
-        let mut st = State::default();
-        take_values(&mut st, wg.clone());
-        assert!(save_body(&st, &wg, fields::card("slskd").unwrap()).get("vpn_wireguard_config").is_none());
+        let st = loaded(&wg);
+        assert!(st.save_body(&wg, fields::card("slskd").unwrap()).get("vpn_wireguard_config").is_none());
     }
 
     #[test]
@@ -931,24 +497,25 @@ mod tests {
             "app_name": "Encore", "base_url": "http://x", "auto_approve": 1, "github_token": "•••• (saved)", "signup_mode": "invite",
             "_meta": { "base_url": { "source": "env", "env": "ENCORE_BASE_URL" } }
         });
-        let mut st = State::default();
-        st.edits.insert("app_name".into(), "Mine".into());
-        st.bools.insert("auto_approve".into(), false);
+        let mut st = loaded(&values);
+        st.update(form::Msg::Edit("app_name".into(), "Mine".into()), fields::SECTIONS);
+        st.update(form::Msg::Bool("auto_approve".into(), false), fields::SECTIONS);
         let card = fields::card("general").unwrap();
-        let b = save_body(&st, &values, card);
+        let b = st.save_body(&values, card);
         assert_eq!(b["app_name"], "Mine");
         assert_eq!(b["auto_approve"], false);
         assert_eq!(b["signup_mode"], "invite");
         assert!(b.get("base_url").is_none(), "locked by the environment");
         assert!(b.get("github_token").is_none(), "nothing typed keeps the saved secret");
         assert!(b.get("session_days").is_none(), "the server does not have it");
-        st.edits.insert("github_token".into(), " tok ".into());
-        assert_eq!(save_body(&st, &values, card)["github_token"], "tok");
+        st.update(form::Msg::Edit("github_token".into(), " tok ".into()), fields::SECTIONS);
+        assert_eq!(st.save_body(&values, card)["github_token"], "tok");
         // checks join the ticked options in the table's spelling
         let values = json!({ "release_types": "album,ep", "release_skip": "" });
-        let mut st = State::default();
-        st.checks.insert("release_skip".into(), vec!["live".into(), "djmix".into()]);
-        let b = save_body(&st, &values, fields::card("releases").unwrap());
+        let mut st = loaded(&values);
+        st.update(form::Msg::Check("release_skip".into(), "Live".into(), true), fields::SECTIONS);
+        st.update(form::Msg::Check("release_skip".into(), "DJ-mix".into(), true), fields::SECTIONS);
+        let b = st.save_body(&values, fields::card("releases").unwrap());
         assert_eq!(b["release_types"], "Album,EP");
         assert_eq!(b["release_skip"], "Live,DJ-mix");
     }
@@ -956,26 +523,24 @@ mod tests {
     #[test]
     fn when_rules_follow_the_select() {
         let values = json!({ "torrent_client": "qbittorrent", "qbit_url": "", "transmission_url": "" });
-        let mut st = State::default();
+        let mut st = loaded(&values);
         let qbit = fields::card("torznab").unwrap().fields.iter().find(|f| f.key == "qbit_url").unwrap();
         let tr = fields::card("torznab").unwrap().fields.iter().find(|f| f.key == "transmission_url").unwrap();
-        assert!(visible(&st, &values, qbit) && !visible(&st, &values, tr));
-        st.edits.insert("torrent_client".into(), "transmission".into());
-        assert!(!visible(&st, &values, qbit) && visible(&st, &values, tr));
-        assert_eq!(test_words(&json!({ "ok": true })), (true, "Connected".to_string()));
-        assert_eq!(test_words(&json!({ "ok": false, "message": "no" })), (false, "no".to_string()));
+        assert!(st.visible(&values, qbit) && !st.visible(&values, tr));
+        st.update(form::Msg::Edit("torrent_client".into(), "transmission".into()), fields::SECTIONS);
+        assert!(!st.visible(&values, qbit) && st.visible(&values, tr));
         assert_eq!(group_id(Section::Tasks), Some("tasks"));
         assert_eq!(group_id(Section::Blocked), None);
         assert_eq!(group_id(Section::Processing), Some("processing"));
         // the first card the server has starts open, or the one a link asked for
-        let mut st = State {
-            section: Some(Section::Downloads),
-            values: Some(json!({ "release_types": "Album" })),
-            ..State::default()
-        };
-        assert_eq!(first_open(&st), Some("releases"));
-        st.focus = Some("pipeline");
-        assert_eq!(first_open(&st), Some("pipeline"));
+        let downloads = || fields::group("downloads").unwrap().sections();
+        let mut st = Form::new();
+        st.open(downloads(), None);
+        st.update(form::Msg::Values(Ok(json!({ "release_types": "Album" }))), fields::SECTIONS);
+        assert!(st.is_open("releases") && !st.is_open("pipeline"));
+        st.open(downloads(), Some("pipeline".into()));
+        st.update(form::Msg::Values(Ok(json!({ "release_types": "Album" }))), fields::SECTIONS);
+        assert!(st.is_open("pipeline"));
     }
 
     #[test]
