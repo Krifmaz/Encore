@@ -990,6 +990,20 @@ impl RowExt for Row {
     }
 }
 
+/// The kit server crates use Encore's database: the same statements, connections and write counters as
+/// Encore's own routes (a failure is logged and answers 500 "Database error", as `ApiError` does).
+impl kit_server_core::Db for Db {
+    fn query(&self, sql: &str, params: Vec<Value>) -> kit_server_core::Result<Vec<Row>> {
+        Db::query(self, sql, params).map_err(kit_server_core::Error::database)
+    }
+    fn execute(&self, sql: &str, params: Vec<Value>) -> kit_server_core::Result<i64> {
+        Db::execute(self, sql, params).map_err(kit_server_core::Error::database)
+    }
+    fn execute_batch(&self, sql: &str) -> kit_server_core::Result<()> {
+        Db::execute_batch(self, sql).map_err(kit_server_core::Error::database)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1796,19 +1810,5 @@ mod tests {
         assert_eq!(rows(&db), want);
         drop(db);
         let _ = std::fs::remove_dir_all(&d);
-    }
-}
-
-/// The kit server crates use Encore's database: the same statements, connections and write counters as
-/// Encore's own routes (a failure is logged and answers 500 "Database error", as `ApiError` does).
-impl kit_server_core::Db for Db {
-    fn query(&self, sql: &str, params: Vec<Value>) -> kit_server_core::Result<Vec<Row>> {
-        Db::query(self, sql, params).map_err(kit_server_core::Error::database)
-    }
-    fn execute(&self, sql: &str, params: Vec<Value>) -> kit_server_core::Result<i64> {
-        Db::execute(self, sql, params).map_err(kit_server_core::Error::database)
-    }
-    fn execute_batch(&self, sql: &str) -> kit_server_core::Result<()> {
-        Db::execute_batch(self, sql).map_err(kit_server_core::Error::database)
     }
 }
