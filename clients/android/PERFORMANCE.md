@@ -58,47 +58,51 @@ to catch regressions in startup; judge smoothness by a run on a real phone.
 ## Results
 
 CI emulator (Pixel 6 profile, Android 34, x86_64, software rendering), release build. *Before*: `d9762ee`, the
-app as it was, no ahead-of-time compilation. *Code*: `84ae0e7`, the code changes below, measured before the
-profile existed. *Code + profile*: `b83c581`, the same code with its Baseline Profile installed
-(`CompilationMode.Partial`). A real-phone run is still to come (see "Run it").
+app as it was, with no ahead-of-time compilation (`CompilationMode.None`, as an app without a profile runs after
+install). *After*: `4b13db5`, every change below, with its Baseline Profile installed (`CompilationMode.Partial`).
+A run on a real phone is still to come (see "Run it").
 
-### Startup (time to initial display, median of 10)
+### Startup (time to initial display, median of 10 / min / max)
 
-| Journey | Before | Code | Code + profile |
-|---|---|---|---|
-| coldStartup | 1051.8 ms | 1014.4 ms | 1106.1 ms |
-| warmStartup | 859.9 ms | 601.4 ms | 769.3 ms |
+| Journey | Before | After |
+|---|---|---|
+| coldStartup | 1051.8 ms (934.5 / 1184.8) | 897.3 ms (713.1 / 1106.3) |
+| warmStartup | 859.9 ms (750.1 / 1074.1) | 500.9 ms (308.6 / 688.8) |
 
-### Frame duration (CPU time per frame, P50 / P90 / P99)
+### Frame duration (CPU time per frame: P50 / P90 / P99, 5 iterations)
 
-| Journey | Before | Code | Code + profile |
-|---|---|---|---|
-| scrollLibraryAlbums | 90.4 / 116.4 / 142.1 ms | 95.1 / 116.4 / 174.7 ms | 101.6 / 126.7 / 232.5 ms |
-| openAlbumAndScrollTracks | 75.7 / 336.6 / 451.8 ms | 76.3 / 191.1 / 416.6 ms | 83.8 / 189.1 / 394.5 ms |
-| fullPlayerPlaying | 108.8 / 272.3 / 916.7 ms | 162.3 / 183.9 / 745.0 ms | 169.2 / 192.7 / 777.3 ms |
-| upNextQueue | 173.0 / 376.3 / 1243.8 ms | 193.5 / 258.2 / 701.0 ms | 228.5 / 302.8 / 901.8 ms |
+| Journey | Before | After |
+|---|---|---|
+| scrollLibraryAlbums | 90.4 / 116.4 / 142.1 ms | 76.3 / 90.3 / 103.9 ms |
+| openAlbumAndScrollTracks | 75.7 / 336.6 / 451.8 ms | 61.1 / 125.9 / 272.5 ms |
+| fullPlayerPlaying | 108.8 / 272.3 / 916.7 ms | 125.5 / 147.4 / 390.4 ms |
+| upNextQueue | 173.0 / 376.3 / 1243.8 ms | 163.0 / 218.4 / 615.9 ms |
 
-### Frames drawn per iteration (all of them janky on this emulator)
+### Frames drawn per iteration (janky share)
 
-| Journey | Before | Code | Code + profile |
-|---|---|---|---|
-| scrollLibraryAlbums | 52.0 | 50.2 | 28.8 |
-| openAlbumAndScrollTracks | 18.8 | 20.2 | 18.2 |
-| fullPlayerPlaying | 45.4 | 182.2 | 162.0 |
-| upNextQueue | 56.4 | 120.8 | 116.4 |
+| Journey | Before | After |
+|---|---|---|
+| scrollLibraryAlbums | 52.0 (100 %) | 69.2 (100 %) |
+| openAlbumAndScrollTracks | 18.8 (100 %) | 22.8 (97 %) |
+| fullPlayerPlaying | 45.4 (100 %) | 198.8 (100 %) |
+| upNextQueue | 56.4 (100 %) | 145.6 (100 %) |
 
-What the emulator does show:
+What the emulator shows:
 
-- **Fewer long frames.** P90 and P99 fell on the album page (P90 337 → 189 ms), in the full player (P99 917 →
-  777 ms, P90 272 → 193 ms) and in Up next (P99 1244 → 701–902 ms): fewer of the stalls a person notices.
+- **Shorter long frames everywhere.** P90 fell by 22–62 % and P99 by 27–57 % on every frame journey: fewer of the
+  stalls a person notices while scrolling, opening an album, watching the player or editing Up next.
+- **Faster start**: warm start 860 → 501 ms, cold start 1052 → 897 ms (medians).
 - **More frames where something now moves.** The full player draws about four times as many frames because the
-  progress bar now moves every frame instead of twice a second, and Up next draws twice as many because removed
-  rows slide out and the rows below slide up instead of jumping. On this software-rendered emulator each of those
-  frames repaints the whole screen on the CPU, which lifts the P50; on a phone's GPU a frame that redraws one thin
-  layer is cheap.
-- **Startup is within the emulator's noise** (the same app code measured 706, 710, 872 and 860 ms warm on four
-  runs). The profile's effect on start and first scroll needs a phone: on a shared runner with software
-  rendering, the time saved by not interpreting code is smaller than the run-to-run spread.
+  progress bar now moves every frame instead of twice a second, and Up next more than twice as many because removed
+  rows slide away and the rows below slide up instead of jumping. More frames in the same time on the album grid
+  means the fling ran more smoothly, not longer.
+- **Every frame misses its deadline on this emulator**, before and after: it renders on the CPU, so the janky share
+  says nothing here. That is the number a phone run will show.
+
+How much to trust it: two intermediate runs (`84ae0e7`, the code changes without the profile, and `b83c581`, with
+the profile but before the progress bars got their own layer) landed between the two columns, and four runs of the
+unchanged app spread by up to 2× on a single P90. The direction is consistent across runs; the size of each gain
+needs the phone run.
 
 ## What changed
 
@@ -135,10 +139,28 @@ Each change is under the hood: nothing looks or behaves differently.
 6. **Checked, nothing to change**: every cover (`AsyncImage`, `Cover`) fills a sized box, so Coil decodes it at
    the box's size, never at full size. The loader settings, `CoverPreloader`, 400 px covers, R8 and strong
    skipping are as they were.
-7. **Debug-only checks** (`core/DevPerf.kt`): StrictMode (main-thread disk reads and writes, network, logged) and
+7. **Preferences and the Cadenza library load in the background at start** (`core/Warmup.kt`). StrictMode showed
+   the main thread waiting for SharedPreferences files and `libcadenza.so` the first time a screen or the playback
+   service read them (Library's sort, the offline store, TV and car settings, the remote device, the server route,
+   Cadenza's availability). A background thread now opens every preferences file and the library first thing at
+   start, so those reads find them in memory. *Effect: no disk wait on the main thread when Library, the player or
+   a TV panel opens for the first time.*
+8. **Debug-only checks** (`core/DevPerf.kt`): StrictMode (main-thread disk reads and writes, network, logged) and
    JankStats (janky frames logged with the current screen: Home, Library, an album, FullPlayer, UpNext, …) in
    debug builds; release builds turn neither on.
 
 ## Debug-build checks
 
-STRICTMODE
+A debug-build pass through the same journeys (`STRICTMODE=1`, CI run of `4b13db5`) logged these main-thread disk
+reads; there was no main-thread network access.
+
+| Where | What it reads | Done |
+|---|---|---|
+| `CadenzaEngine.available` (15) | loads `libcadenza.so` | loaded by `Warmup` first |
+| `LibraryScreen`, `LibrarySorts`, `OfflineStore`, `CarPrefs`, `TvPrefs`, `RemoteDevice`, `ServerRoute`, `PrefsRepository`, `AuthScreens.legacyServer` | a SharedPreferences file's first read | loaded by `Warmup` first |
+| `CrashLog.install`, `Translations.init`, `EncoreApp.onCreate` | the crash folder, the translation setting | kept: needed before the first frame, a few hundred bytes, once per start |
+| `buildHttpClient`, `ApiCache.init`, `EncorePlaybackService.onCreate` | `cacheDir`/`filesDir` (a folder check) | kept: a single `stat` each, once per process |
+
+JankStats (debug build, so slower than release; compare screens with each other): UpNext 12 janky frames (median
+12 ms, the slide animations), Library 6 (131 ms, the first page and covers arriving), Home 4 (291 ms, the first
+frame after start), Album 4 (68 ms), FullPlayer 3 (137 ms, opening it).

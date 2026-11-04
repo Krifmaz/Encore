@@ -104,7 +104,9 @@ jobs:
           git fetch -q --deepen=200 origin "$GITHUB_REF" || true
           git fetch -q --depth=200 origin main || true
           git diff --name-only origin/main...HEAD > /tmp/changed.txt || true
-          python3 clients/android/benchmark/ci/lint.py clients/android/app/build/reports/lint-results-debug.xml /tmp/changed.txt
+          mkdir -p clients/android/benchmark/build
+          python3 clients/android/benchmark/ci/lint.py clients/android/app/build/reports/lint-results-debug.xml /tmp/changed.txt \
+            | tee clients/android/benchmark/build/lint.txt
       - name: Wait for the library scan
         run: |
           H='x-requested-with: encore'
@@ -146,7 +148,7 @@ jobs:
         if: always()
         run: |
           S=clients/android/benchmark/build/summary.md
-          for S in clients/android/benchmark/build/summary.md clients/android/benchmark/build/strictmode.md; do
+          for S in clients/android/benchmark/build/summary.md clients/android/benchmark/build/strictmode.md clients/android/benchmark/build/lint.txt; do
             if [ -f "$S" ]; then cat "$S" >> "$GITHUB_STEP_SUMMARY"; cat "$S"; fi
           done
       - name: Server log
