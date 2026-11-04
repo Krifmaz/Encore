@@ -1292,7 +1292,7 @@ mod tests {
         let mut n = Settings::default();
         n.output.backend = "null".into();
         n.output.device.clear();
-        let list = [d.clone(), null.clone()];
+        let list = [d.clone(), null];
         assert_eq!(current_device(&n, &list).map(device_key).as_deref(), Some("null:null"));
         assert_eq!(device_key(&d), "alsa:hw:1,0");
     }

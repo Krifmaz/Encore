@@ -353,7 +353,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         if !lf_artists.is_empty() { if let Some(g) = dom::qs_in(&body, "#fy-artists") { bind_tiles(&g); } }
         if !lf_albums.is_empty() { if let Some(g) = dom::qs_in(&body, "#fy-albums") { bind_tiles(&g); } }
         {
-            let (view, ctx, pl_tracks) = (view.clone(), ctx.clone(), pl_tracks.clone());
+            let (view, ctx, pl_tracks) = (view.clone(), ctx.clone(), pl_tracks);
             dom::on(&body, "click", move |e| {
                 if let Some(r) = dom::closest(e, "[data-req-pl]") {
                     let Ok(pi) = dom::data(&r, "reqPl").parse::<usize>() else { return };

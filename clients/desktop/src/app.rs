@@ -752,7 +752,7 @@ impl App {
                     pages::login::sign_in(&mut self.login, &server, Value::Null);
                     let api = self.api.clone();
                     return Task::perform(async move { api.info().await }, move |r| {
-                        Message::Login(pages::login::Message::Probed(server.clone(), r))
+                        Message::Login(pages::login::Message::Probed(server, r))
                     });
                 }
                 Task::none()
@@ -799,7 +799,7 @@ impl App {
                         let api = self.api.clone();
                         let done = a.done.clone();
                         Task::perform(async move { api.post(&a.path, a.body).await }, move |r| {
-                            Message::DetailsActed(done.clone(), r)
+                            Message::DetailsActed(done, r)
                         })
                     }
                     Some(details::Out::Open(page)) => {

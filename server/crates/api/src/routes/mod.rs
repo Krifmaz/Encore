@@ -22,6 +22,7 @@ pub mod stats;
 pub mod surround;
 pub mod system;
 pub mod update;
+pub mod video_links;
 pub mod tagging;
 pub mod wrapper;
 pub mod ytauth;

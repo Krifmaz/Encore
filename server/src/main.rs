@@ -97,7 +97,7 @@ fn background(st: &AppState) -> Vec<Arc<dyn Supervisor>> {
         // plugin programs run only while a command runs: before a restart the running ones are stopped
         // (SIGTERM to their processes, SIGKILL to their groups 10 seconds later)
         with_stop("plugins", std::future::pending::<()>, {
-            let st = s.clone();
+            let st = s;
             move || { let st = st.clone(); async move { st.plugins.stop_all().await } }
         }),
     ]

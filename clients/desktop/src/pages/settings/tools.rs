@@ -926,7 +926,7 @@ pub fn cadenza_block<'a>(state: &'a State, values: &'a Value) -> El<'a, Message>
                     let opts: Vec<Opt> = engine_options(&s).into_iter().map(|(v, l)| Opt::new(vs(&v), vs(&l))).collect();
                     let pick = if opts.iter().any(|o| o.key == vs(&current)) { vs(&current) } else { vs(&s["default"]) };
                     if locked {
-                        widgets::field(label, help(opts.iter().find(|o| o.key == pick).map(|o| o.label.clone()).unwrap_or(pick.clone())))
+                        widgets::field(label, help(opts.iter().find(|o| o.key == pick).map(|o| o.label.clone()).unwrap_or_else(|| pick.clone())))
                     } else {
                         widgets::field(label, select(opts, &pick, move |v| Message::EngineSelect(k2.clone(), v)))
                     }
@@ -1077,7 +1077,7 @@ mod tests {
         assert!(session_text(&r["session"]).starts_with("Disconnected – the login timed out"));
         assert_eq!(session_details(&r["session"], now), "Next attempt in 3 m 12 s · 12 searches waiting for the connection · last search 5 min ago");
         assert_eq!(reconnect_wait(&r), Some(None));
-        let mut r2 = r.clone();
+        let mut r2 = r;
         r2["session"]["reconnect_in"] = json!(12);
         assert_eq!(reconnect_wait(&r2), Some(Some(12)));
         // logged in, with searches turned away for a minute

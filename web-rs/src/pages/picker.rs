@@ -759,7 +759,7 @@ mod tests {
         // the same words in another order, case or punctuation are the same search
         assert_eq!(line(&kept, "illuminate ep, DUUMU", false).0, "Found at 14:02");
         // Soulseek not connected: the reason instead of Search again
-        let down = Kept { can_search: false, notice: "Soulseek isn't connected – next attempt at 14:20".into(), ..kept.clone() };
+        let down = Kept { can_search: false, notice: "Soulseek isn't connected – next attempt at 14:20".into(), ..kept };
         assert_eq!(line(&down, "Duumu Illuminate EP", false), ("Found at 14:02 · Soulseek isn't connected – next attempt at 14:20".to_string(), false));
         assert_eq!(line(&down, "Duumu Illuminate EP", true).0, "No results. · Found at 14:02 · Soulseek isn't connected – next attempt at 14:20");
         // the HTML: the words, a dot and the button

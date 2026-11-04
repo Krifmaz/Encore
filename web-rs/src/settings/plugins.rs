@@ -688,12 +688,12 @@ async fn draw(hub: &Rc<Hub>, open: Vec<String>, focus: Option<String>) {
         if let Some(e) = part.or(el) { e.scroll_into_view(); }
     }
     dom::spawn(page.clone().statuses());
-    if page.list.borrow().a("plugins").iter().any(|c| c.truthy("busy")) { dom::spawn(page.clone().poll_busy()); }
+    if page.list.borrow().a("plugins").iter().any(|c| c.truthy("busy")) { dom::spawn(page.poll_busy()); }
 }
 
 /// The Test button's words: those of the card the plugin's settings were before 0.32, or "Test".
 fn test_label(schema: &Schema, id: &str) -> String {
-    schema.group(id).and_then(|g| g.test.as_ref().and(g.test_label.clone())).unwrap_or_else(|| "Test".into())
+    schema.group(id).and_then(|g| g.test.as_ref().and_then(|_| g.test_label.clone())).unwrap_or_else(|| "Test".into())
 }
 
 impl Page {

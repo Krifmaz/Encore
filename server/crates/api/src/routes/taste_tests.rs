@@ -1,5 +1,6 @@
 //! /api/taste through the real router: smart shuffle and the plain shuffle never offer a disliked song or artist,
-//! a dislike and a like undo each other, skips are saved (not the first-second ones), the mixes, genres, "More
+//! a dislike and a like undo each other, skips are saved (not the first-second ones), how much of a play was heard
+//! is kept on the play, share links count towards the taste, the mixes, genres, "More
 //! like this" and the profile answer from the listener's plays and likes.
 use crate::state::AppState;
 use axum::body::Body;
@@ -140,6 +141,43 @@ async fn skips_are_saved() {
     let rows = e.st.db.query("SELECT track_id, seconds FROM skips WHERE user_id=?", p![e.uid]).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].i("track_id"), rows[0].f("seconds")), (31, 12.0));
+}
+
+#[tokio::test]
+async fn listen_time_is_kept_on_the_latest_play() {
+    let e = setup("listened").await;
+    let t = now();
+    // two plays of song 41: yesterday's (too old to change) and one just now
+    e.st.db.execute("INSERT INTO plays (user_id, track_id, seconds, played_at) VALUES (?,?,?,?), (?,?,?,?)",
+        p![e.uid, 41, 100.0, t - 86400.0, e.uid, 41, 100.0, t - 60.0]).unwrap();
+    let (s, v) = e.call("POST", "/api/taste/listened", Some(json!({ "track_id": 41, "seconds": 190 }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["counted"], json!(true));
+    // a smaller second report (another tab) never moves it back
+    e.call("POST", "/api/taste/listened", Some(json!({ "track_id": 41, "seconds": 120 }))).await;
+    let rows = e.st.db.query("SELECT listened FROM plays WHERE user_id=? AND track_id=41 ORDER BY played_at", p![e.uid]).unwrap();
+    assert_eq!(rows[0].get("listened").and_then(Value::as_f64), None);
+    assert_eq!(rows[1].f("listened"), 190.0);
+    // no recent play of the song, or nothing heard: nothing to keep
+    assert_eq!(e.call("POST", "/api/taste/listened", Some(json!({ "track_id": 42, "seconds": 190 }))).await.1["counted"], json!(false));
+    assert_eq!(e.call("POST", "/api/taste/listened", Some(json!({ "track_id": 41, "seconds": 0 }))).await.1["counted"], json!(false));
+}
+
+#[tokio::test]
+async fn shares_count_towards_the_taste() {
+    let e = setup("shares").await;
+    // a liked rock song, then a shared jazz song and a shared jazz album: the jazz artists lead
+    e.call("POST", "/api/likes/11", None).await;
+    assert_eq!(e.call("POST", "/api/library/tracks/41/share", None).await.0, StatusCode::OK);
+    assert_eq!(e.call("POST", "/api/library/albums/a5/share", None).await.0, StatusCode::OK);
+    let (_, p) = e.call("GET", "/api/taste/profile", None).await;
+    assert_eq!(p["cold"], json!(false));
+    let names: Vec<&str> = p["artists"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+    // the song and the album link weigh the same for their artists, so the two may come in either order
+    let mut top = names[..2].to_vec();
+    top.sort();
+    assert_eq!(top, ["Artist 4", "Artist 5"], "{names:?}");
+    assert_eq!(names[2], "Artist 1");
 }
 
 #[tokio::test]

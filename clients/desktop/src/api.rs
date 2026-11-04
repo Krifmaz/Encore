@@ -680,7 +680,7 @@ async fn finish_text(sent: Result<reqwest::Response, reqwest::Error>) -> Result<
     let data: Value = if text.is_empty() {
         Value::Null
     } else {
-        serde_json::from_str(&text).unwrap_or(Value::String(text.clone()))
+        serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone()))
     };
     if status.is_success() {
         return Ok((data, text));

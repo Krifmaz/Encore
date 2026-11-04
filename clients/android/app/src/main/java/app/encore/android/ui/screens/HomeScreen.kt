@@ -73,6 +73,7 @@ import app.encore.android.ui.components.Toasts
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.palette
 import androidx.compose.foundation.layout.offset
+import app.encore.android.features.library.openAlbum
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -210,7 +211,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                             onDismiss = { menu = false },
                             entries = listOf(
                                 MenuEntry("For you", R.drawable.ic_spark) { nav.open(Screen.ForYou) },
-                                MenuEntry("Requests", R.drawable.ic_inbox, badge = if (pending > 0) "$pending" else null) { nav.open(Screen.Requests) },
+                                MenuEntry("Requests", R.drawable.ic_inbox, badge = if (pending > 0) "$pending" else null) { nav.showTab(Tab.DOWNLOADS) },
                                 MenuEntry("Leaderboard", R.drawable.ic_leaderboard) { nav.open(Screen.Leaderboard) },
                                 MenuSeparator,
                                 MenuEntry("Account", R.drawable.ic_person) { nav.open(Screen.Account) },
@@ -264,7 +265,7 @@ fun HomeScreen(nav: Nav, session: Session) {
             }
 
             if (active.isNotEmpty()) {
-                item { SectionHead("Your downloads in progress", action = "All requests") { nav.open(Screen.Requests) } }
+                item { SectionHead("Your downloads in progress", action = "All requests") { nav.showTab(Tab.DOWNLOADS) } }
                 item {
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(active, key = { it.id }) { r -> RequestCard(reqActions, r, Modifier.width(150.dp)) }
@@ -281,7 +282,7 @@ fun HomeScreen(nav: Nav, session: Session) {
                     LazyRow(contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(data.recent, key = { it.id }) { a ->
                             AlbumCard(a, api.coverUrl(a.id, 400), nav.graph.imageLoader, Modifier.width(150.dp)) {
-                                nav.open(Screen.Album(a.id))
+                                nav.openAlbum(a)
                             }
                         }
                     }

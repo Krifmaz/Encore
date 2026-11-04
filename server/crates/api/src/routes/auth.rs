@@ -310,12 +310,12 @@ async fn profile(State(st): State<AppState>, User(u): User, Json(b): Json<Profil
 
 /// Personal preferences (appearance etc.). Stored as JSON; unknown keys are kept.
 async fn get_prefs(User(u): User) -> Json<Value> {
-    Json(serde_json::from_str(&u.s("prefs")).unwrap_or(json!({})))
+    Json(serde_json::from_str(&u.s("prefs")).unwrap_or_else(|_| json!({})))
 }
 
 /// PUT /api/auth/prefs: merge preferences into the user's.
 async fn put_prefs(State(st): State<AppState>, User(u): User, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
-    let mut prefs: Value = serde_json::from_str(&u.s("prefs")).unwrap_or(json!({}));
+    let mut prefs: Value = serde_json::from_str(&u.s("prefs")).unwrap_or_else(|_| json!({}));
     if let (Some(p), Some(n)) = (prefs.as_object_mut(), b.as_object()) {
         for (k, v) in n {
             if v.is_null() { p.remove(k); } else { p.insert(k.clone(), v.clone()); }

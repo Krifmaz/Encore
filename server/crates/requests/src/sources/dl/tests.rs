@@ -568,7 +568,7 @@ async fn form_of(mut m: axum::extract::Multipart) -> Value {
 
 fn fake_qbit(q: QbState, tb: Vec<u8>) -> Router {
     let authed = |q: &QbState, h: &HeaderMap| h.get("cookie").and_then(|c| c.to_str().ok()) == Some(q.lock().unwrap().sid.as_str());
-    let (q1, q2, q3, q4) = (q.clone(), q.clone(), q.clone(), q.clone());
+    let (q1, q2, q3, q4) = (q.clone(), q.clone(), q.clone(), q);
     Router::new()
         .route("/api/v2/auth/login", post(move || {
             let q = q1.clone();

@@ -123,9 +123,8 @@ fn the_cards_that_move_lose_no_field() {
             assert_eq!(owner(key).len(), 1, "{key} (card {group}) belongs to exactly one plugin");
         }
         if key.starts_with("tools_auto_") {
-            let takers: Vec<&str> =
-                catalog().iter().filter(|m| m.migration.as_ref().and_then(|g| g.auto_key.as_deref()) == Some(key.as_str())).map(|m| m.id()).collect();
-            assert_eq!(takers.len(), 1, "{key}: one plugin takes the old auto-update switch over");
+            let takers = catalog().iter().filter(|m| m.migration.as_ref().and_then(|g| g.auto_key.as_deref()) == Some(key.as_str())).count();
+            assert_eq!(takers, 1, "{key}: one plugin takes the old auto-update switch over");
         }
     }
     for key in ["translator_model", "translate_background", "streamrip_sources", "slskd_managed_api_key", "plex_client_id", "cadenza_engine_settings"] {

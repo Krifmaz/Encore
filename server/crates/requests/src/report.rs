@@ -81,7 +81,7 @@ pub fn block_of_release(c: &Value) -> Option<(String, String, String)> {
     let kind = if c["protocol"] == "usenet" { "usenet" } else { "torrent" };
     let url = c["url"].as_str().unwrap_or("");
     let hash = url.split(['?', '&']).find_map(|p| p.strip_prefix("xt=urn:btih:")).map(|h| h.to_lowercase());
-    let key = hash.or(c["guid"].as_str().filter(|g| !g.is_empty()).map(String::from)).or(Some(url.to_string()).filter(|u| !u.is_empty()))?;
+    let key = hash.or_else(|| c["guid"].as_str().filter(|g| !g.is_empty()).map(String::from)).or_else(|| Some(url.to_string()).filter(|u| !u.is_empty()))?;
     Some((kind.to_string(), key, c["title"].as_str().unwrap_or("").to_string()))
 }
 
@@ -406,7 +406,7 @@ pub fn purge_trash(st: &impl Ctx) -> usize {
             }
             let t = name.split('-').next().and_then(|x| x.parse::<f64>().ok())
                 .or_else(|| e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()))
-                .unwrap_or(now());
+                .unwrap_or_else(now);
             if t < cutoff && std::fs::remove_file(e.path()).is_ok() {
                 n += 1;
             }
@@ -587,7 +587,7 @@ pub fn file_report(st: &impl Ctx, u: &Row, b: &ReportBody) -> ApiResult<Value> {
             let _ = st.db().execute("UPDATE reports SET status='replacing', request_id=?, message=?, updated_at=? WHERE id=?", p![req, "Looking for a replacement from another source", now(), rid]);
         }
         Err(e) => {
-            let msg = e.detail.clone();
+            let msg = e.detail;
             replacement_failed(st, &json!({ "replace": { "report": rid } }), &msg);
         }
     }
@@ -606,18 +606,18 @@ fn request_replacement(st: &impl Ctx, u: &Row, rid: i64, kind: &str, tracks: &[R
     }
     // what was asked for originally, when the request is still around
     let orig = st.db().one("SELECT * FROM requests WHERE id=?", p![first.i("request_id")]).ok().flatten();
-    let od: Value = orig.as_ref().and_then(|o| serde_json::from_str(&o.s("detail")).ok()).unwrap_or(json!({}));
+    let od: Value = orig.as_ref().and_then(|o| serde_json::from_str(&o.s("detail")).ok()).unwrap_or_else(|| json!({}));
     let nz = |s: String| Some(s).filter(|x| !x.is_empty());
     let b = if kind == "album" {
         let rg = nz(first.s("mb_releasegroupid")).or_else(|| orig.as_ref().filter(|o| o.s("kind") == "album").and_then(|o| nz(o.s("mbid"))));
-        NewRequest { kind: "album".into(), mbid: rg, artist: nz(first.s("albumartist")).or(nz(first.s("artist"))), title: nz(first.s("album")), album: nz(first.s("album")),
+        NewRequest { kind: "album".into(), mbid: rg, artist: nz(first.s("albumartist")).or_else(|| nz(first.s("artist"))), title: nz(first.s("album")), album: nz(first.s("album")),
             year: nz(first.s("year")), ext: od.get("ext").filter(|e| e.is_object()).cloned(), ..Default::default() }
     } else {
         extra["album_mode"] = json!("song");
         let from_req = orig.as_ref().filter(|o| o.s("kind") == "track");
         let length = od["length"].as_f64().or(Some(first.f("duration")).filter(|d| *d > 0.0));
-        NewRequest { kind: "track".into(), mbid: from_req.and_then(|o| nz(o.s("mbid"))).or(nz(first.s("mb_trackid"))),
-            artist: from_req.and_then(|o| nz(o.s("artist"))).or(nz(first.s("artist"))), title: from_req.and_then(|o| nz(o.s("title"))).or(nz(first.s("title"))),
+        NewRequest { kind: "track".into(), mbid: from_req.and_then(|o| nz(o.s("mbid"))).or_else(|| nz(first.s("mb_trackid"))),
+            artist: from_req.and_then(|o| nz(o.s("artist"))).or_else(|| nz(first.s("artist"))), title: from_req.and_then(|o| nz(o.s("title"))).or_else(|| nz(first.s("title"))),
             album: nz(first.s("album")), length, isrc: nz(first.s("isrc")), album_mode: Some("song".into()), ..Default::default() }
     };
     // a replacement is not a new request: no approval queue, no weekly limit

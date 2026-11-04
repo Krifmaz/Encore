@@ -239,10 +239,11 @@ for s in "BCDEFG":
 
 # ---------------------------------------------------------------- tables
 signal_rows = "".join(f"<tr><td>{s}</td><td class='num'>{w}</td><td>{f}</td><td>{n}</td></tr>" for s, w, f, n in [
-    ("Play", "+1.0", "Halves every 120 days", "Counts once you've heard half the song or 4 minutes, whichever comes first (very short songs: to the end)."),
+    ("Play", "+0.8 to +1.2", "Halves every 120 days", "Counts once you've heard half the song or 4 minutes, whichever comes first (very short songs: to the end). How much of it you heard sets the weight: +0.8 if you moved on right after it counted, +1.2 if you heard it to the end (the last tenth counts as the end). +1.0 when the app didn't say."),
     ("Song in Liked Songs", "+4.0", "Never fades", "The strongest “yes”. Liking a song also takes back a dislike of it."),
+    ("Share link you made", "+5.0", "Halves every 180 days", "A little more than a like: sending a song to someone says it out loud. An album link counts like one shared song, spread over the album's songs. Playlist links don't count (the playlist already does)."),
     ("Song on one of your own playlists", "+0.75", "Never fades", "Each song once, however many playlists it is on. Playlists shared with you don't count."),
-    ("Skip", "−0.6", "Halves every 21 days, ignored after 90", "Pressing Next after 2 seconds but before the play counted. A mild “not now”."),
+    ("Skip", "−0.6 to −0.12", "Halves every 21 days, ignored after 90", "Pressing Next after 2 seconds but before the play counted. A mild “not now”: full weight in the first seconds, falling to a fifth just before the play would have counted."),
     ("Dislike (a song)", "−3.0", "Until you take it back", "The song is never played by any recommendation again, and leaves Liked Songs."),
     ("Don't play this artist", "blocks", "Until you take it back", "Every song where they are the main artist is never played. Songs they only feature on just sink."),
 ])

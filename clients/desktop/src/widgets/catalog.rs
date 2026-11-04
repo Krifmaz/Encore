@@ -504,12 +504,32 @@ pub fn artist_tile<'a, M: Clone + 'a>(ctx: &Ctx<'a>, a: &Value, sub: String, on_
     tile.view()
 }
 
+/// Whether a library album row (`tracks`: its song count) is a single: one song, which the pages show
+/// and play as a song instead of opening an album page for it (the web's `common::is_single`). The
+/// album page itself stays (a song's Go to album, Tag this album …).
+pub fn is_single(a: &Value) -> bool {
+    fmt::i(a, "tracks") == 1
+}
+
+/// The library album a catalogue release plays as a song: its `library_album_id` when the library's
+/// copy has exactly one song (`library_tracks`), None for a release with a page of its own.
+pub fn single_of(a: &Value) -> Option<String> {
+    (fmt::truthy(a, "library_album_id") && fmt::i(a, "library_tracks") == 1).then(|| fmt::s(a, "library_album_id"))
+}
+
+/// The subtitle of a library album tile: `line` ("artist · year"), led by "Song · " for a single.
+pub fn album_sub(a: &Value, line: String) -> String {
+    if is_single(a) { join_truthy(&["Song".to_string(), line], " · ") } else { line }
+}
+
 /// A library album tile (`libraryTile`): the cover from the server, the album and the artist.
-/// `a` is the library row (`album`, `albumartist`, `year`, `cover_v`); `id` its album id.
+/// `a` is the library row (`album`, `albumartist`, `year`, `cover_v`, `tracks`); `id` its album id. A
+/// single ([`is_single`]) says "Song" and a click plays it (`on_play`) instead of `on_open`.
 pub fn library_tile<'a, M: Clone + 'a>(ctx: &Ctx<'a>, id: &str, a: &Value, on_open: M, on_play: M) -> El<'a, M> {
     let album = fmt::s(a, "album");
     let title = if album.is_empty() { "Unknown album".to_string() } else { album };
-    let sub = join_truthy(&[fmt::s(a, "albumartist"), fmt::s(a, "year")], " · ");
+    let sub = album_sub(a, join_truthy(&[fmt::s(a, "albumartist"), fmt::s(a, "year")], " · "));
+    let on_open = if is_single(a) { on_play.clone() } else { on_open };
     Tile::new(title, TileKind::Album, on_open)
         .sub(sub)
         .cover(ctx.cover(id, &a["cover_v"], 400))

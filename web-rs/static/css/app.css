@@ -831,6 +831,8 @@ body.offline-mode .shell { min-height: calc(100vh - var(--offline-bar)); }
   font-family: ui-monospace, monospace; font-size: 12.5px; line-height: 1.55; background: var(--bg-2); border: 1px solid var(--border);
   border-radius: 10px; padding: 12px 14px; }
 [data-details], .req-row .req-text { cursor: pointer; }
+/* a finished request's cover plays it */
+.req-row .thumb[data-act="play"] { cursor: pointer; }
 .btn.copy-btn { flex: none; padding: 5px; color: inherit; }
 .btn.copy-btn svg { width: 14px; height: 14px; }
 .test-result .copy-btn { margin: -4px -6px -4px auto; }

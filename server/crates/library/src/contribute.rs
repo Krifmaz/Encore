@@ -87,7 +87,7 @@ pub fn acoustid_form(client: &str, user: &str, items: &[(String, i64, String)]) 
 /// {"submissions":[{"index":"0","id":123,"status":"pending"}]} → (index, id, status), by position when
 /// the index is missing.
 pub fn parse_submissions(d: &Value) -> Vec<(usize, i64, String)> {
-    d["submissions"].as_array().cloned().unwrap_or_default().iter().enumerate().filter_map(|(n, s)| {
+    d["submissions"].as_array().into_iter().flatten().enumerate().filter_map(|(n, s)| {
         let idx = s["index"].as_str().and_then(|x| x.parse().ok()).or(s["index"].as_u64().map(|x| x as usize)).unwrap_or(n);
         Some((idx, s["id"].as_i64()?, s["status"].as_str().unwrap_or("pending").to_string()))
     }).collect()
@@ -265,14 +265,14 @@ pub async fn isrc_scan(st: &impl Ctx, limit: usize) -> anyhow::Result<usize> {
             // MusicBrainz down or rate limiting: the next pass tries again
             Err(e) => return Err(e),
         };
-        let have: Vec<String> = d["isrcs"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        let have = d["isrcs"].as_array().into_iter().flatten().any(|x| x.as_str() == Some(isrc.as_str()));
         // only a "not found" means no recording has it; any other failure ends the pass (nothing is queued)
         let others: Vec<String> = match st.mb().get(st, &format!("isrc/{isrc}"), &[]).await {
-            Ok(v) => v["recordings"].as_array().cloned().unwrap_or_default().iter().filter_map(|r| r["id"].as_str().map(String::from)).collect(),
+            Ok(v) => v["recordings"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_str().map(String::from)).collect(),
             Err(e) if http_status(&e) == Some(404) => vec![],
             Err(e) => return Err(e),
         };
-        let (status, why) = if have.contains(&isrc) {
+        let (status, why) = if have {
             ("skipped", Some("already in MusicBrainz"))
         } else if !others.is_empty() {
             // on another recording already: a person should look at that, not a robot
@@ -530,7 +530,7 @@ pub async fn load_seed(st: &impl Ctx, deezer: Option<&str>, apple: Option<&str>,
             anyhow::bail!("Deezer: {}", d["error"]["message"].as_str().unwrap_or("album not found"));
         }
         a.title = s(&d["title"]);
-        let main: Vec<String> = d["contributors"].as_array().cloned().unwrap_or_default().iter()
+        let main: Vec<String> = d["contributors"].as_array().into_iter().flatten()
             .filter(|c| c["role"].as_str().is_none_or(|r| r == "Main")).map(|c| s(&c["name"])).filter(|n| !n.is_empty()).collect();
         let names = if main.is_empty() { vec![s(&d["artist"]["name"])] } else { main };
         a.artists = names.iter().map(|n| (n.clone(), mbid_for(n))).collect();

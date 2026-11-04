@@ -54,7 +54,7 @@ pub fn router() -> Router<AppState> {
 /// A request row with its detail parsed; 404 when there is none.
 pub(crate) fn get_request(st: &AppState, id: i64) -> ApiResult<Value> {
     let mut r = st.db.one("SELECT * FROM requests WHERE id=?", p![id])?.ok_or_else(|| err(404, "Request not found"))?;
-    let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+    let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
     r.insert("detail".into(), d);
     Ok(Value::Object(r))
 }
@@ -198,7 +198,7 @@ fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
     let mut rows = rows;
     library_links(st, &mut rows);
     rows.into_iter().map(|mut r| {
-        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({}));
         r.remove("detail");
         let req = worker::Req { id: r.i("id"), row: r.clone(), d: d.clone() };
         let now_fields = worker::now::row_fields(st, &req);
@@ -214,7 +214,7 @@ fn list_rows(st: &AppState, rows: Vec<Row>, admin: bool) -> Vec<Value> {
                 let m = worker::storage::plain_message(&r.s("status"), &msg, &d).unwrap_or_else(|| worker::storage::hide_folders(&msg));
                 r.insert("message".into(), json!(m));
             }
-            let log: Vec<Value> = log.as_array().into_iter().flatten().map(|l| l.as_str().map(|s| json!(worker::storage::hide_folders(s))).unwrap_or(l.clone())).collect();
+            let log: Vec<Value> = log.as_array().into_iter().flatten().map(|l| l.as_str().map(|s| json!(worker::storage::hide_folders(s))).unwrap_or_else(|| l.clone())).collect();
             r.insert("log".into(), json!(log));
         }
         r.insert("length".into(), d["length"].clone());
@@ -279,7 +279,7 @@ async fn create(State(st): State<AppState>, User(u): User, Json(b): Json<NewRequ
     let r = get_request(&st, id)?;
     if r["status"] == "pending" {
         let what = [&r["title"], &r["artist"], &r["url"]].iter().find_map(|v| v.as_str().filter(|s| !s.is_empty())).unwrap_or("").to_string();
-        let (st2, who, kind, cover) = (st.clone(), u.s("username"), b.kind.clone(), b.cover_url.clone());
+        let (st2, who, kind, cover) = (st, u.s("username"), b.kind.clone(), b.cover_url);
         tokio::spawn(async move {
             notify::send(&st2, "🎵 New request awaiting approval", &format!("{who} requested {kind}: {what}"), cover.as_deref()).await;
         });
@@ -301,7 +301,7 @@ async fn from_link_inner(st: &AppState, u: &Row, url: &str, album_mode: Option<S
     let data = encore_requests::sources::links::fetch_as(st, url, Some(u.i("id"))).await.map_err(|e| err(400, e.to_string()))?;
     quota(st, u, 1)?;
     let (mut made, mut skipped) = (vec![], 0);
-    for t in data["tracks"].as_array().cloned().unwrap_or_default().iter().take(500) {
+    for t in data["tracks"].as_array().into_iter().flatten().take(500) {
         let s = |k: &str| t[k].as_str().filter(|x| !x.is_empty()).map(String::from);
         let b = NewRequest { kind: "track".into(), artist: s("artist"), title: s("title"), album: s("album"), cover_url: s("cover"),
             length: t["duration"].as_f64(), isrc: s("isrc"), mbid: s("mbid"), album_mode: album_mode.clone(), ..Default::default() };
@@ -425,7 +425,7 @@ async fn retry_failed(State(st): State<AppState>, User(u): User, body: Option<Js
         let Ok(r) = get_request(&st, id) else { continue };
         match retry_request(&st, &u, id, &r) {
             Ok(()) => retried += 1,
-            Err(e) => { skipped += 1; why.get_or_insert(e.detail.clone()); }
+            Err(e) => { skipped += 1; why.get_or_insert_with(|| e.detail.clone()); }
         }
     }
     Ok(Json(json!({ "retried": retried, "skipped": skipped, "why": why })))
@@ -487,7 +487,7 @@ async fn import_again(State(st): State<AppState>, User(u): User, Path(rid): Path
     let r = get_owned(&st, rid, &u)?;
     if r["status"] == "importing" {
         worker::stall::import_again(&st, rid, &u.s("username")).await.map_err(|(code, why)| err(code, why))?;
-        let status = get_request(&st, rid).map(|r| r["status"].clone()).unwrap_or(json!("importing"));
+        let status = get_request(&st, rid).map(|r| r["status"].clone()).unwrap_or_else(|_| json!("importing"));
         return Ok(Json(json!({ "ok": true, "status": status })));
     }
     worker::storage::import_again(&st, rid).map_err(|e| err(400, e))?;

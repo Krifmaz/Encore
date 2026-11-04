@@ -131,7 +131,7 @@ fn toast_html(html: &str, kind: &str) {
     dom::set_html(&el, html);
     if let Some(t) = dom::by_id("toasts") { let _ = t.append_child(&el); }
     let e1 = el.clone();
-    let e2 = el.clone();
+    let e2 = el;
     dom::keep_forever(Timeout::new(5000, move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
     dom::keep_forever(Timeout::new(5400, move || e2.remove()));
 }
@@ -410,7 +410,7 @@ fn browse_modal(username: &str) {
         let Some(list) = dom::qs_in(&body, "#br-list") else { return };
         bind_tree(&list, Rc::new(RefCell::new(vec![(*user).clone()])), checked.clone());
         let paint = {
-            let (user, list, checked) = (user.clone(), list.clone(), checked.clone());
+            let (user, list, checked) = (user, list, checked.clone());
             move |q: &str| {
                 let needle = q.to_lowercase();
                 let hit = |s: &str| s.to_lowercase().contains(&needle);

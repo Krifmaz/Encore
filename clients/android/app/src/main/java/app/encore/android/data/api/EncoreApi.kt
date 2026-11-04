@@ -363,6 +363,14 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         return post("/api/taste/mix", body).objects().mapNotNull { Track.from(it) }
     }
 
+    /**
+     * POST /api/taste/listened: a song whose play already counted is over, `seconds` in (its whole length when it
+     * ran to the end). The recommendations weigh the play by how much of the song was heard.
+     */
+    fun listened(trackId: Long, seconds: Double) {
+        post("/api/taste/listened", json.encodeToJsonElement(PlayBody.serializer(), PlayBody(trackId, seconds)))
+    }
+
     /** POST /api/taste/skip: Next before the song's play counted (a mild "not now" for the recommendations). */
     fun skip(trackId: Long, seconds: Double) {
         post("/api/taste/skip", json.encodeToJsonElement(PlayBody.serializer(), PlayBody(trackId, seconds)))
@@ -448,7 +456,7 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
         val o = getObject("/api/playlists/$id")
         val pl = (Playlist.from(o) ?: Playlist(id, o.str("name"), o.str("kind"), 0, 0, "")).withFullCover()
         val rows = (o.arr("items") ?: o.arr("tracks")).objectsOf().map { r ->
-            PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r), r.str("request_status"), r.str("album"))
+            PlaylistRow(r.str("title"), r.str("artist"), Track.fromPlaylistItem(r), r.str("request_status"), r.str("album"), r.dbl("added_at"), r.dbl("duration"), r.str("cant_request"))
         }
         return PlaylistDetail(pl, rows)
     }

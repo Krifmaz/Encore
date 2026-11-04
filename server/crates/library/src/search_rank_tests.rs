@@ -101,8 +101,8 @@ fn the_real_song_is_the_top_result() {
         let apos = |needle: &str| albums.iter().position(|t| t.contains(needle)).unwrap_or(usize::MAX);
         assert_eq!(apos("Travis Scott / Rodeo"), 0, "{albums:?}");
         assert!(apos("Tribute Kings") > 1, "{albums:?}");
-        let rodeo: Vec<&Value> = out["albums"].as_array().unwrap().iter().filter(|a| a["title"] == "Rodeo").collect();
-        assert_eq!(rodeo.len(), 1, "Deezer and Apple's Rodeo merge into MusicBrainz's: {albums:?}");
+        let rodeo = out["albums"].as_array().unwrap().iter().filter(|a| a["title"] == "Rodeo").count();
+        assert_eq!(rodeo, 1, "Deezer and Apple's Rodeo merge into MusicBrainz's: {albums:?}");
         let remix = out["albums"].as_array().unwrap().iter().find(|a| a["title"] == "90210 (Remixes)").expect("ext album");
         assert_eq!(remix["ext"]["deezer"], 555000111);
         assert!(remix["id"].as_str().unwrap().starts_with("ext-d"));

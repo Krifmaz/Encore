@@ -205,6 +205,15 @@ pub fn album_ids_for(db: &Db, items: &[(String, String, String)]) -> Vec<Option<
     out
 }
 
+/// How many songs the library has on each of these albums (`tracks.album_id`), for the album ids it has at all;
+/// an id with no song isn't in the map. One query per batch of [`CHUNK`] ids. The pages use it to tell a single
+/// (one song, played as a song) from an album with a page of its own.
+pub fn album_song_counts(db: &Db, ids: &[String]) -> std::collections::HashMap<String, i64> {
+    let keys = params(ids.iter().filter(|i| !i.is_empty()).cloned());
+    rows_in(db, "SELECT album_id, COUNT(*) n FROM tracks WHERE album_id IN ({in}) GROUP BY album_id", &keys)
+        .into_iter().map(|r| (r.s("album_id"), r.i("n"))).collect()
+}
+
 /// For each (artist, title) pair: whether a song has `lower(<artist_col>)=lower(artist) AND
 /// lower(<title_col>)=lower(title)`. One query per batch of titles.
 fn pairs_owned(db: &Db, artist_col: &str, title_col: &str, pairs: &[(String, String)]) -> Vec<bool> {
@@ -388,6 +397,19 @@ mod tests {
         // an artist's albums of one name: a release group asked about with another one the library has isn't it
         let same_name = strs(&[("rg5", "Band", "Album"), ("rg6", "Band", "Album")]);
         assert_eq!(album_ids_for(&db, &same_name), vec![Some("a5".to_string()), None]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The song counts per album: every song of the album counted, unknown and empty ids left out.
+    #[test]
+    fn album_song_counts_count_each_albums_songs() {
+        let (db, dir) = library();
+        let ids: Vec<String> = ["a1", "a2", "a5", "nope", ""].iter().map(|s| s.to_string()).collect();
+        let n = album_song_counts(&db, &ids);
+        assert_eq!(n.get("a1"), Some(&3));
+        assert_eq!(n.get("a2"), Some(&1), "a one-song album: a single");
+        assert_eq!(n.get("a5"), Some(&1));
+        assert!(!n.contains_key("nope") && !n.contains_key(""));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -107,7 +107,7 @@ pub fn find_duplicates(st: &impl Ctx) -> Vec<Value> {
         let (ra, rb) = (find(p, a), find(p, b));
         if ra != rb {
             p.insert(rb, ra);
-            reason.entry(ra).or_insert(why.to_string());
+            reason.entry(ra).or_insert_with(|| why.to_string());
         }
     };
     for (col, why) in [("acoustid_id", "identical audio (AcoustID)"), ("mb_trackid", "same MusicBrainz recording"), ("isrc", "same ISRC")] {

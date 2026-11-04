@@ -393,7 +393,7 @@ pub fn refresh_list(gr: &mut Group, ctx: &Ctx) -> Task<Message> {
         return Task::none();
     }
     let api = ctx.api.clone();
-    Task::perform(async move { api.get("/group").await }, move |r| g(Msg::List(base.clone(), r)))
+    Task::perform(async move { api.get("/group").await }, move |r| g(Msg::List(base, r)))
 }
 
 /// An answer that means "no group listens here" (turned off, or a server before 0.31).
@@ -931,7 +931,7 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 }
                 let api = ctx.api.clone();
                 let p = format!("/group/code/{}", crate::pages::urlencode(&code));
-                return Task::perform(async move { api.get(&p).await }, move |r| g(Msg::Lookup(code.clone(), r)));
+                return Task::perform(async move { api.get(&p).await }, move |r| g(Msg::Lookup(code, r)));
             }
             return update(st, Msg::JoinCode(code), ctx);
         }
@@ -1016,7 +1016,7 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
             let p = path(&id, "/end");
             let b = body(ctx, json!({}));
             let api = ctx.api.clone();
-            return Task::perform(async move { api.post(&p, b).await }, move |r| g(Msg::Ended(id.clone(), r)));
+            return Task::perform(async move { api.post(&p, b).await }, move |r| g(Msg::Ended(id, r)));
         }
         Msg::Ended(id, r) => match r {
             // the event stream's `ended` may have come first and said it already
@@ -1107,7 +1107,7 @@ pub fn update(st: &mut State, msg: Msg, ctx: &mut Ctx) -> Task<Message> {
                 crate::pages::urlencode(&device_id(ctx))
             );
             let api = ctx.api.clone();
-            return Task::perform(async move { api.del(&p).await }, move |r| g(Msg::Removed(name.clone(), r)));
+            return Task::perform(async move { api.del(&p).await }, move |r| g(Msg::Removed(name, r)));
         }
         Msg::Removed(name, r) => match r {
             Ok(v) => {

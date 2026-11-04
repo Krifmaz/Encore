@@ -58,8 +58,6 @@ pub fn artwork_modal(album_id: &str, a: &Value, on_done: Rc<dyn Fn()>) {
     // search(q): the candidates grid; `out.onclick` is replaced on every search like the JS did
     let click: Rc<RefCell<Option<dom::EventListener>>> = Rc::new(RefCell::new(None));
     let search: Rc<dyn Fn(String)> = {
-        let album_id = album_id.clone();
-        let out = out.clone();
         let apply = apply.clone();
         Rc::new(move |q: String| {
             dom::set_html(&out, r#"<div class="muted"><span class="spinner"></span> Searching every catalogue…</div>"#);

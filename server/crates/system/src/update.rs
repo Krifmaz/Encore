@@ -6,7 +6,10 @@
 //! The `update_channel` setting picks what counts: `stable` = the newest full release (GitHub's latest), `hotfix`
 //! = the newest of those and the hotfix prereleases CI publishes on every push to the main branch (tag
 //! `hotfix-<last release>.<run>`, e.g. hotfix-0.35.2.17, image :0.35.2.17); a full release is newer than every
-//! hotfix before it (0.35.3 > 0.35.2.17).
+//! hotfix before it (0.35.3 > 0.35.2.17). Both channels read GitHub's release list and take the highest version
+//! in it, never GitHub's "Latest" flag alone: a hotfix built while a full release was still on its way carries the
+//! older release's number (0.42.5.191 after v0.42.6) yet became "Latest", and a server on it was told it had the
+//! newest version.
 //! The newest release comes from GitHub (`encore_http::github`, ETags and the token setting) and is kept
 //! in the database, so the Diagnostics page and its banner show it without waiting; the scheduler looks once a
 //! day (`check_updates`). "Update now" needs the Docker socket mounted into the container; selfupdate.rs does
@@ -42,8 +45,8 @@ const FRESH_SECS: f64 = 3600.0;
 const SCOPE: &str = "encore:update";
 /// Where the last answer of the hotfix channel is kept.
 const SCOPE_HOTFIX: &str = "encore:update:hotfix";
-/// How many releases the hotfix channel looks through (newest first).
-const HOTFIX_PAGE: usize = 30;
+/// How many releases a check looks through (newest first; full releases and the three kept hotfixes fit).
+const RELEASE_PAGE: usize = 30;
 
 /// The channel the `update_channel` setting names (`Channel` is the kit's: anything but `hotfix` is stable).
 pub fn channel(st: &impl Ctx) -> Channel {
@@ -79,10 +82,11 @@ pub fn parse_release(v: &Value, now: f64) -> Option<Value> {
     kit_server_updates::server::parse_release(v, now, &repo())
 }
 
-/// The hotfix channel's pick from GitHub's release list: the highest version among the full releases and the
-/// hotfix prereleases (drafts and other prereleases don't count).
-pub fn pick_newest(list: &Value, now: f64) -> Option<Value> {
-    kit_server_updates::server::pick_newest(list, now, &repo())
+/// The channel's pick from GitHub's release list: the highest version among the releases it counts (the kit's
+/// `server::counts`: never a draft or a beta; a hotfix prerelease on the hotfix channel only), whichever of them
+/// GitHub marks "Latest".
+pub fn pick_newest(list: &Value, channel: Channel, now: f64) -> Option<Value> {
+    kit_server_updates::server::pick_newest(list, channel, now, &repo())
 }
 
 /// The last answer from GitHub kept in the database, for the channel the settings name.
@@ -99,17 +103,12 @@ fn store(st: &impl Ctx, channel: Channel, release: &Value) {
 /// Ask GitHub (the ETag makes an unchanged answer free) and keep the answer.
 pub async fn fetch(st: &impl Ctx) -> anyhow::Result<Value> {
     let channel = channel(st);
-    let path = match channel {
-        Channel::Stable => format!("{}/repos/{REPO}/releases/latest", st.system().github_api),
-        Channel::Hotfix => format!("{}/repos/{REPO}/releases?per_page={HOTFIX_PAGE}", st.system().github_api),
-    };
+    // the list, not /releases/latest: "Latest" can sit on a hotfix numbered below a newer full release
+    let path = format!("{}/repos/{REPO}/releases?per_page={RELEASE_PAGE}", st.system().github_api);
     let (code, v) = encore_http::github::get(st, &path).await?;
     match code {
         200 => {
-            let r = match channel {
-                Channel::Stable => parse_release(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub's answer has no release tag"))?,
-                Channel::Hotfix => pick_newest(&v, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub shows no Encore release or hotfix yet"))?,
-            };
+            let r = pick_newest(&v, channel, db::now()).ok_or_else(|| anyhow::anyhow!("GitHub shows no Encore release yet"))?;
             store(st, channel, &r);
             Ok(r)
         }
@@ -337,7 +336,7 @@ pub fn pull_error(image: &str, e: &str) -> String {
 /// Pull `IMAGE:tag`, then create and start the helper container from it. Ok(the helper's name).
 pub async fn start_update(d: &Docker, self_id: &str, tag: &str) -> Result<String, String> {
     let image = format!("{IMAGE}:{tag}");
-    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| pull_error(&image, &e.to_string()))?;
+    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| pull_error(&image, &e))?;
     let me = d.inspect(self_id).await.map_err(|e| format!("The Docker socket refused the request: {e}"))?
         .ok_or_else(|| "Not running in a container".to_string())?;
     let body = selfupdate::plan_helper_body(&me, &image).ok_or_else(|| "The Docker socket is not mounted from the host (no bind for /var/run/docker.sock)".to_string())?;

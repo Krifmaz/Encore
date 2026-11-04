@@ -105,7 +105,6 @@ pub fn hash() -> String { location().hash().unwrap_or_default() }
 pub fn set_hash(h: &str) { let _ = location().set_hash(h); }
 pub fn set_title(t: &str) { document().set_title(t); }
 pub fn console_error(msg: &str) { web_sys::console::error_1(&JsValue::from_str(msg)); }
-pub fn console_log(msg: &str) { web_sys::console::log_1(&JsValue::from_str(msg)); }
 
 /// `window.dispatchEvent(new CustomEvent(name, { detail }))`.
 pub fn dispatch(name: &str, detail: Option<JsValue>) {

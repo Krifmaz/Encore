@@ -46,7 +46,7 @@ async fn login(app: &axum::Router, name: &str) -> String {
 
 fn row(st: &AppState, id: i64) -> (String, String, Value) {
     let r = st.db.one("SELECT status, message, detail FROM requests WHERE id=?", p![id]).unwrap().unwrap();
-    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or(json!({})))
+    (r.s("status"), r.s("message"), serde_json::from_str(&r.s("detail")).unwrap_or_else(|_| json!({})))
 }
 
 /// A request of `owner` in `status`, its files kept for the import (`kept`: in its staging folder, Encore's own).

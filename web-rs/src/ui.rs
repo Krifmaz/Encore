@@ -34,6 +34,7 @@ pub fn icon(name: &str) -> String {
         "library" => p(r#"<path d="M4 4v16M9 4v16M14 4l6 16"/>"#),
         "inbox" => p(r#"<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>"#),
         "download" => p(r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/>"#),
+        "video" => p(r#"<rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-4v12l-6-4z"/>"#),
         "activity" => p(r#"<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>"#),
         "users" => p(r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>"#),
         "ticket" => p(r#"<path d="M2 9a3 3 0 0 0 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 0 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"/><path d="M13 5v2M13 17v2M13 11v2"/>"#),
@@ -97,7 +98,7 @@ pub fn toast(msg: &str, kind: &str) {
     el.set_text_content(Some(msg));
     if let Some(t) = by_id("toasts") { let _ = t.append_child(&el); }
     let e1 = el.clone();
-    let e2 = el.clone();
+    let e2 = el;
     keep_app(gloo_timers::callback::Timeout::new(3800, move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
     keep_app(gloo_timers::callback::Timeout::new(4200, move || e2.remove()));
 }
@@ -725,7 +726,7 @@ pub fn set_secret_text(el: &Element, value: &str) {
         let _ = el.after_with_node_1(&eye_button(move |shown| {
             dom::set_data(&e2, "shown", if shown { "1" } else { "" });
             let v = dom::data(&e2, "value");
-            e2.set_text_content(Some(&if shown { v.clone() } else { dots(v.len()) }));
+            e2.set_text_content(Some(&if shown { v } else { dots(v.len()) }));
         }));
     }
 }

@@ -171,6 +171,13 @@ enum class Tab(val label: String, val icon: Int) {
     DISCOVER("Discover", R.drawable.ic_search),
     LIBRARY("Library", R.drawable.ic_library),
     PLAYLISTS("Playlists", R.drawable.ic_queue_music),
+
+    /**
+     * Downloads: the Requests page ([RequestsScreen], the web's `#/requests`) as a tab of its own, so the download
+     * queue, Retry failed, Download all now, Clear finished and Clear waiting are one tap away instead of behind the
+     * Home avatar menu.
+     */
+    DOWNLOADS("Downloads", R.drawable.ic_download),
 }
 
 /** Everything a screen needs to move around and play. */
@@ -185,6 +192,10 @@ class Nav(
     val addToPlaylist: (List<Long>) -> Unit,
     /** The "⋯" menu for one song in a list (web/js/pages/library.js `trackMenu`); drawn once at the root. */
     val showTrackMenu: (track: Track, onAlbumPage: Boolean) -> Unit,
+    /** Opens the full player (the TV player on a TV) on Now playing: a single's tile plays its song there. */
+    val openPlayer: () -> Unit = {},
+    /** The signed-in app's scope, for work a tap starts that outlives the tile (loading a single's song). */
+    val scope: CoroutineScope? = null,
 ) {
     /** `onAlbumPage`: true leaves out "Go to album". */
     fun trackMenu(track: Track, onAlbumPage: Boolean = false) = showTrackMenu(track, onAlbumPage)
@@ -287,6 +298,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
             showTab = { t -> showPlayer = false; stack.clear(); tab = t },
             addToPlaylist = { ids -> if (ids.isNotEmpty()) addToPlaylistIds = ids },
             showTrackMenu = { t, onAlbum -> trackMenuFor = TrackMenuRequest(t, onAlbum) },
+            openPlayer = { showUpNext = false; showPlayer = true },
+            scope = fixScope,
         )
     }
     // the song menu's "Download for offline": made here, so the storage permission's answer (Android 8–9) still
@@ -339,6 +352,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                 Tab.LIBRARY -> LibraryScreen(nav)
                 Tab.PLAYLISTS -> PlaylistsScreen(nav)
                 Tab.DISCOVER -> DiscoverScreen(nav)
+                // the tab's root: no back arrow (the bottom tabs and Back to Home take you away)
+                Tab.DOWNLOADS -> RequestsScreen(nav, asTab = true)
             }
         }
     }
@@ -367,6 +382,7 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
                         RailItem.HOME -> nav.showTab(Tab.HOME)
                         RailItem.LIBRARY -> nav.showTab(Tab.LIBRARY)
                         RailItem.PLAYLISTS -> nav.showTab(Tab.PLAYLISTS)
+                        RailItem.DOWNLOADS -> nav.showTab(Tab.DOWNLOADS)
                         // For you and Settings are pages of the stack on a phone; on the TV they are places of their own
                         RailItem.FOR_YOU -> { showPlayer = false; stack.clear(); stack.add(Screen.ForYou) }
                         RailItem.SETTINGS -> { showPlayer = false; stack.clear(); stack.add(Screen.Settings) }
@@ -438,7 +454,8 @@ private fun MainScreen(graph: AppGraph, player: PlayerConnection, session: Sessi
         // an Encore playlist link shared to the app: "Add to my playlists?" (kept until signed in, as group links are)
         PlaylistLinkHost(nav, session)
         // a share link opened in the app (from the browser's share page): its album, artist or playlist
-        ShareOpenHost(nav, session)
+        // a song link plays the song and opens the full player (the TV player on a TV), the "Now playing" screen
+        ShareOpenHost(nav, session, onOpenPlayer = { showPlayer = true })
         addToPlaylistIds?.let { ids ->
             AddToPlaylistSheet(graph.api, ids, onDismiss = { addToPlaylistIds = null })
         }

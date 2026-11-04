@@ -160,7 +160,7 @@ pub fn soulseek_state(st: &impl Ctx) -> Sk {
         (SState::LoggedIn, _) if !c.lost => Sk::LoggedIn,
         (SState::LoggedIn | SState::Connecting, _) => Sk::Connecting,
         (SState::Stopped, Some(r)) => Sk::Stopped(session::describe(r, c.message.as_deref())),
-        (SState::Stopped, None) => Sk::Stopped(c.message.clone().unwrap_or_else(|| "Soulseek is off".into())),
+        (SState::Stopped, None) => Sk::Stopped(c.message.unwrap_or_else(|| "Soulseek is off".into())),
         (SState::Waiting, Some(Reason::Timeout)) => Sk::Timeout(next(&c)),
         (SState::Waiting, Some(Reason::Kicked)) => Sk::Kicked(next(&c)),
         _ => Sk::Attempt,
@@ -423,7 +423,7 @@ fn lower_first(s: &str) -> String {
 /// `POST /api/requests/{id}/download-now` for `who` (the request's owner or an admin; `admin`: the words of a
 /// storage problem with its folder). → `{ok, action, text, at?, line?, status}` or (HTTP status, why not)
 pub async fn download_now<C: Ctx>(st: &C, id: i64, who: &str, admin: bool) -> Result<Value, (u16, String)> {
-    let r = get(st, id).ok_or((404, "Request not found".to_string()))?;
+    let r = get(st, id).ok_or_else(|| (404, "Request not found".to_string()))?;
     let o = offer(st, &r)?;
     let lines = &st.requests().lines;
     let (mut body, outcome) = match o.act.clone() {
@@ -472,8 +472,8 @@ pub async fn download_now<C: Ctx>(st: &C, id: i64, who: &str, admin: bool) -> Re
 
 /// Hold the request's place in the queue (its running step ends first), and check it still offers `act`.
 async fn hold_same(st: &impl Ctx, id: i64, act: &Act) -> Result<Hold, (u16, String)> {
-    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or((409, BUSY.to_string()))?;
-    let r = get(st, id).ok_or((404, "Request not found".to_string()))?;
+    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or_else(|| (409, BUSY.to_string()))?;
+    let r = get(st, id).ok_or_else(|| (404, "Request not found".to_string()))?;
     match offer(st, &r) {
         Ok(o) if std::mem::discriminant(&o.act) == std::mem::discriminant(act) => Ok(hold),
         _ => Err((409, CHANGED.to_string())),
@@ -527,8 +527,8 @@ async fn disk_now<C: Ctx>(st: &C, id: i64, who: &str, admin: bool) -> Result<(Va
         st.requests().lines.press(id, who, now());
         return Ok(writable());
     }
-    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or((409, BUSY.to_string()))?;
-    let r = get(st, id).ok_or((404, "Request not found".to_string()))?;
+    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or_else(|| (409, BUSY.to_string()))?;
+    let r = get(st, id).ok_or_else(|| (404, "Request not found".to_string()))?;
     if !waits(&r) {
         st.requests().lines.press(id, who, now());
         return Ok(writable());
@@ -567,7 +567,7 @@ fn soulseek_answer(sk: &Sk) -> (Value, String) {
 /// The request's step at once, in its place in the queue (Soulseek can be searched now, or won't come back by
 /// itself and the request goes on to its next source).
 async fn soulseek_step<C: Ctx>(st: &C, id: i64, who: &str, sk: Sk) -> Result<(Value, String), (u16, String)> {
-    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or((409, BUSY.to_string()))?;
+    let hold = hold_idle(st, id, IDLE_WAIT).await.ok_or_else(|| (409, BUSY.to_string()))?;
     take_turn(st, id, hold, step(st.clone(), id));
     st.requests().lines.press(id, who, now());
     Ok(soulseek_answer(&sk))
@@ -861,7 +861,7 @@ pub async fn download_all_now<C: Ctx>(st: &C, who: &str, mine: Option<i64>, own:
         if lines.place(id).is_some() || lines.holding(id).is_some() {
             continue;
         }
-        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or(json!({}));
+        let d: Value = serde_json::from_str(&row.s("detail")).unwrap_or_else(|_| json!({}));
         let reason = d["wait"]["reason"].as_str().unwrap_or("");
         match (row.s("status").as_str(), reason) {
             ("waiting", storage::STORAGE_DOWNLOAD | storage::STORAGE_IMPORT) => storage_ids.push(id),

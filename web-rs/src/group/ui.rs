@@ -98,7 +98,7 @@ pub fn start_dialog() {
       </div>"#)
         .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="g-start">Start</button>"#));
     let Some(btn) = m.qs("#g-start") else { return };
-    let m2 = m.clone();
+    let m2 = m;
     dom::on(&btn, "click", move |_| {
         if super::busy() { return; }
         let vis = m2.qsa("[name=g-vis]").into_iter().find(dom::checked).map(|r| dom::value(&r)).unwrap_or_else(|| "anyone".into());
@@ -142,7 +142,7 @@ pub fn sheet() {
         let p = paint.clone();
         follow_while(&root, move || p());
     }
-    let (m2, p2) = (m.clone(), paint.clone());
+    let (m2, p2) = (m, paint.clone());
     dom::on(&root, "click", move |e| {
         let Some(b) = dom::closest(e, "[data-g]") else { return };
         let Some(s) = super::current() else { return };
@@ -314,7 +314,7 @@ fn invite_dialog(code: &str, g: Option<Value>) {
     let m = modal(ModalOpts::new(&esc(&title), &format!(r#"<p class="muted" style="margin:0">{}</p>"#, esc(&text)))
         .footer(r#"<button class="btn" data-close>Cancel</button><button class="btn primary" id="g-yes">Join</button>"#));
     let Some(b) = m.qs("#g-yes") else { return };
-    let (m2, code, b2) = (m.clone(), code.to_string(), b.clone());
+    let (m2, code, b2) = (m, code.to_string(), b.clone());
     dom::on(&b, "click", move |_| {
         if super::busy() { return; }
         dom::set_disabled(&b2, true);

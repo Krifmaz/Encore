@@ -305,6 +305,7 @@ private fun iconOf(item: RailItem): Int = when (item) {
     RailItem.HOME -> R.drawable.ic_home
     RailItem.LIBRARY -> R.drawable.ic_library
     RailItem.PLAYLISTS -> R.drawable.ic_queue_music
+    RailItem.DOWNLOADS -> R.drawable.ic_download
     RailItem.FOR_YOU -> R.drawable.ic_spark
     RailItem.NOW_PLAYING -> R.drawable.ic_play
     RailItem.SETTINGS -> R.drawable.ic_settings

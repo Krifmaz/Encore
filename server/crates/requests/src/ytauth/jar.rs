@@ -177,7 +177,7 @@ impl Jar {
             c.expires = if m <= 0 { -1 } else { now + m };
         }
         if c.expires < 0 || (c.expires > 0 && c.expires <= now) {
-            let (d, p, n) = (c.domain.clone(), c.path.clone(), c.name.clone());
+            let (d, p, n) = (c.domain.clone(), c.path.clone(), c.name);
             self.0.retain(|o| !(o.domain.eq_ignore_ascii_case(&d) && o.path == p && o.name == n));
             return;
         }

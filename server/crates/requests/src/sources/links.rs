@@ -216,7 +216,7 @@ pub async fn spotify_api(st: &impl Ctx, token: &str, kind: &str, id: &str) -> an
         let mut next = Some(format!("{base}/me/tracks?limit=50"));
         while let Some(u) = next.filter(|_| items.len() < 10000) {
             let page = get(u).await?;
-            items.extend(page["items"].as_array().cloned().unwrap_or_default().iter().filter(|i| i["track"].is_object()).map(|i| sp_track(&i["track"], None)));
+            items.extend(page["items"].as_array().into_iter().flatten().filter(|i| i["track"].is_object()).map(|i| sp_track(&i["track"], None)));
             next = page["next"].as_str().map(String::from);
         }
         return Ok(json!({ "name": "Spotify Liked Songs", "description": "", "cover": null, "tracks": items }));
@@ -224,7 +224,7 @@ pub async fn spotify_api(st: &impl Ctx, token: &str, kind: &str, id: &str) -> an
     let meta = get(format!("{base}/{kind}s/{id}")).await?;
     let mut next;
     if kind == "album" {
-        items.extend(meta["tracks"]["items"].as_array().cloned().unwrap_or_default().iter().map(|x| sp_track(x, Some(&meta))));
+        items.extend(meta["tracks"]["items"].as_array().into_iter().flatten().map(|x| sp_track(x, Some(&meta))));
         next = meta["tracks"]["next"].as_str().map(String::from);
     } else {
         // the 2026 API renamed /tracks → /items; older apps still have /tracks
@@ -262,7 +262,7 @@ async fn spotify_embed(st: &impl Ctx, kind: &str, id: &str) -> anyhow::Result<Va
         .ok_or_else(|| anyhow::anyhow!("Spotify embed page format changed"))?;
     let data: Value = serde_json::from_str(&m[1])?;
     let entity = walk_find(&data, &|d| d.get("trackList").is_some()).cloned().unwrap_or_default();
-    let mut tracks: Vec<Value> = entity["trackList"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+    let mut tracks: Vec<Value> = entity["trackList"].as_array().into_iter().flatten().map(|x| {
         t(s(&x["title"]), &s(&x["subtitle"]).replace('\u{a0}', " "), None, x["duration"].as_f64().map(|d| d / 1000.0), None, None,
           x["uri"].as_str().and_then(|u| u.rsplit(':').next()).map(String::from), None)
     }).collect();
@@ -362,7 +362,7 @@ async fn deezer(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
     let mut tracks = vec![];
     while let Some(r) = next.filter(|_| tracks.len() < 10000) {
         let page = get(r).await?;
-        tracks.extend(page["data"].as_array().cloned().unwrap_or_default().iter().map(|x| dz(x, album)));
+        tracks.extend(page["data"].as_array().into_iter().flatten().map(|x| dz(x, album)));
         // the next page's address as Deezer gives it
         next = page["next"].as_str().map(|u| st.http().get(u));
     }
@@ -395,7 +395,7 @@ async fn tidal(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
         let mut q = cc.clone();
         while let Some(n) = next.filter(|_| ids.len() < 10000) {
             let page = get(n, q).await?;
-            ids.extend(page["data"].as_array().cloned().unwrap_or_default().iter().filter(|d| d["type"] == "tracks").filter_map(|d| d["id"].as_str().map(String::from)));
+            ids.extend(page["data"].as_array().into_iter().flatten().filter(|d| d["type"] == "tracks").filter_map(|d| d["id"].as_str().map(String::from)));
             next = page["links"]["next"].as_str().map(String::from);
             q = vec![];
         }
@@ -409,7 +409,7 @@ async fn tidal(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
             let Some(x) = d["data"].as_array().and_then(|a| a.iter().find(|x| s(&x["id"]) == tid)) else { continue };
             let a = &x["attributes"];
             let names = |rel: &str, typ: &str, field: &str| -> Vec<String> {
-                x["relationships"][rel]["data"].as_array().cloned().unwrap_or_default().iter()
+                x["relationships"][rel]["data"].as_array().into_iter().flatten()
                     .filter_map(|r| inc.get(&(typ.to_string(), s(&r["id"]).to_string())).and_then(|v| v[field].as_str().map(String::from))).collect()
             };
             let mut title = s(&a["title"]).to_string();
@@ -501,7 +501,7 @@ async fn listenbrainz(st: &impl Ctx, url: &str) -> anyhow::Result<Value> {
         anyhow::bail!("ListenBrainz returned {}", r.status().as_u16());
     }
     let pl = r.json::<Value>().await?["playlist"].clone();
-    let tracks: Vec<Value> = pl["track"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+    let tracks: Vec<Value> = pl["track"].as_array().into_iter().flatten().map(|x| {
         let ids: Vec<String> = match &x["identifier"] { Value::Array(a) => a.iter().map(|i| s(i).to_string()).collect(), Value::String(v) => vec![v.clone()], _ => vec![] };
         let mbid = ids.iter().find(|i| i.contains("musicbrainz.org/recording/")).and_then(|i| i.rsplit('/').next()).map(String::from);
         t(s(&x["title"]), s(&x["creator"]), x["album"].as_str(), x["duration"].as_f64().map(|d| d / 1000.0), None, mbid.as_deref(), None, None)

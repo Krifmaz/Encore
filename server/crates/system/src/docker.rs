@@ -229,7 +229,7 @@ pub fn pull_error(status: u16, body: &[u8]) -> Option<String> {
         let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let text = String::from_utf8_lossy(body).trim().chars().take(300).collect::<String>();
         return Some(v["message"].as_str().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
-            .unwrap_or(if text.is_empty() { format!("Docker answered {status}") } else { text }));
+            .unwrap_or_else(|| if text.is_empty() { format!("Docker answered {status}") } else { text }));
     }
     let mut last = None;
     for v in serde_json::Deserializer::from_slice(body).into_iter::<Value>().map_while(Result::ok) {

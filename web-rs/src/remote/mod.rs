@@ -116,7 +116,7 @@ fn got_devices(list: Vec<Value>) {
         let d = DEVICES.with(|d| d.borrow().iter().find(|x| x.s("id") == link.id).cloned());
         MISSED.with(|m| m.set(if d.is_some() { 0 } else { m.get() + 1 }));
         if let Some(d) = d { player::link_state(d.g("state").clone(), true); }
-        else if MISSED.with(|m| m.get()) > 1 { player::link_state(link.state.clone(), false); }
+        else if MISSED.with(|m| m.get()) > 1 { player::link_state(link.state, false); }
     }
     let f = ON_DEVICES.with(|o| o.borrow().clone());
     if let Some(f) = f { f(); }

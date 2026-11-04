@@ -82,7 +82,7 @@ pub fn replace_modal(t: &Value, on_done: Option<Rc<dyn Fn()>>) {
     let Some(input) = m.qs("#own-file").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) else { return };
     let id = t.i("id");
     let m = Rc::new(m);
-    let m2 = m.clone();
+    let m2 = m;
     dom::on(&input.clone().into(), "change", move |_| {
         let Some(file) = files_of(&input).into_iter().next() else { return };
         let (m, on_done, input) = (m2.clone(), on_done.clone(), input.clone());
@@ -168,7 +168,7 @@ pub fn bulk_modal(on_done: Option<Rc<dyn Fn()>>) {
         }
     }
     {
-        let (m, rows, count, input2) = (m.clone(), rows.clone(), count.clone(), input.clone());
+        let (m, rows, count, input2) = (m.clone(), rows.clone(), count, input.clone());
         dom::on(&input.into(), "change", move |_| {
             let files = files_of(&input2);
             input2.set_value("");
@@ -213,7 +213,7 @@ pub fn bulk_modal(on_done: Option<Rc<dyn Fn()>>) {
     }
     // Replace: the chosen ones, all at once; then each line says how it went
     let Some(apply) = m.qs("#own-apply") else { return };
-    let (m2, apply2) = (m.clone(), apply.clone());
+    let (m2, apply2) = (m, apply.clone());
     dom::on(&apply.into(), "click", move |_| {
         let items: Vec<Value> = rows.borrow().iter().filter_map(|r| r.pick.map(|id| json!({ "token": r.staged.s("token"), "track_id": id }))).collect();
         if items.is_empty() { return; }

@@ -126,9 +126,9 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             let api = ctx.api.clone();
             let path = format!("/bug-reports/{}/status", state.id);
             let body = json!({ "status": s });
-            let s2 = s.clone();
+            let s2 = s;
             return Task::perform(async move { api.post(&path, body).await }, move |r| {
-                Message::StatusSet(s2.clone(), r)
+                Message::StatusSet(s2, r)
             });
         }
         Message::StatusSet(s, Ok(_)) => {
@@ -333,7 +333,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .center_x(Length::Fill)
                     .into()
             } else {
-                column(msgs.iter().map(|m| message_view(m, ctx)).collect::<Vec<_>>()).into()
+                column(msgs.iter().map(|m| message_view(m, ctx))).into()
             };
             let reply = card(drop_zone::view(
                 column![

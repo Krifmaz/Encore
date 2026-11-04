@@ -144,7 +144,7 @@ pub fn update(state: &mut State, msg: Message, config: &mut Config) -> Task<Mess
             if let Some(s) = config.server_mut(&server) {
                 if s.token != token || s.device_id != id {
                     s.token = token.clone();
-                    s.device_id = id.clone();
+                    s.device_id = id;
                     config.save();
                 }
             }
@@ -349,7 +349,7 @@ mod tests {
         let song = engine::tracks::from_encore("http://nas:8080", &old, &row).unwrap();
         let other = engine::tracks::from_encore("http://nas:8080", &engine::tracks::bearer("x"), &row).unwrap();
         let file = engine::test_sound::track(std::path::PathBuf::from("/tmp/a.wav"));
-        let (out, changed) = with_auth(&[song.clone(), other.clone(), file.clone()], &old, &new);
+        let (out, changed) = with_auth(&[song, other.clone(), file.clone()], &old, &new);
         assert!(changed);
         match &out[0].source {
             Source::Url { headers, .. } => {

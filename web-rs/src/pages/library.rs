@@ -166,6 +166,20 @@ pub fn play_album(id: &str, start: usize) {
     });
 }
 
+/// Plays a single (an album with one song, [`common::is_single`]) as a song: its song, with the library shuffle after
+/// it as for any song played on its own, in the full player on Now playing – what a tap on a single's tile does
+/// instead of opening an album page. An album that can't be loaded or has no song changes nothing.
+pub fn play_single(id: &str) {
+    let id = id.to_string();
+    dom::spawn(async move {
+        let Ok(a) = api::get(&format!("/library/albums/{id}")).await else { return };
+        let tracks = with_album_id(&a.a("tracks"), &id);
+        if tracks.is_empty() { return; }
+        player::play_queue(tracks, 0, "single");
+        player::open_full("now");
+    });
+}
+
 fn source_line(t: &Value) -> String {
     if !t.truthy("source") { return String::new(); }
     let when = if t.truthy("downloaded_at") { format!(" · {}", ui::fmt::ago(t.f("downloaded_at"))) } else { String::new() };
@@ -298,7 +312,7 @@ pub fn fix_song_modal(t: &Value) {
     // `el('#fx-res').onclick = …` is replaced on every identify run
     let res_click: Rc<RefCell<Option<EventListener>>> = Rc::new(RefCell::new(None));
     {
-        let (m, t, slot) = (m.clone(), t.clone(), res_click.clone());
+        let (m, t, slot) = (m.clone(), t.clone(), res_click);
         dom::on_sel(&m.el.clone(), "#fx-id", "click", move |e| {
             let target = dom::target_el(e);
             let (m, t, slot) = (m.clone(), t.clone(), slot.clone());
@@ -332,7 +346,7 @@ pub fn fix_song_modal(t: &Value) {
         });
     }
     {
-        let (m, t) = (m.clone(), t.clone());
+        let (m, t) = (m, t);
         dom::on_sel(&m.el.clone(), "#fx-save", "click", move |e| {
             let target = dom::target_el(e);
             let (m, t) = (m.clone(), t.clone());
@@ -1394,7 +1408,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
                 });
             }
             {
-                let (view, bulk, wb) = (view.clone(), bulk.clone(), was_busy.clone());
+                let (view, bulk, wb) = (view.clone(), bulk.clone(), was_busy);
                 dom::on_sel(&view.clone(), "#autotag-btn", "click", move |_| {
                     let (view, bulk, wb) = (view.clone(), bulk.clone(), wb.clone());
                     dom::spawn(async move {
@@ -1483,6 +1497,21 @@ fn pick_out_shared(view: &Element, tracks: &[Value], want: &str) {
         dom::add_class(tr, "shared");
         tr.scroll_into_view_with_bool(false);
     }
+}
+
+/// Plays the shared song (`?track=<id>` of a share link's jump) from the album's `queue` and opens the full player
+/// on Now playing, as the Android app does for a song link. The `?track=` then leaves the address, so coming back to
+/// the album page (Back, a reload) doesn't start the song again. A browser that blocks sound without a tap first
+/// leaves the song paused in the open player, one tap on play away. An id that isn't one of the album's songs (another
+/// copy, a stale link) changes nothing.
+fn play_shared(queue: &[Value], want: &str) {
+    if want.is_empty() { return; }
+    let Some(i) = queue.iter().position(|t| t.s("id") == want) else { return };
+    // the album page's own address without the query: `#/library/album/<id>?track=<id>` → `#/library/album/<id>`
+    let hash = dom::window().location().hash().unwrap_or_default();
+    if let Some((page, _)) = hash.split_once('?') { replace_hash(page); }
+    player::play_queue(queue.to_vec(), i, "album");
+    player::open_full("now");
 }
 
 pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
@@ -1606,8 +1635,9 @@ pub fn render_album(view: Element, ctx: Ctx) -> PageFuture {
         { let h = highlight.clone(); ctx.on_leave(player::on_change(move |cur| h(cur))); }
         highlight(player::current());
         // a shared song's link opened by someone signed in (`#/library/album/<id>?track=<id>`, the server's
-        // share_open): its row stands out and scrolls into view, one tap from playing
+        // share_open): its row stands out and scrolls into view, and the song starts playing in the full player
         pick_out_shared(&view, &tracks, &ctx.q("track"));
+        play_shared(&queue_tracks, &ctx.q("track"));
         let liked: Rc<RefCell<HashSet<i64>>> = Rc::new(RefCell::new(
             api::get("/likes").await.map_err(|e| e.message)?.items().iter().filter_map(|v| v.as_i64()).collect()));
         let paint_likes: Rc<dyn Fn()> = {
@@ -1714,7 +1744,7 @@ fn sweep_bar(body: &Element) {
         running.set(v.truthy("running"));
     }) };
     // follow it until it is over or the bar is gone
-    let follow = { let (show, text) = (show.clone(), text.clone()); Rc::new(move || {
+    let follow = { let (show, text) = (show.clone(), text); Rc::new(move || {
         let (show, text) = (show.clone(), text.clone());
         dom::spawn(async move {
             loop {
@@ -1780,7 +1810,7 @@ fn album_menu(anchor: &Element, a: &Value, id: &str, qt: &Rc<Vec<Value>>, admin:
     { let (id, a) = (id.to_string(), a.clone()); items.push(MenuItem::new("Share link", &icon("external"), move || dom::spawn(ui::share_album(id.clone(), a.clone())))); }
     items.extend(crate::pages::downloads::menu_items(qt));
     if admin {
-        let (ids, reload) = (ids.clone(), reload.clone());
+        let (ids, reload) = (ids, reload.clone());
         items.push(MenuItem::new("All songs are right (confirm)", &icon("check"), move || {
             let (ids, reload) = (ids.clone(), reload.clone());
             dom::spawn(async move {
@@ -1869,7 +1899,7 @@ fn change_type_modal(id: &str, a: &Value, reload: Rc<dyn Fn()>) {
     let body = format!(r##"<p class="muted" style="margin-top:0">{}</p><div class="type-opts">{rows}</div>"##, esc(&lt::what_is(&a.s("album"))));
     let m = modal(ModalOpts::new("Change type", &body).footer(r##"<button class="btn" data-close>Cancel</button><button class="btn primary" id="ct-save">Save</button>"##));
     let (m2, id) = (m.clone(), id.to_string());
-    dom::on_sel(&m.el.clone(), "#ct-save", "click", move |e| {
+    dom::on_sel(&m.el, "#ct-save", "click", move |e| {
         let target = dom::target_el(e);
         let picked = m2.qs("input[name=ct]:checked").map(|i| dom::value(&i)).unwrap_or_default();
         let (m, id, reload) = (m2.clone(), id.clone(), reload.clone());
@@ -2067,7 +2097,7 @@ fn match_modal(id: &str, a: &Value) {
             else { dom::spawn(mm.search(artist, album)); }
         });
     }
-    dom::spawn(mm.clone().search(if artist0 == "Unknown Artist" { String::new() } else { artist0 }, a.s("album")));
+    dom::spawn(mm.search(if artist0 == "Unknown Artist" { String::new() } else { artist0 }, a.s("album")));
 }
 
 // ---- editModal ----
@@ -2098,7 +2128,7 @@ fn edit_modal(id: &str, _shown: &Value) {
         let m = modal(ModalOpts::new("Edit details", &body)
             .footer(r##"<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">Save</button>"##)
             .wide(true));
-        let (m2, a2, id2) = (m.clone(), a.clone(), id.clone());
+        let (m2, a2, id2) = (m.clone(), a, id.clone());
         dom::on_sel(&m.el, "#save", "click", move |e| {
             let target = dom::target_el(e);
             let (m, a, id) = (m2.clone(), a2.clone(), id2.clone());

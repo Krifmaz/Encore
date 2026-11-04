@@ -209,6 +209,8 @@ data class CatalogAlbum(
     val cover: LString = "",
     @SerialName("in_library") val inLibrary: LBool = false,
     @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    /** The songs the library's copy has (0.42.11; 0: not in the library, or an older server): one is a single. */
+    @SerialName("library_tracks") val libraryTracks: LInt = 0,
     @SerialName("request_status") val requestStatus: LString = "",
     /** Deezer / Apple ids of an album only they know (search results): requested without a MusicBrainz id. */
     val ext: LObject = null,
@@ -404,6 +406,8 @@ data class ExtRelease(
     val cover: LString = "",
     @SerialName("in_library") val inLibrary: LBool = false,
     @SerialName("library_album_id") val libraryAlbumId: LString = "",
+    /** The songs the library's copy has (0.42.11; 0: not in the library, or an older server): one is a single. */
+    @SerialName("library_tracks") val libraryTracks: LInt = 0,
     @SerialName("request_status") val requestStatus: LString = "",
     @Serializable(with = SourceLinks::class) val sources: List<Pair<String, String>> = emptyList(),
     val harmony: LString = "",
@@ -841,6 +845,28 @@ data class LinkProbe(
     val duration: LDouble = 0.0,
     val thumbnail: LString = "",
 )
+
+/**
+ * A video the server downloads for this phone (POST/GET /api/video-links): it is saved in Downloads and then deleted
+ * from the server, never added to the library. [state] is `queued`, `downloading`, `ready` or `failed`.
+ */
+@Serializable
+data class VideoJob(
+    val id: LString = "",
+    val state: LString = "",
+    /** 0–100 while downloading. */
+    val progress: LDouble = 0.0,
+    val title: LString = "",
+    /** The file name to save it as, once ready. */
+    val name: LString = "",
+    /** Its size in bytes, once ready. */
+    val size: LLong = 0L,
+    /** Why it failed. */
+    val error: LString = "",
+) {
+    /** Still on its way on the server (worth asking again). */
+    val running: Boolean get() = state == "queued" || state == "downloading"
+}
 
 /** POST /api/requests/retry-failed: how many were queued again, how many the server refused and why. */
 data class RetryFailedResult(val retried: Int, val skipped: Int, val why: String)

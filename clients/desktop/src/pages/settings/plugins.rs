@@ -783,21 +783,21 @@ fn load_one(ctx: &Ctx, id: &str) -> Task<Message> {
     let api = ctx.api.clone();
     let id = id.to_string();
     let path = format!("/plugins/{}", enc(&id));
-    Task::perform(async move { api.get(&path).await }, move |r| Message::One(id.clone(), r))
+    Task::perform(async move { api.get(&path).await }, move |r| Message::One(id, r))
 }
 
 fn load_settings(ctx: &Ctx, id: &str) -> Task<Message> {
     let api = ctx.api.clone();
     let id = id.to_string();
     let path = plugin_path(&id, "settings");
-    Task::perform(async move { api.get(&path).await }, move |r| Message::Settings(id.clone(), r))
+    Task::perform(async move { api.get(&path).await }, move |r| Message::Settings(id, r))
 }
 
 fn load_logs(ctx: &Ctx, id: &str) -> Task<Message> {
     let api = ctx.api.clone();
     let id = id.to_string();
     let path = format!("{}?lines=200", plugin_path(&id, "logs"));
-    Task::perform(async move { api.get(&path).await }, move |r| Message::LogsLoaded(id.clone(), r))
+    Task::perform(async move { api.get(&path).await }, move |r| Message::LogsLoaded(id, r))
 }
 
 pub fn open(state: &mut State, ctx: &mut Ctx) -> Task<Message> {
@@ -1263,7 +1263,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             }
             let api = ctx.api.clone();
             let path = format!("/admin/settings/secret/{}", crate::pages::urlencode(&k));
-            return Task::perform(async move { api.get(&path).await }, move |r| Message::Revealed(id.clone(), k.clone(), r));
+            return Task::perform(async move { api.get(&path).await }, move |r| Message::Revealed(id.clone(), k, r));
         }
         Message::Revealed(id, k, Ok(r)) => {
             if let Some(f) = state.forms.get_mut(&id) {
@@ -1311,7 +1311,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             body.insert(k, Value::String(String::new()));
             let (path, body) = if builtin { ("/admin/settings".to_string(), Value::Object(body)) } else { (plugin_path(&id, "settings"), json!({ "values": body })) };
             let api = ctx.api.clone();
-            return Task::perform(async move { api.put(&path, body).await }, move |r| Message::Saved(id.clone(), "clear", r));
+            return Task::perform(async move { api.put(&path, body).await }, move |r| Message::Saved(id, "clear", r));
         }
         Message::Save(id) => {
             let Some(f) = state.forms.get_mut(&id) else { return Task::none() };
@@ -1319,7 +1319,7 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
             f.saving = true;
             f.flash.clear();
             let api = ctx.api.clone();
-            return Task::perform(async move { api.put(&path, body).await }, move |r| Message::Saved(id.clone(), "save", r));
+            return Task::perform(async move { api.put(&path, body).await }, move |r| Message::Saved(id, "save", r));
         }
         Message::Saved(id, what, r) => {
             let model_before = vs(&state.settings["translator_model"]);
@@ -1475,7 +1475,7 @@ fn field_view<'a>(id: &str, form: &'a Form, f: &'a PField, reveal: bool) -> El<'
                 lines.push(
                     row![
                         btn_sm(if shown { "Hide" } else { "Show saved" }, Btn::Default, Some(if shown { Message::Hide(pid.clone(), key.clone()) } else { Message::Reveal(pid.clone(), key.clone()) })),
-                        btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Message::CopySecret(pid.clone(), key.clone()))),
+                        btn_icon(Icon::Copy, "Copy", Btn::Default, Some(Message::CopySecret(pid, key))),
                     ]
                     .spacing(8)
                     .into(),
@@ -1505,7 +1505,7 @@ fn field_view<'a>(id: &str, form: &'a Form, f: &'a PField, reveal: bool) -> El<'
                     if shown { "Hide" } else { "Show" },
                     Some(if shown { Message::Hide(pid.clone(), key.clone()) } else { Message::Reveal(pid.clone(), key.clone()) }),
                 ));
-                r = r.push(icon_btn(Icon::Copy, "Copy", Some(Message::CopySecret(pid.clone(), key.clone()))));
+                r = r.push(icon_btn(Icon::Copy, "Copy", Some(Message::CopySecret(pid, key))));
             }
             lines.push(widgets::field(f.label.as_str(), r));
         }
@@ -1595,7 +1595,7 @@ fn chosen_clients<'a>(state: &State) -> Vec<El<'a, Message>> {
         if !fmt::truthy(&c, "name") {
             continue;
         }
-        let (label, chosen) = option_label(key, &v).unwrap_or((key, v.clone()));
+        let (label, chosen) = option_label(key, &v).unwrap_or_else(|| (key, v.clone()));
         let Some((line, act)) = chosen_client_line(label, &chosen, &c) else { continue };
         let free = !state.acting.contains_key(*id);
         let button: El<'a, Message> = if act == "install" {
@@ -1811,7 +1811,7 @@ fn logs_view<'a>(id: &str, l: &'a Logs) -> El<'a, Message> {
     if l.loading && l.text.is_empty() {
         c = c.push(help("Loading…"));
     } else {
-        let i2 = i.clone();
+        let i2 = i;
         c = c.push(
             text_editor::TextEditor::new(&l.content)
                 .on_action(move |a| Message::LogText(i2.clone(), a))

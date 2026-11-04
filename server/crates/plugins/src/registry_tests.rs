@@ -366,8 +366,7 @@ fn origins_are_kept_in_the_table() {
     // a plugin row the registry did not write (a manifest that no longer reads) is left out of the list
     let db = encore_db::Db::open(&e.dir).unwrap();
     db.execute("INSERT INTO plugins (id, version, origin, trust, manifest) VALUES ('broken', '1.0.0', 'upload', 'third-party', 'not toml')", p![]).unwrap();
-    let ids: Vec<String> = e.reg.list()["plugins"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect();
-    assert!(!ids.contains(&"broken".to_string()));
+    assert!(!e.reg.list()["plugins"].as_array().unwrap().iter().any(|p| p["id"] == "broken"));
 }
 
 /// streamrip 2.6.1 needs Python 3.15. Offline (no way to fetch it), Update installs the newest older release that

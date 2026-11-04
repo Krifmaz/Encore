@@ -278,7 +278,7 @@ pub async fn plan_stream(st: &impl Ctx, path: &str, fmt: &str, q: &StreamQ, head
     }
     if let Some(list) = decoders(headers, &q.codecs) {
         let (p2, media) = (path.to_string(), st.media().clone());
-        let info = tokio::task::spawn_blocking(move || media.audio_info(&p2)).await.unwrap_or(json!({}));
+        let info = tokio::task::spawn_blocking(move || media.audio_info(&p2)).await.unwrap_or_else(|_| json!({}));
         return Ok(match plan(fmt, &info, Some(&list)).content_type {
             Some(content_type) => StreamPlan::Original { content_type },
             None => StreamPlan::Convert(Convert::Flac { fallback: true, dsd }),

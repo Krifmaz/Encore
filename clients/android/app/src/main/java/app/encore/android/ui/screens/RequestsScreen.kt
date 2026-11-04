@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -44,6 +45,7 @@ import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.RequestCounts
 import app.encore.android.data.repo.RequestRow
 import app.encore.android.data.repo.RequestUser
+import app.encore.android.data.repo.VideoJob
 import app.encore.android.features.requests.RequestItem
 import app.encore.android.features.requests.RequestRules
 import app.encore.android.features.requests.RequestSheets
@@ -94,14 +96,21 @@ private object AlbumModePref {
 /**
  * Requests (web-rs/src/pages/requests.rs, with the web Downloader's link box and bulk actions, download.rs): the list
  * with status filters, every row's buttons (common.rs), a tap for the whole message and log, a link box with the
- * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear… and Clear waiting beside the
+ * album choice, Preview, Import as playlist and Exactly this link, Retry failed, Clear finished and Clear waiting beside the
  * admin's User list ("All users", then each person with their requests: "Caz (612)"; the buttons take the person
  * picked) as the web shows them, the admin's Download all now (servers with Download now), the storage banner while imports are
  * paused, and for admins Activity in ⋯.
+ *
+ * The page is laid out in the web's order: the title, the badges ("3715 remaining", "3 failed"), the buttons (User,
+ * Retry failed, Download all now, Clear finished, Clear waiting), then the link box, the tabs and the list.
+ *
+ * @param nav the app's navigation.
+ * @param asTab true when the page is the Downloads tab's root ([Tab.DOWNLOADS]): no back arrow then, since there is no
+ *   page underneath to go back to; false when it was opened on top of another page (Surround's request badge).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun RequestsScreen(nav: Nav) {
+fun RequestsScreen(nav: Nav, asTab: Boolean = false) {
     val features = nav.features
     val p = MaterialTheme.palette
     val context = LocalContext.current
@@ -126,6 +135,8 @@ fun RequestsScreen(nav: Nav) {
     var probe by remember { mutableStateOf<LinkProbe?>(null) }
     var probeError by remember { mutableStateOf<String?>(null) }
     var probing by remember { mutableStateOf(false) }
+    // "Save video to this phone": the server's download of it while there is one (null: none)
+    var video by remember { mutableStateOf<VideoJob?>(null) }
     var confirmClear by remember { mutableStateOf<Pair<List<String>, String>?>(null) }
     var clearMenu by remember { mutableStateOf(false) }
     // Retry failed on its way (its button waits)
@@ -298,6 +309,46 @@ fun RequestsScreen(nav: Nav) {
             probing = false
         }
     }
+    // Save video to this phone: the server downloads the video at the link, the phone saves it in Downloads, and the
+    // server deletes its copy; nothing goes into the library
+    fun saveVideo() {
+        val url = link.trim()
+        if (url.isEmpty() || video?.let { it.error.isEmpty() } == true) return
+        video = VideoJob(state = "queued")
+        scope.launch {
+            try {
+                var job = withContext(Dispatchers.IO) { features.startVideo(url) }
+                link = ""
+                probe = null
+                probeError = null
+                video = job
+                // once a second until it is ready or failed (or ✕ took it away)
+                while (job.running) {
+                    delay(1000)
+                    if (video?.id != job.id) return@launch
+                    job = withContext(Dispatchers.IO) { features.videoStatus(job.id) }
+                    video = job
+                }
+                if (job.state == "ready") {
+                    val ready = job
+                    val saved = withContext(Dispatchers.IO) { features.saveVideo(context, ready.id, ready.name) }
+                    video = null
+                    Toasts.show("Saved to Downloads: $saved", "ok")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val msg = e.message ?: "Couldn't save that video"
+                if (video?.id.isNullOrEmpty()) { video = null; Toasts.show(msg, "err") } else video = video?.copy(state = "failed", error = msg)
+            }
+        }
+    }
+    // ✕ on the video's line: stop it and delete it from the server
+    fun cancelVideo() {
+        val id = video?.id.orEmpty()
+        video = null
+        if (id.isNotEmpty()) scope.launch { try { withContext(Dispatchers.IO) { features.cancelVideo(id) } } catch (e: CancellationException) { throw e } catch (_: Exception) {} }
+    }
     // Exactly this link: skip matching, download what the link points at
     fun exactly() {
         val url = link.trim()
@@ -334,7 +385,7 @@ fun RequestsScreen(nav: Nav) {
         containerColor = p.bg,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            EncoreTopBar("Requests", scrollBehavior = scrollBehavior, onBack = nav.back, actions = {
+            EncoreTopBar("Requests", scrollBehavior = scrollBehavior, onBack = if (asTab) null else nav.back, actions = {
                 if (admin) {
                     // the web's Activity (Soulseek transfers, torrents, the log), under its Downloader
                     MoreButton(entries = listOf(MenuEntry("Activity", R.drawable.ic_signal) { nav.open(Screen.Activity) }))
@@ -345,6 +396,15 @@ fun RequestsScreen(nav: Nav) {
         val list = rows
         val err = error
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            // "12 remaining", "3 awaiting approval", "2 failed": right under the title, where the web shows them
+            val badges = counts?.let { RequestRules.countBadges(it) }.orEmpty()
+            if (badges.isNotEmpty()) {
+                item {
+                    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        badges.forEach { (text, kind) -> Badge(text, kind) }
+                    }
+                }
+            }
             // quota, the admin's User list, and the web's Retry failed and Clear buttons (members' Clear entries
             // only clear the list; the admin's also delete files, after a confirm)
             item {
@@ -384,7 +444,9 @@ fun RequestsScreen(nav: Nav) {
                                 SmallButton("Download all now", iconRes = R.drawable.ic_download, enabled = !downloadingAll, modifier = Modifier.align(Alignment.CenterVertically)) { downloadAllNow() }
                             }
                             Box(Modifier.align(Alignment.CenterVertically)) {
-                                SmallButton("Clear…", iconRes = R.drawable.ic_delete) { clearMenu = true }
+                                // the web's "Clear finished": a menu of what to clear (completed, failed & cancelled, and
+                                // for admins the same with the files deleted)
+                                SmallButton("Clear finished", iconRes = R.drawable.ic_delete) { clearMenu = true }
                                 PopMenu(
                                     clearMenu, { clearMenu = false },
                                     listOf(
@@ -426,6 +488,9 @@ fun RequestsScreen(nav: Nav) {
                     SmallButton("Request", iconRes = R.drawable.ic_download, primary = true, enabled = !linkBusy && link.isNotBlank()) { requestLink() }
                 }
             }
+            video?.let { v ->
+                item(key = "video") { VideoLine(v, onCancel = { cancelVideo() }) }
+            }
             if (link.isNotBlank()) {
                 // the Downloader's choices for this link
                 item {
@@ -440,6 +505,10 @@ fun RequestsScreen(nav: Nav) {
                         SmallButton("Preview", enabled = !probing && !linkBusy) { preview() }
                         SmallButton("Import as playlist", iconRes = R.drawable.ic_queue_music, enabled = !linkBusy) { importAsPlaylist() }
                         SmallButton("Exactly this link", iconRes = R.drawable.ic_link, enabled = !linkBusy && !metadataOnly) { exactly() }
+                        // the video comes to this phone's Downloads and is deleted from the server
+                        if (me?.can("video_download") == true) {
+                            SmallButton("Save video to this phone", iconRes = R.drawable.ic_video, enabled = !linkBusy && video?.let { it.error.isNotEmpty() } != false) { saveVideo() }
+                        }
                     }
                     if (metadataOnly) {
                         Text(
@@ -467,15 +536,6 @@ fun RequestsScreen(nav: Nav) {
                 item {
                     Row(Modifier.padding(horizontal = Gutter, vertical = 2.dp)) {
                         SmallButton("Search Discover to request music", iconRes = R.drawable.ic_search) { nav.showTab(Tab.DISCOVER) }
-                    }
-                }
-            }
-            // "12 remaining", "3 awaiting approval", "2 failed"
-            val badges = counts?.let { RequestRules.countBadges(it) }.orEmpty()
-            if (badges.isNotEmpty()) {
-                item {
-                    FlowRow(Modifier.padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        badges.forEach { (text, kind) -> Badge(text, kind) }
                     }
                 }
             }
@@ -531,5 +591,34 @@ fun RequestsScreen(nav: Nav) {
             danger = true,
             onDismiss = { confirmClear = null },
         ) { clear(statuses, true) }
+    }
+}
+
+/**
+ * The line of a video the server downloads for this phone: waiting, downloading with its progress, saving, or why it
+ * failed; ✕ stops it and deletes it from the server (hidden while the file is on its way to Downloads).
+ */
+@Composable
+private fun VideoLine(v: VideoJob, onCancel: () -> Unit) {
+    val p = MaterialTheme.palette
+    val what = if (v.title.isEmpty()) "the video" else "“${v.title}”"
+    Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            when {
+                v.error.isNotEmpty() -> Text(v.error, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)
+                v.state == "ready" -> Text("Saving $what to Downloads…", style = MaterialTheme.typography.bodySmall, color = p.muted)
+                else -> {
+                    Text(
+                        (if (v.state == "downloading") "Downloading " else "Waiting to download ") + what,
+                        style = MaterialTheme.typography.bodySmall, color = p.muted, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                    LinearProgressIndicator(progress = { (v.progress / 100.0).toFloat() }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                }
+            }
+        }
+        if (v.state != "ready" || v.error.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
+            SmallButton("", iconRes = R.drawable.ic_close) { onCancel() }
+        }
     }
 }

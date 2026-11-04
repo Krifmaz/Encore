@@ -150,8 +150,7 @@ fn schema_answer_has_every_field_with_its_attributes() {
                 assert!(g.get(a).is_some(), "{} has no {a}", g["id"]);
             }
             for f in g["fields"].as_array().unwrap() {
-                let keys: Vec<&String> = f.as_object().unwrap().keys().collect();
-                assert_eq!(keys.len(), attrs.len(), "{f}");
+                assert_eq!(f.as_object().unwrap().len(), attrs.len(), "{f}");
                 for a in attrs {
                     assert!(f.get(a).is_some(), "{} has no {a}", f["key"]);
                 }

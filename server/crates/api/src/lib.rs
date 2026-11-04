@@ -155,6 +155,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::plugins::router())
         .merge(routes::wrapper::router())
         .merge(routes::changelog::router())
+        .merge(routes::video_links::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)
         .with_state(st)
         // someone waits for every API call: its MusicBrainz lookups go first in the line (encore_http::mb)
@@ -167,8 +168,9 @@ pub fn app(st: AppState) -> Router {
         .layer(middleware::from_fn(security_headers))
         // API calls hold background passes (cover thumbnails …) to one low-priority thread
         .layer(middleware::from_fn_with_state(busy, encore_jobs::busy::layer))
-        // gzip for JSON and pages – never for audio: it only burns CPU and gets in the way of range requests
-        .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::new("audio/"))))
+        // gzip for JSON and pages – never for audio or video: it only burns CPU and gets in the way of range
+        // requests (and of a video's Content-Length, which a device's download shows progress by)
+        .layer(CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::new("audio/")).and(NotForContentType::new("video/"))))
 }
 
 /// An API call's MusicBrainz lookups are for a page someone is looking at: they go before imports, requests
@@ -184,6 +186,8 @@ async fn musicbrainz_first(req: Request, next: Next) -> Response {
 /// is being made wait for it rather than making their own. Also starts the refresh of MusicBrainz answers
 /// shown from disk past their hour (encore_http::mb::Mb::refresh_stale).
 pub fn warm_up(st: &AppState) {
+    // videos a stopped server was downloading for devices are never kept (routes::video_links)
+    routes::video_links::clear_leftovers(st);
     let s = st.clone();
     tokio::task::spawn_blocking(move || {
         s.library.artists.index(&s.db);

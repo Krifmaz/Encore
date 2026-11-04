@@ -139,7 +139,7 @@ async fn events(State(st): State<AppState>, User(u): User, Query(q): Query<Event
         let t = now();
         let mut all = st.playback.devices.hubs();
         let hub = all.entry(u.i("id")).or_default();
-        let d = hub.devices.entry(q.device.clone()).or_insert_with(|| Device::unnamed(t));
+        let d = hub.devices.entry(q.device).or_insert_with(|| Device::unnamed(t));
         d.push = Some(tx);
         (hub.watch.subscribe(), json!({ "type": "devices", "devices": online(hub, t) }))
     };

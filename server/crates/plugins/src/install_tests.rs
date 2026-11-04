@@ -179,7 +179,7 @@ fn verify_reads_the_version_and_checks_the_json() {
     let v = install::verify(&m, &bin, &[("LD_LIBRARY_PATH".into(), "/x/lib".into())], &d.join("home")).unwrap();
     assert!(v.output.stdout.contains("/x/lib none"), "{}", v.output.stdout);
     // a program that hangs is stopped
-    let mut slow = m.clone();
+    let mut slow = m;
     slow.install.get_or_insert_with(Default::default).timeout = Some(1);
     script(&bin, "sleep 30");
     let t = std::time::Instant::now();
