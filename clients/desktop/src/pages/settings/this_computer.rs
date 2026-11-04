@@ -115,8 +115,7 @@ fn set_hotkey(h: &mut Hotkeys, key: &str, value: String) {
 
 /// The updater is at work (checking, downloading, checking the file, installing).
 fn updater_busy(p: &updater::Phase) -> bool {
-    use updater::Phase;
-    matches!(p, Phase::Checking | Phase::Downloading { .. } | Phase::Verifying(_) | Phase::Installing(_))
+    p.busy()
 }
 
 pub fn open(state: &mut State, _ctx: &mut Ctx) -> Task<Message> {
@@ -214,23 +213,19 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
 
     let phase = updater::state();
-    let busy = updater_busy(&phase);
     let version = updater::available().map(|r| r.version).unwrap_or_default();
-    let line = updater::describe(&phase);
-    let is_err = matches!(phase, updater::Phase::Failed(_));
-    let mut updates: Vec<El<'a, Message>> = vec![
-        help(format!("Version {VERSION}")).into(),
-        switch(c.check_updates, "Look for a new version when Encore starts", Message::CheckAtStart),
-    ];
-    if !line.is_empty() {
-        updates.push(if is_err { super::err_text(line).into() } else { help(line).into() });
-    }
-    let mut actions = row![btn_sm("Check for updates", Btn::Default, (!busy).then_some(Message::Check))].spacing(8);
-    if !version.is_empty() {
-        actions = actions.push(btn_sm(format!("Install {version} and restart"), Btn::Primary, (!busy).then_some(Message::Install)));
-    }
-    actions = actions.push(super::link("Releases page", Message::OpenReleases));
-    updates.push(actions.align_y(Alignment::Center).into());
+    // the kit's Updates block: this build, the switch, the phase's words, Check / Install / Releases page
+    let updates: Vec<El<'a, Message>> = kit_iced::update::lines("Encore", VERSION, c.check_updates, &phase, Some(version.as_str()))
+        .into_iter()
+        .map(|e| {
+            e.map(|m| match m {
+                kit_iced::update::UpdateMsg::CheckAtStart(on) => Message::CheckAtStart(on),
+                kit_iced::update::UpdateMsg::Check => Message::Check,
+                kit_iced::update::UpdateMsg::Install => Message::Install,
+                kit_iced::update::UpdateMsg::OpenReleases => Message::OpenReleases,
+            })
+        })
+        .collect();
 
     let offline_text = if state.offline > 0 {
         format!("{} song(s) saved on this computer.", state.offline)

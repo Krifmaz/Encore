@@ -528,25 +528,10 @@ impl App {
         if !self.api.is_offline() {
             return None;
         }
-        let p = theme::look();
-        Some(
-            container(
-                row![
-                    widgets::t("Offline – showing what this computer saved. Songs saved for offline play.")
-                        .size(14)
-                        .color(p.warn)
-                        .width(Length::Fill),
-                    widgets::btn("Offline music", theme::Btn::Default, Some(Message::Nav(Page::Offline))),
-                    widgets::btn("Retry", theme::Btn::Primary, Some(Message::CheckServer)),
-                ]
-                .spacing(12)
-                .align_y(iced::Alignment::Center),
-            )
-            .padding([10, 16])
-            .width(Length::Fill)
-            .style(theme::warn_box)
-            .into(),
-        )
+        Some(kit_iced::offline::banner(
+            kit_iced::offline::ENCORE_TEXT,
+            vec![("Offline music", false, Message::Nav(Page::Offline)), (kit_iced::offline::RETRY, true, Message::CheckServer)],
+        ))
     }
 
     fn sign_out(&mut self) -> Task<Message> {
