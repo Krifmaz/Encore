@@ -20,9 +20,8 @@ inefficient_to_string = "warn"
 
 [dependencies]
 # ---- the kit (Krifmaz/kit): the shell's toasts, dialogs, banners and Settings' components (DESIGN.md §10) ----
-# KIT-PIN: a path to the kit's worktree while its changes are open; becomes
-# `kit-leptos = { git = "https://github.com/Krifmaz/kit", rev = "<main sha>" }` once they are merged.
-kit-leptos = { path = "/home/claude/wt/kit-b2/crates/kit-leptos" }
+# the kit's web components (Krifmaz/kit), pinned to a main commit until kit v0.1.0 is tagged
+kit-leptos = { git = "https://github.com/Krifmaz/kit", rev = "ff51239" }
 # Leptos itself, at the kit's exact pin (Leptos is before 1.0: upgraded deliberately, together with the kit);
 # client-side rendering only
 leptos = { version = "=0.8.23", features = ["csr"] }
@@ -71,4 +70,4 @@ panic = "abort"
 [dev-dependencies]
 # native tests render Leptos views to strings (`to_html`); resolver 2 keeps `ssr` out of the wasm build
 leptos = { version = "=0.8.23", features = ["csr", "ssr"] }
-kit-leptos = { path = "/home/claude/wt/kit-b2/crates/kit-leptos", features = ["ssr"] }
+kit-leptos = { git = "https://github.com/Krifmaz/kit", rev = "ff51239", features = ["ssr"] }
