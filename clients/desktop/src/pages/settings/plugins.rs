@@ -256,7 +256,7 @@ pub fn remove_words(name: &str, catalog: bool) -> (String, String) {
 /// The Test button's words: those of the card the plugin's settings were before 0.32, or "Test".
 pub fn test_label(id: &str) -> &'static str {
     match fields::card(id) {
-        Some(c) if c.test.is_some() => c.test_label.unwrap_or("Test connection"),
+        Some(c) if c.test.is_some() => c.test_label.as_deref().unwrap_or("Test connection"),
         _ => "Test",
     }
 }
@@ -375,7 +375,7 @@ pub fn chosen_client_line(select: &str, chosen: &str, c: &Value) -> Option<(Stri
 fn option_label(key: &str, value: &str) -> Option<(&'static str, String)> {
     let f = fields::SECTIONS.iter().flat_map(|c| c.fields.iter()).find(|f| f.key == key)?;
     let words = f.options.iter().find(|(o, _)| *o == value).map(|(_, l)| l.to_string()).unwrap_or_else(|| value.to_string());
-    Some((f.label, words))
+    Some((&f.label, words))
 }
 
 // ----- the settings card of a plugin ----------------------------------------------------------------------------
@@ -1567,7 +1567,7 @@ pub fn runs<'a>(fields: &[&'a PField]) -> Vec<(String, Vec<&'a PField>)> {
 /// description and Test button. (desc, (test, its words), the card it was)
 fn part_info(part: &str) -> (&'static str, Option<(&'static str, &'static str)>, &'static str) {
     match fields::SECTIONS.iter().find(|c| c.title == part) {
-        Some(c) => (c.desc, c.test.map(|t| (t, c.test_label.unwrap_or("Test connection"))), c.id),
+        Some(c) => (&c.desc, c.test.as_deref().map(|t| (t, c.test_label.as_deref().unwrap_or("Test connection"))), &c.id),
         None => ("", None, ""),
     }
 }
