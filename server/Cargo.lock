@@ -718,6 +718,14 @@ dependencies = [
  "futures-util",
  "hex",
  "image",
+ "kit-server-bugreports",
+ "kit-server-changelog",
+ "kit-server-core",
+ "kit-server-diagnostics",
+ "kit-server-health",
+ "kit-server-notices",
+ "kit-server-settings",
+ "kit-server-updates",
  "lettre",
  "libc",
  "rand 0.9.5",
@@ -759,6 +767,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "hex",
+ "kit-server-core",
  "libc",
  "rand 0.9.5",
  "regex",
@@ -775,6 +784,7 @@ version = "0.35.1"
 dependencies = [
  "anyhow",
  "encore-core",
+ "kit-server-core",
  "rusqlite",
  "serde_json",
  "tokio",
@@ -1656,6 +1666,93 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kit-server-bugreports"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-changelog"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-health"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-notices"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-settings"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "kit-server-updates"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "kit-server-core",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
