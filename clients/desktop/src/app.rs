@@ -12,7 +12,8 @@ use crate::pages::{self, Ctx, Effect, El, Page};
 use crate::player;
 use crate::theme::{self, Palette};
 use crate::widgets::details::{self, Details};
-use crate::widgets::{self, Covers, Toast, ToastKind};
+use crate::widgets::{self, Covers, ToastKind};
+use crate::widgets::toast::Toasts;
 use iced::widget::{column, container, operation, row, scrollable, stack};
 use iced::{window, Length, Point, Size, Subscription, Task};
 use serde_json::Value;
@@ -126,8 +127,7 @@ pub struct App {
     pub session: Session,
     pub page: Page,
     pub history: Vec<Page>,
-    pub toasts: Vec<Toast>,
-    next_toast: u64,
+    pub toasts: Toasts,
     /// The details dialog when one is open (over the page and its own dialogs).
     pub details: Option<Details>,
     pub covers: Covers,
@@ -218,8 +218,7 @@ impl App {
             session: Session::default(),
             page: Page::Login,
             history: Vec::new(),
-            toasts: Vec::new(),
-            next_toast: 1,
+            toasts: Toasts::default(),
             details: None,
             covers: Covers::new(),
             player: player::State::default(),
@@ -312,30 +311,9 @@ impl App {
     }
 
     fn toast_with(&mut self, text: impl Into<String>, kind: ToastKind, action: Option<(String, player::Message, std::time::Duration)>) {
-        let text = text.into();
-        // an error stays until it is dismissed: the same error again (a page that polls) does not
-        // pile up a second copy
-        if kind == ToastKind::Err && self.toasts.iter().any(|t| t.stays() && t.text == text) {
-            return;
-        }
-        let id = self.next_toast;
-        self.next_toast += 1;
-        self.toasts.push(Toast {
-            id,
-            text,
-            kind,
-            at: std::time::Instant::now(),
-            action,
-        });
-        // at most three errors stay: a new one pushes out the oldest
-        while self.toasts.iter().filter(|t| t.stays()).count() > Toast::STAYING {
-            if let Some(i) = self.toasts.iter().position(Toast::stays) {
-                self.toasts.remove(i);
-            }
-        }
-        if self.toasts.len() > 5 {
-            self.toasts.remove(0);
-        }
+        // the kit's rules: the same error again (a page that polls) does not pile up a second copy,
+        // at most three errors stay (a new one pushes out the oldest), at most five toasts show
+        self.toasts.push_with(text, kind, action);
     }
 
     /// The web's `copy_text`: write to the clipboard, read it back, and say whether it took.
@@ -550,25 +528,10 @@ impl App {
         if !self.api.is_offline() {
             return None;
         }
-        let p = theme::look();
-        Some(
-            container(
-                row![
-                    widgets::t("Offline – showing what this computer saved. Songs saved for offline play.")
-                        .size(14)
-                        .color(p.warn)
-                        .width(Length::Fill),
-                    widgets::btn("Offline music", theme::Btn::Default, Some(Message::Nav(Page::Offline))),
-                    widgets::btn("Retry", theme::Btn::Primary, Some(Message::CheckServer)),
-                ]
-                .spacing(12)
-                .align_y(iced::Alignment::Center),
-            )
-            .padding([10, 16])
-            .width(Length::Fill)
-            .style(theme::warn_box)
-            .into(),
-        )
+        Some(kit_iced::offline::banner(
+            kit_iced::offline::ENCORE_TEXT,
+            vec![("Offline music", false, Message::Nav(Page::Offline)), (kit_iced::offline::RETRY, true, Message::CheckServer)],
+        ))
     }
 
     fn sign_out(&mut self) -> Task<Message> {
@@ -661,7 +624,7 @@ impl App {
         match msg {
             Message::Tick => {
                 self.ticks += 1;
-                self.toasts.retain(|t| !t.expired());
+                self.toasts.expire();
                 let mut tasks: Vec<Task<Message>> = self
                     .covers
                     .take_wants()
@@ -771,16 +734,15 @@ impl App {
                 Task::none()
             }
             Message::DismissToast(id) => {
-                self.toasts.retain(|t| t.id != id);
+                self.toasts.dismiss(id);
                 Task::none()
             }
-            Message::CopyToast(id) => match self.toasts.iter().find(|t| t.id == id) {
-                Some(t) => Self::copy_checked(t.text.clone()),
+            Message::CopyToast(id) => match self.toasts.text(id) {
+                Some(text) => Self::copy_checked(text),
                 None => Task::none(),
             },
             Message::ToastAction(id) => {
-                let then = self.toasts.iter().find(|t| t.id == id).and_then(|t| t.action.as_ref()).map(|a| a.1.clone());
-                self.toasts.retain(|t| t.id != id);
+                let then = self.toasts.take_action(id);
                 match then {
                     Some(m) => self.update(Message::Player(m)),
                     None => Task::none(),
@@ -1052,7 +1014,7 @@ impl App {
             layers = layers.push(details::view(d).map(Message::Details));
         }
         if !self.toasts.is_empty() {
-            layers = layers.push(widgets::toast::view(&self.toasts, Message::DismissToast, Message::CopyToast, Message::ToastAction));
+            layers = layers.push(widgets::toast::view(self.toasts.list(), Message::DismissToast, Message::CopyToast, Message::ToastAction));
         }
         layers.into()
     }
