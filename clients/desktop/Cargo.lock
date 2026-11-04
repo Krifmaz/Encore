@@ -3094,7 +3094,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kit-iced"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?rev=0e6335f39b1bd3b5aa6a6bdafbeb0ae7ad4d06fe#0e6335f39b1bd3b5aa6a6bdafbeb0ae7ad4d06fe"
+source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
 dependencies = [
  "iced",
  "kit-rules",
@@ -3107,7 +3107,7 @@ dependencies = [
 [[package]]
 name = "kit-rules"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?rev=0e6335f39b1bd3b5aa6a6bdafbeb0ae7ad4d06fe#0e6335f39b1bd3b5aa6a6bdafbeb0ae7ad4d06fe"
+source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
 dependencies = [
  "serde",
  "serde_json",
