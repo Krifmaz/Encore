@@ -16,6 +16,11 @@ regex = { workspace = true }
 serde_json = { workspace = true }
 # the table's types, the loader and the schema answer (the kit's settings crate)
 kit-server-settings = { workspace = true, features = ["server", "toml"] }
+# the error type and async_trait of the kit's store traits
+kit-server-core = { workspace = true }
+# Config::set_many finishes the kit store's save in one poll (FutureExt::now_or_never)
+futures-util = { workspace = true }
+tracing = { workspace = true }
 
 [build-dependencies]
 # build.rs checks settings.toml and generates settings_gen.rs with the kit's settings crate (without its server

@@ -23,7 +23,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/api-key", get(api_key))
         .route("/api/system/activity", get(activity))
         // GET/PUT /api/admin/settings, the schema and a saved secret: the kit's settings routes (Encore's hooks below)
-        .merge(kit_server_settings::router())
+        .merge(kit_server_settings::router_with(kit_server_settings::SettingsPaths {
+            values: "/api/admin/settings".into(),
+            schema: "/api/admin/settings/schema".into(),
+            secret: "/api/admin/settings/secret/{key}".into(),
+        }))
 }
 
 /// GET /api/admin/users: every account with its invite.
@@ -295,7 +299,7 @@ impl kit_server_settings::SettingsHost for AppState {
 
     async fn owner(&self, parts: &mut axum::http::request::Parts) -> kit_server_core::Result<kit_server_core::Account> {
         let Owner(u) = <Owner as axum::extract::FromRequestParts<AppState>>::from_request_parts(parts, self).await?;
-        Ok(kit_server_core::Account::from_row(u))
+        Ok(kit_server_core::Account::from_row(&u))
     }
 
     fn dump(&self) -> Value {

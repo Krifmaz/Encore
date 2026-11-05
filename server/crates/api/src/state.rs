@@ -58,6 +58,8 @@ pub struct AppState {
     pub web: Web,
     /// the plugins: the catalog, what is installed (the plugins table), the installer, the sandbox
     pub plugins: encore_plugins::Registry,
+    /// where the Krifmaz kit's server crates keep their data (bug reports, crash reports, What's new marks)
+    pub kit: crate::kit::KitStores,
 }
 
 /// Most bytes the answers of other services may take in memory (`AppState::cache`).
@@ -162,12 +164,13 @@ impl AppState {
         let jobs = encore_jobs::Jobs::default();
         let scheduler = encore_jobs::Scheduler::new(db.clone(), cfg.clone(), jobs.clone());
         let plugins = encore_plugins::Registry::new(data, db.clone(), cfg.clone());
+        let kit = crate::kit::KitStores::open(&db).map_err(|e| anyhow::anyhow!("the kit's tables: {}", e.detail))?;
         let st = AppState {
             db, cfg, http, http_no_redirects, urls: Default::default(), limits: Arc::new(RateLimiter::default()), static_dir, library: Library::new(busy.clone()),
             // MusicBrainz's look-ups kept next to the database, so a restart doesn't make every page ask again
             mb: Mb::with_store(&data.join("musicbrainz-cache.db")),
             pace: Default::default(), cache: Arc::new(ByteCache::new(REMOTE_CACHE_BYTES, REMOTE_CACHE_ENTRIES)), requests: Default::default(), busy, jobs, scheduler, media: Default::default(),
-            playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(), plugins,
+            playback: Default::default(), vpn: Default::default(), system: Default::default(), web: Default::default(), plugins, kit,
         };
         crate::auth::ensure_owner(&st)?;
         Ok(st)

@@ -41,7 +41,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/system/backups/{name}/restore", post(backup_restore))
         .route("/api/discover/probe", get(probe))
         // Encore's own updates and "Restart server": the kit's routes over update.rs
-        .merge(kit_server_updates::router())
+        .merge(kit_server_updates::router_with(kit_server_updates::UpdatePaths {
+            update: "/api/system/update".into(),
+            restart: "/api/system/restart".into(),
+        }))
 }
 
 // ---- the old Download tools card: answered from the plugins for one more release ---------------
@@ -398,17 +401,17 @@ fn msg(ok: bool, m: impl Into<String>) -> Value {
 /// test that failed on the way, never cut ("streamrip config path: config failed: start /config/tools/venv/bin/rip: …",
 /// answered `{ok: false, message}`).
 pub(crate) async fn test(st: AppState, service: String, u: kit_server_core::Account) -> Option<kit_server_diagnostics::TestResult> {
-    match run_test(&st, &service, Some(&u.row)).await {
+    match run_test(&st, &service, Some(u.id)).await {
         Ok(v) => Some(Ok(v)),
         Err(e) if e.to_string() == "__unknown" => None,
         Err(e) => Some(Err(format!("{e:#}"))),
     }
 }
 
-/// A settings section's test (`{ok, message}`), as the admin `u` (the email test writes to them); the builtin
+/// A settings section's test (`{ok, message}`), as the admin `user_id` (the email test writes to them); the builtin
 /// plugins' Test buttons run the same ones (crate::builtins). Err("__unknown") for a service there is no test
 /// for.
-pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) -> anyhow::Result<Value> {
+pub async fn run_test(st: &AppState, service: &str, user_id: Option<i64>) -> anyhow::Result<Value> {
     let st = st.clone();
     async {
         Ok(match service {
@@ -450,7 +453,7 @@ pub async fn run_test(st: &AppState, service: &str, u: Option<&encore_db::Row>) 
             // Settings → Connections → Lantern
             "lantern" => encore_requests::lantern::test(&st).await,
             "email" => {
-                let to = st.db.one("SELECT email FROM users WHERE id=?", p![u.map(|u| u.i("id")).unwrap_or(0)])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or_else(|| st.cfg.str("smtp_from"));
+                let to = st.db.one("SELECT email FROM users WHERE id=?", p![user_id.unwrap_or(0)])?.map(|r| r.s("email")).filter(|e| !e.is_empty()).unwrap_or_else(|| st.cfg.str("smtp_from"));
                 if to.is_empty() {
                     msg(false, "Add an email address to your account (Account page) to receive the test")
                 } else {

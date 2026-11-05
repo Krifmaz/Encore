@@ -219,22 +219,40 @@ mod list_wait_tests {
         assert_eq!(list(&st, || Ok(json!(2))).await.0, json!(2), "a quick build is waited for");
 
         songs_written(&st);
-        let slow = list(&st, || {
-            std::thread::sleep(LIST_WAIT + Duration::from_millis(1500));
+        // the slow build says when it has started and runs until the test lets it end, so the page that comes
+        // meanwhile is sure to come during the build (no head start that a busy machine may not keep)
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let slow = list(&st, move || {
+            started_tx.send(()).unwrap();
+            // ends when told to, or after 30 s should the test stop before it tells
+            let _ = end_rx.recv_timeout(Duration::from_secs(30));
             Ok(json!(3))
         });
         let meanwhile = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(30)))
+                .await
+                .unwrap()
+                .expect("the slow build started");
             list(&st, || panic!("one build at a time")).await
         };
         let ((v, waited), (v2, waited2)) = tokio::join!(slow, meanwhile);
         assert_eq!(v, json!(2), "the list as it was");
-        assert!(waited >= LIST_WAIT && waited < LIST_WAIT + Duration::from_millis(1000), "{waited:?}");
+        assert!(waited >= LIST_WAIT, "{waited:?}");
         assert_eq!(v2, json!(2));
-        assert!(waited2 < Duration::from_millis(500), "a page during the build doesn't wait: {waited2:?}");
+        assert!(waited2 < LIST_WAIT, "a page during the build doesn't wait: {waited2:?}");
 
-        tokio::time::sleep(Duration::from_millis(2000)).await;
-        assert_eq!(list(&st, || panic!("made already")).await.0, json!(3), "the new list once it is made");
+        // the build ends: the pages after it get the new list (asked until it is in, without building again)
+        end_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let (v, _) = list(&st, || panic!("made already")).await;
+            if v == json!(3) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the new list never came");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 

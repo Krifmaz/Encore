@@ -32,10 +32,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use kit_server_updates::server::{is_newer, Channel};
-pub use kit_server_updates::{Restart, EXIT_RESTART, HOTFIX_PREFIX};
+pub use kit_server_updates::{Restart, EXIT_RESTART};
 
 /// The GitHub repository releases are looked up in.
 pub const REPO: &str = "Krifmaz/Encore";
+/// What a hotfix release's tag starts with before its version (`hotfix-0.42.19.1`).
+pub const HOTFIX_PREFIX: &str = "hotfix-";
 /// A build without ENCORE_VERSION (cargo build on a desk) is not a release: any release counts as newer.
 pub const DEV: bool = option_env!("ENCORE_VERSION").is_none();
 /// The oldest image that has the self-update helper in it.
@@ -62,10 +64,11 @@ fn scope(c: Channel) -> &'static str {
     }
 }
 
-/// Encore's repository, as the kit's release rules take it.
-pub fn repo() -> kit_server_updates::feed::Repo {
-    let (owner, app) = REPO.split_once('/').unwrap_or((REPO, REPO));
-    kit_server_updates::feed::Repo::new(owner, app)
+/// Encore's release feed, as the kit's release rules take it: full releases tagged `v<version>`, hotfixes
+/// tagged `hotfix-<version>`.
+pub fn feed() -> kit_server_updates::feed::Feed {
+    let (owner, repo) = REPO.split_once('/').unwrap_or((REPO, REPO));
+    kit_server_updates::feed::Feed::new(owner, repo).hotfix_prefix(HOTFIX_PREFIX)
 }
 /// Cache key of the self-update check (an hour).
 const DOCKER_CACHE: &str = "update:docker";
@@ -80,14 +83,14 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// GitHub's release JSON → what is kept: {tag, latest, notes, notes_cut, url, published_at, checked_at}
 /// (the kit's `server::parse_release` for Encore's repository).
 pub fn parse_release(v: &Value, now: f64) -> Option<Value> {
-    kit_server_updates::server::parse_release(v, now, &repo())
+    kit_server_updates::server::parse_release(v, now, &feed())
 }
 
 /// The channel's pick from GitHub's release list: the highest version among the releases it counts (the kit's
 /// `server::counts`: never a draft or a beta; a hotfix prerelease on the hotfix channel only), whichever of them
 /// GitHub marks "Latest".
 pub fn pick_newest(list: &Value, channel: Channel, now: f64) -> Option<Value> {
-    kit_server_updates::server::pick_newest(list, channel, now, &repo())
+    kit_server_updates::server::pick_newest(list, channel, now, &feed())
 }
 
 /// The last answer from GitHub kept in the database, for the channel the settings name.
@@ -285,7 +288,7 @@ pub async fn self_update(st: &impl Ctx, force: bool) -> SelfUpdate {
 
 /// GET /api/system/update's answer from the kept release (the kit's shared part) and the socket check.
 pub fn answer(release: Option<&Value>, su: &SelfUpdate, current: &str, dev: bool) -> Value {
-    let mut out = kit_server_updates::server::answer(release, current, dev, &repo());
+    let mut out = kit_server_updates::server::answer(release, current, dev, &feed());
     let latest = out["latest"].as_str().map(String::from);
     out["self_update"] = json!(if su.ready { "ready" } else { "unavailable" });
     out["self_update_reason"] = json!(su.reason);

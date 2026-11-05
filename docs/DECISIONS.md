@@ -2,6 +2,30 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the server on kit v0.6.1 (pinned by tag)
+
+- **Pinned to a kit tag, not a commit.** The server took the kit from a commit made before the kit's first release.
+  Every kit release since moved the crates' data behind async store traits in `kit_*` tables and made them
+  app-neutral, so the pin is a port, not a bump: v0.6.1 is the first tag that runs the kit's SQLite stores on
+  Encore's own database (its pool, write lock and panic guards; kit PR #39), so no second connection is opened to
+  `encore.db`.
+- **Bug reports and app crash reports move to the kit's tables** (`kit_bug_reports`, `kit_bug_report_messages`,
+  `kit_bug_report_files`, `kit_client_crashes`). At start the rows of Encore's old tables of the same shape are
+  copied over once, ids and all, so report links and the files under `reports/<id>/` stay valid. The old tables are
+  left as they were (removing them would delete data); schema 43 makes older servers refuse the database rather
+  than show a list without the newer reports.
+- **Settings and account preferences stay in Encore's tables.** `settings` is also read before start-up (backup
+  retention) and by the release-type migration, and `users.prefs` holds the web app's own preferences next to the
+  What's new marks, so both get a two-method adapter of the kit's store trait instead of moving.
+- **`Config::set_many` stays synchronous** (193 callers): the kit's store is async, Encore's settings table answers
+  at once, so the save completes on its first poll (`now_or_never`).
+- **Changed settings list A to Z.** The kit dropped settings.toml's `listed_last`; Diagnostics now lists changed
+  settings A to Z instead of "A to Z, then the keys added later". The only visible difference of this change.
+- **Bug report answers are no longer passed through the enrichment pass.** The kit dropped the hook; bug reports
+  hold no music, and no client reads a translated bug report title.
+- **The routes keep Encore's paths** (`/api/admin/settings…`, `/api/system/update`, `/api/system/restart`,
+  `/api/system/diagnostics`, `/api/system/test/{id}`, `/api/diagnostics/client-crash`) through the kit's `*Paths`.
+
 ## 2026-11-05: crash logs for the web app are the kit's
 
 - **`kit_leptos::crash::install` replaces `on_panic`,** with Encore's path (`/diagnostics/client-crash`) and banner

@@ -217,8 +217,8 @@ async fn answers_match_the_captured_fixtures() {
 /// nothing. A handler that forgot to call it would show here (no `cover_v`, no `artists`, no `album_t`):
 /// the middlewares used to do it for every answer. The sample library gets a translation the admin
 /// reads, a heartbeat with a song, a share link, a report, a suspect file, a mismatch, a torrent download,
-/// a block and a bug report, so these answers carry something to enrich. Only answers that need no
-/// network are here.
+/// and a block, so these answers carry something to enrich. Only answers that need no network are here. Bug
+/// reports are not: they hold no music, and the kit's bug report routes answer them as they are.
 #[tokio::test]
 async fn every_answer_is_already_enriched() {
     let s = sample("audit").await;
@@ -241,10 +241,6 @@ async fn every_answer_is_already_enriched() {
     let (code, b) = call(app, "POST", "/api/library/albums/52b52b2323b5df9d/share", cookie, None).await;
     assert_eq!(code, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let token = serde_json::from_slice::<Value>(&b).unwrap()["token"].as_str().unwrap().to_string();
-    // the bug report tables are made on first use
-    let (code, _) = call(app, "GET", "/api/bug-reports", cookie, None).await;
-    assert_eq!(code, StatusCode::OK);
-    db.execute("INSERT INTO bug_reports (user_id, username, kind, title, body, status, created_at, updated_at) VALUES (1, 'admin', 'bug', 'ペルソナ4 サウンドトラック', 'x', 'new', 1, 1)", encore_db::p![]).unwrap();
     // a group listen (0.31): its queue rows are enriched once per change, and the list's tiles carry the song
     let group = json!({ "device_id": "audit-desk", "device_name": "Audit", "visibility": "anyone", "everyone_controls": false,
                         "tracks": [32, 13], "index": 0, "position": 0.0, "playing": false });
@@ -288,8 +284,6 @@ async fn every_answer_is_already_enriched() {
         "/api/reports",
         "/api/blocks",
         "/api/quality/suspect",
-        "/api/bug-reports",
-        "/api/bug-reports/1",
         "/api/discover/artist/none/library-tracks?name=%E5%B9%B3%E7%94%B0%E5%BF%97%E7%A9%82%E5%AD%90",
         "/api/discover/for-you",
         "/api/discover/made-for-you",

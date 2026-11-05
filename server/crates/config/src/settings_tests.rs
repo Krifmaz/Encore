@@ -37,15 +37,11 @@ fn every_key_is_listed_once_and_every_field_is_a_key() {
     assert_eq!(Keys::TASK_BACKUP_MINUTES, "task_backup_minutes");
 }
 
-/// The TABLE order is the order the loader always had (the diagnostics page lists changed settings in it):
-/// A to Z, then the settings added later in the order they were added.
+/// The TABLE order (the diagnostics page lists changed settings in it) is every key A to Z.
 #[test]
-fn table_order_is_a_to_z_then_the_later_keys() {
+fn table_order_is_a_to_z() {
     let keys: Vec<&str> = TABLE.iter().map(|d| d.key).collect();
-    let first_late = keys.iter().position(|k| *k == "email_login").unwrap();
-    assert!(keys[..first_late].windows(2).all(|w| w[0] < w[1]), "the first run is A to Z");
-    assert_eq!(&keys[first_late..first_late + 3], &["email_login", "app_session_days", "lastfm_shared_secret"]);
-    assert_eq!(keys.last(), Some(&"backup_keep_upgrade"));
+    assert!(keys.windows(2).all(|w| w[0] < w[1]), "TABLE is A to Z");
 }
 
 #[test]
