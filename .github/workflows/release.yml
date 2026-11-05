@@ -66,23 +66,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Releases are built from main only: 0.42.17 and 0.42.18 were started from a stale branch and shipped an older
-  # database schema, which servers that updated to them could not open. A run on any other branch stops here.
-  main-only:
+  # The release guards, before anything is built. Releases are built from main only, and the database schema never
+  # goes down: 0.42.17 and 0.42.18 were started from a stale branch and shipped schema 41 after 0.42.11-0.42.16 had
+  # moved databases to 42, so servers that updated to them could not open their database.
+  guard:
     runs-on: ubuntu-latest
     steps:
-      - name: Started from main
+      - uses: actions/checkout@v4
+        with:
+          # the release tags, for the schema check
+          fetch-depth: 0
+      - name: Built from main
         env:
           REF: ${{ github.ref_name }}
         run: |
-          if [ "$REF" != main ]; then
-            echo "::error::releases are built from main only (this run is on '$REF')"
-            exit 1
-          fi
+          [ "$REF" = main ] || { echo "::error::releases are built from main only (this run is on '$REF')"; exit 1; }
+          git fetch --quiet origin main
+          git merge-base --is-ancestor HEAD origin/main || { echo "::error::$GITHUB_SHA is not on main"; exit 1; }
+      - name: The database schema never goes down (scripts/check-schema-version.sh)
+        run: bash scripts/check-schema-version.sh
 
   # The checks every release and every pull request runs (docker.yml runs the same).
   test:
-    needs: main-only
+    needs: guard
     uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       rust-dirs: server
@@ -97,7 +103,8 @@ jobs:
       advisory-name: Cadenza is pinned to the same rev everywhere
       advisory: bash scripts/check-cadenza-pins.sh
       # Dependencies a Cargo.toml lists but no code uses fail the run (cargo machete over every Rust project)
-      check: bash scripts/check-unused-deps.sh
+      # unused dependencies fail the run (cargo machete); the schema release guard's own tests
+      check: bash scripts/check-unused-deps.sh && bash scripts/test-check-schema-version.sh
 
   # the version, the web app (web-rs → static/) and the server tarballs for x86_64 and aarch64
   prepare:
