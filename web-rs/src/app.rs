@@ -408,12 +408,8 @@ fn conn_banner(on: bool, text: &str) {
 /// Module-load work of app.js: listeners, service worker, boot.
 pub fn init() {
     dom::on_window("hashchange", |_| route());
-    // wherever the browser allows it (https, localhost, 127.0.0.1, *.localhost): the same test as downloads
-    if dom::window().is_secure_context() {
-        crate::sw::register();
-    }
-    // reload into a new version of the web app once the server serves one (update.rs)
-    crate::update::start();
+    // reload into a new version of the web app once the server serves one, and the service worker (kit.rs)
+    crate::kit::start_updates();
     dom::on_window("encore:unauthorized", |_| {
         if user().is_some() {
             set_user(None);

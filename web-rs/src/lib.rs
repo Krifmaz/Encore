@@ -24,9 +24,7 @@ pub mod player;
 pub mod remote;
 pub mod scrubber;
 pub mod settings;
-pub mod sw;
 pub mod ui;
-pub mod update;
 pub mod whats_new;
 
 #[cfg(test)]
