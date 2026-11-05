@@ -14,6 +14,7 @@
 //! its dialogs ([`Shared`], [`Act`], `track_menu`, `shared_update`, `shared_overlay`), and the
 //! small helpers of the web's library.rs (`format_text`, `verify_badge`, `tr`, `long_dur`).
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::library_types as lt;
@@ -567,17 +568,17 @@ fn song_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
     let b = || Box::new(t.clone());
     let id = fmt::i(t, "id");
     let mut items = vec![
-        MenuItem::new("Play next", Act::PlayNext(b())).icon(Icon::Next),
+        MenuItem::new("Play next", Act::PlayNext(b())).icon(app_icons::NEXT),
         MenuItem::new("Add to queue", Act::Enqueue(b())).icon(Icon::List),
         MenuItem::new("Add to playlist", Act::AddToPlaylist(vec![id])).icon(Icon::Plus),
         MenuItem::new("More like this", Act::MoreLike(b())).icon(Icon::Spark),
-        MenuItem::new("Lyrics", Act::Lyrics(b())).icon(Icon::Music),
+        MenuItem::new("Lyrics", Act::Lyrics(b())).icon(app_icons::MUSIC),
         MenuItem::new("Share link", Act::Share(b())).icon(Icon::External),
         MenuItem::new("Download this song", Act::DownloadFile(b())).icon(Icon::Download),
         MenuItem::new("Save for offline", Act::SaveOffline(vec![t.clone()])).icon(Icon::Download),
     ];
     if fmt::truthy(t, "album_id") {
-        items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(Icon::Disc));
+        items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(app_icons::DISC));
     }
     // its surround version (0.35): play it, or (admins) fetch the Dolby Atmos version
     if fmt::truthy(t, "surround_id") {
@@ -604,7 +605,7 @@ fn song_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
     );
     // bring your own music: this song's file replaced with one you upload (admins and the "own_files" permission)
     if admin || ctx.session.perm("own_files") {
-        items.push(MenuItem::new("Replace with my own file", Act::ReplaceOwn(b())).icon(Icon::Disc));
+        items.push(MenuItem::new("Replace with my own file", Act::ReplaceOwn(b())).icon(app_icons::DISC));
     }
     if admin {
         items.push(MenuItem::new("Edit song details…", Act::FixSong(b())).icon(Icon::Edit));
@@ -650,17 +651,17 @@ fn song_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
 fn surround_track_menu(sh: &mut Shared, t: &Value, ctx: &Ctx) {
     let b = || Box::new(t.clone());
     let mut items = vec![
-        MenuItem::new("Play next", Act::PlayNext(b())).icon(Icon::Next),
+        MenuItem::new("Play next", Act::PlayNext(b())).icon(app_icons::NEXT),
         MenuItem::new("Add to queue", Act::Enqueue(b())).icon(Icon::List),
-        MenuItem::new("Lyrics", Act::Lyrics(b())).icon(Icon::Music),
+        MenuItem::new("Lyrics", Act::Lyrics(b())).icon(app_icons::MUSIC),
         MenuItem::new("Download this song", Act::DownloadFile(b())).icon(Icon::Download),
     ];
     if fmt::truthy(t, "album_id") {
-        items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(Icon::Disc));
+        items.push(MenuItem::new("Go to album", Act::GoAlbum(fmt::s(t, "album_id"))).icon(app_icons::DISC));
     }
     if fmt::truthy(t, "stereo_album_id") {
         items.push(
-            MenuItem::new("Go to the stereo version", Act::GoAlbum(fmt::s(t, "stereo_album_id"))).icon(Icon::Disc),
+            MenuItem::new("Go to the stereo version", Act::GoAlbum(fmt::s(t, "stereo_album_id"))).icon(app_icons::DISC),
         );
     }
     sh.menu = Some((ctx.cursor, items));
@@ -1650,7 +1651,7 @@ fn similar_row<'a>(v: &'a Value, i: usize, ctx: &Ctx<'a>) -> El<'a, Act> {
             .content_fit(iced::ContentFit::Cover)
             .border_radius(6.0)
             .into(),
-        None => container(icon(Icon::Music, 16.0, p.faint))
+        None => container(icon(app_icons::MUSIC, 16.0, p.faint))
             .width(40)
             .height(40)
             .center(40)
@@ -3135,7 +3136,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         title_col = title_col.push(small_muted(sub));
     }
     let shuffle = tooltip(
-        btn_icon(Icon::Shuffle, "Shuffle", Btn::Primary, Some(Message::Shuffle)),
+        btn_icon(app_icons::SHUFFLE, "Shuffle", Btn::Primary, Some(Message::Shuffle)),
         widgets::tip_box("Play everything in random order – no song twice this session"),
         tooltip::Position::Bottom,
     )
@@ -3143,7 +3144,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let mut head = row![title_col, shuffle].spacing(14).align_y(Alignment::Center);
     // bring your own music: a batch of your own files matched to the songs they are
     if super::own_file::allowed_for(&ctx.session.user) {
-        head = head.push(btn_icon(Icon::Disc, "Upload your own files", Btn::Default, Some(Message::Shared(Act::OwnBulk))));
+        head = head.push(btn_icon(app_icons::DISC, "Upload your own files", Btn::Default, Some(Message::Shared(Act::OwnBulk))));
     }
     let mut head = head.push(space().width(Length::Fill));
     if state.admin {
@@ -3166,13 +3167,13 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             labeled_btn(Icon::Refresh, "Scan", vec![], Message::Admin(AdminAct::Scan)),
             labeled_btn(Icon::Tag, "Auto-tag untagged", autotag_badges, Message::Admin(AdminAct::Autotag)),
             tooltip(
-                labeled_btn(Icon::Disc, "Organize files", vec![], Message::Admin(AdminAct::Organize)),
+                labeled_btn(app_icons::DISC, "Organize files", vec![], Message::Admin(AdminAct::Organize)),
                 widgets::tip_box("Move every file into Artist/Album/NN Title folders (your naming template), filling in missing tags first"),
                 tooltip::Position::Bottom,
             )
             .gap(4),
             labeled_btn(Icon::Shield, "Verify audio", verify_badges, Message::Admin(AdminAct::Verify)),
-            labeled_btn(Icon::Disc, "Find missing artwork", vec![], Message::Admin(AdminAct::Artwork)),
+            labeled_btn(app_icons::DISC, "Find missing artwork", vec![], Message::Admin(AdminAct::Artwork)),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -3343,13 +3344,13 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     return widgets::error_box(&state.error);
                 }
                 if !state.q.trim().is_empty() {
-                    return widgets::catalog::empty_text(Icon::Library, format!("No albums match “{}”", state.q.trim()), String::new());
+                    return widgets::catalog::empty_text(app_icons::LIBRARY, format!("No albums match “{}”", state.q.trim()), String::new());
                 }
                 if state.tab == "albums" && !state.album_type.is_empty() {
-                    return empty(Icon::Library, lt::NO_ALBUMS_OF_TYPE, "");
+                    return empty(app_icons::LIBRARY, lt::NO_ALBUMS_OF_TYPE, "");
                 }
                 empty(
-                    Icon::Library,
+                    app_icons::LIBRARY,
                     "No albums found",
                     if state.filter == "untagged" { "Everything is tagged" } else { "" },
                 )
@@ -3430,10 +3431,10 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     return widgets::error_box(&state.error);
                 }
                 if !state.q.trim().is_empty() {
-                    return widgets::catalog::empty_text(Icon::Disc, format!("No surround albums match “{}”", state.q.trim()), String::new());
+                    return widgets::catalog::empty_text(app_icons::DISC, format!("No surround albums match “{}”", state.q.trim()), String::new());
                 }
                 empty(
-                    Icon::Disc,
+                    app_icons::DISC,
                     "No surround albums yet",
                     "Dolby Atmos and 5.1 albums show here. Put them in the Surround folder, or use Get Dolby Atmos version on an album.",
                 )
@@ -3488,9 +3489,9 @@ fn body<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     return widgets::error_box(&state.error);
                 }
                 if !state.q.trim().is_empty() {
-                    return widgets::catalog::empty_text(Icon::Music, format!("No songs match “{}”", state.q.trim()), String::new());
+                    return widgets::catalog::empty_text(app_icons::MUSIC, format!("No songs match “{}”", state.q.trim()), String::new());
                 }
-                empty(Icon::Music, "No songs found", "")
+                empty(app_icons::MUSIC, "No songs found", "")
             }
             Some(rows) => {
                 let mut col = column![];

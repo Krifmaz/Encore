@@ -3093,7 +3093,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kit-iced"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.3.3#d933e87addc8674b2a6fc8f29733bd9c3f604ca4"
 dependencies = [
  "iced",
  "kit-rules",
@@ -3106,7 +3106,7 @@ dependencies = [
 [[package]]
 name = "kit-rules"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?rev=8a6304d05e3cad7cb90198b46f6558330f0c8a6f#8a6304d05e3cad7cb90198b46f6558330f0c8a6f"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.3.3#d933e87addc8674b2a6fc8f29733bd9c3f604ca4"
 dependencies = [
  "serde",
  "serde_json",
@@ -4706,7 +4706,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4744,7 +4744,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -6145,7 +6145,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand 2.5.0",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",

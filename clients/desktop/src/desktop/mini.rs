@@ -4,6 +4,7 @@
 //! the player's ⋯ menu change that, the app's tick opens or closes the window. Dragging its
 //! background moves it.
 
+use crate::widgets::app_icons;
 use super::Msg;
 use crate::app::{App, Message as AppMsg};
 use crate::fmt;
@@ -136,7 +137,7 @@ pub fn view(app: &App) -> El<'_, Msg> {
             .content_fit(ContentFit::Cover)
             .border_radius(10.0)
             .into(),
-        None => container(icon(Icon::Music, 30.0, p.faint))
+        None => container(icon(app_icons::MUSIC, 30.0, p.faint))
             .width(100)
             .height(100)
             .center(100)
@@ -183,9 +184,9 @@ pub fn view(app: &App) -> El<'_, Msg> {
     .style(theme::btn(Btn::Play))
     .on_press_maybe(on(player::Message::Toggle));
     let controls = row![
-        small_btn(Icon::Prev, on(player::Message::Prev)),
+        small_btn(app_icons::PREV, on(player::Message::Prev)),
         play,
-        small_btn(Icon::Next, on(player::Message::Next)),
+        small_btn(app_icons::NEXT, on(player::Message::Next)),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -235,7 +236,7 @@ pub fn view(app: &App) -> El<'_, Msg> {
         .padding(14)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::player_bar);
+        .style(theme::bottom_bar);
     mouse_area(frame).on_press(Msg::MiniDrag).into()
 }
 

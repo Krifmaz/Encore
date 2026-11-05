@@ -2,6 +2,7 @@
 //! web-rs/src/pages/download.rs (and activity.rs for the admin's transfers, torrents and log
 //! under it; playlists.rs `import_modal` for "Import as playlist").
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
@@ -648,7 +649,7 @@ fn probe_view<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             .join(" · ");
             Some(
                 row![
-                    catalog::art(ctx, &fmt::s(p, "thumbnail"), 64.0, false, Icon::Music),
+                    catalog::art(ctx, &fmt::s(p, "thumbnail"), 64.0, false, app_icons::MUSIC),
                     column![
                         widgets::t(if title.is_empty() { "Untitled".to_string() } else { title })
                             .size(14)

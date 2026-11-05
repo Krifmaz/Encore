@@ -3,6 +3,7 @@
 //! New releases from library artists, a taste of For you, the downloads in progress and the
 //! Recently added albums. Behaviour reference: web-rs/src/pages/home.rs.
 
+use crate::widgets::app_icons;
 use super::library::{self, num, req_body, request_toast, status_badge, tr};
 use crate::api::ApiError;
 use crate::fmt;
@@ -716,7 +717,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .content_fit(ContentFit::Cover)
                     .border_radius(6.0)
                     .into(),
-                None => container(icon(Icon::Music, 16.0, p.faint))
+                None => container(icon(app_icons::MUSIC, 16.0, p.faint))
                     .width(40)
                     .height(40)
                     .center(40)
@@ -769,7 +770,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                 widgets::error_box(&state.error)
             } else {
                 widgets::empty(
-                    Icon::Library,
+                    app_icons::LIBRARY,
                     "Your library is empty",
                     "Search above or paste a link to get started.",
                 )
@@ -849,7 +850,7 @@ fn mfy_dialog<'a>(state: &'a State, d: &'a MfyDialog, ctx: &Ctx<'a>) -> Option<E
                 .content_fit(ContentFit::Cover)
                 .border_radius(6.0)
                 .into(),
-            None => container(icon(Icon::Music, 16.0, p.faint))
+            None => container(icon(app_icons::MUSIC, 16.0, p.faint))
                 .width(40)
                 .height(40)
                 .center(40)

@@ -4,6 +4,7 @@
 //! can't be reached (then it has its own Retry, Change server and player, since the app shows no
 //! sidebar or player bar there) and from Settings → This computer.
 
+use crate::widgets::app_icons;
 use crate::desktop::offline::{self, Song};
 use crate::engine::PlayState;
 use crate::fmt;
@@ -228,7 +229,7 @@ fn player_card<'a>(drag: Option<f64>, ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
             .content_fit(ContentFit::Cover)
             .border_radius(8.0)
             .into(),
-        None => container(icon(Icon::Music, 20.0, p.faint))
+        None => container(icon(app_icons::MUSIC, 20.0, p.faint))
             .width(48)
             .height(48)
             .center(48)
@@ -272,9 +273,9 @@ fn player_card<'a>(drag: Option<f64>, ctx: &Ctx<'a>) -> Option<El<'a, Message>> 
                     ]
                     .spacing(2)
                     .width(Length::Fill),
-                    icon_btn(Icon::Prev, "Previous", pl(player::Message::Prev)),
+                    icon_btn(app_icons::PREV, "Previous", pl(player::Message::Prev)),
                     play,
-                    icon_btn(Icon::Next, "Next", pl(player::Message::Next)),
+                    icon_btn(app_icons::NEXT, "Next", pl(player::Message::Next)),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
@@ -309,7 +310,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         )
         .into(),
         btn_icon(
-            Icon::Shuffle,
+            app_icons::SHUFFLE,
             "Shuffle",
             Btn::Default,
             has.then_some(Message::Shuffle),

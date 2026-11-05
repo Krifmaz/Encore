@@ -143,7 +143,7 @@ fn asked_title(r: &Value) -> String {
 pub fn links(r: &Value) -> Links {
     let title = if fmt::s(r, "kind") == "artist" { artist_page(r) } else { title_page(r).map(|p| (asked_title(r), p)) };
     let artist = if fmt::s(r, "kind") == "artist" { None } else { artist_page(r) };
-    Links { title, artist, play: play_path(r) }
+    super::details::request_links(title, artist, play_path(r))
 }
 
 /// The songs a Play answer holds: an album's (`tracks`, each with the album's id) or the one song.
@@ -1751,22 +1751,23 @@ pub fn overlay<'a>(l: &'a List, ctx: &Ctx<'a>) -> Option<El<'a, Msg>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::details::Target;
 
     #[test]
     fn the_details_link_the_album_the_artist_and_play_what_is_downloaded() {
         // the Love Buzz card of the Oct 23 screenshot: queued, asked for by its release group
         let queued = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "mbid": "rg-1", "status": "queued" });
         let l = links(&queued);
-        assert_eq!(l.title, Some(("Love Buzz".into(), Page::Album("rg-1".into()))));
-        assert_eq!(l.artist, Some(("Nirvana".into(), Page::ArtistName("Nirvana".into()))));
-        assert_eq!(l.play, None);
+        assert_eq!(l.title, Some(("Love Buzz".into(), Target::Page(Page::Album("rg-1".into())))));
+        assert_eq!(l.subtitle, Some(("Nirvana".into(), Target::Page(Page::ArtistName("Nirvana".into())))));
+        assert_eq!(l.button, None);
         let done = json!({ "kind": "album", "artist": "Nirvana", "title": "Love Buzz", "status": "completed", "library_album_id": "abc", "library_track_id": null });
-        assert_eq!(links(&done).title, Some(("Love Buzz".into(), Page::LibraryAlbum("abc".into()))));
-        assert_eq!(links(&done).play.as_deref(), Some("/library/albums/abc"));
+        assert_eq!(links(&done).title, Some(("Love Buzz".into(), Target::Page(Page::LibraryAlbum("abc".into())))));
+        assert_eq!(links(&done).button, Some(("Play".into(), Target::Play("/library/albums/abc".into()))));
         let song = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "failed" });
         assert_eq!(title_page(&song), Some(Page::Search { q: "Nirvana Blew".into() }));
         let song_done = json!({ "kind": "track", "artist": "Nirvana", "title": "Blew", "status": "completed", "library_album_id": "x", "library_track_id": 12 });
-        assert_eq!(links(&song_done).play.as_deref(), Some("/library/tracks/12"));
+        assert_eq!(links(&song_done).button, Some(("Play".into(), Target::Play("/library/tracks/12".into()))));
         assert_eq!(play_path(&json!({ "kind": "track", "status": "completed", "library_track_id": null })), None);
         let link = json!({ "kind": "url", "url": "https://example.com/a", "artist": "x", "status": "completed" });
         assert_eq!(links(&link), Links::default());

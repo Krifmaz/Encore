@@ -2,6 +2,18 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: desktop on the kit's latest tag (kit-iced after the kit went neutral)
+
+- **Encore's music icons and logo live in the app.** The kit dropped Music, Disc, Next, Prev, Shuffle, Library and
+  Volume and its Encore logo; `widgets/app_icons.rs` brings them back as `Icon::App` icons (the same SVG paths) and
+  `LOGO` as a kit `Logo`, so every kit widget still draws them. Added `Icon::App` to kit-iced rather than keeping a
+  second icon type in the app.
+- **Accent ids stay `logo` and `encore`.** The kit renamed them `cream` and `pastel`; saved settings, the web and the
+  account's synced look use Encore's ids, so `theme.rs` translates both ways and keeps the names "Logo" and "Encore".
+- **The details dialog's Play is a target, not a page.** The kit's main button opens a page; the app's dialog target
+  is `Target::Page` or `Target::Play`, and the kit's new `with_button_icon` keeps the Play icon on it.
+- **Encore's own words where the kit's defaults moved:** the offline banner sentence, the update toast's place
+  ("Settings → This computer → Updates") and the What's new first line ("This server runs Encore …").
 ## 2026-11-05: the web app's self-update and service worker side come from kit-leptos
 
 - **`update.rs` and `sw.rs` are gone; `kit::start_updates` starts the kit's.** The kit's `update` module is the

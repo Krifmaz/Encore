@@ -7,6 +7,7 @@
 //! The dialogs live with the song menu's ([`super::library::Dialog`]); this file holds their state, their
 //! views and what they send.
 
+use crate::widgets::app_icons;
 use super::library::Act;
 use crate::api::{Api, ApiError};
 use crate::fmt;
@@ -152,7 +153,7 @@ pub fn replace_view<'a>(s: &'a ReplaceState) -> El<'a, Act> {
     .size(13)]
     .spacing(14);
     let label = if s.busy { "Uploading and checking…" } else { "Choose a file…" };
-    let pick = btn_icon(Icon::Disc, label, Btn::Default, s.takes_files().then_some(Act::ReplaceOwnPick));
+    let pick = btn_icon(app_icons::DISC, label, Btn::Default, s.takes_files().then_some(Act::ReplaceOwnPick));
     body = body.push(drop_zone::view(pick, &s.drop, "Drop the audio file here to use it"));
     if !s.done.is_empty() {
         body = body.push(t(format!("Replaced: {}", s.done)).size(13).color(theme::look().ok));

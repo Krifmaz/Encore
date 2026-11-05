@@ -1,6 +1,7 @@
 //! `.sidebar`: the logo, the nav (the same entries and order as web-rs/src/app.rs), the storage
 //! box, Bug reports under it, and the user foot. App-level: it sends `app::Message`.
 
+use super::app_icons;
 use super::{avatar, badge, icon, icon_btn, logo, small, small_muted, t, El, Icon};
 use crate::app::{App, Message};
 use crate::pages::{Page, Section};
@@ -130,7 +131,7 @@ pub fn view(app: &App) -> El<'_, Message> {
     nav = nav.push(nav_button(app, Page::Home, Icon::Home, "Home", None));
     nav = nav.push(nav_button(app, Page::Search { q: String::new() }, Icon::Search, "Discover", None));
     nav = nav.push(nav_button(app, Page::ForYou, Icon::Spark, "For you", None));
-    nav = nav.push(nav_button(app, Page::library(""), Icon::Library, "Library", None));
+    nav = nav.push(nav_button(app, Page::library(""), app_icons::LIBRARY, "Library", None));
     nav = nav.push(nav_button(app, Page::Requests, Icon::Inbox, "Requests", admin.then_some(app.shell.pending)));
     nav = nav.push(nav_button(app, Page::Playlists, Icon::List, "Playlists", None));
     nav = nav.push(nav_button(app, Page::Download, Icon::Download, "Downloader", None));

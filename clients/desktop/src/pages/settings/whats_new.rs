@@ -55,6 +55,27 @@ pub fn update(state: &mut State, msg: Message, ctx: &mut Ctx) -> Task<Message> {
     Task::none()
 }
 
+/// The page's words: the kit's, with Encore's first line (the server's version, and where the
+/// short list shows).
+const WORDS: kit::ChangelogWords = kit::ChangelogWords {
+    intro: "This server runs {app} {version}. After an update, a short list of what changed shows once on the website and in the desktop app.",
+    ..kit::ChangelogWords::DEFAULT
+};
+
 pub fn view<'a>(state: &'a State, _ctx: &Ctx<'a>) -> El<'a, Message> {
-    kit::changelog(&state.page, "Encore").map(Message::Page)
+    kit::changelog_with(&state.page, "Encore", &WORDS).map(Message::Page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_line_is_encores() {
+        assert_eq!(
+            WORDS.intro("Encore", "0.40.1"),
+            "This server runs Encore 0.40.1. After an update, a short list of what changed shows once on the website and in the desktop app."
+        );
+        assert_eq!(WORDS.no_notes, kit::NO_NOTES);
+    }
 }

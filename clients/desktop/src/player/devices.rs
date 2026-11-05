@@ -3,6 +3,7 @@
 //! does. This computer is a device through the engine link (`link.rs`); this file is the
 //! picker and the "linked" mode, where everything you play or press here goes to that device.
 
+use crate::widgets::app_icons;
 use super::{Message, State};
 use crate::api::{Api, ApiError};
 use crate::engine::Track;
@@ -242,7 +243,7 @@ fn cover_el<'a>(ctx: &Ctx<'a>, cover: &str, size: f32) -> El<'a, Message> {
             .content_fit(ContentFit::Cover)
             .border_radius(6.0)
             .into(),
-        None => container(icon(Icon::Music, size * 0.4, p.faint))
+        None => container(icon(app_icons::MUSIC, size * 0.4, p.faint))
             .width(size)
             .height(size)
             .center(size)
@@ -351,7 +352,7 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
         let mut controls = row![].spacing(8).align_y(Alignment::Center);
         if fmt::truthy(s, "title") {
             controls = controls.push(icon_btn(
-                Icon::Prev,
+                app_icons::PREV,
                 "Previous",
                 Some(Message::Command(id.clone(), json!({ "action": "prev" }))),
             ));
@@ -362,7 +363,7 @@ fn device_card<'a>(d: &'a Value, state: &'a State, ctx: &Ctx<'a>, me: &str, play
                 Some(Message::Command(id.clone(), json!({ "action": "toggle" }))),
             ));
             controls = controls.push(icon_btn(
-                Icon::Next,
+                app_icons::NEXT,
                 "Next",
                 Some(Message::Command(id.clone(), json!({ "action": "next" }))),
             ));
@@ -462,7 +463,7 @@ fn zone_card<'a>(z: &'a Value, state: &'a State, ctx: &Ctx<'a>) -> El<'a, Messag
     .align_y(Alignment::Center);
     let mut controls = row![
         icon_btn(
-            Icon::Prev,
+            app_icons::PREV,
             "Previous",
             fmt::truthy(z, "is_previous_allowed").then(|| Message::ZoneCommand(id.clone(), json!({ "action": "prev" })))
         ),
@@ -473,7 +474,7 @@ fn zone_card<'a>(z: &'a Value, state: &'a State, ctx: &Ctx<'a>) -> El<'a, Messag
             Some(Message::ZoneCommand(id.clone(), json!({ "action": "toggle" })))
         ),
         icon_btn(
-            Icon::Next,
+            app_icons::NEXT,
             "Next",
             fmt::truthy(z, "is_next_allowed").then(|| Message::ZoneCommand(id.clone(), json!({ "action": "next" })))
         ),

@@ -3,6 +3,7 @@
 //! request bodies, the catalogue tiles and rows, and the live request stream
 //! (`GET /api/requests/events`) that keeps the badges current while a page is open.
 
+use super::app_icons;
 use super::{badge, icon, small_muted, t, El, Icon, Tile, TileKind};
 use crate::api;
 use crate::fmt;
@@ -442,7 +443,7 @@ impl<'a, M: Clone + 'a> AlbumTile<'a, M> {
     pub fn view(self, ctx: &Ctx<'a>) -> El<'a, M> {
         let p = ctx.look;
         let w = super::tile::WIDTH;
-        let mut layers = stack![art(ctx, &self.cover, w, false, Icon::Disc)];
+        let mut layers = stack![art(ctx, &self.cover, w, false, app_icons::DISC)];
         if let Some(c) = self.corner {
             layers = layers.push(container(c).padding(8));
         }
@@ -540,7 +541,7 @@ pub fn song_row<'a, M: Clone + 'a>(ctx: &Ctx<'a>, tr: &Value, m: SongRow<M>) -> 
     let thumb: El<'a, M> = match m.play {
         Some(pl) => button(
             stack![
-                art(ctx, &cover, 44.0, false, Icon::Music),
+                art(ctx, &cover, 44.0, false, app_icons::MUSIC),
                 container(icon(Icon::Play, 16.0, p.text)).center(44)
             ],
         )
@@ -548,7 +549,7 @@ pub fn song_row<'a, M: Clone + 'a>(ctx: &Ctx<'a>, tr: &Value, m: SongRow<M>) -> 
         .style(theme::btn(Btn::Row))
         .on_press(pl)
         .into(),
-        None => art(ctx, &cover, 44.0, false, Icon::Music),
+        None => art(ctx, &cover, 44.0, false, app_icons::MUSIC),
     };
     let mut meta = row![link(fmt::s(tr, "artist"), 12.5, m.open_artist)]
         .spacing(4)
@@ -578,7 +579,7 @@ pub fn song_row<'a, M: Clone + 'a>(ctx: &Ctx<'a>, tr: &Value, m: SongRow<M>) -> 
         r = r.push(
             row![
                 super::btn_icon(Icon::Plus, "Song", Btn::Primary, m.request_song),
-                super::btn_icon(Icon::Disc, "+ Album", Btn::Default, m.request_album),
+                super::btn_icon(app_icons::DISC, "+ Album", Btn::Default, m.request_album),
             ]
             .spacing(6),
         );
@@ -611,7 +612,7 @@ pub fn fy_track_row<'a, M: Clone + 'a>(ctx: &Ctx<'a>, tr: &Value, playing: bool,
         meta = meta.push(small_muted(format!("· {}", fmt::s(tr, "album"))).size(12.5));
     }
     let lines = column![t(fmt::s(tr, "title")).size(14).font(theme::semibold()).color(color), meta].spacing(2);
-    let mut r = row![play, art(ctx, &fmt::s(tr, "cover"), 40.0, false, Icon::Music), lines.width(Length::Fill)]
+    let mut r = row![play, art(ctx, &fmt::s(tr, "cover"), 40.0, false, app_icons::MUSIC), lines.width(Length::Fill)]
         .spacing(12)
         .align_y(Alignment::Center);
     if fmt::truthy(tr, "length") {

@@ -198,6 +198,9 @@ macro_rules! page_update {
     }};
 }
 
+/// The offline banner's sentence: what still works while the server can't be reached.
+const OFFLINE_TEXT: &str = "Offline – showing what this computer saved. Songs saved for offline play.";
+
 impl App {
     pub fn boot(flags: Flags) -> (App, Task<Message>) {
         let mut config = Config::load();
@@ -529,7 +532,7 @@ impl App {
             return None;
         }
         Some(kit_iced::offline::banner(
-            kit_iced::offline::ENCORE_TEXT,
+            OFFLINE_TEXT,
             vec![("Offline music", false, Message::Nav(Page::Offline)), (kit_iced::offline::RETRY, true, Message::CheckServer)],
         ))
     }
@@ -591,7 +594,7 @@ impl App {
                 Effect::Enqueue(t) => tasks.push(self.queue(t, false)),
                 Effect::Clipboard(s) => tasks.push(iced::clipboard::write(s)),
                 Effect::CopyText(s) => tasks.push(Self::copy_checked(s)),
-                Effect::Details { title, text, lead, act, links } => self.details = Some(Details::new(title, text, lead, act).with_links(*links)),
+                Effect::Details { title, text, lead, act, links } => self.details = Some(details::with_links(Details::new(title, text, lead, act), *links)),
                 Effect::OpenUrl(u) => {
                     if let Err(e) = open::that_detached(&u) {
                         self.toast(format!("Could not open the browser: {e}"), ToastKind::Err);
@@ -764,11 +767,11 @@ impl App {
                             Message::DetailsActed(done, r)
                         })
                     }
-                    Some(details::Out::Open(page)) => {
+                    Some(details::Out::Open(details::Target::Page(page))) => {
                         self.details = None;
                         self.navigate(page, true)
                     }
-                    Some(details::Out::Play(path)) => {
+                    Some(details::Out::Open(details::Target::Play(path))) => {
                         self.details = None;
                         let api = self.api.clone();
                         Task::perform(async move { api.get(&path).await }, Message::DetailsPlay)

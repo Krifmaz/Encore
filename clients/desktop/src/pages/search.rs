@@ -8,6 +8,7 @@
 //! has nothing but the library has, the library shows instead of "No results"; when the
 //! catalogue fails, the library's matches stay with the reason under them.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{urlencode, Ctx, El, Page};
@@ -341,14 +342,14 @@ fn top_result<'a>(state: &State, ctx: &Ctx<'a>, top: &Value) -> Option<El<'a, Me
                 actions = actions.push(
                     row![
                         iced::widget::tooltip(btn_icon(Icon::Plus, "Song", Btn::Primary, can.then(|| Message::Request(key.clone(), Box::new(catalog::song_body(x, "song"))))), crate::widgets::tip_box("Just this song"), iced::widget::tooltip::Position::Bottom).gap(4),
-                        iced::widget::tooltip(btn_icon(Icon::Disc, "+ Album", Btn::Default, can.then(|| Message::Request(key.clone(), Box::new(catalog::song_body(x, "album"))))), crate::widgets::tip_box("Request the song and download the whole album it's on, in the best quality available"), iced::widget::tooltip::Position::Bottom).gap(4),
+                        iced::widget::tooltip(btn_icon(app_icons::DISC, "+ Album", Btn::Default, can.then(|| Message::Request(key.clone(), Box::new(catalog::song_body(x, "album"))))), crate::widgets::tip_box("Request the song and download the whole album it's on, in the best quality available"), iced::widget::tooltip::Position::Bottom).gap(4),
                     ]
                     .spacing(6),
                 );
             }
         }
     }
-    let fallback = if kind == "artist" { Icon::User } else { Icon::Disc };
+    let fallback = if kind == "artist" { Icon::User } else { app_icons::DISC };
     let picture = catalog::art(ctx, &cover, 160.0, kind == "artist", fallback);
     let heading: El<'a, Message> = match &href {
         Some(page) => button(h1(title))
