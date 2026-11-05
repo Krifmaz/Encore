@@ -74,7 +74,7 @@ fn files_of(input: &HtmlInputElement) -> Vec<File> {
 /// ⋯ → Replace with my own file on song `t`: choose a file, it is uploaded, checked and put in the song's
 /// place. `on_done` runs once it is (the page reloads the song).
 pub fn replace_modal(t: &Value, on_done: Option<Rc<dyn Fn()>>) {
-    // the whole dialog takes a dropped file (crate::dropzone hands it to the input's change handler)
+    // the whole dialog takes a dropped file (the kit's drag and drop hands it to the input's change handler)
     let body = format!(r#"<div data-dropzone="own-file"><p class="small muted" style="margin-top:0">Your file takes the place of “{title}” for everyone. It is tagged as this song, and the song keeps its plays, likes, playlists and lyrics. The file it replaces is deleted, or kept in the Trash while Keep deleted files in Trash is on.</p>
       <label class="btn" id="own-pick">{up}Choose or drop a file…<input type="file" id="own-file" accept="{ACCEPT}" hidden></label>
       <div class="small mt" id="own-out"></div></div>"#, title = esc(&t.s("title")), up = up_icon());
