@@ -115,7 +115,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import dev.krifmaz.kit.compose.widgets.CardBox
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import dev.krifmaz.kit.compose.widgets.Spinner
 
 // ---- artist (web/js/pages/discover.js renderArtist) --------------------------------------------------------------

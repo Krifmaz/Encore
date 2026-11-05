@@ -152,7 +152,7 @@ private fun CrashReports(nav: Nav) {
                 sending = true
                 scope.launch {
                     try {
-                        withContext(Dispatchers.IO) { CrashLogReport.send(nav.graph.app, nav.graph.bugReports) }
+                        withContext(Dispatchers.IO) { CrashLogReport.send(nav.graph.app, nav.graph.bugReports, page = "This device") }
                         Toasts.show("Crash log sent to the admin")
                     } catch (e: CancellationException) {
                         throw e

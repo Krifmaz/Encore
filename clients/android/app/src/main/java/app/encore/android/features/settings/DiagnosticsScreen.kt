@@ -59,7 +59,7 @@ import dev.krifmaz.kit.compose.widgets.SmallButton
 import dev.krifmaz.kit.compose.toasts.Toasts
 import dev.krifmaz.kit.compose.core.formatDay
 import dev.krifmaz.kit.compose.core.formatSize
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette

@@ -14,6 +14,7 @@ import dev.krifmaz.kit.compose.theme.AppearanceRules
 import dev.krifmaz.kit.compose.theme.KitAppearance
 import dev.krifmaz.kit.compose.theme.KitLook
 import dev.krifmaz.kit.compose.theme.KitPalette
+import dev.krifmaz.kit.compose.theme.KitPaletteSet
 import dev.krifmaz.kit.compose.theme.KitPalettes
 import dev.krifmaz.kit.compose.theme.KitShapes
 import dev.krifmaz.kit.compose.theme.KitStatusColors
@@ -21,8 +22,10 @@ import dev.krifmaz.kit.compose.theme.KitTheme
 import dev.krifmaz.kit.compose.theme.LocalKitPalette
 import dev.krifmaz.kit.compose.theme.kitPaletteOf
 
-// Encore's look comes from the kit (Krifmaz/kit design/tokens.json → kit-compose's theme), which holds Encore's
-// palettes, accents and shapes exactly as they were here. These names stay for the rest of the app.
+// Encore's look comes from the kit (Krifmaz/kit design/tokens.json → kit-compose's theme): its themes, accents, shapes
+// and colour maths. Where Encore's colours differ from the kit's neutral ones (the Dark theme's cream accent, the OLED
+// theme's cream text, the Encore theme's text on the accent) and where its account settings use other accent ids
+// ("logo", "encore"), Encore keeps its own here, so nothing looks different. These names stay for the rest of the app.
 
 // The logo's colours (web/css/app.css :root[data-theme="encore"]): charcoal and cream.
 object EncoreColors {
@@ -52,17 +55,21 @@ object EncoreColors {
  */
 typealias EncorePalette = KitPalette
 
-/** The Encore theme (the logo's charcoal and cream). */
-val EncorePaletteDark: EncorePalette = KitPalettes.Encore
+/** The Encore theme (the logo's charcoal and cream); text on the accent is the theme's own charcoal. */
+val EncorePaletteDark: EncorePalette = KitPalettes.Encore.copy(onAccent = Color(0xFF161617))
 
-// app.css :root[data-theme="oled"]: true black, so pixels switch off.
-val EncorePaletteOled: EncorePalette = KitPalettes.Oled
+/** app.css :root[data-theme="oled"]: true black, so pixels switch off; cream text, black on the accent. */
+val EncorePaletteOled: EncorePalette = KitPalettes.Oled.copy(text = Color(0xFFF0EAD6), onAccent = Color(0xFF000000))
 
-// app.css :root[data-theme="light"]; the accent turns charcoal so it reads on white.
+/** app.css :root[data-theme="light"]; the accent turns charcoal so it reads on white. */
 val EncorePaletteLight: EncorePalette = KitPalettes.Light
 
-// the web's :root (data-theme="dark"): the original Encore dark, blue-black
-val EncorePaletteNight: EncorePalette = KitPalettes.Default
+/** The web's data-theme="dark": the original Encore dark, blue-black, with the logo's cream accent. */
+val EncorePaletteNight: EncorePalette =
+    KitPalettes.Dark.copy(accent = Color(0xFFF0EAD6), accent2 = Color(0xFFD6C49A), onAccent = Color(0xFF16161F))
+
+/** Encore's palette for each theme, for the kit's palette maths ([kitPaletteOf]). */
+val EncorePalettes: KitPaletteSet = KitPaletteSet(encore = EncorePaletteDark, dark = EncorePaletteNight, oled = EncorePaletteOled, light = EncorePaletteLight)
 
 /** The current theme's palette (the kit's [LocalKitPalette]). */
 val LocalEncorePalette = LocalKitPalette
@@ -79,23 +86,42 @@ data class Accent(val id: String, val name: String, val a: String, val b: String
 /** One preset of Settings → Appearance (appearance.rs PRESETS): a theme, an accent and a background. */
 data class Preset(val id: String, val name: String, val theme: ThemeChoice, val accent: String, val custom: String?, val background: String)
 
+/** Settings → Appearance: the kit's accents and presets under Encore's ids and names, and the kit's colour maths. */
 object Appearance {
-    val ACCENTS: List<Accent> = KitAppearance.ACCENTS.map { Accent(it.id, it.name, it.a, it.b) }
+    /**
+     * Encore's accent id (kept in the account's settings, shared with the web) for each kit accent id that differs:
+     * the kit's Cream is Encore's Logo and its Pastel is Encore's Encore.
+     */
+    private val ENCORE_IDS: Map<String, Pair<String, String>> = mapOf("cream" to ("logo" to "Logo"), "pastel" to ("encore" to "Encore"))
 
-    val PRESETS: List<Preset> = KitAppearance.PRESETS.map { Preset(it.id, it.name, ThemeChoice.of(it.theme), it.accent, it.custom, it.background) }
+    /** The kit accent id for one of Encore's ([ENCORE_IDS] the other way round); any other id is the same in both. */
+    fun kitAccent(id: String): String = ENCORE_IDS.entries.firstOrNull { it.value.first == id }?.key ?: id
 
+    /** The accents, in the kit's order, with Encore's ids and names. */
+    val ACCENTS: List<Accent> = KitAppearance.ACCENTS.map {
+        val (id, name) = ENCORE_IDS[it.id] ?: (it.id to it.name)
+        Accent(id, name, it.a, it.b)
+    }
+
+    /** The presets, with Encore's accent ids. */
+    val PRESETS: List<Preset> = KitAppearance.PRESETS.map {
+        Preset(it.id, it.name, ThemeChoice.of(it.theme), ENCORE_IDS[it.accent]?.first ?: it.accent, it.custom, it.background)
+    }
+
+    /** The default custom accent colour. */
     const val DEFAULT_CUSTOM = KitAppearance.DEFAULT_CUSTOM
 
     /** "#abc" / "abc" / "#aabbcc" as "#aabbcc"; null when it is not a hex colour (the web's /^#([0-9a-f]{3}|[0-9a-f]{6})$/i). */
     fun cleanHex(input: String): String? = AppearanceRules.cleanHex(input)
 
+    /** A "#rrggbb" colour as a Compose colour. */
     fun colorOf(hex: String): Color = AppearanceRules.colorOf(hex)
 
     /** A custom colour gets a partner shifted around the colour wheel for the gradient (appearance.rs partner). */
     fun partner(hex: String): String = AppearanceRules.partner(hex)
 
-    /** The accent's two colours as hex (a preset's, or the custom colour and its partner). */
-    fun accentHex(accent: String, custom: String): Pair<String, String> = AppearanceRules.accentHex(accent, custom)
+    /** The accent's two colours as hex (a preset's, by Encore's id, or the custom colour and its partner). */
+    fun accentHex(accent: String, custom: String): Pair<String, String> = AppearanceRules.accentHex(kitAccent(accent), custom)
 
     /** Dark text on light accents, white on dark ones (appearance.rs apply: `--on-accent`). */
     fun onAccent(a: String, b: String): Color = AppearanceRules.onAccent(a, b)
@@ -105,8 +131,11 @@ object Appearance {
  * The palette for the account's look: the theme's tokens, the accent's colours (the logo's cream and gold keep the
  * theme's own accent, charcoal on Light) and, for the faded background, a faint wash of the accent in the page colours.
  */
-fun paletteOf(settings: Settings, systemDark: Boolean): EncorePalette =
-    kitPaletteOf(KitLook(KitTheme.of(settings.theme.id), settings.accent, settings.custom, settings.background), systemDark)
+fun paletteOf(settings: Settings, systemDark: Boolean): EncorePalette {
+    // "logo" is the theme's own accent (cream and gold, charcoal on Light), which the kit calls ""
+    val accent = if (settings.accent == "logo") "" else Appearance.kitAccent(settings.accent)
+    return kitPaletteOf(KitLook(KitTheme.of(settings.theme.id), accent, settings.custom, settings.background), systemDark, EncorePalettes)
+}
 
 /** The theme a setting resolves to on this device (Match device follows the system). */
 fun isDarkTheme(settings: Settings, systemDark: Boolean): Boolean = paletteOf(settings, systemDark).dark

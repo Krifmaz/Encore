@@ -41,7 +41,7 @@ import dev.krifmaz.kit.compose.widgets.KitButton
 import dev.krifmaz.kit.compose.widgets.MenuEntry
 import dev.krifmaz.kit.compose.widgets.MenuSeparator
 import dev.krifmaz.kit.compose.toasts.Toasts
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import dev.krifmaz.kit.compose.widgets.KitField
 import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.screens.features

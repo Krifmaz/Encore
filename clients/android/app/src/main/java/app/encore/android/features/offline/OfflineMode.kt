@@ -26,8 +26,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import dev.krifmaz.kit.compose.offline.OfflineReason
-import dev.krifmaz.kit.compose.offline.OutLike
-import dev.krifmaz.kit.compose.offline.OutPlay
+import dev.krifmaz.kit.compose.offline.OutAction
 import dev.krifmaz.kit.compose.offline.Outbox
 
 /**
@@ -161,7 +160,7 @@ object OfflineMode {
             _active.value = false
             if (was) CrashLog.log("offline mode: the server answers again")
             val (plays, likes) = withContext(Dispatchers.IO) { flush(a) }
-            if (was) Toasts.show(Outbox.backOnlineText(plays, likes), "ok")
+            if (was) Toasts.show(EncoreOutbox.backOnlineText(plays, likes), "ok")
             if (likes > 0) graph.likes.refresh(force = true)
         } else {
             // offline mode starts whether or not songs are saved here: the pages the server answered before still
@@ -210,7 +209,7 @@ object OfflineMode {
         val owner = s.owner()
         if (owner.isEmpty() || id <= 0L) return
         val sec = if (seconds.isFinite()) seconds.coerceAtLeast(0.0) else 0.0
-        s.outbox.update { it.own(owner).addPlay(OutPlay(id, sec, System.currentTimeMillis() / 1000L)) }
+        s.outbox.update { EncoreOutbox.addPlay(it.own(owner), EncoreOutbox.Play(id, sec, System.currentTimeMillis() / 1000L)) }
     }
 
     /** A like (`liked`) or an unlike the server couldn't take: it waits; the hearts this phone keeps follow it. */
@@ -218,7 +217,7 @@ object OfflineMode {
         val s = store() ?: return
         val owner = s.owner()
         if (owner.isEmpty() || id <= 0L) return
-        s.outbox.update { it.own(owner).addLike(OutLike(id, liked, System.currentTimeMillis() / 1000L)) }
+        s.outbox.update { EncoreOutbox.addLike(it.own(owner), EncoreOutbox.Like(id, liked, System.currentTimeMillis() / 1000L)) }
         s.keepLikes(likedNow)
     }
 
@@ -226,16 +225,17 @@ object OfflineMode {
     fun hasLike(id: Long): Boolean {
         val s = store() ?: return false
         val o = s.outbox.read()
-        return o.belongsTo(s.owner()) && o.likes.any { it.trackId == id }
+        return o.belongsTo(s.owner()) && EncoreOutbox.likes(o).any { it.second.trackId == id }
     }
 
     /** The liked songs the server listed, with the likes and unlikes still waiting applied. */
     fun withPending(ids: Set<Long>): Set<Long> {
         val s = store() ?: return ids
         val o = s.outbox.read()
-        if (!o.belongsTo(s.owner()) || o.likes.isEmpty()) return ids
+        val likes = if (o.belongsTo(s.owner())) EncoreOutbox.likes(o) else emptyList()
+        if (likes.isEmpty()) return ids
         val out = HashSet(ids)
-        for (l in o.likes) if (l.liked) out.add(l.trackId) else out.remove(l.trackId)
+        for ((_, l) in likes) if (l.liked) out.add(l.trackId) else out.remove(l.trackId)
         return out
     }
 
@@ -274,7 +274,7 @@ object OfflineMode {
     fun pending(): Pair<Int, Int> {
         val s = store() ?: return 0 to 0
         val o = s.outbox.read()
-        return if (o.belongsTo(s.owner())) o.plays.size to o.likes.size else 0 to 0
+        return if (o.belongsTo(s.owner())) o.of(EncoreOutbox.PLAY).size to o.of(EncoreOutbox.LIKE).size else 0 to 0
     }
 
     /**
@@ -299,13 +299,15 @@ object OfflineMode {
             s.outbox.update { Outbox(owner = OfflineStore.norm(s.server()) + "|" + me.username) }
             return 0 to 0
         }
-        val sentPlays = ArrayList<OutPlay>()
-        val sentLikes = ArrayList<OutLike>()
+        val sent = ArrayList<OutAction>()
+        var plays = 0
+        var likes = 0
         var failed = false
-        for (chunk in doc.plays.chunked(Outbox.PLAYS_PER_CALL)) {
+        for (chunk in EncoreOutbox.plays(doc).chunked(EncoreOutbox.PLAYS_PER_CALL)) {
             try {
-                api.post("/api/library/plays", Outbox.playsBody(chunk))
-                sentPlays.addAll(chunk)
+                api.post("/api/library/plays", EncoreOutbox.playsBody(chunk.map { it.second }))
+                chunk.mapTo(sent) { it.first }
+                plays += chunk.size
             } catch (e: Exception) {
                 CrashLog.log("offline: plays not sent: ${e.message}")
                 failed = true
@@ -313,18 +315,22 @@ object OfflineMode {
             }
         }
         if (!failed) {
-            for (l in doc.likes) {
+            for ((action, l) in EncoreOutbox.likes(doc)) {
                 try {
                     if (l.liked) api.like(l.trackId) else api.unlike(l.trackId)
-                    sentLikes.add(l)
+                    sent.add(action)
+                    likes += 1
                 } catch (e: ApiException) {
-                    if (e.code == 404) sentLikes.add(l) else break
+                    if (e.code != 404) break
+                    // the song is gone: nothing left to like, so it counts as sent
+                    sent.add(action)
+                    likes += 1
                 } catch (_: Exception) {
                     break
                 }
             }
         }
-        if (sentPlays.isNotEmpty() || sentLikes.isNotEmpty()) s.outbox.update { it.forget(sentPlays, sentLikes) }
-        sentPlays.size to sentLikes.size
+        if (sent.isNotEmpty()) s.outbox.update { it.forget(sent) }
+        plays to likes
     }
 }

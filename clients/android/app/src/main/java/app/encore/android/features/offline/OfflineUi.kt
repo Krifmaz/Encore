@@ -2,7 +2,6 @@ package app.encore.android.features.offline
 
 import dev.krifmaz.kit.compose.offline.OfflineBanner as KitOfflineBanner
 import dev.krifmaz.kit.compose.offline.OfflineSheet as KitOfflineSheet
-import dev.krifmaz.kit.compose.offline.Outbox
 import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -74,7 +73,7 @@ import dev.krifmaz.kit.compose.widgets.SmallButton
 import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.TrackRow
 import dev.krifmaz.kit.compose.core.formatSize
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import app.encore.android.ui.screens.PlayButtons
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -128,7 +127,7 @@ fun OfflineSheet(onDismiss: () -> Unit) {
     var waiting by remember { mutableStateOf("") }
     LaunchedEffect(all) {
         val (plays, likes) = withContext(Dispatchers.IO) { OfflineMode.pending() }
-        waiting = Outbox.countsText(plays, likes)
+        waiting = EncoreOutbox.countsText(plays, likes)
     }
     val status = listOf(
         "${OfflineIndex.songs(store.songs(all).size)} saved on this phone",
@@ -276,7 +275,7 @@ fun DownloadedList(nav: Nav, modifier: Modifier = Modifier) {
     var waiting by remember { mutableStateOf("") }
     LaunchedEffect(outboxChanges, all) {
         val (plays, likes) = withContext(Dispatchers.IO) { OfflineMode.pending() }
-        waiting = Outbox.countsText(plays, likes)
+        waiting = EncoreOutbox.countsText(plays, likes)
     }
     val p = MaterialTheme.palette
     if (songs.isEmpty()) {

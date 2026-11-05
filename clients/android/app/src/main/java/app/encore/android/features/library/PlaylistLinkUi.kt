@@ -30,7 +30,7 @@ import app.encore.android.ui.Screen
 import dev.krifmaz.kit.compose.widgets.MenuEntry
 import dev.krifmaz.kit.compose.widgets.MoreButton
 import dev.krifmaz.kit.compose.toasts.Toasts
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import dev.krifmaz.kit.compose.widgets.KitField
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.palette

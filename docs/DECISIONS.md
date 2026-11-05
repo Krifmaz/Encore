@@ -108,3 +108,11 @@ The helper's log was lost because Docker removed its container (`AutoRemove`), s
   The server that comes back reads it, merges it with its own steps into one record (`update_report.rs`),
   checks its own version against the target (`verify`), removes the helper and shows the failing step and
   error with Copy in Diagnostics → Updates.
+- *Android on a released, neutral kit-compose, with Encore's look kept in the app.* The neutral kit renamed the
+  accents Encore keeps in account settings ("logo" is the kit's Cream, "encore" its Pastel) and gave its Dark and
+  OLED themes neutral colours. The app maps the ids both ways (`Appearance.kitAccent`) and passes its own palettes
+  to the kit's palette maths (`KitPaletteSet`), so stored settings, names and colours stay as they were.
+- *Encore's routes are inputs to the kit, not kit defaults.* `KIT_ROUTES` (EncoreApp.kt) names the admin settings,
+  `/api/system/test/{test}`, `/api/system/diagnostics` and `/api/diagnostics/client-crash`; the rest are the kit's.
+- *The offline outbox file is upgraded, not dropped.* Plays and likes waiting in the file written before the kit's
+  generic outbox are read by `EncoreOutbox.fromLegacy` (through `OutboxFile`'s `upgrade`), so an update loses none.
