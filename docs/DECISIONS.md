@@ -128,3 +128,6 @@ The helper's log was lost because Docker removed its container (`AutoRemove`), s
   `/api/system/test/{test}`, `/api/system/diagnostics` and `/api/diagnostics/client-crash`; the rest are the kit's.
 - *The offline outbox file is upgraded, not dropped.* Plays and likes waiting in the file written before the kit's
   generic outbox are read by `EncoreOutbox.fromLegacy` (through `OutboxFile`'s `upgrade`), so an update loses none.
+- *Confirm dialogs are the kit's.* The last "are you sure?" dialogs Encore drew itself (delete to trash, empty the
+  trash, delete forever, end a group listen) use kit-compose's `ConfirmDialog` with `danger`; it draws them the
+  same. Dialogs with fields or more than two choices stay the app's.

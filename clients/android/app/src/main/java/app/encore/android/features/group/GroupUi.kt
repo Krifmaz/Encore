@@ -74,7 +74,6 @@ import dev.krifmaz.kit.compose.widgets.SmallButton
 import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
 import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
-import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -259,18 +258,10 @@ private fun GroupSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
         }
     }
     if (confirmEnd) {
-        AlertDialog(
-            onDismissRequest = { confirmEnd = false },
-            containerColor = p.panel,
-            titleContentColor = p.text,
-            textContentColor = p.muted,
-            title = { Text("End the group listen?") },
-            text = { Text("The music stops for everyone in it.") },
-            confirmButton = {
-                TextButton(onClick = { confirmEnd = false; GroupListen.end(); onDismiss() }) { Text("End for everyone", color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
-            },
-            dismissButton = { TextButton(onClick = { confirmEnd = false }) { Text("Cancel", color = p.muted) } },
-        )
+        ConfirmDialog("End the group listen?", "The music stops for everyone in it.", "End for everyone", danger = true, onDismiss = { confirmEnd = false }) {
+            GroupListen.end()
+            onDismiss()
+        }
     }
 }
 
