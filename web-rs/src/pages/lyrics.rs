@@ -1,45 +1,75 @@
-//! Port of web/js/pages/lyrics.js – see docs/archive/ui-rewrite/CONTRACT.md
-//! Lyrics for one song (shown, fetched and saved as .lrc/.txt next to the file) or a whole album.
+//! Lyrics for one song (shown, fetched and saved as .lrc/.txt next to the file) or a whole album. The dialog's body
+//! is a Leptos view ([`LyricsBody`]) over the last answer.
 
 use crate::api;
 use crate::dom;
 use crate::json::J;
-use crate::ui::{esc, modal, toast, Modal, ModalOpts};
+use crate::ui::{esc, modal, toast, ModalOpts};
+use leptos::prelude::*;
 use serde_json::Value;
 
-/// `lyricsModal(t)`: opens the modal and looks the lyrics up (spawns).
+/// Opens the Lyrics dialog of song `t` and looks its lyrics up; Search again asks LRCLIB again.
 pub fn lyrics_modal(t: &Value) {
-    let m = modal(ModalOpts::new(&format!("Lyrics · {}", esc(&t.s("title"))), r#"<div class="muted"><span class="spinner"></span> Looking for lyrics…</div>"#)
+    let m = modal(ModalOpts::new(&format!("Lyrics · {}", esc(&t.s("title"))), "")
         .footer(r#"<button class="btn" id="ly-refetch">Search again</button><button class="btn primary" data-close>Close</button>"#));
     let id = t.s("id");
-    if let Some(b) = m.qs("#ly-refetch") {
-        let (m2, id2) = (m.clone(), id.clone());
-        dom::on(&b, "click", move |_| dom::spawn(show(m2.clone(), id2.clone(), true)));
+    // the body is the view over the last answer ("Looking for lyrics…" until one has come)
+    let owner = Owner::new();
+    let answer: RwSignal<Option<Result<Value, String>>> = owner.with(|| RwSignal::new(None));
+    if let Some(body) = m.qs(".modal-body") {
+        dom::set_html(&body, "");
+        let shown = owner.with(|| {
+            kit_leptos::rt::mount(&body, move || {
+                move || match answer.get() {
+                    None => view! { <div class="muted"><span class="spinner"></span>" Looking for lyrics…"</div> }.into_any(),
+                    Some(a) => view! { <LyricsBody answer=a/> }.into_any(),
+                }
+            })
+        });
+        // kept while the page is on screen (the dialog closes before the page changes, or with it)
+        if let Some(v) = shown {
+            dom::keep(v);
+        }
     }
-    dom::spawn(show(m, id, false));
+    dom::keep(owner);
+    if let Some(b) = m.qs("#ly-refetch") {
+        let id2 = id.clone();
+        dom::on(&b, "click", move |_| dom::spawn(look_up(answer, id2.clone(), true)));
+    }
+    dom::spawn(look_up(answer, id, false));
 }
 
-/// The JS `show(force)`: fetch the lyrics of track `id` and render them into the modal body.
-async fn show(m: Modal, id: String, force: bool) {
-    let Some(body) = m.qs(".modal-body") else { return };
-    match api::get(&format!("/library/tracks/{id}/lyrics{}", if force { "?force=true" } else { "" })).await {
-        Ok(r) => {
-            let synced = r.truthy("synced");
-            let text = if synced { plain_text(&r.s("lyrics")) } else { r.s("lyrics") };
-            let html = if r.truthy("instrumental") {
-                r#"<div class="muted">Instrumental – no lyrics.</div>"#.to_string()
-            } else if !text.is_empty() {
-                format!(r#"<div class="small faint" style="margin-bottom:10px">{} lyrics · {}</div><div style="white-space:pre-wrap;line-height:1.6">{}</div>"#,
-                    if synced { "Time-synced" } else { "Plain" },
-                    if r.g("source").as_str() == Some("file") { "saved next to the song" } else { "from LRCLIB, saved next to the song" },
-                    esc(&text))
-            } else {
-                r#"<div class="muted">No lyrics found on LRCLIB.</div>"#.to_string()
-            };
-            dom::set_html(&body, &html);
-        }
-        Err(e) => dom::set_html(&body, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))),
+/// Fetches the lyrics of track `id` (`force`: from LRCLIB again) into `answer`.
+async fn look_up(answer: RwSignal<Option<Result<Value, String>>>, id: String, force: bool) {
+    let r = api::get(&format!("/library/tracks/{id}/lyrics{}", if force { "?force=true" } else { "" })).await.map_err(|e| e.message);
+    answer.set(Some(r));
+}
+
+/// The dialog's body for one answer: the lyrics with where they come from, that the song is instrumental, that
+/// none were found, or the error.
+#[component]
+fn LyricsBody(
+    /// The answer of GET /api/library/tracks/{id}/lyrics, or its error.
+    answer: Result<Value, String>,
+) -> impl IntoView {
+    let r = match answer {
+        Ok(r) => r,
+        Err(e) => return view! { <div class="error-box">{e}</div> }.into_any(),
+    };
+    let synced = r.truthy("synced");
+    let text = if synced { plain_text(&r.s("lyrics")) } else { r.s("lyrics") };
+    if r.truthy("instrumental") {
+        return view! { <div class="muted">"Instrumental – no lyrics."</div> }.into_any();
     }
+    if text.is_empty() {
+        return view! { <div class="muted">"No lyrics found on LRCLIB."</div> }.into_any();
+    }
+    let kind = if synced { "Time-synced" } else { "Plain" };
+    let from = if r.g("source").as_str() == Some("file") { "saved next to the song" } else { "from LRCLIB, saved next to the song" };
+    view! {
+        <div class="small faint" style="margin-bottom:10px">{format!("{kind} lyrics · {from}")}</div><div style="white-space:pre-wrap;line-height:1.6">{text}</div>
+    }
+    .into_any()
 }
 
 /// `lyrics.replace(/\[[^\]]*\]/g, '').replace(/\n{3,}/g, '\n\n').trim()`: synced lyrics without their
