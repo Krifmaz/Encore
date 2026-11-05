@@ -396,15 +396,6 @@ pub async fn refresh_user() {
     route();
 }
 
-fn conn_banner(on: bool, text: &str) {
-    // offline mode has its own banner
-    if on && crate::offline::mode::active() { return; }
-    let b = by_id("conn-banner");
-    if !on { if let Some(b) = b { b.remove(); } return; }
-    let b = match b { Some(b) => b, None => { let b = dom::create("div"); b.set_id("conn-banner"); let _ = dom::body().append_child(&b); b } };
-    set_html(&b, &format!(r#"{}<span>{}</span>"#, icon("x"), esc(text)));
-}
-
 /// Module-load work of app.js: listeners, service worker, boot.
 pub fn init() {
     dom::on_window("hashchange", |_| route());
@@ -420,10 +411,9 @@ pub fn init() {
     });
     dom::on_window("encore:requests-changed", |_| dom::spawn(refresh_pending_badge()));
     dom::on_window("encore:bugs-changed", |_| dom::spawn(refresh_bugs_badge()));
-    dom::on_window("offline", |_| conn_banner(true, "Not connected – check your internet or server"));
-    dom::on_window("online", |_| conn_banner(false, ""));
-    dom::on_window("encore:server-down", |_| conn_banner(true, "The Encore server isn't answering"));
-    dom::on_window("encore:server-up", |_| conn_banner(false, ""));
+    // the connection banner (`#conn-banner`): offline, or the server isn't answering (the kit's; offline mode has
+    // its own banner)
+    kit_leptos::offline::watch_connection();
     // the JS exposes the session for the pages; here they read app::user()
     let _ = ui::icon("x");
     let _: Rc<()> = Rc::new(());

@@ -23,7 +23,14 @@ pub const WAITS_FOR_SAVING: &str = "It reloads when the songs are saved";
 /// service worker's `encore:version` answer) and draws its toasts into the page's `#toasts`. Call once, first
 /// thing at start-up.
 pub fn init() {
-    config::set(AppConfig::new(App::named("Encore")));
+    let mut cfg = AppConfig::new(App::named("Encore"));
+    // What's new: Full changelog opens Settings → What's new, whose opening sentence is Encore's
+    cfg.routes.changelog = crate::whats_new::SETTINGS.into();
+    cfg.words.changelog.intro = crate::whats_new::INTRO;
+    // offline mode's banner says what still works here: the songs downloaded to this device
+    cfg.words.offline.banner = crate::offline::mode::BANNER;
+    cfg.words.offline.banner_ended = crate::offline::mode::BANNER_ENDED;
+    config::set(cfg);
     kit_leptos::toasts::mount();
 }
 
