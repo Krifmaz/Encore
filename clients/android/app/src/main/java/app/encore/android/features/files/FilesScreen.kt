@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -575,21 +576,9 @@ private fun FolderView(
         }
         is FolderDialog.Trash -> {
             val (keep, days) = FilesRules.trashKeep(roots)
-            AlertDialog(
-                onDismissRequest = { dialog = null },
-                containerColor = p.panel,
-                titleContentColor = p.text,
-                textContentColor = p.muted,
-                title = { Text(FilesRules.deleteTitle(d.names, keep)) },
-                text = { Text(FilesRules.deleteBody(keep, days)) },
-                confirmButton = {
-                    TextButton(onClick = {
-                        dialog = null
-                        run(FilesRules.deletedLine(d.names.size, keep)) { api.trash(root.id, d.names.map { join(path, it) }) }
-                    }) { Text(FilesRules.deleteLabel(keep), color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) }
-                },
-                dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel", color = p.muted) } },
-            )
+            ConfirmDialog(FilesRules.deleteTitle(d.names, keep), FilesRules.deleteBody(keep, days), FilesRules.deleteLabel(keep), danger = true, onDismiss = { dialog = null }) {
+                run(FilesRules.deletedLine(d.names.size, keep)) { api.trash(root.id, d.names.map { join(path, it) }) }
+            }
         }
         is FolderDialog.Move -> FolderPicker(api, roots.filter { !it.isTrash && it.writable }, root, path, title = if (d.names.size == 1) "Move “${d.names[0]}”" else "Move ${d.names.size} items", onDismiss = { dialog = null }) { toRoot, toPath ->
             dialog = null
@@ -1243,28 +1232,14 @@ private fun TrashView(nav: Nav, api: FilesApi, roots: List<FileRoot>) {
         }
     }
     if (confirmEmpty) {
-        AlertDialog(
-            onDismissRequest = { confirmEmpty = false },
-            containerColor = p.panel,
-            titleContentColor = p.text,
-            textContentColor = p.muted,
-            title = { Text("Empty the trash?") },
-            text = { Text("Everything in it is deleted forever. This can't be undone.") },
-            confirmButton = { TextButton(onClick = { confirmEmpty = false; run("The trash is empty") { api.emptyTrash(); "" } }) { Text("Empty trash", color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) } },
-            dismissButton = { TextButton(onClick = { confirmEmpty = false }) { Text("Cancel", color = p.muted) } },
-        )
+        ConfirmDialog("Empty the trash?", "Everything in it is deleted forever. This can't be undone.", "Empty trash", danger = true, onDismiss = { confirmEmpty = false }) {
+            run("The trash is empty") { api.emptyTrash(); "" }
+        }
     }
     confirmDelete?.let { t ->
-        AlertDialog(
-            onDismissRequest = { confirmDelete = null },
-            containerColor = p.panel,
-            titleContentColor = p.text,
-            textContentColor = p.muted,
-            title = { Text("Delete “${t.name}” forever?") },
-            text = { Text("This can't be undone.") },
-            confirmButton = { TextButton(onClick = { confirmDelete = null; run("Deleted") { api.deleteForever(t.id); "" } }) { Text("Delete forever", color = EncoreColors.Err, fontWeight = FontWeight.SemiBold) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = p.muted) } },
-        )
+        ConfirmDialog("Delete “${t.name}” forever?", "This can't be undone.", "Delete forever", danger = true, onDismiss = { confirmDelete = null }) {
+            run("Deleted") { api.deleteForever(t.id); "" }
+        }
     }
 }
 
