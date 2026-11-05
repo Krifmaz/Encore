@@ -179,7 +179,10 @@ fn every_string_the_javascript_ui_ships_is_in_web_rs() {
     // answers with
     let catalog = read_all(&repo.join("server/crates/plugins/catalog"), "toml");
     assert!(catalog.contains("[plugin]"), "server/crates/plugins/catalog/*.toml read");
-    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table + &catalog;
+    // the words of the kit's components (toasts, dialogs, What's new, …), which say Encore's words by default
+    // and come from the kit's crates now; their Debug form lists every one of them
+    let kit_words = format!("{:?}", kit_leptos::config::Words::default());
+    let rs_raw = read_all(&repo.join("web-rs/src"), "rs") + &table + &catalog + &kit_words;
     assert!(rs_raw.len() > 100_000, "web-rs sources read");
     let rs_norm = without_placeholders(&rs_raw);
     let rs_decoded = collapse(&decode_entities(&rs_norm));

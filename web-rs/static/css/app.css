@@ -339,6 +339,8 @@ table.table { width: 100%; border-collapse: collapse; }
 .pick-row .pm { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .pick-row .btn { flex: none; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px; border-top: 1px solid var(--border); }
+/* the kit's confirm dialog (kit-leptos): its line of text, muted, without the paragraph's margin */
+.confirm-text { margin: 0; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: scale(.97) translateY(6px); } }
 #toasts { position: fixed; right: 18px; bottom: calc(var(--player) + 18px); z-index: 200; display: flex; flex-direction: column; gap: 8px; }

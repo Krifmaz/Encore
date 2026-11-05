@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bugreports;
 pub mod files;
 pub mod group;
+pub mod lantern;
 pub mod library;
 pub mod own_file;
 pub mod perf;
@@ -31,6 +32,8 @@ pub mod foryou;
 pub mod taste;
 pub mod catalog;
 pub mod changelog;
+#[cfg(test)]
+mod lantern_tests;
 #[cfg(test)]
 mod plugins_tests;
 #[cfg(test)]

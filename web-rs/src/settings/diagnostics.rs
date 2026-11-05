@@ -637,7 +637,7 @@ fn updates_html(d: &Value) -> String {
         format!(r#"<div class="small muted">Update now is not available here: {}. <a href="{README_UPDATES}" target="_blank" rel="noopener" style="color:var(--accent)">How to turn it on</a></div>"#,
             esc(reason.trim_end_matches('.')))
     };
-    let shell = crate::sw::shell_cache().map(|c| format!(r#"<div class="small faint">This browser keeps the web app for offline use ({})</div>"#, esc(&c))).unwrap_or_default();
+    let shell = kit_leptos::update::shell_cache().map(|c| format!(r#"<div class="small faint">This browser keeps the web app for offline use ({})</div>"#, esc(&c))).unwrap_or_default();
     format!(r#"
     <div class="section-head"><h2>Updates</h2>
       <div class="row">{channel}<button class="btn sm" id="up-check">{refresh}Check now</button><button class="btn sm" id="up-restart">Restart server</button></div>
@@ -797,9 +797,9 @@ async fn wait_back(up: &Element, w: Wait, from: &str) {
     loop {
         dom::sleep(POLL_MS).await;
         if !up.is_connected() { return; }
-        let h = crate::update::health().await;
+        let h = kit_leptos::update::health().await;
         let now = dom::now_ms();
-        let version = h.as_ref().map(|v| v.s("version"));
+        let version = h.map(|v| v.version);
         match &version {
             None => { down = true; answering_since = None; }
             Some(_) => { answering_since.get_or_insert(now); }

@@ -2,6 +2,57 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the web app's self-update and service worker side come from kit-leptos
+
+- **`update.rs` and `sw.rs` are gone; `kit::start_updates` starts the kit's.** The kit's `update` module is the
+  same logic (it was made from them): health polling, the reload gate, the loop guard (`encore.update.tried`), the
+  worker flow. Encore only says what holds the page (music, an upload, songs being saved; the kit adds a dialog).
+- **The worker script stays Encore's.** `static/sw.js` and `hooks/sw.sh` (the offline shell and saved songs) are
+  the app's; the test that checks they speak the kit's messages (`skip-waiting`, `version?`, `encore:version`)
+  moved to `kit.rs`.
+
+## 2026-11-05: the web app's toasts, dialogs, confirm, copy and details come from kit-leptos
+
+- **Kept as adapters, not rewritten call sites.** `ui::toast`, `ui::modal`, `ui::confirm_dialog`, `ui::copy_text` and
+  `details::*` now hand over to `kit_leptos` (tag v0.3.0); their 500 call sites stay as they are. `ui::Modal` keeps its
+  `el`/`bg` fields because the hand-written pages wire their dialogs on them; it closes through the kit's handle.
+- **Encore keeps its own stylesheet; the kit's `kit.css` is not loaded.** Loaded together, the kit's filled danger
+  button (`.btn.danger`) mixed with Encore's outlined one into red text on red. `css/app.css` already styles every
+  class the kit's markup uses; it gains only the confirm dialog's `.confirm-text`. Moving to the kit's look would be a
+  visible change, which this move must not make.
+- **The strings parity test reads the kit's words.** Strings such as "Copy failed – select and copy manually" now
+  live in kit-rules; the test adds the Debug form of `kit_leptos::config::Words::default()` to what it searches.
+## 2026-11-05 – Lantern: what is built before Lantern 1.0, and what waits for it
+
+**Situation.** Lantern 1.0 is not out: github.com/Krifmaz/lantern has no commits, releases or API docs yet. The
+ask was to connect Encore to it once 1.0 is out, so everything that doesn't depend on Lantern's API is built
+now and nothing guesses that API (docs/contracts/lantern.md has the details).
+
+**Decisions.**
+- *Two steps: connected, then taken over.* Saving Lantern's address and key (Settings → Connections →
+  Lantern) changes nothing about downloads. Lantern only takes over once the one-time move of the settings
+  into it is done (`lantern_took_over`). So connecting can't break a working server, and "hide the native
+  settings while connected" means while Lantern has taken over: hiding them before the move would hide
+  settings that are still in use.
+- *The move waits for Lantern 1.0.* The dry run (what would move, card by card, secrets masked) works now.
+  The move itself answers 501 with the reason and changes nothing, because writing into Lantern needs its API.
+  As a result Lantern can't take over yet, so the Lantern source never runs before 1.0.
+- *The dry run follows the settings table.* It reads the Torrents & Usenet and Soulseek cards of
+  settings.toml and their `when` rules, so only the chosen clients' fields move, and a field added to those
+  cards later moves without a change in the plan.
+- *Lantern replaces sources in place.* In the request worker's source list, Soulseek (FLAC and any format)
+  and the indexers become one Lantern turn, at the place of the first of them, so the admin's order against
+  streamrip, yt-dlp and plugins stays the same. Import, tagging and filing stay Encore's.
+- *Nothing native is deleted.* The move keeps Encore's own settings. Disconnecting clears the address, the
+  key and the takeover, and the native sources and cards come back exactly as they were. A key that goes
+  away (an environment variable removed) also ends the takeover at once.
+- *Encore's Soulseek engine stops while Lantern has taken over*, because one Soulseek login can't be signed in
+  from two clients at once (`slskd_managed::configured`).
+- *The Lantern card sits on Connections, under a Server heading for admins.* Connections is otherwise per
+  user, but this is where it was asked for, and admins look for service links there.
+- *The connection test only checks that Lantern answers over HTTP.* Checking the key needs Lantern's API, and
+  the test says so.
+
 ## 2026-11-05: re-land the kit release workflows (#4) and Android on kit-compose (#5) onto main
 
 - **Why.** Both pull requests were merged into the stale branch `ccr-a4585b2e-d7xdtf` (0.42.6) instead of `main`, so

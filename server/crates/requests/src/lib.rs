@@ -5,7 +5,8 @@
 //! streamrip, yt-dlp with the YouTube sign-in of [`ytauth`]; the Apple Music [`wrapper`] gamdl decrypts through). Pages follow the requests live through [`events`]; [`report`] handles a song reported as
 //! wrong (its source blocked, a replacement requested); [`missing`] requests what a playlist lacks;
 //! [`upgrade`] rates an album's quality and asks for a lossless or hi-res copy; [`upkeep`] queues lossless
-//! upgrades and clears old requests; [`notify`] tells the admin's channels.
+//! upgrades and clears old requests; [`notify`] tells the admin's channels; [`lantern`] connects Lantern, which
+//! takes over the torrent, Usenet and Soulseek downloads once its settings were moved into it.
 //!
 //! Functions that need the server take a [`Ctx`], which the server's state implements.
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use tokio::sync::Notify;
 
 pub mod create;
 pub mod events;
+pub mod lantern;
 pub mod line;
 pub mod missing;
 pub mod notify;
