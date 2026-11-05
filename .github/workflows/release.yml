@@ -66,8 +66,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Releases are built from main only: 0.42.17 and 0.42.18 were started from a stale branch and shipped an older
+  # database schema, which servers that updated to them could not open. A run on any other branch stops here.
+  main-only:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Started from main
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [ "$REF" != main ]; then
+            echo "::error::releases are built from main only (this run is on '$REF')"
+            exit 1
+          fi
+
   # The checks every release and every pull request runs (docker.yml runs the same).
   test:
+    needs: main-only
     uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
     with:
       rust-dirs: server
