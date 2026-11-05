@@ -17,6 +17,7 @@ fn repo() -> PathBuf {
 /// with the switch of 0.26) was never extracted into the reference, so it needs no entry. An entry that
 /// matches no reference line fails the test, so a stale one is noticed.
 const LEGACY_ONLY: &[(&str, &str)] = &[
+    ("Only mine", "the Requests page's switch for admins, replaced by the User list (everyone's requests, or one person's)"),
     ("Tick at least one kind of release", "the Request discography dialog of 0.26 ticks releases, not kinds (\"Tick at least one release\")"),
     // 0.29: the web app runs only in browsers; what the apps hung on window.EncoreNative went with the bridge
     ("Offline music", "the apps' offline screen (EncoreNative.openOffline), gone with the bridge in 0.29"),
