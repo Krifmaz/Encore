@@ -118,11 +118,13 @@ where
         let (tx, rx) = std::sync::mpsc::channel();
         let (st2, k) = (st.clone(), key.to_string());
         rt.spawn_blocking(move || {
-            let _building = building;
             let r = make().map(Arc::new);
             if let Ok(v) = &r {
                 keep_list(&st2, k, version, v.clone());
             }
+            // the mark goes before the answer: a page that comes right after the one that waited may start the
+            // next build, instead of being told one still runs (a panic in `make` drops the mark too)
+            drop(building);
             let _ = tx.send(r);
         });
         return rx.recv_timeout(LIST_WAIT).unwrap_or(Ok(old));

@@ -1026,18 +1026,13 @@ dependencies = [
  "encore-jobs",
  "encore-playback",
  "encore-plugins",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
+ "kit-server-selfupdate",
  "kit-server-updates",
  "libc",
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]
@@ -1671,7 +1666,7 @@ dependencies = [
 [[package]]
 name = "kit-rules"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "serde",
  "serde_json",
@@ -1680,7 +1675,7 @@ dependencies = [
 [[package]]
 name = "kit-server-bugreports"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "image",
@@ -1696,7 +1691,7 @@ dependencies = [
 [[package]]
 name = "kit-server-changelog"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "kit-rules",
@@ -1708,7 +1703,7 @@ dependencies = [
 [[package]]
 name = "kit-server-core"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "async-trait",
  "axum",
@@ -1721,7 +1716,7 @@ dependencies = [
 [[package]]
 name = "kit-server-diagnostics"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "futures-util",
@@ -1734,7 +1729,7 @@ dependencies = [
 [[package]]
 name = "kit-server-health"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "serde_json",
@@ -1743,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "kit-server-notices"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "futures-util",
@@ -1755,9 +1750,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "kit-server-selfupdate"
+version = "0.1.0"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "kit-server-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "kit-server-settings"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "kit-server-core",
@@ -1769,7 +1784,7 @@ dependencies = [
 [[package]]
 name = "kit-server-updates"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.6.1#7994ef29356ba49d703f27c30e84c34d7d1b8b53"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.7.0#562b9209f93b991213bacc87678c3de0a2e4bc6c"
 dependencies = [
  "axum",
  "kit-server-core",

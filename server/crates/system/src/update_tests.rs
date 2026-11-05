@@ -1,8 +1,7 @@
-//! Encore's own updates: the release answer from a local stand-in for GitHub's releases API, the socket check
-//! in plain words (no socket in tests; a mock Docker on a unix socket for the rest), the restart planning
-//! (never exits), and "Update now"'s pull and helper start against the mock Docker.
+//! Encore's own updates: the release answer from a local stand-in for GitHub's releases API, the
+//! `self_update` setting, Encore's tag rule and the restart planning (never exits). The socket check, the
+//! pull, the helper and the swap are the kit's, tested there.
 use super::*;
-use crate::selfupdate::tests::{fixture, serve_mock, sock_dir, HELPER_ID};
 
 #[test]
 fn a_release_is_kept_with_its_notes_cut_at_4000_characters() {
@@ -82,52 +81,14 @@ fn image_tags_are_checked() {
     assert!(check_tag("0.27.0").unwrap_err().contains("can't update itself"), "older images have no helper");
 }
 
-#[test]
-fn the_container_id_is_found_in_mountinfo() {
-    let id = "784f60a526476812415c46b2613ebae100e5df0b6fc23a4b255d19ccf653c7a5";
-    let text = format!("1236 1218 0:322 / / rw,relatime master:500 - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/ABC\n\
-        1250 1236 254:1 /var/lib/docker/containers/{id}/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/vda1 rw\n\
-        1251 1236 254:1 /var/lib/docker/containers/{id}/hostname /etc/hostname rw,relatime - ext4 /dev/vda1 rw\n");
-    assert_eq!(container_id_from_mountinfo(&text).as_deref(), Some(id));
-    assert_eq!(container_id_from_mountinfo("22 1 254:1 / / rw - ext4 /dev/vda1 rw\n"), None);
-    assert_eq!(container_id_from_mountinfo("1 1 0:1 /containers/short/hostname /etc/hostname rw - ext4 x rw"), None);
-}
-
-/// Each reason in plain words, in the order they are checked.
+/// Switched off in the settings wins over everything the socket would say.
 #[tokio::test]
-async fn self_update_says_why_not() {
-    let dir = sock_dir("probe");
-    let missing = dir.join("none.sock");
-    assert_eq!(probe_with(&missing, "", "abc", "").await.reason.as_deref(), Some("The Docker socket is not mounted"));
-    assert_eq!(probe_with(&missing, "off", "abc", "").await.reason.as_deref(), Some("Switched off in the settings (self_update = off)"));
-    std::fs::write(dir.join("file.sock"), "").unwrap();
-    let r = probe_with(&dir.join("file.sock"), "", "abc", "").await;
-    assert!(!r.ready && r.reason.as_deref().unwrap().starts_with("The Docker socket is not mounted ("), "{r:?}");
-    // a socket nobody answers on
-    let dead = dir.join("dead.sock");
-    drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
-    let r = probe_with(&dead, "", "abc", "").await;
-    assert!(r.reason.as_deref().unwrap().starts_with("The Docker socket refused the request: "), "{r:?}");
-
-    let (_d, m) = serve_mock(&dir).await;
-    let sock = dir.join("docker.sock");
-    let ins = fixture();
-    let id = ins["Id"].as_str().unwrap();
-    // the hostname is the id's first 12 characters
-    let r = probe_with(&sock, "", &id[..12], "").await;
-    assert_eq!(r, SelfUpdate { ready: true, reason: None, id: Some(id.into()), name: Some("encore".into()), image: Some("ghcr.io/krifmaz/encore:latest".into()) });
-    // a hostname of the owner's own: the id from mountinfo
-    let mi = format!("1251 1236 254:1 /var/lib/docker/containers/{id}/hostname /etc/hostname rw - ext4 /dev/vda1 rw\n");
-    assert!(probe_with(&sock, "", "music", &mi).await.ready);
-    // a Docker that doesn't know this machine
-    assert_eq!(probe_with(&sock, "", "laptop", "").await.reason.as_deref(), Some("Not running in a container"));
-    // switched off wins even with the socket there
-    assert!(!probe_with(&sock, "OFF", &id[..12], "").await.ready);
-    // a container started with --rm can't be swapped
-    m.fail.lock().unwrap().insert("rm");
-    let r = probe_with(&sock, "", &id[..12], "").await;
-    assert_eq!(r.reason.as_deref(), Some("This container is removed when it stops (started with --rm), so it can't be replaced"));
-    let _ = std::fs::remove_dir_all(&dir);
+async fn self_update_can_be_switched_off() {
+    let missing = std::path::Path::new("/nonexistent/docker.sock");
+    for off in ["off", "OFF", "false", "no", "0"] {
+        assert_eq!(probe_with(missing, off, "abc", "").await.reason.as_deref(), Some("Switched off in the settings (self_update = off)"), "{off}");
+    }
+    assert_eq!(probe_with(missing, "", "abc", "").await.reason.as_deref(), Some("The Docker socket is not mounted"));
 }
 
 /// "Restart server" plans the restart and does not exit: the server loop (`serve`) does that.
@@ -142,45 +103,6 @@ async fn a_restart_is_scheduled_once() {
     assert!(r.is_requested());
     // asked for after the fact: answers at once
     tokio::time::timeout(Duration::from_millis(100), r.requested()).await.unwrap();
-}
-
-/// "Update now" up to the helper: the pull (Docker's words when it fails), then the helper's container from
-/// the new image with the socket, started.
-#[tokio::test]
-async fn update_now_pulls_and_starts_the_helper() {
-    let dir = sock_dir("start");
-    let (d, m) = serve_mock(&dir).await;
-    let id = fixture()["Id"].as_str().unwrap().to_string();
-    let mut r = crate::update_report::Report::start("ghcr.io/krifmaz/encore:0.28.0", "0.28.0", "0.27.0", "admin", 1.0);
-    // an ended helper of an earlier try is removed first, so its log is not read as this update's
-    m.fail.lock().unwrap().insert("helper-left");
-    let name = start_update(&d, &id, "0.28.0", &mut r).await.unwrap();
-    m.fail.lock().unwrap().remove("helper-left");
-    assert!(name.starts_with("encore-update-"), "{name}");
-    let calls = m.calls();
-    assert_eq!(calls[0], "POST /images/create?fromImage=ghcr.io%2Fkrifmaz%2Fencore&tag=0.28.0");
-    assert_eq!(calls[1], format!("GET /containers/{id}/json"));
-    assert!(calls[2].starts_with("GET /containers/json?all=true&filters="), "{calls:?}");
-    assert_eq!(calls[3], format!("GET /containers/{HELPER_ID}/json"));
-    assert_eq!(calls[4], format!("DELETE /containers/{HELPER_ID}?force=true"));
-    assert!(calls[5].starts_with("POST /containers/create?name=encore-update-"), "{calls:?}");
-    assert_eq!(calls[6], format!("POST /containers/{HELPER_ID}/start"));
-    let body = m.body("/containers/create?name=encore-update-").unwrap();
-    let schema = encore_db::SCHEMA_VERSION.to_string();
-    assert_eq!(body["Cmd"], json!(["self-update-helper", "--target", id, "--image", "ghcr.io/krifmaz/encore:0.28.0", "--schema", schema]));
-    assert_eq!(body["HostConfig"].get("AutoRemove"), None, "the helper's log outlives it");
-    assert_eq!(r.lines.iter().map(|l| l.split(':').next().unwrap()).collect::<Vec<_>>(), ["pull", "pull", "helper", "helper"], "{:?}", r.lines);
-
-    // the failure path on the server's side: the failing step and Docker's words
-    let e = start_update(&d, &id, "9.9.9", &mut r).await.unwrap_err();
-    assert_eq!(e, ("pull", "Could not pull ghcr.io/krifmaz/encore:9.9.9: manifest unknown".to_string()));
-    let e = start_update(&d, &id, "denied", &mut r).await.unwrap_err().1;
-    assert!(e.starts_with("Could not pull ghcr.io/krifmaz/encore:denied: pull access denied"), "{e}");
-    assert!(e.contains("must be public"), "{e}");
-    assert!(pull_error("i:1", "error from registry: unauthorized").contains("must be public"));
-    assert_eq!(pull_error("i:1", "manifest unknown"), "Could not pull i:1: manifest unknown");
-    assert_eq!(m.calls().iter().filter(|c| c.starts_with("POST /containers/create")).count(), 1, "no helper after a failed pull");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -2,6 +2,19 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: "Update now" is the kit's self-update (kit v0.7.0)
+
+- **The Docker client, the socket check, the pull, the helper and the container swap are `kit_server_selfupdate`,**
+  which was made from Encore's `docker.rs`, `selfupdate.rs` and `update_report.rs`. Encore keeps only its facts
+  (`selfupdate::app()`: image, program, schema, exit code 3, the migration line, `/config/backups`), the
+  `self_update` setting, where the record is kept (`sync_state`) and the release pick.
+- **The helper's label and lines stay `org.encore.role` and `encore self-update: `** (the kit's defaults for a
+  program named `encore`), so a helper started by an older server is still found and read after the update.
+- **Records kept before the switch have no app name;** `update_report::load` fills in "Encore", so Copy still
+  says "Encore update …". The answer's `last_update` gains an `app` field; nothing reads it.
+- `encore_system::docker` is now the kit's client, re-exported, so the Apple Music wrapper's image build is
+  unchanged.
+
 ## 2026-11-05: pages move to Leptos one at a time, starting with the Leaderboard
 
 - **Each page becomes a Leptos component mounted into `#view`** (`kit_leptos::rt::mount`, kept with `dom::keep`

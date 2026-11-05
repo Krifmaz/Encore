@@ -1,5 +1,6 @@
 //! Keeping the server up to date: Encore's own updates and "Restart server" ([`update`]), the container
-//! swap of "Update now" ([`selfupdate`], over the Docker Engine API in [`docker`]; its step-by-step record in
+//! swap of "Update now" (the kit's `kit_server_selfupdate` with Encore's facts in [`selfupdate`], over the
+//! kit's Docker Engine API client, re-exported as [`docker`]; its step-by-step record kept in
 //! [`update_report`]), and the programs of the
 //! builtin plugins with the old Download tools routes and the "Update plugins" task ([`tools`]; installing and
 //! updating are the plugins', encore_plugins; slskd and the translator are run by other crates and reach the
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-pub mod docker;
+pub use kit_server_selfupdate::docker;
 pub mod selfupdate;
 pub mod tools;
 pub mod update;
