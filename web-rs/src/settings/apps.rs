@@ -15,6 +15,7 @@ use crate::ui::{esc, escv, icon, toast};
 use serde_json::{Map, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use web_sys::Element;
 
 /// What a card holds between its result line and Save: its fields, with the extras this web app draws for
@@ -29,7 +30,7 @@ pub fn card_body(id: &str, fields_html: &str) -> String {
 }
 
 /// Wires the extras of a card (see [`card_body`]; the VPN block is part of Soulseek's fields).
-pub fn bind_card(hub: &Rc<Hub>, g: &Rc<Group>, card: &Element) {
+pub fn bind_card(hub: &Rc<Hub>, g: &Arc<Group>, card: &Element) {
     match g.id.as_str() {
         "streamrip" => { bind_tidal(&hub.view, card); bind_streamrip_config(card); }
         "cadenza" => bind_cadenza_cache(hub, card),
@@ -56,7 +57,7 @@ thread_local! {
     static VPN_POLL: Cell<u32> = const { Cell::new(0) };
 }
 
-pub fn bind_vpn(hub: &Rc<Hub>, g: Rc<Group>, card: &Element) {
+pub fn bind_vpn(hub: &Rc<Hub>, g: Arc<Group>, card: &Element) {
     let (Some(state), Some(btn)) = (dom::qs_in(card, "#vpn-state"), dom::qs_in(card, "#vpn-test")) else { return };
     let refresh: Rc<dyn Fn()> = {
         let (state, btn) = (state.clone(), btn.clone());
