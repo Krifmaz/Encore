@@ -14,7 +14,9 @@ pub mod connections;
 pub mod lantern;
 pub mod eq_graph;
 pub mod diagnostics;
-pub mod fields;
+/// The schema of the Server pages (pages, cards, fields, `when` rules): the kit's model, read from
+/// GET /api/admin/settings/schema (docs/contracts/settings-schema.md).
+pub use kit_leptos::schema_form::schema as fields;
 pub mod general;
 pub mod groups;
 pub mod invites;

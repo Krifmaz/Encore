@@ -2,6 +2,13 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the Server settings pages read their schema with the kit's model
+
+- **`settings/fields.rs` is gone; `settings::fields` is `kit_leptos::schema_form::schema`.** The two were the same
+  code (pages, cards, fields, `when` rules, `type_key`), apart from `Arc` for `Rc`. Encore's renderer
+  (`schema_form.rs`, `groups.rs`) still draws the cards: its markup and Save wiring move to the kit's
+  `SettingsCards` in a later step, once that page is Leptos.
+
 ## 2026-11-05: the server on kit v0.6.1 (pinned by tag)
 
 - **Pinned to a kit tag, not a commit.** The server took the kit from a commit made before the kit's first release.

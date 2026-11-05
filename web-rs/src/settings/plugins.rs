@@ -26,6 +26,7 @@ use serde_json::{Map, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlInputElement};
 
@@ -616,7 +617,7 @@ struct Page {
     list: RefCell<Value>,
     /// the settings answers of the cards drawn with a form
     forms: RefCell<HashMap<String, Value>>,
-    groups: RefCell<HashMap<String, Rc<Group>>>,
+    groups: RefCell<HashMap<String, Arc<Group>>>,
     acting: RefCell<HashMap<String, String>>,
 }
 
@@ -767,7 +768,7 @@ impl Page {
             let id = dom::data(&card, "plugin");
             let Some(answer) = self.forms.borrow().get(&id).cloned() else { continue };
             if answer.truthy("_error") { continue; }
-            let g = Rc::new(group_of(&answer, &self.card(&id).s("name")));
+            let g = Arc::new(group_of(&answer, &self.card(&id).s("name")));
             self.groups.borrow_mut().insert(id.clone(), g.clone());
             bind_show_when(&card);
             if !answer.truthy("builtin") { continue; }

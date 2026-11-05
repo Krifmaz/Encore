@@ -14,6 +14,7 @@ use crate::json::{js_string, json, truthy, J};
 use crate::ui::{copy_text, esc, icon, toast, EYE, EYE_OFF};
 use serde_json::{Map, Value};
 use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlInputElement};
 
@@ -47,7 +48,7 @@ pub fn card_html(g: &Group, body: &str, open: bool) -> String {
 }
 
 /// The cards of a page that this server has: each with the fields the values hold, cards with none left out.
-pub fn visible_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Group, Vec<&'a Field>)> {
+pub fn visible_cards<'a>(groups: &'a [Arc<Group>], values: &Value) -> Vec<(&'a Group, Vec<&'a Field>)> {
     groups.iter()
         .map(|g| (g.as_ref(), g.fields.iter().filter(|f| values.has(&f.key)).collect::<Vec<_>>()))
         .filter(|(_, fields)| !fields.is_empty())
@@ -56,7 +57,7 @@ pub fn visible_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Gr
 
 /// The cards a Server page draws: [`visible_cards`] without those that are plugin cards since 0.32 (streamrip,
 /// Torrents & Usenet, Soulseek, yt-dlp and YouTube sign-in are drawn on the Plugins page, plugins.rs).
-pub fn page_cards<'a>(groups: &'a [Rc<Group>], values: &Value) -> Vec<(&'a Group, Vec<&'a Field>)> {
+pub fn page_cards<'a>(groups: &'a [Arc<Group>], values: &Value) -> Vec<(&'a Group, Vec<&'a Field>)> {
     visible_cards(groups, values).into_iter().filter(|(g, _)| !super::plugins::moved(&g.id)).collect()
 }
 
@@ -104,7 +105,7 @@ pub async fn show_page(hub: &Rc<Hub>, id: &str) {
 }
 
 /// Save, clear, the eye and copy buttons, Test, the `when` rules and the card's extras.
-fn bind_card(hub: &Rc<Hub>, g: Rc<Group>, card: &Element, page: &str) {
+fn bind_card(hub: &Rc<Hub>, g: Arc<Group>, card: &Element, page: &str) {
     let Some(out) = dom::qs_in(card, "[data-out]") else { return };
     apps::bind_card(hub, &g, card);
     bind_show_when(card);
