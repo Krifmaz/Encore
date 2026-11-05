@@ -9,7 +9,8 @@ Calls made while working hands-off, with why. Newest first.
   branch.
 - **Releases follow `main` by name.** `release-on-merge.yml` now runs on pushes to `main` only, instead of the
   repository's default branch: the default branch was the stale one, and a merge there would have shipped a release
-  built from old code.
+  built from old code. `release.yml` also stops at a `main-only` job when
+  started by hand on any other branch: 0.42.17 and 0.42.18 were built from a stale branch with an older database schema.
 - **Unused dependencies still fail CI.** main had added `cargo machete` to the release test job after #4 was
   written; the kit's `kit-ci` has no such step, so it runs as Encore's app check (`scripts/check-unused-deps.sh`),
   in releases and pull requests alike. It belongs in `kit-ci` as an option; until then it stays an app check.
