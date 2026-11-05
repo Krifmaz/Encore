@@ -37,11 +37,14 @@ fn every_key_is_listed_once_and_every_field_is_a_key() {
     assert_eq!(Keys::TASK_BACKUP_MINUTES, "task_backup_minutes");
 }
 
-/// The TABLE order (the diagnostics page lists changed settings in it) is every key A to Z.
+/// The kit's TABLE is every key A to Z (`Config::defs` puts Encore's listed-last keys after them).
 #[test]
 fn table_order_is_a_to_z() {
     let keys: Vec<&str> = TABLE.iter().map(|d| d.key).collect();
     assert!(keys.windows(2).all(|w| w[0] < w[1]), "TABLE is A to Z");
+    for k in crate::LISTED_LAST {
+        assert!(keys.contains(k), "LISTED_LAST names {k}, which settings.toml does not have");
+    }
 }
 
 #[test]
@@ -119,10 +122,15 @@ fn typed_accessors_read_the_values_in_effect() {
     assert_eq!(cfg.mb_oauth_expires_at(), 0.0);
     cfg.set_many(&json!({ "app_name": "Home music", "session_days": "12", "auto_approve": "yes" }));
     assert_eq!((cfg.app_name(), cfg.session_days(), cfg.auto_approve()), ("Home music".to_string(), 12, true));
-    // the loader's table is the generated one, in its order, with the defaults coerced as before
+    // the loader's table is the generated one, with the defaults coerced as before, in Encore's order: A to Z,
+    // then the listed-last keys in theirs (the diagnostics page lists changed settings in it)
     let keys: Vec<&str> = cfg.defs.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(keys, TABLE.iter().map(|d| d.key).collect::<Vec<_>>());
-    for ((k, d), t) in cfg.defs.iter().zip(TABLE) {
+    let (first, last) = keys.split_at(keys.len() - crate::LISTED_LAST.len());
+    assert_eq!(last, crate::LISTED_LAST);
+    assert!(first.windows(2).all(|w| w[0] < w[1]), "the rest A to Z");
+    assert_eq!(keys.len(), TABLE.len());
+    for (k, d) in cfg.defs.iter() {
+        let t = TABLE.iter().find(|t| t.key == k).unwrap();
         assert_eq!((d.env.as_deref(), &d.default, d.secret), (t.env, &t.default.to_json(), t.secret), "{k}");
     }
     let _ = std::fs::remove_dir_all(d);

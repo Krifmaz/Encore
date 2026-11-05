@@ -46,8 +46,10 @@ Calls made while working hands-off, with why. Newest first.
   What's new marks, so both get a two-method adapter of the kit's store trait instead of moving.
 - **`Config::set_many` stays synchronous** (193 callers): the kit's store is async, Encore's settings table answers
   at once, so the save completes on its first poll (`now_or_never`).
-- **Changed settings list A to Z.** The kit dropped settings.toml's `listed_last`; Diagnostics now lists changed
-  settings A to Z instead of "A to Z, then the keys added later". The only visible difference of this change.
+- **Changed settings keep their order.** The kit dropped settings.toml's `listed_last` (its table is A to Z), so
+  Encore keeps the list itself (`encore_config::LISTED_LAST`) and `Config::defs` puts those keys after the A-to-Z
+  run, as before: Diagnostics lists changed settings exactly as it did. Kept in Encore rather than as a kit hook:
+  the order is Encore's history and only Encore's own diagnostics code reads it.
 - **Bug report answers are no longer passed through the enrichment pass.** The kit dropped the hook; bug reports
   hold no music, and no client reads a translated bug report title.
 - **The routes keep Encore's paths** (`/api/admin/settings…`, `/api/system/update`, `/api/system/restart`,
