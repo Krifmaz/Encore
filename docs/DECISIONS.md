@@ -2,11 +2,11 @@
 
 Calls made while working hands-off, with why. Newest first.
 
-## 2026-11-05: the server on kit v0.5.0 (pinned by tag)
+## 2026-11-05: the server on kit v0.6.1 (pinned by tag)
 
 - **Pinned to a kit tag, not a commit.** The server took the kit from a commit made before the kit's first release.
   Every kit release since moved the crates' data behind async store traits in `kit_*` tables and made them
-  app-neutral, so the pin is a port, not a bump: v0.5.0 is the first tag that runs the kit's SQLite stores on
+  app-neutral, so the pin is a port, not a bump: v0.6.1 is the first tag that runs the kit's SQLite stores on
   Encore's own database (its pool, write lock and panic guards; kit PR #39), so no second connection is opened to
   `encore.db`.
 - **Bug reports and app crash reports move to the kit's tables** (`kit_bug_reports`, `kit_bug_report_messages`,

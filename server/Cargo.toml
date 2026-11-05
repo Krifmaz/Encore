@@ -29,14 +29,14 @@ encore-files = { path = "crates/files" }
 encore-plugins = { path = "crates/plugins" }
 # the shared server crates of Krifmaz/kit (health, What's new, notices, bug reports, diagnostics, settings, updates),
 # pinned to a kit release tag
-kit-server-core = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
-kit-server-health = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
-kit-server-changelog = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e", default-features = false }
-kit-server-notices = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
-kit-server-bugreports = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
-kit-server-diagnostics = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
-kit-server-settings = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e", default-features = false }
-kit-server-updates = { git = "https://github.com/Krifmaz/kit", rev = "9d0ab07f08b4c9570692d452c443c544b396c93e" }
+kit-server-core = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-health = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-changelog = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1", default-features = false }
+kit-server-notices = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-bugreports = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-diagnostics = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-settings = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1", default-features = false }
+kit-server-updates = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }
