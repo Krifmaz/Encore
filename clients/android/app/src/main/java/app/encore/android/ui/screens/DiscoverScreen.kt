@@ -80,18 +80,18 @@ import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
 import app.encore.android.ui.components.AlbumCard
 import app.encore.android.ui.components.ArtPlaceholder
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EmptyState
+import dev.krifmaz.kit.compose.widgets.EmptyState
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.PageTitle
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.components.Tile
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.TrackRow
 import app.encore.android.ui.components.formatDuration
 import app.encore.android.ui.theme.EncoreColors
@@ -108,71 +108,14 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.widgets.CardBox
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 // ---- widgets shared by the feature screens (Discover, For you, Requests, picker, playlists, Account) ------------
 
 /** The [FeaturesApi] behind the feature screens. */
 val Nav.features: FeaturesApi get() = graph.features
-
-/** The web's `.input`: an outlined field in the panel colours. */
-@Composable
-fun EncoreField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    placeholder: String = "",
-    label: String? = null,
-    leadingIcon: Int? = null,
-    enabled: Boolean = true,
-    singleLine: Boolean = true,
-    minLines: Int = 1,
-    maxLines: Int = Int.MAX_VALUE,
-    password: Boolean = false,
-    keyboardType: KeyboardType = KeyboardType.Text,
-    imeAction: ImeAction = ImeAction.Done,
-    onAction: (() -> Unit)? = null,
-) {
-    val p = MaterialTheme.palette
-    val focus = LocalFocusManager.current
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        placeholder = if (placeholder.isNotEmpty()) ({ Text(placeholder, color = p.faint, maxLines = 1, overflow = TextOverflow.Ellipsis) }) else null,
-        label = if (label != null) ({ Text(label) }) else null,
-        leadingIcon = if (leadingIcon != null) ({ Icon(painterResource(leadingIcon), contentDescription = null, tint = p.faint) }) else null,
-        singleLine = singleLine,
-        minLines = minLines,
-        maxLines = if (singleLine) 1 else maxLines,
-        enabled = enabled,
-        shape = RoundedCornerShape(10.dp),
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
-        keyboardActions = KeyboardActions(onAny = { focus.clearFocus(); onAction?.invoke() }),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = p.accent,
-            unfocusedBorderColor = p.border,
-            focusedContainerColor = p.bg2,
-            unfocusedContainerColor = p.bg2,
-            cursorColor = p.accent,
-        ),
-        modifier = modifier,
-    )
-}
-
-/** The web's `.card`: a panel with a border and 14dp corners. */
-@Composable
-fun CardBox(modifier: Modifier = Modifier, flat: Boolean = false, content: @Composable () -> Unit) {
-    val p = MaterialTheme.palette
-    val shape = RoundedCornerShape(14.dp)
-    Box(
-        modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(if (flat) p.bg2 else p.panel)
-            .border(1.dp, p.border, shape)
-            .padding(if (flat) 0.dp else 16.dp),
-    ) { content() }
-}
 
 /** The web's `statusBadge(status)`: "Awaiting approval", "Queued", "Available"… in the status colour. */
 @Composable
@@ -188,30 +131,6 @@ fun Availability(inLibrary: Boolean, requestStatus: String, modifier: Modifier =
         inLibrary -> Badge("In library", kind = "ok", modifier = modifier)
         requestStatus.isNotEmpty() -> StatusBadge(requestStatus, modifier)
     }
-}
-
-/** The web's `confirmDialog(title, text, okLabel, danger)`. */
-@Composable
-fun ConfirmDialog(title: String, text: String, okLabel: String, danger: Boolean = false, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    val p = MaterialTheme.palette
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = p.panel,
-        titleContentColor = p.text,
-        textContentColor = p.muted,
-        title = { Text(title) },
-        text = { if (text.isNotEmpty()) Text(text) },
-        confirmButton = {
-            TextButton(onClick = { onDismiss(); onConfirm() }) { Text(okLabel, color = if (danger) EncoreColors.Err else p.text, fontWeight = FontWeight.SemiBold) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = p.muted) } },
-    )
-}
-
-/** A small spinner for inline "working" states. */
-@Composable
-fun Spinner(size: Dp = 16.dp) {
-    CircularProgressIndicator(color = MaterialTheme.palette.accent, trackColor = MaterialTheme.palette.border, strokeWidth = 2.dp, modifier = Modifier.size(size))
 }
 
 /** Opens a link in the browser (the web's `target="_blank"` links). */
@@ -629,7 +548,7 @@ fun DiscoverScreen(nav: Nav, initialQuery: String = "", initialType: String = "a
         } else {
             PageTitle("Discover") { SmallButton("For you", iconRes = R.drawable.ic_spark) { nav.open(Screen.ForYou) } }
         }
-        EncoreField(
+        KitField(
             value = input,
             onValueChange = { input = it },
             placeholder = "Search your library and MusicBrainz…",

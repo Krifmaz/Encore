@@ -46,7 +46,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.repo.Me
 import app.encore.android.data.repo.PickResult
@@ -58,19 +58,19 @@ import app.encore.android.features.picker.PickerRules
 import app.encore.android.features.requests.RequestRules
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
-import app.encore.android.ui.components.CopyIconButton
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
+import dev.krifmaz.kit.compose.details.CopyIconButton
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
-import app.encore.android.ui.components.formatSize
+import dev.krifmaz.kit.compose.core.formatSize
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -83,6 +83,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 private fun isUrl(v: String): Boolean = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE).matches(v.trim())
 
@@ -333,7 +335,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        EncoreField(
+                        KitField(
                             value = query,
                             onValueChange = { query = it },
                             placeholder = "Search, or paste a YouTube Music / Bandcamp / any link",
@@ -343,7 +345,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(8.dp))
-                        EncoreButton("Search", primary = true, enabled = !busy) {
+                        KitButton("Search", primary = true, enabled = !busy) {
                             if (isUrl(query)) download("link", buildJsonObject { put("url", query.trim()) }, query.trim()) else searchGen += 1
                         }
                     }
@@ -440,7 +442,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                 }
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        EncoreField(
+                        KitField(
                             value = linkUrl,
                             onValueChange = { linkUrl = it },
                             placeholder = "…or paste a link: Qobuz, Tidal, Deezer, YouTube, Bandcamp, SoundCloud…",
@@ -451,7 +453,7 @@ fun PickerScreen(nav: Nav, opts: PickerOpts) {
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(8.dp))
-                        EncoreButton("Download link", iconRes = R.drawable.ic_download, enabled = !busy && linkUrl.isNotBlank()) {
+                        KitButton("Download link", iconRes = R.drawable.ic_download, enabled = !busy && linkUrl.isNotBlank()) {
                             download("link", buildJsonObject { put("url", linkUrl.trim()) }, linkUrl.trim())
                         }
                     }

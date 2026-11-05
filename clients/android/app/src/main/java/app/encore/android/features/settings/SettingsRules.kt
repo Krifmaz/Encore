@@ -1,17 +1,19 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.str
-import app.encore.android.core.strings
+import dev.krifmaz.kit.compose.settings.DiagnosticsRules
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
+import dev.krifmaz.kit.compose.core.strings
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlin.math.floor
+import dev.krifmaz.kit.compose.settings.SchemaRules
 
 // The words and decisions of the hand-written Settings pages, apart from Compose so they can be tested: the same
 // rules and sentences as the web (the web-rs/src/settings files and the pages they embed).
@@ -330,28 +332,14 @@ object SettingsRules {
 
     // ---- Diagnostics -----------------------------------------------------------------------------------------
 
-    val CHECK_KINDS: List<Pair<String, String>> = listOf("service" to "Connections", "path" to "Folders & permissions", "tool" to "Tools in the container")
+    // the check kinds and crash words are the kit's (kit-compose settings.DiagnosticsRules), shared by every app
+    val CHECK_KINDS: List<Pair<String, String>> = DiagnosticsRules.CHECK_KINDS
 
     /** App crash report kinds, the web's words. */
-    fun crashKind(k: String): String = when (k) {
-        "crash" -> "Crash"
-        "native" -> "Native crash"
-        "anr" -> "Not responding"
-        "low_memory" -> "Closed for memory"
-        "signaled" -> "Killed by the system"
-        "web" -> "Web page"
-        "" -> "Crash"
-        else -> k
-    }
+    fun crashKind(k: String): String = DiagnosticsRules.crashKind(k)
 
-    /**
-     * An app crash as text, for its dialog and Copy (diagnostics.rs `crash_text`): the first line, the kind, device /
-     * app / os / user and the time, then the whole report.
-     */
-    fun crashText(first: String, kind: String, meta: String, time: String, text: String): String {
-        val head = listOf(first, kind, meta, time).filter { it.isNotEmpty() }.joinToString("\n")
-        return if (text.isBlank()) head else head + "\n\n" + text.trimEnd()
-    }
+    /** An app crash as text, for its dialog and Copy (diagnostics.rs `crash_text`). */
+    fun crashText(first: String, kind: String, meta: String, time: String, text: String): String = DiagnosticsRules.crashText(first, kind, meta, time, text)
 
     /** The Server block (`machine` of the diagnostics answer) as (label, value) rows; [size] formats bytes. */
     fun serverRows(s: JsonObject, size: (Double) -> String): List<Pair<String, String>> {

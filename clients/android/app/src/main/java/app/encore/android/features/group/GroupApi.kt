@@ -1,8 +1,8 @@
 package app.encore.android.features.group
 
-import app.encore.android.core.long
-import app.encore.android.core.objects
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.objects
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.EncoreApi
 import kotlinx.serialization.json.JsonArray

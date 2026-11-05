@@ -1,22 +1,22 @@
 package app.encore.android.data.repo
 
-import app.encore.android.core.Checked
-import app.encore.android.core.Items
-import app.encore.android.core.LBool
-import app.encore.android.core.LBoolOrNull
-import app.encore.android.core.LDouble
-import app.encore.android.core.LInt
-import app.encore.android.core.LLong
-import app.encore.android.core.LObject
-import app.encore.android.core.LString
-import app.encore.android.core.LTexts
-import app.encore.android.core.LYear
-import app.encore.android.core.Nested
-import app.encore.android.core.arr
-import app.encore.android.core.decodeModel
-import app.encore.android.core.obj
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.Checked
+import dev.krifmaz.kit.compose.core.Items
+import dev.krifmaz.kit.compose.core.LBool
+import dev.krifmaz.kit.compose.core.LBoolOrNull
+import dev.krifmaz.kit.compose.core.LDouble
+import dev.krifmaz.kit.compose.core.LInt
+import dev.krifmaz.kit.compose.core.LLong
+import dev.krifmaz.kit.compose.core.LObject
+import dev.krifmaz.kit.compose.core.LString
+import dev.krifmaz.kit.compose.core.LTexts
+import dev.krifmaz.kit.compose.core.LYear
+import dev.krifmaz.kit.compose.core.Nested
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.decodeModel
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.Track
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
@@ -35,6 +35,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.IOException
 import java.util.Date
+import dev.krifmaz.kit.compose.core.formatAgo
 
 // Rows of the Discover / For you / Requests / Picker / Account / Leaderboard pages (web/js/pages/*.js), as
 // @Serializable models read leniently (app.encore.android.core, Json.kt): the `L…` field types turn a missing, null
@@ -71,19 +72,6 @@ fun statusLabel(status: String): String = REQUEST_STATUS[status]?.second ?: stat
 fun statusKind(status: String): String = REQUEST_STATUS[status]?.first ?: ""
 
 // ---- web/js/ui.js fmt.ago ------------------------------------------------------------------------------------
-
-/** `fmt.ago`: "just now", "5m ago", "3h ago", "12d ago", else the date; "never" for nothing. */
-fun formatAgo(epochSeconds: Double): String {
-    if (epochSeconds <= 0.0) return "never"
-    val d = System.currentTimeMillis() / 1000.0 - epochSeconds
-    return when {
-        d < 60 -> "just now"
-        d < 3600 -> "${(d / 60).toInt()}m ago"
-        d < 86400 -> "${(d / 3600).toInt()}h ago"
-        d < 86400 * 30 -> "${(d / 86400).toInt()}d ago"
-        else -> java.text.DateFormat.getDateInstance(java.text.DateFormat.SHORT).format(Date((epochSeconds * 1000).toLong()))
-    }
-}
 
 // ---- reading the answers ------------------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 package app.encore.android.features.requests
 
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.decodeModel
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.decodeModel
 import app.encore.android.data.repo.VideoJob
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -12,7 +12,7 @@ import org.junit.Test
 /** The server's answers about a video downloaded for this phone (GET /api/video-links/{id}), read leniently. */
 class VideoJobTest {
     private fun job(json: String): VideoJob =
-        (EncoreJson.parseToJsonElement(json) as JsonObject).decodeModel(VideoJob.serializer())!!
+        (KitJson.parseToJsonElement(json) as JsonObject).decodeModel(VideoJob.serializer())!!
 
     @Test
     fun readyJobCarriesItsNameAndSize() {

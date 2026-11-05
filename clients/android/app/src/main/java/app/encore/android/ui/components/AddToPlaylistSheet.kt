@@ -44,6 +44,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.KitButton
 
 /**
  * The web's `addToPlaylistModal` (web/js/pages/playlists.js) as a bottom sheet: pick a playlist, or type a name
@@ -124,7 +126,7 @@ fun AddToPlaylistSheet(api: EncoreApi, trackIds: List<Long>, onDismiss: () -> Un
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(10.dp))
-                EncoreButton("Create", iconRes = R.drawable.ic_add, enabled = !busy, onClick = { create() })
+                KitButton("Create", iconRes = R.drawable.ic_add, enabled = !busy, onClick = { create() })
             }
         }
     }

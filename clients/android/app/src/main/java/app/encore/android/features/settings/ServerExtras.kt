@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,14 +27,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.obj
-import app.encore.android.core.parseJsonObject
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.SettingsApi
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -44,6 +45,16 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import dev.krifmaz.kit.compose.settings.CardHead
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaCardScope
+import dev.krifmaz.kit.compose.settings.SchemaFormState
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SecureWindow
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.TextLink
 
 // What the source cards (plugin cards on Settings → Plugins since 0.32) and the Server processing card show besides
 // their fields (web-rs/src/settings/apps.rs): the Soulseek engine's status and the VPN's state with Test VPN, the

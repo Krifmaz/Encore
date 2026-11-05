@@ -1,7 +1,7 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.decodeModel
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.decodeModel
 import app.encore.android.data.repo.CatalogAlbum
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -26,7 +26,7 @@ class SingleRulesTest {
         assertEquals("", SingleRules.subtitle("", "", 0))
     }
 
-    private fun release(json: String): CatalogAlbum = (EncoreJson.parseToJsonElement(json) as JsonObject).decodeModel(CatalogAlbum.serializer())!!
+    private fun release(json: String): CatalogAlbum = (KitJson.parseToJsonElement(json) as JsonObject).decodeModel(CatalogAlbum.serializer())!!
 
     @Test
     fun aDiscographyReleaseCarriesItsLibrarySongCount() {

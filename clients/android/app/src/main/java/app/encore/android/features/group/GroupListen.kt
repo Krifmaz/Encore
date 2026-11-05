@@ -4,12 +4,12 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.SystemClock
 import app.encore.android.AppGraph
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ApiException
 import app.encore.android.data.api.Track
 import app.encore.android.graph
 import app.encore.android.remote.RemoteDevice
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

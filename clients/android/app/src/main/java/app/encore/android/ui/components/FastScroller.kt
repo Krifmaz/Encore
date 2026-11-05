@@ -43,9 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.encore.android.core.int
-import app.encore.android.core.objects
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.objects
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException

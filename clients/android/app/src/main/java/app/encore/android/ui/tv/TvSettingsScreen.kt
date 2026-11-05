@@ -14,10 +14,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import app.encore.android.features.settings.Muted
+import dev.krifmaz.kit.compose.settings.Muted
 import app.encore.android.features.settings.SegRow
-import app.encore.android.features.settings.SetCard
-import app.encore.android.features.settings.SettingsPage
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * The TV page: Layout (the TV layout or the phone one), Player side (which side the TV player's controls take; the

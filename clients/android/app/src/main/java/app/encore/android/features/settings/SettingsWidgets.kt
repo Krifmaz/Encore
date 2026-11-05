@@ -69,7 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import app.encore.android.R
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -79,81 +79,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.krifmaz.kit.compose.settings.Muted
 
 // The pieces the Settings pages share: the page frame with its back arrow, the web's cards, switches, drop-downs,
 // segmented choices, stat tiles and result lines, the browser tab for sign-ins, and the clipboard.
-
-/** One Settings page: a back arrow and the title, then [content] in a scrolling column with the page gutter. */
-@Composable
-fun SettingsPage(
-    title: String,
-    onBack: () -> Unit,
-    subtitle: String = "",
-    /** false: the content brings its own side gutter (sections shared with other screens) */
-    gutter: Boolean = true,
-    actions: @Composable () -> Unit = {},
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    BackHandler(onBack = onBack)
-    val p = MaterialTheme.palette
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "Back") }
-            Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            actions()
-        }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = if (gutter) 16.dp else 0.dp)) {
-            if (subtitle.isNotEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = p.muted, modifier = Modifier.padding(bottom = 12.dp))
-            content()
-            Spacer(Modifier.height(32.dp))
-        }
-    }
-}
-
-/** The web's `.card` (or `.card.flat` for the blocks inside a card): a bordered panel with its content in a column. */
-@Composable
-fun SetCard(modifier: Modifier = Modifier, flat: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
-    val p = MaterialTheme.palette
-    val shape = RoundedCornerShape(if (flat) 10.dp else 14.dp)
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(if (flat) p.panel2 else p.panel)
-            .border(1.dp, p.border, shape)
-            .padding(horizontal = 14.dp, vertical = if (flat) 12.dp else 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        content = content,
-    )
-}
-
-/** A card's h2 with an optional small button on the right. */
-@Composable
-fun CardHead(title: String, modifier: Modifier = Modifier, trailing: @Composable () -> Unit = {}) {
-    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        trailing()
-    }
-}
-
-/** The web's `.section-head` inside a page: an h2 and an optional line under it. */
-@Composable
-fun PageSection(title: String, subtitle: String = "", trailing: @Composable () -> Unit = {}) {
-    Row(Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleLarge)
-            if (subtitle.isNotEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.palette.muted)
-        }
-        trailing()
-    }
-}
-
-/** Small muted text (`.small.muted`). */
-@Composable
-fun Muted(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.palette.muted) {
-    if (text.isEmpty()) return
-    Text(text, style = MaterialTheme.typography.bodySmall, color = color, modifier = modifier)
-}
 
 /**
  * Under a setting an environment variable sets, on the hand-written pages (as schema_form.rs `source_note`):
@@ -173,12 +102,6 @@ fun EnvLockedNote(env: String, modifier: Modifier = Modifier.padding(top = 4.dp)
         color = EncoreColors.Info,
         modifier = modifier,
     )
-}
-
-/** Monospaced small text (`.mono`, `.code`). */
-@Composable
-fun Mono(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.palette.text) {
-    Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = color, modifier = modifier)
 }
 
 /** The web's `label.switch`: a switch with its label (and the help line under it). */
@@ -285,23 +208,6 @@ fun ResultBox(ok: Boolean, message: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** The status dot of a list row (`.dot ok|err`). */
-@Composable
-fun Dot(ok: Boolean, modifier: Modifier = Modifier) {
-    Box(modifier.size(9.dp).clip(CircleShape).background(if (ok) EncoreColors.Ok else EncoreColors.Err))
-}
-
-/** A link-like text button (`a.small`). */
-@Composable
-fun TextLink(text: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.palette.accent, enabled: Boolean = true, onClick: () -> Unit) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodySmall,
-        color = color,
-        modifier = modifier.clip(RoundedCornerShape(4.dp)).clickable(enabled = enabled, onClick = onClick).padding(vertical = 4.dp, horizontal = 2.dp).alpha(if (enabled) 1f else 0.5f),
-    )
-}
-
 /** The seconds since 1970, ticking every [everyMs] so "3 min ago" lines move on. */
 @Composable
 fun rememberNow(everyMs: Long = 30_000L): Double {
@@ -354,57 +260,6 @@ suspend fun State<Boolean>.awaitOnScreen() {
     if (!value) snapshotFlow { value }.first { it }
 }
 
-/** Windows kept secure, with how many places asked for it (the flag goes when the last one lets go). */
-private val secureHolds = java.util.WeakHashMap<Window, Int>()
-
-/**
- * While [on] (a secret is shown as text), the window is kept out of screenshots and of the Recents thumbnail
- * (FLAG_SECURE), as a password field would be.
- */
-@Composable
-fun SecureWindow(on: Boolean) {
-    if (!on) return
-    val context = LocalContext.current
-    DisposableEffect(context) {
-        val window = context.findActivity()?.window
-        if (window != null) {
-            val n = secureHolds[window] ?: 0
-            secureHolds[window] = n + 1
-            if (n == 0) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        }
-        onDispose {
-            if (window != null) {
-                val left = (secureHolds[window] ?: 1) - 1
-                if (left <= 0) {
-                    secureHolds.remove(window)
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                } else {
-                    secureHolds[window] = left
-                }
-            }
-        }
-    }
-}
-
-/**
- * Runs a blocking server call on the IO dispatcher from a button: [ok] is toasted when it worked and [after] gets
- * the answer; the server's words are toasted (or given to [onError]) when it did not.
- */
-fun <T> CoroutineScope.serverCall(ok: String = "", onError: ((String) -> Unit)? = null, after: (T) -> Unit = {}, call: () -> T) {
-    launch {
-        try {
-            val r = withContext(Dispatchers.IO) { call() }
-            if (ok.isNotEmpty()) Toasts.show(ok, "ok")
-            after(r)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val msg = e.message ?: "Something went wrong"
-            if (onError != null) onError(msg) else Toasts.show(msg, "err")
-        }
-    }
-}
-
 /**
  * Opens a sign-in page in a browser tab over the app (a Custom Tab where the browser has them; any browser page
  * otherwise). androidx.browser is not a dependency: the Custom Tabs protocol is an ACTION_VIEW intent carrying the
@@ -441,24 +296,6 @@ private fun Context.findActivity(): Activity? {
     }
     return null
 }
-
-/**
- * Puts text on the clipboard ("Copied to clipboard", or "Copy failed – select and copy manually"); [sensitive] hides
- * it from the keyboard's clipboard preview. True when it worked (a sheet or dialog above the toasts says so itself).
- */
-fun copyToClipboard(context: Context, text: String, sensitive: Boolean = false): Boolean =
-    try {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: throw IllegalStateException()
-        val clip = ClipData.newPlainText("Encore", text)
-        // ClipDescription.EXTRA_IS_SENSITIVE (API 33); older versions ignore the extra
-        if (sensitive) clip.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
-        cm.setPrimaryClip(clip)
-        Toasts.show("Copied to clipboard", "ok")
-        true
-    } catch (_: Exception) {
-        Toasts.show(Toasts.COPY_FAILED, "err")
-        false
-    }
 
 /** The web's modal with a form: a title, the fields, Cancel / Close and the main button (none when [okLabel] is empty). */
 @Composable

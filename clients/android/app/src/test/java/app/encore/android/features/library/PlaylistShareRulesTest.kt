@@ -1,6 +1,6 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import app.encore.android.data.api.Playlist
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaylistShareRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
 
     @Test
     fun theTileSaysShared() {

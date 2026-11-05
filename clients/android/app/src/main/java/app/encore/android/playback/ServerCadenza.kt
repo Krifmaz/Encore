@@ -4,7 +4,7 @@ import android.os.Handler
 import androidx.media3.exoplayer.ExoPlayer
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.prefs.PlaybackPrefs
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.toasts.Toasts
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 

@@ -2,9 +2,9 @@ package app.encore.android.remote
 
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.EncoreApi
 import app.encore.android.data.api.Track
 import app.encore.android.data.prefs.NormPrefs

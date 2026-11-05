@@ -1,9 +1,9 @@
 package app.encore.android.features.settings
 
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import kotlinx.serialization.json.JsonObject
 
 /** The words of Settings → Language that follow from GET /api/translate/status (translate.rs on the web). */

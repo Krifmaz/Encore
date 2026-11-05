@@ -22,29 +22,34 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import app.encore.android.CrashLog
+import app.encore.android.bugReports
+import app.encore.android.crashHost
+import app.encore.android.ui.bugHost
+import dev.krifmaz.kit.compose.bugs.CrashLog
 import app.encore.android.R
 import app.encore.android.data.session.AuthKind
-import app.encore.android.features.bugs.BugReportsEntry
-import app.encore.android.features.bugs.BugRules
-import app.encore.android.features.bugs.CrashLogReport
-import app.encore.android.features.bugs.saveExport
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.bugs.BugReportsEntry
+import dev.krifmaz.kit.compose.bugs.BugRules
+import dev.krifmaz.kit.compose.bugs.CrashLogReport
+import dev.krifmaz.kit.compose.bugs.saveExport
+import dev.krifmaz.kit.compose.toasts.Toasts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import app.encore.android.features.offline.OfflineStorageSection
-import app.encore.android.features.update.UpdatesSection
+import dev.krifmaz.kit.compose.update.UpdatesSection
 import app.encore.android.remote.RemoteDevice
 import app.encore.android.remote.RemoteUi
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * Settings → This device: what belongs to this phone and not to the account – the server it is signed in to, the
@@ -62,7 +67,7 @@ fun ThisDeviceScreen(nav: Nav, onBack: () -> Unit) {
             OfflineStorageSection(nav)
             UpdatesSection()
             // the reports to the admin, with the count of those that have something new (features/bugs)
-            BugReportsEntry(nav)
+            BugReportsEntry(nav.bugHost)
             CrashReports(nav)
         }
     }
@@ -147,7 +152,7 @@ private fun CrashReports(nav: Nav) {
                 sending = true
                 scope.launch {
                     try {
-                        withContext(Dispatchers.IO) { CrashLogReport.send(nav.graph) }
+                        withContext(Dispatchers.IO) { CrashLogReport.send(nav.graph.app, nav.graph.bugReports) }
                         Toasts.show("Crash log sent to the admin")
                     } catch (e: CancellationException) {
                         throw e
@@ -174,7 +179,7 @@ private fun CrashReports(nav: Nav) {
             Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Muted("Waiting to send: $waiting", Modifier.weight(1f), color = p.text)
                 SmallButton("Send now", iconRes = R.drawable.ic_refresh) {
-                    CrashLog.uploadPending(nav.graph.app, nav.graph)
+                    CrashLog.uploadPending(nav.graph.app, nav.graph.crashHost)
                     version += 1
                 }
             }

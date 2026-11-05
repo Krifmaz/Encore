@@ -37,21 +37,21 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.Translations
 import app.encore.android.data.api.settingsApi
 import app.encore.android.data.session.Settings
 import app.encore.android.data.session.ThemeChoice
 import app.encore.android.ui.Nav
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.Appearance
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -60,6 +60,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
 
 /**
  * Settings → Appearance (web-rs/src/settings/appearance.rs): presets, theme (Encore, Dark, OLED black, Light, Match
@@ -170,7 +173,7 @@ fun AppearanceScreen(nav: Nav, serverPrefs: Boolean, onBack: () -> Unit) {
             SegRow(listOf("fade" to "Faded colour", "solid" to "Solid"), s.background) { set(background = it) }
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 8.dp)) {
-                EncoreButton("Example button", iconRes = R.drawable.ic_check, primary = true) {}
+                KitButton("Example button", iconRes = R.drawable.ic_check, primary = true) {}
                 Badge("Example badge", kind = "accent")
             }
         }

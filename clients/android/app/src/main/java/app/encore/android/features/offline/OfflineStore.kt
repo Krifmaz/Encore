@@ -13,10 +13,10 @@ import android.os.Environment
 import android.os.StatFs
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
-import app.encore.android.CrashLog
-import app.encore.android.core.arr
-import app.encore.android.core.parseJsonObject
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.bugs.CrashLog
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.parseJsonObject
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.ArtistCredit
 import app.encore.android.data.api.Track
 import app.encore.android.graph
@@ -37,6 +37,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import dev.krifmaz.kit.compose.offline.OutboxFile
 
 /**
  * Songs saved on this phone (0.30, offline-manifest.md "Phone"): the audio in `Music/Encore/<Artist>/<Album>/`

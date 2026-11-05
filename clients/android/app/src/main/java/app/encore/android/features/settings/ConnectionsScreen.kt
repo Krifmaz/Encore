@@ -1,5 +1,6 @@
 package app.encore.android.features.settings
 
+import dev.krifmaz.kit.compose.settings.serverCall
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -27,22 +28,22 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.obj
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.api.SettingsApi
 import app.encore.android.data.api.settingsApi
-import app.encore.android.data.repo.formatAgo
+import dev.krifmaz.kit.compose.core.formatAgo
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.ErrorBox
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
-import app.encore.android.ui.screens.ConfirmDialog
-import app.encore.android.ui.screens.Spinner
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.ErrorBox
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException
@@ -56,6 +57,13 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import dev.krifmaz.kit.compose.details.copyToClipboard
+import dev.krifmaz.kit.compose.settings.Mono
+import dev.krifmaz.kit.compose.settings.Muted
+import dev.krifmaz.kit.compose.settings.SchemaRules
+import dev.krifmaz.kit.compose.settings.SetCard
+import dev.krifmaz.kit.compose.settings.SettingsPage
+import dev.krifmaz.kit.compose.settings.TextLink
 
 /** A sign-in waiting in a browser tab (Spotify, Tidal, Last.fm, Plex): what the dialog shows and what it polls. */
 private class Waiting(val svc: String, val label: String, val url: String, val pinId: JsonElement? = null) {
@@ -155,7 +163,7 @@ fun ConnectionsScreen(nav: Nav, admin: Boolean, onBack: () -> Unit) {
         val sync = data.obj("sync")
         val last = if (sync != null && SchemaRules.truthy(sync["last"])) " Last sync ${formatAgo(sync.dbl("last"))}." else ""
         Muted("Link your accounts so likes and playlists stay the same in Finamp, Plexamp, Navidrome and here.$last", Modifier.padding(bottom = 10.dp))
-        EncoreButton("Sync now", iconRes = R.drawable.ic_refresh, primary = true, enabled = !syncing, modifier = Modifier.padding(bottom = 14.dp)) {
+        KitButton("Sync now", iconRes = R.drawable.ic_refresh, primary = true, enabled = !syncing, modifier = Modifier.padding(bottom = 14.dp)) {
             syncing = true
             scope.launch {
                 try {
@@ -224,7 +232,7 @@ fun ConnectionsScreen(nav: Nav, admin: Boolean, onBack: () -> Unit) {
             }
         }
         FormDialog("Sign in to ${w.label}", onDismiss = { waiting = null }) {
-            EncoreButton("Open ${w.label} sign-in", iconRes = R.drawable.ic_link, primary = true) { openSignInTab(context, w.url, p.bg) }
+            KitButton("Open ${w.label} sign-in", iconRes = R.drawable.ic_link, primary = true) { openSignInTab(context, w.url, p.bg) }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Spinner(14.dp)
                 Spacer(Modifier.width(8.dp))
@@ -312,7 +320,7 @@ private fun ServiceCard(
                     SmallButton("Disconnect") { onDisconnect() }
                 }
             }
-            available -> EncoreButton("Connect", iconRes = R.drawable.ic_link) { onConnect() }
+            available -> KitButton("Connect", iconRes = R.drawable.ic_link) { onConnect() }
             else -> Muted("Not set up yet – an admin needs to add it in Settings.", color = p.faint)
         }
     }
@@ -375,7 +383,7 @@ private fun LastfmDialog(api: SettingsApi, onDismiss: () -> Unit, onSignIn: () -
     FormDialog("Connect Last.fm", onDismiss = onDismiss) {
         Muted("Sign in on last.fm and allow Encore – then everything you play here is scrobbled, and For you suggests artists from your listening.")
         Muted("Only approve Encore on Last.fm when you started the sign-in yourself.")
-        EncoreButton("Sign in with Last.fm", iconRes = R.drawable.ic_link, primary = true) { onSignIn() }
+        KitButton("Sign in with Last.fm", iconRes = R.drawable.ic_link, primary = true) { onSignIn() }
         TextLink("Or just enter a username (loved tracks and recommendations, no scrobbling)", color = MaterialTheme.palette.muted) { more = !more }
         if (more) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -424,7 +432,7 @@ private fun YtMusicDialog(api: SettingsApi, oauth: Boolean, onDismiss: () -> Uni
             Muted("You'll get a short code to enter at google.com/device with the Google account you use for YouTube Music.")
             val c = code
             if (c == null) {
-                EncoreButton("Get code", iconRes = R.drawable.ic_link, primary = true, enabled = !starting) {
+                KitButton("Get code", iconRes = R.drawable.ic_link, primary = true, enabled = !starting) {
                     starting = true
                     scope.launch {
                         try {
@@ -457,7 +465,7 @@ private fun YtMusicDialog(api: SettingsApi, oauth: Boolean, onDismiss: () -> Uni
             Muted("2. Click around, find a browse request (POST), right-click → Copy → Copy request headers.")
             Muted("3. Paste below.")
             FormField("", headers, { headers = it }, placeholder = "accept: */*\ncookie: …", minLines = 6, mono = true)
-            EncoreButton("Connect", primary = true, enabled = headers.isNotBlank()) {
+            KitButton("Connect", primary = true, enabled = headers.isNotBlank()) {
                 scope.serverCall(after = { r: JsonObject ->
                     Toasts.show("YouTube Music connected (${r.str("account")})", "ok")
                     onDone()
@@ -486,7 +494,7 @@ private fun RemotePlaylistsDialog(api: SettingsApi, svc: String, label: String, 
         }
     }
     FormDialog("Playlists on $label", onDismiss = onDismiss, cancelLabel = "Close") {
-        SettingsRules.likedUrl(svc)?.let { url -> EncoreButton("♥ Import Liked Songs") { onLiked(url) } }
+        SettingsRules.likedUrl(svc)?.let { url -> KitButton("♥ Import Liked Songs") { onLiked(url) } }
         val list = rows
         when {
             error.isNotEmpty() -> Text(error, style = MaterialTheme.typography.bodySmall, color = EncoreColors.Err)

@@ -1,13 +1,13 @@
 package app.encore.android.features.library
 
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /** "Get the rest of the album" for albums MusicBrainz doesn't list: the same answers and words as the web and the desktop. */
 class RestOfAlbumRulesTest {
-    private fun obj(json: String): JsonObject = EncoreJson.parseToJsonElement(json) as JsonObject
+    private fun obj(json: String): JsonObject = KitJson.parseToJsonElement(json) as JsonObject
 
     @Test
     fun whereTheAlbumWasFound() {

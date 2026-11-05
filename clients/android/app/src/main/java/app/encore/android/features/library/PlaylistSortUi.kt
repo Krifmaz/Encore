@@ -25,9 +25,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import app.encore.android.R
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.PopMenu
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.PopMenu
 import app.encore.android.ui.theme.palette
 
 /**

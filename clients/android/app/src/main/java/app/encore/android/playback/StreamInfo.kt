@@ -1,7 +1,7 @@
 package app.encore.android.playback
 
 import android.os.Bundle
-import app.encore.android.core.EncoreJson
+import dev.krifmaz.kit.compose.core.KitJson
 import kotlinx.serialization.Serializable
 
 /**
@@ -53,7 +53,7 @@ data class StreamInfo(
     /** the gain normalization applies to this song in dB (0 = none: off, no data, bit-perfect) */
     val normDb: Double = 0.0,
 ) {
-    fun toBundle(): Bundle = Bundle().apply { putString(KEY, EncoreJson.encodeToString(serializer(), this@StreamInfo)) }
+    fun toBundle(): Bundle = Bundle().apply { putString(KEY, KitJson.encodeToString(serializer(), this@StreamInfo)) }
 
     companion object {
         /** The session extra holding the JSON. */
@@ -62,7 +62,7 @@ data class StreamInfo(
         /** What [toBundle] wrote; null for extras without it. */
         fun from(b: Bundle?): StreamInfo? {
             val text = b?.getString(KEY) ?: return null
-            return try { EncoreJson.decodeFromString(serializer(), text) } catch (_: Exception) { null }
+            return try { KitJson.decodeFromString(serializer(), text) } catch (_: Exception) { null }
         }
     }
 }

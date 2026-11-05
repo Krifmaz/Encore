@@ -1,15 +1,16 @@
 package app.encore.android.data.api
 
-import app.encore.android.core.EncoreJson
-import app.encore.android.core.arr
-import app.encore.android.core.bool
-import app.encore.android.core.dbl
-import app.encore.android.core.int
-import app.encore.android.core.long
-import app.encore.android.core.obj
-import app.encore.android.core.objects
-import app.encore.android.core.objectsOf
-import app.encore.android.core.str
+import dev.krifmaz.kit.compose.core.KitApi
+import dev.krifmaz.kit.compose.core.KitJson
+import dev.krifmaz.kit.compose.core.arr
+import dev.krifmaz.kit.compose.core.bool
+import dev.krifmaz.kit.compose.core.dbl
+import dev.krifmaz.kit.compose.core.int
+import dev.krifmaz.kit.compose.core.long
+import dev.krifmaz.kit.compose.core.obj
+import dev.krifmaz.kit.compose.core.objects
+import dev.krifmaz.kit.compose.core.objectsOf
+import dev.krifmaz.kit.compose.core.str
 import app.encore.android.data.session.AuthKind
 import app.encore.android.data.session.Session
 import app.encore.android.data.session.SessionStore
@@ -32,7 +33,8 @@ import java.io.IOException
 import java.net.URLEncoder
 
 /** An HTTP error from the server, with its `detail` message and the JSON body (e.g. `{two_factor: true}`). */
-class ApiException(val code: Int, message: String, val body: JsonObject?) : IOException(message)
+/** An HTTP error from the server, with its `detail` message and JSON body (the kit's, shared with its screens). */
+typealias ApiException = dev.krifmaz.kit.compose.core.ApiException
 
 sealed interface LoginResult {
     data class Success(val session: Session, val user: User) : LoginResult
@@ -45,14 +47,14 @@ sealed interface LoginResult {
  * The Encore REST API (server/src/routes). Every call is blocking: callers run it on Dispatchers.IO or on the
  * playback service's executor. Responses are parsed leniently (see Models.kt).
  */
-class EncoreApi(private val client: OkHttpClient, private val store: SessionStore) {
-    val json: Json = EncoreJson
+class EncoreApi(private val client: OkHttpClient, private val store: SessionStore) : KitApi {
+    val json: Json = KitJson
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     /** The signed-in server ("" when signed out). */
     val base: String get() = store.current?.server ?: ""
 
-    fun url(path: String): String = base + path
+    override fun url(path: String): String = base + path
 
     /**
      * An album cover at a thumbnail size (the server snaps to 96, 200, 400, 600, 1000: list rows 96/200, grids 400,
@@ -500,14 +502,14 @@ class EncoreApi(private val client: OkHttpClient, private val store: SessionStor
 
     // ---- plumbing --------------------------------------------------------------------------------------
 
-    fun get(path: String): JsonElement? = call("GET", url(path), null)
+    override fun get(path: String): JsonElement? = call("GET", url(path), null)
 
     fun getObject(path: String): JsonObject = get(path) as? JsonObject ?: JsonObject(emptyMap())
 
-    fun post(path: String, body: JsonElement): JsonElement? = call("POST", url(path), body)
+    override fun post(path: String, body: JsonElement): JsonElement? = call("POST", url(path), body)
 
     /** Raw GET of a server path (covers): the caller closes the response. */
-    fun rawGet(path: String): okhttp3.Response {
+    override fun rawGet(path: String): okhttp3.Response {
         if (base.isEmpty()) throw IOException("Not signed in")
         return client.newCall(Request.Builder().url(url(path)).build()).execute()
     }

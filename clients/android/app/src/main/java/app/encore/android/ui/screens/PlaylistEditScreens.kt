@@ -59,23 +59,23 @@ import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistMergeRules
 import app.encore.android.features.library.PlaylistShareRules
-import app.encore.android.features.settings.copyToClipboard
+import dev.krifmaz.kit.compose.details.copyToClipboard
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.Badge
-import app.encore.android.ui.components.ChoiceRow
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.EncoreButton
+import dev.krifmaz.kit.compose.widgets.Badge
+import dev.krifmaz.kit.compose.widgets.ChoiceRow
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.KitButton
 import app.encore.android.ui.components.EncoreTopBar
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.Loadable
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MenuSeparator
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.RowDivider
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MenuSeparator
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.RowDivider
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
@@ -83,6 +83,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.krifmaz.kit.compose.widgets.CardBox
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.KitField
+import dev.krifmaz.kit.compose.widgets.Spinner
 
 // Playlist editing (web/js/pages/playlists.js): create, rename, delete, reorder, remove songs, import from a link
 // or a pasted list, request the missing songs. The read-only Playlists / Playlist pages (design part) open these
@@ -118,7 +122,7 @@ fun NewPlaylistDialog(onDismiss: () -> Unit, onOk: (name: String, collaborative:
         title = { Text("New playlist") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                EncoreField(name, { name = it }, imeAction = ImeAction.Done, onAction = { onDismiss(); onOk(name, collaborative) }, modifier = Modifier.fillMaxWidth())
+                KitField(name, { name = it }, imeAction = ImeAction.Done, onAction = { onDismiss(); onOk(name, collaborative) }, modifier = Modifier.fillMaxWidth())
                 Row(
                     Modifier.fillMaxWidth().toggleable(value = collaborative, role = Role.Checkbox, onValueChange = { collaborative = it }),
                     verticalAlignment = Alignment.CenterVertically,
@@ -149,7 +153,7 @@ fun NameDialog(title: String, initial: String, okLabel: String, placeholder: Str
         containerColor = p.panel,
         titleContentColor = p.text,
         title = { Text(title) },
-        text = { EncoreField(name, { name = it }, placeholder = placeholder, imeAction = ImeAction.Done, onAction = { onDismiss(); onOk(name) }, modifier = Modifier.fillMaxWidth()) },
+        text = { KitField(name, { name = it }, placeholder = placeholder, imeAction = ImeAction.Done, onAction = { onDismiss(); onOk(name) }, modifier = Modifier.fillMaxWidth()) },
         confirmButton = { TextButton(onClick = { onDismiss(); onOk(name) }) { Text(okLabel, color = p.text, fontWeight = FontWeight.SemiBold) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = p.muted) } },
     )
@@ -168,9 +172,9 @@ fun AlbumChoiceDialog(title: String, onDismiss: () -> Unit, onPick: (albumMode: 
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("When a song is part of an album:", style = MaterialTheme.typography.bodyMedium)
-                EncoreButton("Just the song", iconRes = R.drawable.ic_note, modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick("song") }
-                EncoreButton("Download the whole album (best quality available)", iconRes = R.drawable.ic_disc, modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick("album") }
-                EncoreButton("Use the admin default", modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick(null) }
+                KitButton("Just the song", iconRes = R.drawable.ic_note, modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick("song") }
+                KitButton("Download the whole album (best quality available)", iconRes = R.drawable.ic_disc, modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick("album") }
+                KitButton("Use the admin default", modifier = Modifier.fillMaxWidth()) { onDismiss(); onPick(null) }
             }
         },
         confirmButton = {},
@@ -222,7 +226,7 @@ fun MergeIntoDialog(nav: Nav, id: Long, name: String, onDismiss: () -> Unit) {
                     LazyColumn(Modifier.fillMaxWidth().height(if (targets.size > 5) 280.dp else (targets.size.coerceAtLeast(1) * 52).dp)) {
                         items(targets.size) { i ->
                             val pl = targets[i]
-                            EncoreButton(PlaylistMergeRules.label(pl), enabled = !busy, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { merge(pl.id, pl.name) }
+                            KitButton(PlaylistMergeRules.label(pl), enabled = !busy, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) { merge(pl.id, pl.name) }
                         }
                     }
                 }
@@ -575,14 +579,14 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
             item {
                 Column(Modifier.padding(horizontal = Gutter)) {
                     if (mode == 0) {
-                        EncoreField(url, { url = it }, placeholder = "YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…", leadingIcon = R.drawable.ic_link, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, onAction = { doPreview() }, modifier = Modifier.fillMaxWidth())
+                        KitField(url, { url = it }, placeholder = "YouTube Music, Spotify, Deezer, Tidal, Apple Music, Amazon Music, Qobuz, YouTube (Music), SoundCloud, Bandcamp, ListenBrainz…", leadingIcon = R.drawable.ic_link, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, onAction = { doPreview() }, modifier = Modifier.fillMaxWidth())
                         Text(
                             "Connect Spotify/Tidal on the Connections page to import private playlists and Liked Songs (e.g. https://music.youtube.com/playlist?list=LM or https://open.spotify.com/collection/tracks). Amazon Music playlists and albums import from their public share links.",
                             style = MaterialTheme.typography.bodySmall, color = p.faint, modifier = Modifier.padding(top = 6.dp),
                         )
                     } else {
                         val long = text.lines().size > ImportListRows
-                        EncoreField(
+                        KitField(
                             text,
                             {
                                 if (isLongPaste(text, it)) listOpen = false
@@ -615,7 +619,7 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
                         }
                     }
                     if (dest == null) {
-                        EncoreField(name, { name = it }, placeholder = "Playlist name (optional)", modifier = Modifier.fillMaxWidth())
+                        KitField(name, { name = it }, placeholder = "Playlist name (optional)", modifier = Modifier.fillMaxWidth())
                         if (mode == 0) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Switch(checked = follow, onCheckedChange = { follow = it })
@@ -631,8 +635,8 @@ fun PlaylistImportScreen(nav: Nav, into: Long?, startUrl: String = "", startRequ
                         albumModes.forEachIndexed { i, (_, label) -> Badge(label, kind = if (i == albumMode) "accent" else "", onClick = { albumMode = i }) }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        EncoreButton("Preview", iconRes = R.drawable.ic_search, enabled = !previewing && !importing) { doPreview() }
-                        EncoreButton(if (importing) "Importing…" else "Import", iconRes = R.drawable.ic_download, primary = true, enabled = !importing && (if (mode == 0) url.isNotBlank() else text.isNotBlank())) { doImport() }
+                        KitButton("Preview", iconRes = R.drawable.ic_search, enabled = !previewing && !importing) { doPreview() }
+                        KitButton(if (importing) "Importing…" else "Import", iconRes = R.drawable.ic_download, primary = true, enabled = !importing && (if (mode == 0) url.isNotBlank() else text.isNotBlank())) { doImport() }
                     }
                 }
             }

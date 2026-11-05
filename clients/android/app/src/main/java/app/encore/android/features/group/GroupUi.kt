@@ -63,17 +63,17 @@ import androidx.compose.ui.unit.sp
 import app.encore.android.R
 import app.encore.android.ui.Nav
 import app.encore.android.ui.components.Avatar
-import app.encore.android.ui.components.Badge
+import dev.krifmaz.kit.compose.widgets.Badge
 import app.encore.android.ui.components.Cover
-import app.encore.android.ui.components.EncoreButton
-import app.encore.android.ui.components.Gutter
-import app.encore.android.ui.components.MenuEntry
-import app.encore.android.ui.components.MoreButton
-import app.encore.android.ui.components.SectionHead
-import app.encore.android.ui.components.SmallButton
-import app.encore.android.ui.components.Toasts
+import dev.krifmaz.kit.compose.widgets.KitButton
+import dev.krifmaz.kit.compose.widgets.Gutter
+import dev.krifmaz.kit.compose.widgets.MenuEntry
+import dev.krifmaz.kit.compose.widgets.MoreButton
+import dev.krifmaz.kit.compose.widgets.SectionHead
+import dev.krifmaz.kit.compose.widgets.SmallButton
+import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
-import app.encore.android.ui.screens.ConfirmDialog
+import dev.krifmaz.kit.compose.widgets.ConfirmDialog
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers
@@ -250,9 +250,9 @@ private fun GroupSheet(nav: Nav, s: GroupState, onDismiss: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     // the group's own pause (Pause in the player pauses only this phone), for those who control it
-                    if (GroupRules.offersPauseForEveryone(s)) EncoreButton(GroupRules.PAUSE_FOR_EVERYONE) { GroupListen.pauseForEveryone() }
-                    if (s.youHost) EncoreButton("End for everyone") { confirmEnd = true }
-                    EncoreButton("Leave") { GroupListen.leave(); onDismiss() }
+                    if (GroupRules.offersPauseForEveryone(s)) KitButton(GroupRules.PAUSE_FOR_EVERYONE) { GroupListen.pauseForEveryone() }
+                    if (s.youHost) KitButton("End for everyone") { confirmEnd = true }
+                    KitButton("Leave") { GroupListen.leave(); onDismiss() }
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }

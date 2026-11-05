@@ -26,10 +26,10 @@ import app.encore.android.R
 import app.encore.android.data.api.Track
 import app.encore.android.ui.Nav
 import app.encore.android.ui.Screen
-import app.encore.android.ui.components.EmptyState
-import app.encore.android.ui.components.Gutter
+import dev.krifmaz.kit.compose.widgets.EmptyState
+import dev.krifmaz.kit.compose.widgets.Gutter
 import app.encore.android.ui.components.LoadableContent
-import app.encore.android.ui.components.SmallButton
+import dev.krifmaz.kit.compose.widgets.SmallButton
 import app.encore.android.ui.components.rememberLoad
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.theme.EncoreColors
