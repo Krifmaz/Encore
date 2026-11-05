@@ -82,6 +82,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Releases come from main only: 0.42.17 and 0.42.18 were built from a stale default branch and shipped an
+      # older database schema than the releases before them (their servers could not open the database).
+      - name: Built from main
+        run: |
+          git fetch --quiet origin main
+          git merge-base --is-ancestor HEAD origin/main || { echo "::error::Releases are built from main only; $GITHUB_REF_NAME ($GITHUB_SHA) is not on main."; exit 1; }
+      - name: The database schema never goes down (scripts/check-schema-version.sh)
+        run: bash scripts/check-schema-version.sh
       - id: v
         env:
           BUMP: ${{ inputs.bump }}
@@ -164,6 +172,8 @@ jobs:
           tool: cargo-machete
       - name: No unused dependencies
         run: cargo machete
+      - name: The release guard's own tests (scripts/test-check-schema-version.sh)
+        run: bash scripts/test-check-schema-version.sh
       - name: Server tests (every crate of the workspace)
         working-directory: server
         run: cargo test --workspace --locked

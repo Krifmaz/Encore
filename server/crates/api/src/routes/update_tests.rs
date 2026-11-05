@@ -144,3 +144,122 @@ async fn the_update_endpoints() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Docker stand-in for the record test: one ended update helper whose log says the swap failed, and the
+/// calls it was sent.
+async fn helper_docker(sock: std::path::PathBuf) -> Arc<std::sync::Mutex<Vec<String>>> {
+    use axum::response::IntoResponse;
+    const HELPER: &str = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let c2 = calls.clone();
+    let app = axum::Router::new().fallback(move |method: axum::http::Method, uri: axum::http::Uri| {
+        let calls = c2.clone();
+        async move {
+            calls.lock().unwrap().push(format!("{method} {}", uri.path()));
+            let gone = calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE"));
+            match (method.as_str(), uri.path()) {
+                ("GET", "/containers/json") if gone => axum::Json(json!([])).into_response(),
+                ("GET", "/containers/json") => axum::Json(json!([{ "Id": HELPER, "State": "exited" }])).into_response(),
+                ("GET", p) if p == format!("/containers/{HELPER}/json") => axum::Json(json!({ "Id": HELPER, "State": { "ExitCode": 1 } })).into_response(),
+                ("GET", p) if p.ends_with("/logs") => concat!(
+                    "encore self-update: inspect: updating container 784f60a52647 to ghcr.io/krifmaz/encore:0.42.18\n",
+                    "encore self-update: verify: new container: This database was written by a newer Encore (schema 42, this server knows 41).\n",
+                    "encore self-update: rollback: encore runs again on the old image\n",
+                    "encore self-update: failed: verify: the new container stopped (status exited, exit code 3): the new Encore refused the database\n",
+                ).into_response(),
+                ("DELETE", _) => StatusCode::NO_CONTENT.into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    });
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    calls
+}
+
+/// The failure path end to end: an update to 0.42.18 was started, its helper rolled back and ended. The next
+/// GET /api/system/update reads the helper's log back, removes the helper, and answers the failing step, the
+/// error and the whole record as text (what Diagnostics shows and Copy takes); the server log has it too.
+#[tokio::test]
+async fn a_failed_update_shows_its_step_and_error() {
+    let dir = std::env::temp_dir().join(format!("enc-upr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut st = crate::test_support::state_in(&dir);
+    let sock = dir.join("d.sock");
+    let calls = helper_docker(sock.clone()).await;
+    st.system.docker_socket = sock;
+    st.cfg.set_many(&json!({ "check_updates": false }));
+    crate::auth::create_user(&st, "boss", PW, "admin", None, None).unwrap();
+    let app = crate::app(st.clone());
+    let admin = login(&app, "boss").await;
+
+    let (_, v, _) = call(&app, "GET", "/api/system/update", &admin, false, None).await;
+    assert_eq!(v["last_update"], Value::Null, "no update yet");
+
+    let mut r = encore_system::update_report::Report::start("ghcr.io/krifmaz/encore:0.42.18", "0.42.18", crate::VERSION, "boss", encore_db::now());
+    r.line("pull", "ghcr.io/krifmaz/encore:0.42.18 is on this host");
+    encore_system::update_report::store(&st, &r);
+
+    let (s, v, _) = call(&app, "GET", "/api/system/update", &admin, false, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let last = &v["last_update"];
+    assert_eq!((last["state"].as_str(), last["failed_step"].as_str()), (Some("failed"), Some("verify")), "{last}");
+    assert_eq!(last["error"], json!("the new container stopped (status exited, exit code 3): the new Encore refused the database"));
+    let text = last["text"].as_str().unwrap();
+    assert!(text.contains("Failed at step: verify") && text.contains("helper: verify: new container: This database was written by a newer Encore"), "{text}");
+    assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE /containers/5e5e")), "the ended helper is removed once read");
+    let logged = st.db.query("SELECT message FROM activity WHERE level='error'", encore_db::p![]).unwrap();
+    assert!(logged.iter().any(|row| row["message"].as_str().unwrap_or("").starts_with("Update to ghcr.io/krifmaz/encore:0.42.18 failed at step verify")), "{logged:?}");
+
+    // read once: the next answer is the kept record, Docker is not asked again
+    let n = calls.lock().unwrap().len();
+    let (_, v, _) = call(&app, "GET", "/api/system/update", &admin, false, None).await;
+    assert_eq!(v["last_update"]["failed_step"], json!("verify"));
+    assert_eq!(calls.lock().unwrap().len(), n);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// GitHub's contents API for the schema file at a tag: base64 in lines, as GitHub sends it; 404 for a tag it
+/// doesn't have.
+async fn github_schema(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use base64::Engine as _;
+    let q = uri.query().unwrap_or("");
+    let schema = if q.contains("ref=v0.42.18") { 41 } else if q.contains("ref=v0.42.19") { encore_db::SCHEMA_VERSION } else {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "No commit found for the ref" }))).into_response();
+    };
+    let src = format!("//! encore_db\npub const SCHEMA_VERSION: i64 = {schema};\npub const EXIT_NEWER_DB: i32 = 3;\n");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(src);
+    let lined: Vec<String> = b64.as_bytes().chunks(60).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+    axum::Json(json!({ "encoding": "base64", "content": lined.join("\n") })).into_response()
+}
+
+/// The updater's schema check before anything is pulled: a release that writes an older schema than this
+/// database (0.42.18: 41 over 42) is refused with the reason; the same schema goes ahead; an unknown tag is
+/// left to the helper's own check.
+#[tokio::test]
+async fn an_update_to_an_older_schema_is_refused() {
+    use encore_system::update::{older_schema_refusal, release_schema, schema_in_source};
+    let gh = axum::Router::new().route("/repos/Krifmaz/Encore/contents/server/crates/db/src/lib.rs", axum::routing::get(github_schema));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, gh).await.unwrap() });
+    let dir = std::env::temp_dir().join(format!("enc-ups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut st = crate::test_support::state_in(&dir);
+    st.system.github_api = base;
+
+    assert_eq!(release_schema(&st, "0.42.18").await, Some(41));
+    assert_eq!(release_schema(&st, "0.42.19").await, Some(encore_db::SCHEMA_VERSION));
+    assert_eq!(release_schema(&st, "9.9.9").await, None, "no such tag: the helper checks");
+    let why = older_schema_refusal("0.42.18", 41, 42).unwrap();
+    assert!(why.starts_with("Encore 0.42.18 can't open this server's database: it knows database schema 41, the database is at schema 42"), "{why}");
+    assert!(why.contains("Nothing was changed"), "{why}");
+    assert_eq!(older_schema_refusal("0.42.19", 42, 42), None);
+    assert_eq!(older_schema_refusal("0.43.0", 43, 42), None, "a newer schema is migrated to, after a backup");
+    assert_eq!(schema_in_source("pub const SCHEMA_VERSION: i64 = 42;"), Some(42));
+    assert_eq!(schema_in_source("no constant here"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

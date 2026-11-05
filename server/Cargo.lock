@@ -1016,6 +1016,7 @@ version = "0.35.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "encore-core",
  "encore-db",
  "encore-http",

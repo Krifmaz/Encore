@@ -1,5 +1,6 @@
 //! Keeping the server up to date: Encore's own updates and "Restart server" ([`update`]), the container
-//! swap of "Update now" ([`selfupdate`], over the Docker Engine API in [`docker`]), and the programs of the
+//! swap of "Update now" ([`selfupdate`], over the Docker Engine API in [`docker`]; its step-by-step record in
+//! [`update_report`]), and the programs of the
 //! builtin plugins with the old Download tools routes and the "Update plugins" task ([`tools`]; installing and
 //! updating are the plugins', encore_plugins; slskd and the translator are run by other crates and reach the
 //! old card through [`Ctx`]).
@@ -12,6 +13,7 @@ pub mod docker;
 pub mod selfupdate;
 pub mod tools;
 pub mod update;
+pub mod update_report;
 
 pub use tools::ToolInfo;
 

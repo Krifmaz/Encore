@@ -151,20 +151,30 @@ async fn update_now_pulls_and_starts_the_helper() {
     let dir = sock_dir("start");
     let (d, m) = serve_mock(&dir).await;
     let id = fixture()["Id"].as_str().unwrap().to_string();
-    let name = start_update(&d, &id, "0.28.0").await.unwrap();
+    let mut r = crate::update_report::Report::start("ghcr.io/krifmaz/encore:0.28.0", "0.28.0", "0.27.0", "admin", 1.0);
+    // an ended helper of an earlier try is removed first, so its log is not read as this update's
+    m.fail.lock().unwrap().insert("helper-left");
+    let name = start_update(&d, &id, "0.28.0", &mut r).await.unwrap();
+    m.fail.lock().unwrap().remove("helper-left");
     assert!(name.starts_with("encore-update-"), "{name}");
     let calls = m.calls();
     assert_eq!(calls[0], "POST /images/create?fromImage=ghcr.io%2Fkrifmaz%2Fencore&tag=0.28.0");
     assert_eq!(calls[1], format!("GET /containers/{id}/json"));
-    assert!(calls[2].starts_with("POST /containers/create?name=encore-update-"), "{calls:?}");
-    assert_eq!(calls[3], format!("POST /containers/{HELPER_ID}/start"));
+    assert!(calls[2].starts_with("GET /containers/json?all=true&filters="), "{calls:?}");
+    assert_eq!(calls[3], format!("GET /containers/{HELPER_ID}/json"));
+    assert_eq!(calls[4], format!("DELETE /containers/{HELPER_ID}?force=true"));
+    assert!(calls[5].starts_with("POST /containers/create?name=encore-update-"), "{calls:?}");
+    assert_eq!(calls[6], format!("POST /containers/{HELPER_ID}/start"));
     let body = m.body("/containers/create?name=encore-update-").unwrap();
-    assert_eq!(body["Cmd"], json!(["self-update-helper", "--target", id, "--image", "ghcr.io/krifmaz/encore:0.28.0"]));
-    assert_eq!(body["HostConfig"]["AutoRemove"], json!(true));
+    let schema = encore_db::SCHEMA_VERSION.to_string();
+    assert_eq!(body["Cmd"], json!(["self-update-helper", "--target", id, "--image", "ghcr.io/krifmaz/encore:0.28.0", "--schema", schema]));
+    assert_eq!(body["HostConfig"].get("AutoRemove"), None, "the helper's log outlives it");
+    assert_eq!(r.lines.iter().map(|l| l.split(':').next().unwrap()).collect::<Vec<_>>(), ["pull", "pull", "helper", "helper"], "{:?}", r.lines);
 
-    let e = start_update(&d, &id, "9.9.9").await.unwrap_err();
-    assert_eq!(e, "Could not pull ghcr.io/krifmaz/encore:9.9.9: manifest unknown");
-    let e = start_update(&d, &id, "denied").await.unwrap_err();
+    // the failure path on the server's side: the failing step and Docker's words
+    let e = start_update(&d, &id, "9.9.9", &mut r).await.unwrap_err();
+    assert_eq!(e, ("pull", "Could not pull ghcr.io/krifmaz/encore:9.9.9: manifest unknown".to_string()));
+    let e = start_update(&d, &id, "denied", &mut r).await.unwrap_err().1;
     assert!(e.starts_with("Could not pull ghcr.io/krifmaz/encore:denied: pull access denied"), "{e}");
     assert!(e.contains("must be public"), "{e}");
     assert!(pull_error("i:1", "error from registry: unauthorized").contains("must be public"));

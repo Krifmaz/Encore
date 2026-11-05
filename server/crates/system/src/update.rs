@@ -20,6 +20,7 @@
 //! planning are the kit's (`kit_server_updates`); the Docker self-update is Encore's own.
 use crate::docker::{self, Docker};
 use crate::selfupdate::{self, IMAGE};
+use crate::update_report::{self, Report};
 use crate::Ctx;
 use encore_core::VERSION;
 use encore_db::{self as db, p};
@@ -294,10 +295,11 @@ pub fn answer(release: Option<&Value>, su: &SelfUpdate, current: &str, dev: bool
 }
 
 /// The update card: installed and newest version, release notes, whether "Update now" works (`force` asks
-/// GitHub and Docker again).
+/// GitHub and Docker again), and the record of the last update (`last_update`, read back from its helper).
 pub async fn status(st: &impl Ctx, force: bool) -> Value {
-    let ((release, error), su) = tokio::join!(release(st, force), self_update(st, force));
+    let ((release, error), su, last) = tokio::join!(release(st, force), self_update(st, force), update_report::collect(st, VERSION));
     let mut out = answer(release.as_ref(), &su, VERSION, DEV);
+    out["last_update"] = update_report::json(last.as_ref());
     out["error"] = json!(error);
     out["check_updates"] = json!(st.cfg().bool("check_updates"));
     out["channel"] = json!(channel(st).name());
@@ -333,26 +335,73 @@ pub fn pull_error(image: &str, e: &str) -> String {
     }
 }
 
-/// Pull `IMAGE:tag`, then create and start the helper container from it. Ok(the helper's name).
-pub async fn start_update(d: &Docker, self_id: &str, tag: &str) -> Result<String, String> {
+/// Pull `IMAGE:tag`, then create and start the helper container from it, writing each step into `r`.
+/// Ok(the helper's name); Err((the step that failed, its error)).
+pub async fn start_update(d: &Docker, self_id: &str, tag: &str, r: &mut Report) -> Result<String, (&'static str, String)> {
     let image = format!("{IMAGE}:{tag}");
-    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| pull_error(&image, &e))?;
-    let me = d.inspect(self_id).await.map_err(|e| format!("The Docker socket refused the request: {e}"))?
-        .ok_or_else(|| "Not running in a container".to_string())?;
-    let body = selfupdate::plan_helper_body(&me, &image).ok_or_else(|| "The Docker socket is not mounted from the host (no bind for /var/run/docker.sock)".to_string())?;
+    r.line("pull", &format!("pulling {image}"));
+    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| ("pull", pull_error(&image, &e)))?;
+    r.line("pull", &format!("{image} is on this host"));
+    let me = d.inspect(self_id).await.map_err(|e| ("helper", format!("The Docker socket refused the request: {e}")))?
+        .ok_or_else(|| ("helper", "Not running in a container".to_string()))?;
+    let body = selfupdate::plan_helper_body(&me, &image, db::SCHEMA_VERSION)
+        .ok_or_else(|| ("helper", "The Docker socket is not mounted from the host (no bind for /var/run/docker.sock)".to_string()))?;
+    // an ended helper of an earlier try would be read as this one's: it goes first
+    if let Ok(old) = update_report::helpers(d).await {
+        for (id, running, _) in old {
+            if running {
+                return Err(("helper", "An update helper is still running: wait for it to end".into()));
+            }
+            let _ = d.delete(&format!("/containers/{id}?force=true")).await;
+        }
+    }
     let name = format!("{}-update-{}", me["Name"].as_str().unwrap_or("encore").trim_start_matches('/'), db::now() as i64);
+    r.line("helper", &format!("creating the helper container {name} (database schema {})", db::SCHEMA_VERSION));
     let (code, v) = d.post(&format!("/containers/create?name={}", urlencoding::encode(&name)), Some(&body)).await
-        .map_err(|e| format!("Could not start the update helper: {e}"))?;
+        .map_err(|e| ("helper", format!("Could not start the update helper: {e}")))?;
     if code != 201 {
-        return Err(format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v)));
+        return Err(("helper", format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v))));
     }
     let id = v["Id"].as_str().unwrap_or(&name).to_string();
-    let (code, v) = d.post(&format!("/containers/{id}/start"), None).await.map_err(|e| format!("Could not start the update helper: {e}"))?;
+    let (code, v) = d.post(&format!("/containers/{id}/start"), None).await.map_err(|e| ("helper", format!("Could not start the update helper: {e}")))?;
     if !(200..300).contains(&code) {
         let _ = d.delete(&format!("/containers/{id}?force=true")).await;
-        return Err(format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v)));
+        return Err(("helper", format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v))));
     }
+    r.line("helper", &format!("{name} started: it stops this server and swaps the container (the server is down for about a minute)"));
     Ok(name)
+}
+
+/// The file of Encore's repository that holds the database schema a version writes (`SCHEMA_VERSION`).
+const SCHEMA_FILE: &str = "server/crates/db/src/lib.rs";
+
+/// `pub const SCHEMA_VERSION: i64 = 42;` in a copy of [`SCHEMA_FILE`] → 42.
+pub fn schema_in_source(src: &str) -> Option<i64> {
+    let rest = &src[src.find("pub const SCHEMA_VERSION: i64 =")? + "pub const SCHEMA_VERSION: i64 =".len()..];
+    rest[..rest.find(';')?].trim().parse().ok()
+}
+
+/// Why `tag` must not be installed over a database at schema `db`: its Encore knows only `target`, so it would
+/// refuse the database and stop at once (0.42.17 and 0.42.18 were built from older code than 0.42.16).
+pub fn older_schema_refusal(tag: &str, target: i64, db: i64) -> Option<String> {
+    (target < db).then(|| format!("Encore {tag} can't open this server's database: it knows database schema {target}, the database is at schema {db} \
+        (that release was built from older code than the one running). Nothing was changed; pick a newer release"))
+}
+
+/// The database schema release `tag` writes, read from its source on GitHub (the tag `v<tag>`). None when it
+/// can't be told (no such tag on GitHub, GitHub unreachable or rate-limited): the helper checks again from
+/// inside the new image before anything is stopped.
+pub async fn release_schema(st: &impl Ctx, tag: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let url = format!("{}/repos/{REPO}/contents/{SCHEMA_FILE}?ref=v{tag}", st.system().github_api);
+    let (code, v) = encore_http::github::get(st, &url).await.map_err(|e| tracing::warn!("update: the schema of {tag} could not be read: {e}")).ok()?;
+    if code != 200 {
+        return None;
+    }
+    // GitHub sends the file base64-encoded, in lines
+    let b64: String = v["content"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    schema_in_source(&String::from_utf8_lossy(&bytes))
 }
 
 /// Why "Update now" was refused or failed, with the HTTP status the API answers.
@@ -375,22 +424,42 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
         }
     };
     let tag = check_tag(&tag).map_err(|e| Refused(400, e))?;
+    // the release's own database schema, before anything is pulled: an older one would refuse this database
+    let target_schema = release_schema(st, &tag).await;
+    if let Some(why) = target_schema.and_then(|s| older_schema_refusal(&tag, s, db::SCHEMA_VERSION)) {
+        let mut r = Report::start(&format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
+        r.fail("check", &why, db::now());
+        update_report::store(st, &r);
+        st.db().log("error", &format!("Update to {IMAGE}:{tag} refused: {why}"));
+        return Err(Refused(409, why));
+    }
     let updating = st.system().updating.clone();
     if updating.swap(true, Ordering::SeqCst) {
         return Err(Refused(409, "An update is already on its way".into()));
     }
     st.db().log("warning", &format!("{who} started an update to {IMAGE}:{tag}"));
+    let mut report = Report::start(&format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
+    report.line("check", &format!("Encore {VERSION} → {tag}; container {} ({})", su.name.as_deref().unwrap_or("?"), su.image.as_deref().unwrap_or("?")));
+    report.line("check", &match target_schema {
+        Some(s) => format!("Encore {tag} knows database schema {s}; this database is at {}", db::SCHEMA_VERSION),
+        None => format!("the database schema of Encore {tag} could not be read from GitHub: the update helper checks it from inside the new image"),
+    });
+    update_report::store(st, &report);
     // The pull can take minutes: it runs in a task of its own, so a request cut off on the way (a reverse
     // proxy's read timeout, a closed tab) neither stops the update half-way nor leaves it marked as running.
-    let (db, sock, id, tag2) = (st.db().clone(), st.system().docker_socket.clone(), su.id.clone().unwrap_or_default(), tag.clone());
+    let (st2, sock, id, tag2) = (st.clone(), st.system().docker_socket.clone(), su.id.clone().unwrap_or_default(), tag.clone());
     let res = tokio::spawn(async move {
-        let res = start_update(&Docker::new(sock), &id, &tag2).await;
+        let res = start_update(&Docker::new(sock), &id, &tag2, &mut report).await;
         updating.store(false, Ordering::SeqCst);
         match &res {
             Ok(helper) => tracing::info!("update to {IMAGE}:{tag2}: helper container {helper} started"),
-            Err(e) => db.log("error", &format!("Update to {IMAGE}:{tag2} failed: {e}")),
+            Err((step, e)) => {
+                report.fail(step, e, db::now());
+                st2.db().log("error", &format!("Update to {IMAGE}:{tag2} failed at step {step}: {e}"));
+            }
         }
-        res
+        update_report::store(&st2, &report);
+        res.map_err(|(_, e)| e)
     })
     .await
     .unwrap_or_else(|e| Err(format!("The update stopped: {e}")));

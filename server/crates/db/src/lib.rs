@@ -192,6 +192,25 @@ pub const SCHEMA_VERSION: i64 = 42;
 /// Exit code of the server when the database comes from a newer Encore.
 pub const EXIT_NEWER_DB: i32 = 3;
 
+/// The words the server logs right before it backs up and migrates an older database. The update helper
+/// looks for them in a new container's log ([`migration_in_log`]): once a new server got this far, the old
+/// Encore may no longer read the database, so the helper keeps the new one instead of rolling back.
+pub fn migrating_line(from: i64, to: i64) -> String {
+    format!("database schema {from} → {to}: backing up first")
+}
+
+/// The `(from, to)` schemas of the last [`migrating_line`] in a server's log (log decorations around it, such
+/// as the time and level, are skipped); None when the log has none.
+pub fn migration_in_log(log: &str) -> Option<(i64, i64)> {
+    log.lines().rev().find_map(|l| {
+        let rest = &l[l.find("database schema ")? + "database schema ".len()..];
+        let (from, rest) = rest.split_once(" → ")?;
+        let (to, tail) = rest.split_once(':')?;
+        tail.trim_start().starts_with("backing up first").then_some(())?;
+        Some((from.trim().parse().ok()?, to.trim().parse().ok()?))
+    })
+}
+
 /// The database was written by a newer Encore than this one.
 #[derive(Debug)]
 pub struct NewerDatabase {
@@ -443,7 +462,7 @@ impl Db {
         }
         let conn = Connection::open(&path)?;
         if let Some(found) = upgrade_from {
-            tracing::info!("database schema {found} → {SCHEMA_VERSION}: backing up first");
+            tracing::info!("{}", migrating_line(found, SCHEMA_VERSION));
             // a full disk is a warning here, not a start that fails over and over (see before_upgrade)
             crate::backup::before_upgrade(&conn, data_dir)?;
         }
@@ -1010,6 +1029,14 @@ mod tests {
     use super::*;
 
     use encore_core::tmp::dir as tmp;
+
+    #[test]
+    fn the_migration_line_is_found_in_a_log() {
+        let log = format!("2026-11-05T00:00:01Z  INFO encore_db: {}\n2026-11-05T00:00:02Z ERROR boom", migrating_line(41, 42));
+        assert_eq!(migration_in_log(&log), Some((41, 42)));
+        assert_eq!(migration_in_log("INFO listening on 0.0.0.0:8080"), None);
+        assert_eq!(migration_in_log("database schema 41 → 42 is fine"), None, "only the line the server writes");
+    }
 
     #[test]
     fn stamps_user_version_and_backs_up_before_migrating() {

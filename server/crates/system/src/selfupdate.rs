@@ -3,13 +3,19 @@
 //! replaces the server's container the way Watchtower does: inspect it, stop it, rename it out of the way,
 //! create a container of the new image with the same settings under the old name, start it, and remove the
 //! old one once the new one keeps running (its volumes stay). When creating or starting the new one fails,
-//! the old one gets its name back and is started again. Every step is printed (`docker logs` of the helper
-//! until Docker removes it).
+//! or it stops again within the settle time, the old one gets its name back and is started again.
+//!
+//! Every step is printed as `encore self-update: <step>: <text>`, and a failure as the last line
+//! `encore self-update: failed: <step>: <error>` (update_report.rs reads them back). The helper's container is
+//! not removed by Docker when it ends: the server that comes back reads its log and removes it. When the new
+//! container stops, its own last lines and what its exit code means are printed too, so the reason (such as an
+//! older Encore refusing a newer database) is in the record.
 //!
 //! The pure parts – which settings carry over (`plan_create_body`), how an image reference splits
 //! (`parse_image`) and the helper's own container (`plan_helper_body`) – are tested on a captured inspect
 //! answer (fixtures/docker-inspect.json, Docker 27).
 use crate::docker::{self, Docker};
+use crate::update_report::{FAILED, LINE_PREFIX};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
 
@@ -214,19 +220,64 @@ pub fn socket_source(inspect: &Value) -> Option<String> {
 }
 
 /// The helper's container: the new image running `encore self-update-helper`, as root (it only talks to the
-/// socket), with the same socket bind, no network, no ports, removed by Docker when it ends.
-pub fn plan_helper_body(self_inspect: &Value, image: &str) -> Option<Value> {
+/// socket), with the same socket bind, no network, no ports. `schema` is the database schema the running
+/// server keeps (`encore_db::SCHEMA_VERSION`): a helper whose own Encore knows less refuses before anything is
+/// stopped. Docker does not remove it when it ends: its log is the update's record until the server that comes
+/// back has read it (update_report.rs `collect`, which removes it).
+pub fn plan_helper_body(self_inspect: &Value, image: &str, schema: i64) -> Option<Value> {
     let id = self_inspect["Id"].as_str().filter(|i| !i.is_empty())?;
     let sock = socket_source(self_inspect)?;
     Some(json!({
         "Image": image,
         "Entrypoint": [BINARY],
-        "Cmd": ["self-update-helper", "--target", id, "--image", image],
+        "Cmd": ["self-update-helper", "--target", id, "--image", image, "--schema", schema.to_string()],
         "User": "0:0",
         "Labels": { HELPER_LABEL: "self-update-helper" },
-        "HostConfig": { "Binds": [format!("{sock}:{}", docker::SOCKET)], "AutoRemove": true, "NetworkMode": "none" },
+        "HostConfig": { "Binds": [format!("{sock}:{}", docker::SOCKET)], "NetworkMode": "none" },
     }))
 }
+
+/// Whether this helper's Encore can open a database at `schema` (the running server's). The helper runs the
+/// new image, so its `SCHEMA_VERSION` is the new server's: a lower one means the new server would refuse the
+/// database and exit at once (`encore_db::EXIT_NEWER_DB`), so the swap is not even started.
+pub fn schema_refusal(schema: Option<i64>, known: i64, image: &str) -> Option<String> {
+    let found = schema?;
+    (found > known).then(|| format!("{image} knows database schema {known}, but this server's database is at schema {found} (it was written by a newer Encore): \
+        this image is older code than the one running, so it would refuse the database. Nothing was changed; pick a newer release"))
+}
+
+/// Whether the image holds the Encore its tag names: `own` is this helper's version (it runs the new image;
+/// None in a build without a release number, which is not checked). `latest` and other names are not
+/// versions and are not checked either.
+pub fn version_refusal(image: &str, own: Option<&str>) -> Option<String> {
+    let own = own?;
+    let tag = parse_image(image).1;
+    (tag.starts_with(|c: char| c.is_ascii_digit()) && tag != own)
+        .then(|| format!("{image} holds Encore {own}, not {tag}: the registry has the wrong image under that tag. Nothing was changed"))
+}
+
+/// What the helper checks before it touches anything: the running server's database schema (`--schema`) and
+/// the helper's own version (the new image's).
+#[derive(Clone, Debug, Default)]
+pub struct Preflight {
+    /// the running server's database schema; None from a server before `--schema`
+    pub schema: Option<i64>,
+    /// this helper's version (`ENCORE_VERSION`); None in a build without one
+    pub version: Option<String>,
+}
+
+/// What a container's exit code says, when Encore knows it.
+pub fn exit_meaning(code: i64) -> Option<&'static str> {
+    match i32::try_from(code).ok()? {
+        encore_db::EXIT_NEWER_DB => Some("the new Encore refused the database because a newer Encore wrote it (the image is older code than the one that was running)"),
+        137 => Some("it was killed (out of memory, or stopped from outside)"),
+        126 | 127 => Some("its program could not be started (missing or not executable)"),
+        _ => None,
+    }
+}
+
+/// How many of the new container's own last lines a failure prints.
+const NEW_LOG_LINES: usize = 20;
 
 /// How long the helper waits on Docker.
 #[derive(Clone, Copy, Debug)]
@@ -259,21 +310,22 @@ async fn step(d: &Docker, what: &str, method: &str, path: &str, body: Option<&Va
 
 /// The old container gets its name back and runs again.
 async fn roll_back(d: &Docker, log: &mut dyn FnMut(&str), id: &str, name: &str) {
-    log(&format!("rolling back: {name} gets its name back and starts again"));
-    if let Err(e) = step(d, "rename back", "POST", &format!("/containers/{id}/rename?name={}", urlencoding::encode(name)), None).await {
+    log(&format!("rollback: {name} gets its name back and starts again"));
+    if let Err(e) = step(d, "rollback: rename back", "POST", &format!("/containers/{id}/rename?name={}", urlencoding::encode(name)), None).await {
         log(&e.to_string());
     }
-    match step(d, "start the old container", "POST", &format!("/containers/{id}/start"), None).await {
-        Ok(_) => log(&format!("{name} runs again on the old image")),
+    match step(d, "rollback: start the old container", "POST", &format!("/containers/{id}/start"), None).await {
+        Ok(_) => log(&format!("rollback: {name} runs again on the old image")),
         Err(e) => log(&format!("{e} – start it by hand: docker start {id}")),
     }
 }
 
-/// The new container goes (it never ran properly), then the old one comes back.
+/// The new container goes (it never ran properly), then the old one comes back. `e` is the failure, already
+/// named after its step.
 async fn give_up(d: &Docker, log: &mut dyn FnMut(&str), e: anyhow::Error, new_id: Option<&str>, id: &str, name: &str) -> anyhow::Error {
     log(&e.to_string());
     if let Some(n) = new_id.filter(|n| !n.is_empty()) {
-        if let Err(e) = step(d, "remove the new container", "DELETE", &format!("/containers/{n}?force=true"), None).await {
+        if let Err(e) = step(d, "rollback: remove the new container", "DELETE", &format!("/containers/{n}?force=true"), None).await {
             log(&e.to_string());
         }
     }
@@ -281,17 +333,92 @@ async fn give_up(d: &Docker, log: &mut dyn FnMut(&str), e: anyhow::Error, new_id
     e
 }
 
-/// Replace container `target` with one of `image`. Ok(new container id).
-pub async fn run_helper(d: &Docker, target: &str, image: &str, t: Timing, log: &mut dyn FnMut(&str)) -> anyhow::Result<String> {
-    log(&format!("updating container {target} to {image}"));
-    let inspect = d.inspect(target).await?.ok_or_else(|| anyhow::anyhow!("no container {target}"))?;
+/// The new container stopped within the settle time: its last lines go into the log (they hold the server's
+/// own reason, e.g. the newer-database message). Gives back the error, naming the exit code and what it
+/// means, and whether the new server had begun migrating the database (`encore_db::migration_in_log`).
+async fn stopped_error(d: &Docker, log: &mut dyn FnMut(&str), new_id: &str, state: &Value) -> (anyhow::Error, Option<(i64, i64)>) {
+    let mut migrated = None;
+    match d.logs(new_id, NEW_LOG_LINES).await {
+        Ok(text) => {
+            for l in text.lines().map(str::trim_end).filter(|l| !l.is_empty()) {
+                log(&format!("verify: new container: {l}"));
+            }
+            migrated = encore_db::migration_in_log(&text);
+        }
+        Err(e) => log(&format!("verify: the new container's log could not be read: {e}")),
+    }
+    let code = state["ExitCode"].as_i64();
+    let mut e = format!("verify: the new container stopped (status {}, exit code {})", state["Status"].as_str().unwrap_or("unknown"),
+        code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()));
+    if let Some(m) = code.and_then(exit_meaning) {
+        e.push_str(": ");
+        e.push_str(m);
+    }
+    (anyhow::anyhow!(e), migrated)
+}
+
+/// How often a new container that stopped after migrating is started again before the helper gives up.
+const RESTARTS_AFTER_MIGRATION: usize = 3;
+
+/// The new server stopped after it began migrating the database: rolling back would hand the migrated
+/// database to an Encore that may not read it, so the new container stays and is started again (up to
+/// [`RESTARTS_AFTER_MIGRATION`] times). The old container stays renamed and stopped, to go back by hand
+/// with the backup taken before the migration. Ok when the new one keeps running after all.
+async fn keep_new(d: &Docker, log: &mut dyn FnMut(&str), e: anyhow::Error, (from, to): (i64, i64), new_id: &str, old_name: &str, t: Timing) -> anyhow::Result<()> {
+    log(&e.to_string());
+    log(&format!("verify: the new server had begun migrating the database from schema {from} to {to}: no roll-back, the new container is started again"));
+    for n in 1..=RESTARTS_AFTER_MIGRATION {
+        log(&format!("verify: starting the new container again ({n} of {RESTARTS_AFTER_MIGRATION})"));
+        if let Err(e) = step(d, "verify: start the new container again", "POST", &format!("/containers/{new_id}/start"), None).await {
+            log(&e.to_string());
+            continue;
+        }
+        if settles(d, new_id, t).await.is_ok() {
+            log("verify: the new container keeps running now");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("{e}. The new server had begun migrating the database (schema {from} → {to}), so the old Encore was not started again: it may not read the migrated database. \
+        The new container is left in place (its restart policy keeps trying) and the old one is kept, stopped, as {old_name}. To go back: restore the backup taken before the migration (/config/backups), then start {old_name}")
+}
+
+/// Whether the container keeps running for the settle time: Err(its state) as soon as it stops.
+async fn settles(d: &Docker, id: &str, t: Timing) -> Result<(), Value> {
+    let deadline = tokio::time::Instant::now() + t.settle;
+    loop {
+        let state = d.inspect(id).await.ok().flatten().map(|v| v["State"].clone()).unwrap_or(Value::Null);
+        if state["Running"] != true || state["Restarting"] == true {
+            return Err(state);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(t.poll).await;
+    }
+}
+
+/// Replace container `target` with one of `image`, after the checks of `pre`. Ok(new container id); every
+/// error starts with the step it failed at.
+pub async fn run_helper(d: &Docker, target: &str, image: &str, pre: &Preflight, t: Timing, log: &mut dyn FnMut(&str)) -> anyhow::Result<String> {
+    log(&format!("inspect: updating container {target} to {image}"));
+    // the helper runs the new image: what it is, is what the new server will be
+    if let Some(why) = version_refusal(image, pre.version.as_deref()) {
+        anyhow::bail!("inspect: {why}");
+    }
+    if let Some(why) = schema_refusal(pre.schema, encore_db::SCHEMA_VERSION, image) {
+        anyhow::bail!("schema: {why}");
+    }
+    if let Some(s) = pre.schema {
+        log(&format!("schema: the new Encore reads this database (schema {s}, it knows {})", encore_db::SCHEMA_VERSION));
+    }
+    let inspect = d.inspect(target).await.map_err(|e| anyhow::anyhow!("inspect: {e}"))?.ok_or_else(|| anyhow::anyhow!("inspect: no container {target}"))?;
     let id = inspect["Id"].as_str().unwrap_or(target).to_string();
     let name = inspect["Name"].as_str().unwrap_or("").trim_start_matches('/').to_string();
     if name.is_empty() {
-        anyhow::bail!("container {target} has no name");
+        anyhow::bail!("inspect: container {target} has no name");
     }
     if let Some(why) = cannot_replace(&inspect) {
-        anyhow::bail!("{why}: nothing was changed");
+        anyhow::bail!("inspect: {why}: nothing was changed");
     }
     let mut body = plan_create_body(&inspect, image);
     let mut old_image = Value::Null;
@@ -301,56 +428,56 @@ pub async fn run_helper(d: &Docker, target: &str, image: &str, t: Timing, log: &
                 body = without_image_defaults(body, &img);
                 old_image = img;
             }
-            _ => log("the old image is gone: its settings are copied as the container had them"),
+            _ => log("inspect: the old image is gone: its settings are copied as the container had them"),
         }
     }
     // image references go into the path as they are, like the docker CLI sends them
-    let (code, new_image) = d.get(&format!("/images/{image}/json")).await?;
+    let (code, new_image) = d.get(&format!("/images/{image}/json")).await.map_err(|e| anyhow::anyhow!("inspect: {e}"))?;
     if code != 200 {
-        anyhow::bail!("{image} is not on this host (Docker answered {code}): nothing was changed");
+        anyhow::bail!("inspect: {image} is not on this host (Docker answered {code}): nothing was changed");
     }
 
-    log(&format!("stopping {name} (up to 30 s)"));
+    log(&format!("stop: stopping {name} (up to 30 s)"));
     step(d, "stop", "POST", &format!("/containers/{id}/stop?t=30"), None).await?;
     let old_name = format!("{name}-old-{}", encore_db::now() as i64);
-    log(&format!("renaming {name} to {old_name}"));
+    log(&format!("rename: renaming {name} to {old_name}"));
     if let Err(e) = step(d, "rename", "POST", &format!("/containers/{id}/rename?name={}", urlencoding::encode(&old_name)), None).await {
         log(&e.to_string());
-        let _ = step(d, "start the old container", "POST", &format!("/containers/{id}/start"), None).await;
+        match step(d, "rollback: start the old container", "POST", &format!("/containers/{id}/start"), None).await {
+            Ok(_) => log(&format!("rollback: {name} runs again on the old image")),
+            Err(e2) => log(&format!("{e2} – start it by hand: docker start {id}")),
+        }
         return Err(e);
     }
-    log(&format!("creating {name} from {image}"));
+    log(&format!("create: creating {name} from {image}"));
     let created = match step(d, "create", "POST", &format!("/containers/create?name={}", urlencoding::encode(&name)), Some(&body)).await {
         Ok(v) => v,
         Err(e) => return Err(give_up(d, log, e, None, &id, &name).await),
     };
     let new_id = created["Id"].as_str().unwrap_or("").to_string();
     for w in created["Warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()) {
-        log(&format!("Docker: {w}"));
+        log(&format!("create: Docker: {w}"));
     }
-    log(&format!("starting {name} ({})", new_id.chars().take(12).collect::<String>()));
+    log(&format!("start: starting {name} ({})", new_id.chars().take(12).collect::<String>()));
     if let Err(e) = step(d, "start", "POST", &format!("/containers/{new_id}/start"), None).await {
         return Err(give_up(d, log, e, Some(&new_id), &id, &name).await);
     }
     // health is the compose file's job: here the new container only has to keep running
-    let deadline = tokio::time::Instant::now() + t.settle;
-    loop {
-        let state = d.inspect(&new_id).await.ok().flatten().map(|v| v["State"].clone()).unwrap_or(Value::Null);
-        if state["Running"] != true || state["Restarting"] == true {
-            let e = anyhow::anyhow!("the new container stopped (status {}, exit code {})", state["Status"].as_str().unwrap_or("unknown"), state["ExitCode"]);
-            return Err(give_up(d, log, e, Some(&new_id), &id, &name).await);
+    log(&format!("verify: the new container must keep running for {} s", t.settle.as_secs()));
+    if let Err(state) = settles(d, &new_id, t).await {
+        let (e, migrated) = stopped_error(d, log, &new_id, &state).await;
+        match migrated {
+            // the database may have moved on: forward only
+            Some(m) => keep_new(d, log, e, m, &new_id, &old_name, t).await?,
+            None => return Err(give_up(d, log, e, Some(&new_id), &id, &name).await),
         }
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(t.poll).await;
     }
-    log(&format!("{name} is running on {image}; removing {old_name} (its volumes stay)"));
-    if let Err(e) = step(d, "remove the old container", "DELETE", &format!("/containers/{id}?v=false&force=true"), None).await {
+    log(&format!("cleanup: {name} is running on {image}; removing {old_name} (its volumes stay)"));
+    if let Err(e) = step(d, "cleanup: remove the old container", "DELETE", &format!("/containers/{id}?v=false&force=true"), None).await {
         log(&format!("{e} – remove it by hand: docker rm {old_name}"));
     }
     clean_images(d, &old_image, new_image["Id"].as_str().unwrap_or(""), log).await;
-    log("done");
+    log("cleanup: done");
     Ok(new_id)
 }
 
@@ -381,8 +508,8 @@ async fn clean_images(d: &Docker, old_image: &Value, new_id: &str, log: &mut dyn
     for r in plan_image_cleanup(old_image, new_id) {
         match d.delete(&format!("/images/{r}")).await {
             Ok((code, _)) if ok(code) || code == 404 => gone += 1,
-            Ok((code, v)) => log(&format!("kept the old image {r} (Docker answered {code}: {})", docker::message(&v))),
-            Err(e) => log(&format!("kept the old image {r}: {e}")),
+            Ok((code, v)) => log(&format!("cleanup: kept the old image {r} (Docker answered {code}: {})", docker::message(&v))),
+            Err(e) => log(&format!("cleanup: kept the old image {r}: {e}")),
         }
     }
     let filters = urlencoding::encode(r#"{"dangling":["true"]}"#).into_owned();
@@ -396,7 +523,7 @@ async fn clean_images(d: &Docker, old_image: &Value, new_id: &str, log: &mut dyn
         }
     }
     if gone > 0 {
-        log("old Encore images removed");
+        log("cleanup: old Encore images removed");
     }
 }
 
@@ -409,19 +536,21 @@ pub async fn main_if_helper() -> Option<i32> {
     }
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let (Some(target), Some(image)) = (arg("--target"), arg("--image")) else {
-        eprintln!("usage: encore self-update-helper --target <container id> --image {IMAGE}:<tag>");
+        eprintln!("usage: encore self-update-helper --target <container id> --image {IMAGE}:<tag> [--schema <n>]");
         return Some(2);
     };
     if parse_image(&image).0 != IMAGE {
-        eprintln!("encore self-update: only {IMAGE} images, not {image}");
+        println!("{LINE_PREFIX}{FAILED}inspect: only {IMAGE} images, not {image}");
         return Some(2);
     }
+    // a server before --schema passes none: the check is skipped
+    let pre = Preflight { schema: arg("--schema").and_then(|s| s.parse::<i64>().ok()), version: option_env!("ENCORE_VERSION").map(String::from) };
     let d = Docker::new(arg("--socket").unwrap_or_else(|| docker::SOCKET.to_string()));
-    let mut log = |m: &str| println!("encore self-update: {m}");
-    match run_helper(&d, &target, &image, Timing::default(), &mut log).await {
+    let mut log = |m: &str| println!("{LINE_PREFIX}{m}");
+    match run_helper(&d, &target, &image, &pre, Timing::default(), &mut log).await {
         Ok(_) => Some(0),
         Err(e) => {
-            println!("encore self-update: failed: {e}");
+            println!("{LINE_PREFIX}{FAILED}{e}");
             Some(1)
         }
     }

@@ -175,21 +175,22 @@ fn the_old_images_own_values_give_way_to_the_new_ones() {
 fn the_helper_runs_the_new_image_with_only_the_socket() {
     let ins = fixture();
     let id = ins["Id"].as_str().unwrap();
-    let b = plan_helper_body(&ins, NEW).unwrap();
+    let b = plan_helper_body(&ins, NEW, 42).unwrap();
     assert_eq!(b["Image"], json!(NEW));
     assert_eq!(b["Entrypoint"], json!(["/usr/local/bin/encore"]));
-    assert_eq!(b["Cmd"], json!(["self-update-helper", "--target", id, "--image", NEW]));
-    assert_eq!(b["HostConfig"], json!({ "Binds": ["/var/run/docker.sock:/var/run/docker.sock"], "AutoRemove": true, "NetworkMode": "none" }));
+    assert_eq!(b["Cmd"], json!(["self-update-helper", "--target", id, "--image", NEW, "--schema", "42"]));
+    // not removed by Docker when it ends: its log is the update's record until the server reads it
+    assert_eq!(b["HostConfig"], json!({ "Binds": ["/var/run/docker.sock:/var/run/docker.sock"], "NetworkMode": "none" }));
     assert!(b.get("ExposedPorts").is_none() && b["HostConfig"].get("PortBindings").is_none());
     assert_eq!(socket_source(&ins).as_deref(), Some("/var/run/docker.sock"));
     // the socket at another host path, mounted at /run/docker.sock
     let mut other = ins.clone();
     other["Mounts"][1] = json!({ "Type": "bind", "Source": "/run/user/1000/docker.sock", "Destination": "/run/docker.sock", "RW": true });
-    assert_eq!(plan_helper_body(&other, NEW).unwrap()["HostConfig"]["Binds"], json!(["/run/user/1000/docker.sock:/var/run/docker.sock"]));
+    assert_eq!(plan_helper_body(&other, NEW, 42).unwrap()["HostConfig"]["Binds"], json!(["/run/user/1000/docker.sock:/var/run/docker.sock"]));
     // no socket bind: no helper
     let mut none = ins;
     none["Mounts"].as_array_mut().unwrap().remove(1);
-    assert!(plan_helper_body(&none, NEW).is_none());
+    assert!(plan_helper_body(&none, NEW, 42).is_none());
 }
 
 #[test]
@@ -211,8 +212,12 @@ fn pull_errors_are_dockers_own_words() {
 pub(crate) struct Mock {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub bodies: Arc<Mutex<Vec<(String, Value)>>>,
-    /// "create", "start", "exits": what goes wrong; "rm": the container was started with --rm
+    /// "create", "start", "exits": what goes wrong; "rm": the container was started with --rm; "migrates": the
+    /// new container's log says it began migrating the database; "recovers": the new container runs once it
+    /// was started a second time
     pub fail: Arc<Mutex<HashSet<&'static str>>>,
+    /// how often the new container was started
+    pub new_starts: Arc<Mutex<usize>>,
 }
 
 pub(crate) const NEW_ID: &str = "9b1e8f2a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f";
@@ -249,11 +254,18 @@ async fn mock_handler(axum::extract::State(m): axum::extract::State<Mock>, metho
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (method.as_str(), parts.as_slice()) {
         ("GET", ["_ping"]) => "OK".into_response(),
+        // the update helpers Docker still has: one that ended (exit code 1) when asked for
+        ("GET", ["containers", "json"]) => reply(200, if m.failing("helper-left") { json!([{ "Id": HELPER_ID, "State": "exited" }]) } else { json!([]) }),
+        ("GET", ["containers", c, "json"]) if *c == HELPER_ID => reply(200, json!({ "Id": HELPER_ID, "State": { "Status": "exited", "Running": false, "ExitCode": 1 } })),
+        ("GET", ["containers", c, "logs"]) if *c == HELPER_ID => {
+            let text = "encore self-update: stop: stopping encore (up to 30 s)\nencore self-update: failed: verify: the new container stopped (status exited, exit code 3): the new Encore refused the database\n";
+            (StatusCode::OK, text).into_response()
+        }
         ("GET", ["containers", c, "json"]) => {
             if id.starts_with(c) || *c == "encore" {
                 reply(200, ins)
             } else if *c == NEW_ID {
-                let running = !m.failing("exits");
+                let running = !m.failing("exits") || (m.failing("recovers") && *m.new_starts.lock().unwrap() >= 2);
                 reply(200, json!({ "Id": NEW_ID, "State": { "Status": if running { "running" } else { "exited" }, "Running": running, "Restarting": false,
                                    "ExitCode": if running { 0 } else { 3 } } }))
             } else {
@@ -296,6 +308,25 @@ async fn mock_handler(axum::extract::State(m): axum::extract::State<Mock>, metho
         }
         ("POST", ["containers", c, "start"]) if *c == NEW_ID && m.failing("start") => {
             reply(500, json!({ "message": "driver failed programming external connectivity: port 8080 is already allocated" }))
+        }
+        ("POST", ["containers", c, "start"]) if *c == NEW_ID => {
+            *m.new_starts.lock().unwrap() += 1;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        // the new server's own words: a frame of stream 2 (stderr) per line, as Docker sends a log without a terminal
+        ("GET", ["containers", c, "logs"]) if *c == NEW_ID => {
+            let text = if m.failing("migrates") {
+                format!("2026-11-05T00:00:01Z  INFO encore_db: {}\n2026-11-05T00:00:03Z ERROR encore: database migration 0043_x failed: disk I/O error\n", encore_db::migrating_line(42, 43))
+            } else {
+                "\nThis database was written by a newer Encore (schema 42, this server knows 41). Start the newer image again, or restore a backup from /config/backups. Nothing was changed.\n".to_string()
+            };
+            let mut out = vec![];
+            for l in text.split_inclusive('\n') {
+                out.extend_from_slice(&[2, 0, 0, 0]);
+                out.extend_from_slice(&(l.len() as u32).to_be_bytes());
+                out.extend_from_slice(l.as_bytes());
+            }
+            (StatusCode::OK, out).into_response()
         }
         ("POST", ["containers", _, "start" | "stop" | "rename"]) => StatusCode::NO_CONTENT.into_response(),
         ("DELETE", ["containers", _]) => StatusCode::NO_CONTENT.into_response(),
@@ -361,7 +392,7 @@ async fn the_helper_swaps_the_container() {
     let (d, m) = serve_mock(&dir).await;
     let id = fixture()["Id"].as_str().unwrap().to_string();
     let mut lines = vec![];
-    let new = run_helper(&d, &id[..12], NEW, fast(), &mut |l| lines.push(l.to_string())).await.unwrap();
+    let new = run_helper(&d, &id[..12], NEW, &Preflight::default(), fast(), &mut |l| lines.push(l.to_string())).await.unwrap();
     assert_eq!(new, NEW_ID);
     let calls = short(&m.calls());
     let expect = ["GET /containers/784f60a52647/json", "GET /images/sha256:d4a92e09a51355b13a6055a235cf06c2ec9e0d079cd1ade6135629bdb98fc349/json",
@@ -377,8 +408,8 @@ async fn the_helper_swaps_the_container() {
     assert_eq!(body["Image"], json!(NEW));
     assert!(!body.to_string().contains("ENCORE_BUILD"), "the old image's own values gave way: {body}");
     assert_eq!(body["HostConfig"]["Binds"][2], json!("encore_config:/config:rw"));
-    assert!(lines.iter().any(|l| l.starts_with("renaming encore to encore-old-")), "{lines:?}");
-    assert_eq!(lines.last().map(String::as_str), Some("done"));
+    assert!(lines.iter().any(|l| l.starts_with("rename: renaming encore to encore-old-")), "{lines:?}");
+    assert_eq!(lines.last().map(String::as_str), Some("cleanup: done"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -404,12 +435,12 @@ async fn a_failed_create_brings_the_old_container_back() {
     let (d, m) = serve_mock(&dir).await;
     m.fail.lock().unwrap().insert("create");
     let mut lines = vec![];
-    let e = run_helper(&d, "encore", NEW, fast(), &mut |l| lines.push(l.to_string())).await.unwrap_err().to_string();
+    let e = run_helper(&d, "encore", NEW, &Preflight::default(), fast(), &mut |l| lines.push(l.to_string())).await.unwrap_err().to_string();
     assert!(e.starts_with("create: Docker answered 409"), "{e}");
     let calls = short(&m.calls());
     assert_eq!(&calls[calls.len() - 2..], ["POST /containers/OLD/rename?name=encore", "POST /containers/OLD/start"], "{calls:#?}");
     assert!(!calls.iter().any(|c| c.starts_with("DELETE")), "nothing is removed: {calls:#?}");
-    assert!(lines.iter().any(|l| l == "encore runs again on the old image"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "rollback: encore runs again on the old image"), "{lines:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -421,11 +452,13 @@ async fn a_new_container_that_does_not_run_is_rolled_back() {
         let (d, m) = serve_mock(&dir).await;
         m.fail.lock().unwrap().insert(what);
         let mut lines = vec![];
-        let e = run_helper(&d, "encore", NEW, fast(), &mut |l| lines.push(l.to_string())).await.unwrap_err().to_string();
+        let e = run_helper(&d, "encore", NEW, &Preflight::default(), fast(), &mut |l| lines.push(l.to_string())).await.unwrap_err().to_string();
         if what == "start" {
-            assert!(e.contains("port 8080 is already allocated"), "{e}");
+            assert!(e.starts_with("start: Docker answered 500") && e.contains("port 8080 is already allocated"), "{e}");
         } else {
-            assert!(e.contains("status exited, exit code 3"), "{e}");
+            // the exit code is explained, and the new server's own words are in the log
+            assert!(e.starts_with("verify: the new container stopped (status exited, exit code 3): the new Encore refused the database"), "{e}");
+            assert!(lines.iter().any(|l| l.starts_with("verify: new container: This database was written by a newer Encore (schema 42, this server knows 41)")), "{lines:?}");
         }
         let calls = short(&m.calls());
         let n = calls.len();
@@ -440,8 +473,8 @@ async fn a_new_container_that_does_not_run_is_rolled_back() {
 async fn a_missing_image_changes_nothing() {
     let dir = sock_dir("noimg");
     let (d, m) = serve_mock(&dir).await;
-    let e = run_helper(&d, "encore", "example.org/other:1", fast(), &mut |_| {}).await.unwrap_err().to_string();
-    assert!(e.contains("is not on this host"), "{e}");
+    let e = run_helper(&d, "encore", "example.org/other:1", &Preflight::default(), fast(), &mut |_| {}).await.unwrap_err().to_string();
+    assert!(e.starts_with("inspect: ") && e.contains("is not on this host"), "{e}");
     assert!(m.calls().iter().all(|c| c.starts_with("GET ")), "{:?}", m.calls());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -452,7 +485,7 @@ async fn a_container_docker_removes_on_stop_is_left_alone() {
     let dir = sock_dir("rm");
     let (d, m) = serve_mock(&dir).await;
     m.fail.lock().unwrap().insert("rm");
-    let e = run_helper(&d, "encore", NEW, fast(), &mut |_| {}).await.unwrap_err().to_string();
+    let e = run_helper(&d, "encore", NEW, &Preflight::default(), fast(), &mut |_| {}).await.unwrap_err().to_string();
     assert!(e.contains("started with --rm") && e.ends_with("nothing was changed"), "{e}");
     assert!(m.calls().iter().all(|c| c.starts_with("GET ")), "{:?}", m.calls());
     let mut swarm = fixture();
@@ -460,4 +493,77 @@ async fn a_container_docker_removes_on_stop_is_left_alone() {
     assert!(cannot_replace(&swarm).unwrap().contains("Swarm service"));
     assert_eq!(cannot_replace(&fixture()), None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The image under the tag is older code than the running server (0.42.18 built from a stale branch, schema
+/// 41, over a schema-42 database): the helper refuses before anything is stopped.
+#[tokio::test]
+async fn an_image_that_would_refuse_the_database_changes_nothing() {
+    let dir = sock_dir("schema");
+    let (d, m) = serve_mock(&dir).await;
+    let pre = Preflight { schema: Some(encore_db::SCHEMA_VERSION + 1), version: None };
+    let e = run_helper(&d, "encore", NEW, &pre, fast(), &mut |_| {}).await.unwrap_err().to_string();
+    assert!(e.starts_with("schema: ") && e.contains("it was written by a newer Encore") && e.contains("Nothing was changed"), "{e}");
+    assert!(m.calls().is_empty(), "nothing was even asked: {:?}", m.calls());
+    // the same schema, or an older one (the new server migrates it), goes ahead
+    assert_eq!(schema_refusal(Some(42), 42, NEW), None);
+    assert_eq!(schema_refusal(Some(41), 42, NEW), None);
+    assert_eq!(schema_refusal(None, 42, NEW), None, "a server before --schema");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tag names another version than the image holds (a wrong image pushed under it): nothing is changed.
+#[tokio::test]
+async fn an_image_with_another_version_than_its_tag_changes_nothing() {
+    let dir = sock_dir("version");
+    let (d, m) = serve_mock(&dir).await;
+    let pre = Preflight { schema: None, version: Some("0.27.0".into()) };
+    let e = run_helper(&d, "encore", NEW, &pre, fast(), &mut |_| {}).await.unwrap_err().to_string();
+    assert!(e.starts_with("inspect: ghcr.io/krifmaz/encore:0.28.0 holds Encore 0.27.0, not 0.28.0"), "{e}");
+    assert!(m.calls().is_empty(), "{:?}", m.calls());
+    assert_eq!(version_refusal(NEW, Some("0.28.0")), None);
+    assert_eq!(version_refusal("ghcr.io/krifmaz/encore:latest", Some("0.28.0")), None, "latest is no version");
+    assert_eq!(version_refusal(NEW, None), None, "a build without a release number");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The new server began migrating the database and then stopped: the old Encore is never started on it. The
+/// new container is started again; when it keeps running the update goes through, otherwise it stays and
+/// the old one is kept stopped for a manual way back.
+#[tokio::test]
+async fn after_a_migration_the_update_goes_forward_not_back() {
+    for recovers in [false, true] {
+        let dir = sock_dir(if recovers { "mig-ok" } else { "mig-bad" });
+        let (d, m) = serve_mock(&dir).await;
+        m.fail.lock().unwrap().extend(["exits", "migrates"]);
+        if recovers {
+            m.fail.lock().unwrap().insert("recovers");
+        }
+        let mut lines = vec![];
+        let res = run_helper(&d, "encore", NEW, &Preflight::default(), fast(), &mut |l| lines.push(l.to_string())).await;
+        let calls = short(&m.calls());
+        assert!(!calls.iter().any(|c| c == "POST /containers/OLD/start"), "the old Encore never runs on the migrated database: {calls:#?}");
+        assert!(!calls.iter().any(|c| c.starts_with("POST /containers/OLD/rename?name=encore")), "the old one keeps its -old- name: {calls:#?}");
+        assert!(!calls.iter().any(|c| c.starts_with("DELETE /containers/NEW")), "the new container stays: {calls:#?}");
+        assert!(lines.iter().any(|l| l.contains("had begun migrating the database from schema 42 to 43")), "{lines:?}");
+        if recovers {
+            assert_eq!(res.unwrap(), NEW_ID);
+            assert!(lines.iter().any(|l| l == "verify: the new container keeps running now"), "{lines:?}");
+            assert_eq!(lines.last().map(String::as_str), Some("cleanup: done"));
+        } else {
+            let e = res.unwrap_err().to_string();
+            assert!(e.starts_with("verify: the new container stopped (status exited, exit code 3)"), "{e}");
+            assert!(e.contains("the old Encore was not started again") && e.contains("restore the backup taken before the migration (/config/backups)"), "{e}");
+            assert_eq!(*m.new_starts.lock().unwrap(), 1 + RESTARTS_AFTER_MIGRATION, "started again {RESTARTS_AFTER_MIGRATION} times");
+            assert!(!calls.iter().any(|c| c.starts_with("DELETE /containers/OLD")), "the old container is kept: {calls:#?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn exit_codes_say_what_they_mean() {
+    assert!(exit_meaning(i64::from(encore_db::EXIT_NEWER_DB)).unwrap().contains("refused the database"));
+    assert!(exit_meaning(137).unwrap().contains("killed"));
+    assert_eq!(exit_meaning(1), None);
 }

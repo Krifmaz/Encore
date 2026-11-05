@@ -650,9 +650,28 @@ fn updates_html(d: &Value) -> String {
         </div>
         <div class="row wrap">{github}{update_btn}</div>
       </div>
-      {dev_note}{error}{notes}{help}{shell}
+      {dev_note}{error}{notes}{help}{shell}{last}
       <div id="up-status" hidden></div>
-    </div>"#, refresh = icon("refresh"), current = esc(&current), dev = if dev { " · development build" } else { "" })
+    </div>"#, refresh = icon("refresh"), current = esc(&current), dev = if dev { " · development build" } else { "" },
+        last = last_update_html(d.g("last_update")))
+}
+
+/// The last "Update now" when it failed (GET /system/update's `last_update`): the step it failed at and the
+/// error in the server's or Docker's own words, with Copy for the whole record (every step and its output),
+/// and the steps themselves to unfold. Nothing for an update that went through, is on its way, or an older
+/// server without the record.
+pub fn last_update_html(r: &Value) -> String {
+    if r.g("state").as_str() != Some("failed") { return String::new(); }
+    let when = if r.f("finished_at") > 0.0 { format!(r#" <span class="faint">{}</span>"#, esc(&fmt::ago(r.f("finished_at")))) } else { String::new() };
+    let step = if r.truthy("failed_step") { r.s("failed_step") } else { "unknown".to_string() };
+    let lines: Vec<String> = r.a("lines").iter().filter_map(|l| l.as_str().map(String::from)).collect();
+    format!(r#"<div class="stack" id="up-last" style="gap:6px;border-left:3px solid var(--err);padding-left:10px">
+        <div class="row wrap between"><span class="small"><b>The update to {to} failed</b> at step <code>{step}</code>{when}</span>{copy}</div>
+        <div class="small" style="color:var(--err);white-space:pre-wrap">{error}</div>
+        <details><summary class="small muted" style="cursor:pointer">Every step ({n})</summary><pre class="details-text small">{lines}</pre></details>
+      </div>"#,
+        to = esck(r, "to"), step = esc(&step), when = when, copy = crate::details::copy_button(&r.s("text")),
+        error = esck(r, "error"), n = lines.len(), lines = esc(&lines.join("\n")))
 }
 
 fn draw_updates(up: &Element, d: &Value) {
@@ -744,6 +763,10 @@ fn status_off(up: &Element) {
     if let Some(s) = dom::qs_in(up, "#up-status") { dom::set_html(&s, ""); dom::hide(&s, true); }
 }
 
+/// How often the page asks for the update's record after the server came back on the old version (every
+/// POLL_MS: the helper finishes its roll-back and ends within seconds).
+const RECORD_TRIES: usize = 10;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait { Restart, Update }
 
@@ -789,7 +812,21 @@ async fn wait_back(up: &Element, w: Wait, from: &str) {
                 return;
             }
             Back::SameVersion => {
-                status(up, &format!(r#"<span class="dot err"></span><span>The server is back, still on Encore {}: the update did not go through. Try Update now again, or update by hand (<code>docker compose pull && docker compose up -d</code>).</span><button class="btn sm" id="up-reload">Reload</button>"#, esc(from)));
+                // the record says which step failed and why: the helper may still be rolling back, so ask a few times
+                let mut last = Value::Null;
+                for _ in 0..RECORD_TRIES {
+                    if let Ok(d) = api::get("/system/update").await {
+                        let done = d.g("last_update").g("state").as_str() != Some("running");
+                        last = d;
+                        if done { break; }
+                    }
+                    dom::sleep(POLL_MS).await;
+                }
+                if !up.is_connected() { return; }
+                if last.is_object() { draw_updates(up, &last); }
+                let failed = last.g("last_update").g("state").as_str() == Some("failed");
+                status(up, &format!(r#"<span class="dot err"></span><span>The server is back, still on Encore {}: the update did not go through{}. Try Update now again, or update by hand (<code>docker compose pull && docker compose up -d</code>).</span><button class="btn sm" id="up-reload">Reload</button>"#,
+                    esc(from), if failed { " – the failing step and its error are above" } else { "" }));
                 if let Some(b) = dom::qs_in(up, "#up-reload") { dom::on(&b, "click", |_| dom::reload()); }
                 return;
             }
@@ -878,6 +915,25 @@ mod update_tests {
         assert_eq!(notes_text("x < y and [unclosed](link"), "x < y and [unclosed](link");
         assert_eq!(notes_text("[a](u1) and [b](u2)"), "a and b");
         assert_eq!(notes_text("Ünïcode – “quotes” [ok](u)"), "Ünïcode – “quotes” ok");
+    }
+
+    /// The failure path on the page: a failed update shows its step, its error and Copy with the whole record;
+    /// one that went through, is still on its way, or a server without the record shows nothing.
+    #[test]
+    fn a_failed_update_shows_its_step_error_and_copy() {
+        let r = json!({ "state": "failed", "to": "0.42.18", "failed_step": "verify", "finished_at": 0.0,
+            "error": "the new container stopped (status exited, exit code 3): the new Encore refused the database",
+            "lines": ["pull: ghcr.io/krifmaz/encore:0.42.18 is on this host", "helper: rollback: encore runs again on the old image"],
+            "text": "Encore update 0.42.15 → 0.42.18\nFailed at step: verify\nError: <x>" });
+        let html = last_update_html(&r);
+        assert!(html.contains("The update to 0.42.18 failed</b> at step <code>verify</code>"), "{html}");
+        assert!(html.contains("exit code 3): the new Encore refused the database"), "{html}");
+        assert!(html.contains(r#"data-copy-text="Encore update 0.42.15 → 0.42.18"#) && html.contains("&lt;x&gt;"), "Copy takes the whole record, escaped: {html}");
+        assert!(html.contains("Every step (2)") && html.contains("helper: rollback: encore runs again on the old image"), "{html}");
+        for state in ["ok", "running"] {
+            assert_eq!(last_update_html(&json!({ "state": state, "to": "0.42.18" })), "", "{state}");
+        }
+        assert_eq!(last_update_html(&Value::Null), "", "an older server");
     }
 
     #[test]
