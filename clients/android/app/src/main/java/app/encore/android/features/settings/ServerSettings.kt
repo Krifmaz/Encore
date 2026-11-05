@@ -9,6 +9,7 @@ import dev.krifmaz.kit.compose.widgets.Spinner
 import kotlinx.serialization.json.JsonObject
 import app.encore.android.schemaApi
 import dev.krifmaz.kit.compose.settings.CardSlots
+import dev.krifmaz.kit.compose.settings.FieldBlock
 import dev.krifmaz.kit.compose.settings.SchemaApi
 import dev.krifmaz.kit.compose.settings.SchemaFormState
 import dev.krifmaz.kit.compose.settings.SchemaPage
@@ -82,7 +83,8 @@ fun sourceSlots(api: SettingsApi): Map<String, CardSlots> = mapOf(
     }),
     "slskd" to CardSlots(
         below = { SoulseekStatusBlock(api) },
-        vpnFooter = { card -> VpnFooter(api, card) },
+        // the VPN's fields (vpn_…) in their own framed block, with its state and Test VPN under them
+        block = FieldBlock("vpn_", "VPN for Soulseek") { card -> VpnFooter(api, card) },
         // the listen port is not used while the VPN is on (the VPN's forwarded port is)
         hide = { f, current -> f.key == "soulseek_port" && current("vpn_enabled") == "true" },
     ),

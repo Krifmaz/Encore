@@ -43,7 +43,7 @@ import dev.krifmaz.kit.compose.widgets.Badge
 import dev.krifmaz.kit.compose.widgets.KitButton
 import dev.krifmaz.kit.compose.widgets.ErrorBox
 import dev.krifmaz.kit.compose.widgets.SmallButton
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import dev.krifmaz.kit.compose.widgets.Spinner
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.CancellationException

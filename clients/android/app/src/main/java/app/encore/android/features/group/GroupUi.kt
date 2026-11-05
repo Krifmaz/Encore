@@ -73,7 +73,7 @@ import dev.krifmaz.kit.compose.widgets.SectionHead
 import dev.krifmaz.kit.compose.widgets.SmallButton
 import dev.krifmaz.kit.compose.toasts.Toasts
 import app.encore.android.ui.components.formatDuration
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import app.encore.android.ui.theme.EncoreColors
 import app.encore.android.ui.theme.palette
 import kotlinx.coroutines.Dispatchers

@@ -69,7 +69,7 @@ import dev.krifmaz.kit.compose.widgets.PopMenu
 import app.encore.android.ui.components.Tile
 import dev.krifmaz.kit.compose.widgets.SmallButton
 import dev.krifmaz.kit.compose.toasts.Toasts
-import dev.krifmaz.kit.compose.widgets.ConfirmDialog
+import dev.krifmaz.kit.compose.dialogs.ConfirmDialog
 import app.encore.android.ui.screens.StatusBadge
 import app.encore.android.ui.screens.features
 import app.encore.android.ui.screens.openArtistPage

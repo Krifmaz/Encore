@@ -159,7 +159,7 @@ fun SettingsScreen(nav: Nav, session: Session, startAt: String? = null) {
         if (!admin) return@LaunchedEffect
         schemaError = null
         try {
-            schemaState = withContext(Dispatchers.IO) { graph.schemaApi.loadState(canReveal) }
+            schemaState = withContext(Dispatchers.IO) { graph.schemaApi.loadState(canReveal, NEVER_SHOWN) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -323,6 +323,9 @@ private fun withPlugins(sections: List<Pair<String, String>>, plugins: Boolean):
 }
 
 /** The Server pages when the schema has not loaded (an older server, or an error): the web's ids and order. */
+/** The saved secrets never shown again, not even to the owner (the server refuses them too): the WireGuard config. */
+private val NEVER_SHOWN: Set<String> = setOf("vpn_wireguard_config")
+
 private val SERVER_PAGES = listOf(
     "general", "library", "downloads", "integrations", "processing", "accounts", "autodownload", "contribute", "blocked", "tasks",
 )

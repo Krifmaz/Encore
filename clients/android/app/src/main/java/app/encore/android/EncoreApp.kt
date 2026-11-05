@@ -12,6 +12,7 @@ import app.encore.android.data.prefs.PrefsRepository
 import app.encore.android.data.session.SessionStore
 import coil3.ImageLoader
 import dev.krifmaz.kit.compose.KitApp
+import dev.krifmaz.kit.compose.KitRoutes
 import dev.krifmaz.kit.compose.bugs.CrashLog
 import dev.krifmaz.kit.compose.update.UpdateRules
 import dev.krifmaz.kit.compose.update.UpdateSource
@@ -19,6 +20,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
+
+/**
+ * Where Encore's server answers the calls the kit's parts make (KitApp.routes): the kit's defaults, except the
+ * settings (admin routes), a settings card's Test, the diagnostics and the app crash reports, which Encore's server
+ * keeps at its own paths.
+ */
+val KIT_ROUTES: KitRoutes = KitRoutes(
+    diagnostics = "/api/system/diagnostics",
+    clientCrash = "/api/diagnostics/client-crash",
+    settingsSchema = "/api/admin/settings/schema",
+    settings = "/api/admin/settings",
+    settingsSecret = "/api/admin/settings/secret",
+    settingsTest = "/api/system/test/{test}",
+)
 
 class EncoreApp : Application() {
     lateinit var graph: AppGraph
@@ -28,8 +43,10 @@ class EncoreApp : Application() {
         super.onCreate()
         // who the app is, for the kit's words and requests (kit-compose: crash log, updates, bug reports), and where
         // its releases are (in-app updates)
-        KitApp.init(name = "Encore", versionName = BuildConfig.VERSION_NAME, versionCode = BuildConfig.VERSION_CODE, userAgent = USER_AGENT)
-        UpdateRules.source = UpdateSource.ENCORE
+        KitApp.init(name = "Encore", versionName = BuildConfig.VERSION_NAME, versionCode = BuildConfig.VERSION_CODE, userAgent = USER_AGENT, id = "encore", routes = KIT_ROUTES)
+        UpdateRules.source = UpdateSource("Krifmaz", "Encore", "Encore-android-", "app.encore.client")
+        // the "Encore 1.2.3 is available" toast points to where the updater is
+        UpdateRules.updatesPlace = "Settings → This device"
         // next, so a crash while building the graph is written too (the kit's CrashLog)
         CrashLog.install(this)
         app.encore.android.data.api.Translations.init(this)

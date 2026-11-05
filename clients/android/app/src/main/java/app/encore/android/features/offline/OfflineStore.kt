@@ -70,7 +70,7 @@ class OfflineStore private constructor(private val app: Context) {
     private val uris = ConcurrentHashMap<String, Uri>()
 
     /** Plays and likes waiting for the server. */
-    val outbox = OutboxFile(File(dir, "outbox.json"))
+    val outbox = OutboxFile(File(dir, "outbox.json"), EncoreOutbox::fromLegacy)
 
     private val likesFile = File(dir, "likes.json")
 
