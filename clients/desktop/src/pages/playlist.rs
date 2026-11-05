@@ -25,6 +25,7 @@
 //! as you type (× clears it, 🔍 again closes it); a song found still plays the whole playlist from
 //! that song.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::playlists::{
@@ -1066,7 +1067,7 @@ fn header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Message> 
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if has_matched {
         actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
-        actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
+        actions = actions.push(btn_icon(app_icons::SHUFFLE, "Shuffle", Btn::Default, Some(Message::Shuffle)));
         actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
     }
     // 🔍 whenever there are songs to search
@@ -1226,7 +1227,7 @@ fn linked_header<'a>(state: &'a State, p: &'a Value, ctx: &Ctx<'a>) -> El<'a, Me
         right = right.push(small_muted(linked_hint(&owner)));
         if !playable(&state.items()).is_empty() {
             actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::Play(0))));
-            actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::Shuffle)));
+            actions = actions.push(btn_icon(app_icons::SHUFFLE, "Shuffle", Btn::Default, Some(Message::Shuffle)));
             actions = actions.push(btn_icon(Icon::Download, "Save for offline", Btn::Default, Some(Message::SaveOffline)));
         }
         if !state.items().is_empty() {
@@ -1319,7 +1320,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             if !linked_active(p) {
                 // the link ended: the head says so, there is nothing to list
             } else if items.is_empty() {
-                col = col.push(empty(Icon::Music, LINKED_EMPTY, ""));
+                col = col.push(empty(app_icons::MUSIC, LINKED_EMPTY, ""));
             } else {
                 if let Some(bar) = search_bar(state, &items) {
                     col = col.push(bar);
@@ -1336,7 +1337,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             }
             if items.is_empty() {
                 col = col.push(empty(
-                    Icon::Music,
+                    app_icons::MUSIC,
                     "Empty playlist",
                     "Add tracks from an album page or from a link.",
                 ));
@@ -1367,7 +1368,7 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             items.push(MenuItem::new("Add to queue", Message::Enqueue(iid)).icon(Icon::Plus));
         }
         if fmt::truthy(&it, "album_id") {
-            items.push(MenuItem::new("View album", Message::ViewAlbum(fmt::s(&it, "album_id"))).icon(Icon::Disc));
+            items.push(MenuItem::new("View album", Message::ViewAlbum(fmt::s(&it, "album_id"))).icon(app_icons::DISC));
         }
         if !state.playlist().is_some_and(is_linked) {
             items.push(MenuItem::new("Remove", Message::RemoveItem(iid)).icon(Icon::X).danger());
@@ -1388,14 +1389,14 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
             let body = column![
                 muted("When a song is part of an album:").size(14),
                 btn_icon(
-                    Icon::Music,
+                    app_icons::MUSIC,
                     "Just the song",
                     Btn::Default,
                     Some(Message::AlbumChoice(Some("song".into())))
                 )
                 .width(Length::Fill),
                 btn_icon(
-                    Icon::Disc,
+                    app_icons::DISC,
                     "Download the whole album (best quality available)",
                     Btn::Default,
                     Some(Message::AlbumChoice(Some("album".into())))

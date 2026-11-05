@@ -38,7 +38,7 @@ log = "0.4"
 env_logger = "0.11"
 url = "2"
 percent-encoding = "2"
-kit-iced = { git = "https://github.com/Krifmaz/kit", rev = "8a6304d05e3cad7cb90198b46f6558330f0c8a6f" }
+kit-iced = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.3" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 directories = "6"
 gethostname = "1"

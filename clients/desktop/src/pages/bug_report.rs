@@ -4,6 +4,7 @@
 //! picker as the New report dialog); admins set the status, export this report (saved through the
 //! API client, since the browser has no session) and delete it.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::widgets::drop_zone;
@@ -191,7 +192,7 @@ fn files_view<'a>(files: &[Value], ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
                     .content_fit(ContentFit::Cover)
                     .border_radius(8.0)
                     .into(),
-                None => container(widgets::icon(Icon::Disc, 20.0, look.faint))
+                None => container(widgets::icon(app_icons::DISC, 20.0, look.faint))
                     .width(120)
                     .height(90)
                     .center(Length::Fill)

@@ -11,6 +11,7 @@
 //! them. After them the One-offs shelf (0.36, web `ArtistSongs::one_offs_html`): the artist's songs on
 //! compilations, remix albums and soundtracks the library has only a few songs of, with the song ⋯ menu.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::library::{self as lib, Act};
@@ -1176,7 +1177,7 @@ fn popular<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, x: &'a Value) -> O
             name_row = name_row.push(muted(fmt::s(tr, "version")).size(13));
         }
         let lines = column![name_row, small_muted(fmt::s(tr, "album")).size(12.5)].spacing(2);
-        let mut r = row![play, catalog::art(ctx, &fmt::s(tr, "cover"), 40.0, false, Icon::Music), lines.width(Length::Fill)]
+        let mut r = row![play, catalog::art(ctx, &fmt::s(tr, "cover"), 40.0, false, app_icons::MUSIC), lines.width(Length::Fill)]
             .spacing(12)
             .align_y(Alignment::Center);
         if fmt::f(tr, "duration") > 0.0 {
@@ -1339,7 +1340,7 @@ fn discography<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, n_rg: usize) -
         } else {
             "No releases on MusicBrainz"
         };
-        col = col.push(empty(Icon::Disc, title, ""));
+        col = col.push(empty(app_icons::DISC, title, ""));
     }
     col = col.push(ext_note(state));
     col.into()

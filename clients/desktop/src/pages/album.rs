@@ -3,6 +3,7 @@
 //! download, Open in library, More like this. Behaviour reference: web-rs/src/pages/discover.rs
 //! `render_album`.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El, Page};
@@ -304,11 +305,11 @@ fn head<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, ts: &[Value]) -> El<'
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if owned_n > 0 {
         actions = actions.push(btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::PlayOwned(0, false))));
-        actions = actions.push(btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::PlayOwned(0, true))));
+        actions = actions.push(btn_icon(app_icons::SHUFFLE, "Shuffle", Btn::Default, Some(Message::PlayOwned(0, true))));
     }
     if fmt::truthy(a, "library_album_id") {
         actions = actions.push(btn_icon(
-            Icon::Disc,
+            app_icons::DISC,
             "Open in library",
             Btn::Default,
             Some(Message::Open(Page::LibraryAlbum(fmt::s(a, "library_album_id")))),
@@ -339,7 +340,7 @@ fn head<'a>(state: &'a State, ctx: &Ctx<'a>, a: &'a Value, ts: &[Value]) -> El<'
     ));
     text = text.push(container(actions.wrap()).padding([6, 0]));
     let cover = fmt::s(a, "cover").replacen("front-250", "front-500", 1);
-    row![catalog::art(ctx, &cover, 220.0, false, Icon::Disc), text.width(Length::Fill)]
+    row![catalog::art(ctx, &cover, 220.0, false, app_icons::DISC), text.width(Length::Fill)]
         .spacing(26)
         .align_y(Alignment::Center)
         .into()
@@ -425,7 +426,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     let body: El<'a, Message> = if a["release"].is_object() {
         track_table(state, ctx, a, &ts)
     } else {
-        empty(Icon::Disc, "No track listing available", "")
+        empty(app_icons::DISC, "No track listing available", "")
     };
     column![head(state, ctx, a, &ts), body].spacing(26).width(Length::Fill).into()
 }

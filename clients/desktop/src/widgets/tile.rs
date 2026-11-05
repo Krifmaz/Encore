@@ -2,6 +2,7 @@
 //! play button on hover. Tiles go in a wrapping [`grid`]. Package A (home + library) owns
 //! this file in stage 2.
 
+use super::app_icons;
 use super::{icon, small_muted, t, El, Icon};
 use crate::theme::{self, Btn};
 use iced::widget::{button, column, container, hover, image, row, space, stack, tooltip};
@@ -116,7 +117,7 @@ impl<'a, M: Clone + 'a> Tile<'a, M> {
                 .into(),
             (None, None) => {
                 let i = match self.kind {
-                    TileKind::Album => Icon::Disc,
+                    TileKind::Album => app_icons::DISC,
                     TileKind::Artist => Icon::User,
                     TileKind::Playlist => Icon::List,
                 };

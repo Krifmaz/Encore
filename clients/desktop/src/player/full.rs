@@ -6,6 +6,7 @@
 //! "Back to the cover" (or a click on the compact bar: thumbnail, title, artist) goes back to Now playing; the mode is
 //! remembered (`encore.lyricsMode`). Long titles scroll sideways (widgets::marquee).
 
+use crate::widgets::app_icons;
 use super::{bar, cover_handle, Message, Now, Pane, State};
 use crate::fmt;
 use crate::pages::{Ctx, El};
@@ -61,7 +62,7 @@ fn art<'a>(ctx: &Ctx<'a>, cover: Option<&str>, size: f32) -> El<'a, Message> {
             .content_fit(ContentFit::Cover)
             .border_radius(theme::RADIUS)
             .into(),
-        None => container(icon(Icon::Music, size * 0.3, p.faint))
+        None => container(icon(app_icons::MUSIC, size * 0.3, p.faint))
             .width(size)
             .height(size)
             .center(size)
@@ -134,7 +135,7 @@ fn main_column<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now, art_size: f32) ->
         if grouped {
             super::group::view::shuffle(state, 18.0)
         } else {
-            bar_mode(Icon::Shuffle, shuffle_on, None, Message::SetShuffle(!shuffle_on))
+            bar_mode(app_icons::SHUFFLE, shuffle_on, None, Message::SetShuffle(!shuffle_on))
         },
         bar::transport(state, Some(now), true),
         if grouped {
@@ -161,7 +162,7 @@ fn main_column<'a>(state: &'a State, ctx: &Ctx<'a>, now: &Now, art_size: f32) ->
         actions = actions.push(icon_btn(Icon::External, "Share link", Some(Message::Share)));
     }
     actions = actions.push(bar_mode(
-        Icon::Music,
+        app_icons::MUSIC,
         state.full == Some(Pane::Lyrics),
         None,
         Message::SetPane(if state.full == Some(Pane::Lyrics) { Pane::Now } else { Pane::Lyrics }),
@@ -244,7 +245,7 @@ fn queue_pane<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .content_fit(ContentFit::Cover)
                     .border_radius(6.0)
                     .into(),
-                None => container(icon(Icon::Music, 16.0, p.faint))
+                None => container(icon(app_icons::MUSIC, 16.0, p.faint))
                     .width(40)
                     .height(40)
                     .center(40)

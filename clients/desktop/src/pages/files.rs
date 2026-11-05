@@ -20,6 +20,7 @@
 //!
 //! Only admins see the section; the server answers 403 to anyone else and 404 before 0.33.
 
+use crate::widgets::app_icons;
 use crate::api::{Api, ApiError};
 use crate::fmt;
 use crate::pages::library::{self, Act as LibAct};
@@ -2744,7 +2745,7 @@ fn found_view<'a>(state: &'a State, root: &'a Root) -> Option<El<'a, Message>> {
                         } else if e.kind == "dir" {
                             ficon(F::Folder, 20.0, p.accent)
                         } else if e.is_audio() {
-                            icon(Icon::Music, 20.0, p.muted)
+                            icon(app_icons::MUSIC, 20.0, p.muted)
                         } else if e.image {
                             ficon(F::Image, 20.0, p.muted)
                         } else {
@@ -2851,7 +2852,7 @@ fn entry_row<'a>(i: usize, e: &'a Entry, selected: bool) -> El<'a, Message> {
     } else if e.kind == "dir" {
         ficon(F::Folder, 20.0, p.accent)
     } else if e.is_audio() {
-        icon(Icon::Music, 20.0, p.muted)
+        icon(app_icons::MUSIC, 20.0, p.muted)
     } else if e.image {
         ficon(F::Image, 20.0, p.muted)
     } else {
@@ -3105,7 +3106,7 @@ fn menu_items(state: &State, menu: &Menu) -> Vec<MenuItem<Message>> {
             .collect(),
         Menu::Upload => vec![
             MenuItem::new("Upload files", Message::PickFiles).icon(Icon::Plus),
-            MenuItem::new("Upload a folder", Message::PickFolder).icon(Icon::Library),
+            MenuItem::new("Upload a folder", Message::PickFolder).icon(app_icons::LIBRARY),
         ],
         Menu::Trash(i) => match &state.trash {
             Some(Ok(items)) => match items.get(*i) {
@@ -3143,11 +3144,11 @@ fn menu_items(state: &State, menu: &Menu) -> Vec<MenuItem<Message>> {
                 // on a link these act on the link itself, never on what it points to
                 if can {
                     v.push(MenuItem::new("Rename", Message::AskRename(e.name.clone())).icon(Icon::Edit));
-                    v.push(MenuItem::new("Move", Message::AskMove(vec![e.name.clone()])).icon(Icon::Next));
+                    v.push(MenuItem::new("Move", Message::AskMove(vec![e.name.clone()])).icon(app_icons::NEXT));
                     v.push(MenuItem::new(delete_label(state.trash_keep().0), Message::AskTrash(vec![e.name.clone()])).icon(Icon::Trash).danger());
                 }
             } else if can {
-                v.push(MenuItem::new("Move", Message::AskMove(names.clone())).icon(Icon::Next));
+                v.push(MenuItem::new("Move", Message::AskMove(names.clone())).icon(app_icons::NEXT));
                 v.push(MenuItem::new(delete_label(state.trash_keep().0), Message::AskTrash(names.clone())).icon(Icon::Trash).danger());
             }
             v

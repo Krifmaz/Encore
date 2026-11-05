@@ -2,6 +2,7 @@
 //! times, the buttons chosen in "Customize the bar", ⋯, the volume; the pick-up offer above it;
 //! the ⋯ menu, the Customize the bar dialog and the Add to playlist dialog.
 
+use crate::widgets::app_icons;
 use super::{cover_handle, signal, Message, Now, Pane, State};
 use crate::config::{BAR_ACTIONS, BAR_DEFAULT};
 use crate::fmt;
@@ -71,7 +72,7 @@ pub fn transport<'a>(state: &'a State, now: Option<&Now>, large: bool) -> El<'a,
             icon_btn(i, label, has.then_some(msg))
         }
     };
-    row![skip(Icon::Prev, "Previous", Message::Prev), play, skip(Icon::Next, "Next", Message::Next)]
+    row![skip(app_icons::PREV, "Previous", Message::Prev), play, skip(app_icons::NEXT, "Next", Message::Next)]
     .spacing(if large { 14 } else { 6 })
     .align_y(Alignment::Center)
     .into()
@@ -121,7 +122,7 @@ pub fn volume<'a>(state: &State, now: Option<&Now>, width: f32) -> El<'a, Messag
         })
         .clamp(0.0, 1.0);
     row![
-        icon(Icon::Volume, 16.0, p.muted),
+        icon(app_icons::VOLUME, 16.0, p.muted),
         slider(0.0..=1.0, v, Message::Volume)
             .on_release(Message::VolumeDone)
             .step(0.01)
@@ -176,7 +177,7 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
     }
     if has("shuffle") && now.is_some() && !grouped {
         out.push(mode_btn(
-            Icon::Shuffle,
+            app_icons::SHUFFLE,
             if shuffle_on { "Shuffle: on" } else { "Shuffle: off" },
             shuffle_on,
             None,
@@ -204,7 +205,7 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
         ));
     }
     if has("album") && now.is_some_and(|n| n.album_id.is_some()) {
-        out.push(icon_btn(Icon::Disc, "View album", Some(Message::ViewAlbum)));
+        out.push(icon_btn(app_icons::DISC, "View album", Some(Message::ViewAlbum)));
     }
     if has("playlist") {
         if let Some(id) = lib {
@@ -213,7 +214,7 @@ fn right_buttons<'a>(state: &'a State, ctx: &Ctx<'a>, now: Option<&Now>) -> Vec<
     }
     out.push(icon_btn(Icon::More, "More", Some(Message::Menu)));
     if has("lyrics") {
-        out.push(icon_btn(Icon::Music, "Lyrics", Some(Message::OpenFull(Pane::Lyrics))));
+        out.push(icon_btn(app_icons::MUSIC, "Lyrics", Some(Message::OpenFull(Pane::Lyrics))));
     }
     if has("share") && lib.is_some() {
         out.push(icon_btn(Icon::External, "Share link", Some(Message::Share)));
@@ -314,7 +315,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
                     .align_y(Alignment::Center),
                 );
             }
-            let content = row![thumb(ctx, n.cover.as_deref(), 48.0, Icon::Music), info]
+            let content = row![thumb(ctx, n.cover.as_deref(), 48.0, app_icons::MUSIC), info]
                 .spacing(12)
                 .width(Length::Fill)
                 .align_y(Alignment::Center);
@@ -350,7 +351,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .align_y(Alignment::Center)
         .into(),
         (None, None) => row![
-            thumb(ctx, None, 48.0, Icon::Music),
+            thumb(ctx, None, 48.0, app_icons::MUSIC),
             column![
                 t("Nothing playing").size(14).font(theme::semibold()).color(p.faint),
                 row![
@@ -439,7 +440,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         .padding([0, 16])
         .height(theme::PLAYER_H - 1.0)
         .width(Length::Fill)
-        .style(theme::player_bar),
+        .style(theme::bottom_bar),
     )
     .into()
 }
@@ -455,7 +456,7 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
             items.push(MenuItem::new("Go to artist", Message::GoToArtist).icon(Icon::User));
         }
         if n.album_id.is_some() {
-            items.push(MenuItem::new("View album", Message::ViewAlbum).icon(Icon::Disc));
+            items.push(MenuItem::new("View album", Message::ViewAlbum).icon(app_icons::DISC));
         }
     }
     if let Some(id) = lib {
@@ -470,7 +471,7 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
             );
             items.push(MenuItem::new("Add to playlist", Message::AddToPlaylist(vec![id])).icon(Icon::Plus));
         }
-        items.push(MenuItem::new("Lyrics", Message::OpenFull(Pane::Lyrics)).icon(Icon::Music));
+        items.push(MenuItem::new("Lyrics", Message::OpenFull(Pane::Lyrics)).icon(app_icons::MUSIC));
         items.push(MenuItem::new("Share link", Message::Share).icon(Icon::External));
         items.push(MenuItem::new("Download this song", Message::DownloadSong).icon(Icon::Download));
         if !linked {
@@ -479,7 +480,7 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
     }
     items.push(MenuItem::new("Signal path", Message::Signal).icon(Icon::Activity));
     if !linked {
-        items.push(MenuItem::new("Mini player", Message::OpenMini).icon(Icon::Music));
+        items.push(MenuItem::new("Mini player", Message::OpenMini).icon(app_icons::MUSIC));
     }
     if lib.is_some() {
         items.push(MenuItem::new("Report a problem", Message::ReportSong).icon(Icon::Shield));
@@ -490,7 +491,7 @@ pub fn more_menu<'a>(state: &'a State, ctx: &Ctx<'a>, at: Point) -> El<'a, Messa
             let song = serde_json::json!({ "id": id, "title": n.title });
             items.push(
                 MenuItem::new("Replace with my own file", Message::SongAct(crate::pages::library::Act::ReplaceOwn(Box::new(song))))
-                    .icon(Icon::Disc),
+                    .icon(app_icons::DISC),
             );
         }
     }
@@ -536,7 +537,7 @@ pub fn customize<'a>(_state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     .spacing(10);
     for (id, label, ic) in BAR_ACTIONS {
         let on = chosen.iter().any(|c| c == id);
-        let ic_el: El<'a, Message> = match Icon::by_name(ic) {
+        let ic_el: El<'a, Message> = match widgets::app_icons::by_name(ic) {
             Some(i) => icon(i, 18.0, p.faint),
             None => space().width(18).into(),
         };

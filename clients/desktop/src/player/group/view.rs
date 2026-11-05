@@ -4,6 +4,7 @@
 //! "Group · 3" with "Paused here · Catch up" on the player bar, Up next with "added by Sam", the
 //! Your devices panel's "Group listens" and Home's "Listening together now".
 
+use crate::widgets::app_icons;
 use super::{model, Dialog, Msg, Summary};
 use crate::fmt;
 use crate::pages::{Ctx, El};
@@ -354,11 +355,11 @@ pub fn shuffle<'a>(st: &'a State, size: f32) -> El<'a, Message> {
         return column![].into();
     };
     if !s.you_can_control {
-        return off(Icon::Shuffle, st.group.deny.as_str(), size);
+        return off(app_icons::SHUFFLE, st.group.deny.as_str(), size);
     }
     let p = theme::look();
     tooltip(
-        button(icon(Icon::Shuffle, size, p.text)).padding(8).style(theme::btn(Btn::Icon)).on_press(g(Msg::Shuffle)),
+        button(icon(app_icons::SHUFFLE, size, p.text)).padding(8).style(theme::btn(Btn::Icon)).on_press(g(Msg::Shuffle)),
         tip_box("Shuffle"),
         tooltip::Position::Top,
     )
@@ -465,7 +466,7 @@ pub fn up_next<'a>(st: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             let album = e.album_id();
             let thumb: El<'a, Message> = match (!album.is_empty()).then(|| ctx.cover(&album, &e.row["cover_v"], 80)).flatten() {
                 Some(h) => image(h).width(40).height(40).content_fit(ContentFit::Cover).border_radius(6.0).into(),
-                None => container(icon(Icon::Music, 16.0, p.faint)).width(40).height(40).center(40).style(theme::art).into(),
+                None => container(icon(app_icons::MUSIC, 16.0, p.faint)).width(40).height(40).center(40).style(theme::art).into(),
             };
             let sub = [e.artist(), fmt::mmss(e.duration())]
                 .into_iter()

@@ -190,7 +190,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     // presets
     let mut presets = row![].spacing(10).align_y(Alignment::Center);
-    for (id, name, theme_id, accent, custom, background) in PRESETS {
+    for (id, name, theme_id, accent, custom, background) in PRESETS.iter().copied() {
         let on = a.theme == theme_id && a.accent == accent && a.background == background && (accent != "custom" || a.custom == custom);
         let label = row![preset_art(theme_id, accent, custom), t(name).size(13).font(theme::semibold())]
             .spacing(10)
@@ -205,8 +205,8 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
 
     // accents
     let mut swatches = row![].spacing(10).align_y(Alignment::Center);
-    for (id, name, ca, cb) in ACCENTS {
-        swatches = swatches.push(swatch(theme::hex(ca), theme::hex(cb), a.accent == *id, 28.0, name, Message::Accent(id)));
+    for (id, name, ca, cb) in ACCENTS.iter().copied() {
+        swatches = swatches.push(swatch(theme::hex(ca), theme::hex(cb), a.accent == id, 28.0, name, Message::Accent(id)));
     }
     let custom_colour = theme::hex(if a.custom.is_empty() { "#f0ead6" } else { &a.custom });
     let mut custom = row![

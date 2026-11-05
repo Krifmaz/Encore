@@ -7,6 +7,7 @@
 //! the stereo library's tools; a stereo album links to its surround versions and, for admins,
 //! has "Get Dolby Atmos version" (web `album_versions`, `atmos_button`, `surround_album_menu`).
 
+use crate::widgets::app_icons;
 use super::library::{self, format_text, long_dur, size_text, tr, verify_badge, Act, Shared};
 use super::library_types as lt;
 use crate::api::ApiError;
@@ -1114,7 +1115,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
             .content_fit(ContentFit::Cover)
             .border_radius(14.0)
             .into(),
-        None => container(icon(Icon::Disc, 48.0, p.faint))
+        None => container(icon(app_icons::DISC, 48.0, p.faint))
             .width(220)
             .height(220)
             .center(220)
@@ -1182,7 +1183,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
     }
     let mut actions = row![
         btn_icon(Icon::Play, "Play", Btn::Primary, Some(Message::PlayAll)),
-        btn_icon(Icon::Shuffle, "Shuffle", Btn::Default, Some(Message::ShuffleAll)),
+        btn_icon(app_icons::SHUFFLE, "Shuffle", Btn::Default, Some(Message::ShuffleAll)),
         tooltip(
             btn_icon(Icon::External, "Share", Btn::Default, Some(Message::Share)),
             widgets::tip_box("Share link"),
@@ -1287,7 +1288,7 @@ pub fn view<'a>(state: &'a State, ctx: &Ctx<'a>) -> El<'a, Message> {
         list = list.push(r.view());
     }
     let songs: El<'a, Message> = if tracks.is_empty() {
-        empty(Icon::Music, "No songs found", "")
+        empty(app_icons::MUSIC, "No songs found", "")
     } else {
         widgets::card_flat(list).width(Length::Fill).into()
     };
@@ -1302,17 +1303,17 @@ fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
     if library::is_surround(&a) {
         let mut items = vec![
             MenuItem::new("Add to queue", Message::AddToQueue).icon(Icon::List),
-            MenuItem::new("Play next", Message::PlayNext).icon(Icon::Next),
+            MenuItem::new("Play next", Message::PlayNext).icon(app_icons::NEXT),
         ];
         let stereo = fmt::s(&a["stereo"], "album_id");
         if !stereo.is_empty() {
-            items.push(MenuItem::new("Go to the stereo version", Message::OpenVersion(stereo)).icon(Icon::Disc));
+            items.push(MenuItem::new("Go to the stereo version", Message::OpenVersion(stereo)).icon(app_icons::DISC));
         }
         return pop_menu(at, items, Message::CloseMenu, ctx.size);
     }
     let mut items = vec![
         MenuItem::new("Add to queue", Message::AddToQueue).icon(Icon::List),
-        MenuItem::new("Play next", Message::PlayNext).icon(Icon::Next),
+        MenuItem::new("Play next", Message::PlayNext).icon(app_icons::NEXT),
         MenuItem::new("Add to playlist", Message::AddToPlaylist).icon(Icon::Plus),
         MenuItem::new("Share link", Message::Share).icon(Icon::External),
         MenuItem::new("Save album for offline", Message::SaveOffline).icon(Icon::Download),
@@ -1321,10 +1322,10 @@ fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
         items.push(MenuItem::new("All songs are right (confirm)", Message::ConfirmAll).icon(Icon::Check));
     }
     items.push(MenuItem::new("Download album (zip)", Message::DownloadZip).icon(Icon::Download));
-    items.push(MenuItem::new("Lyrics for all songs", Message::AlbumLyrics).icon(Icon::Music));
+    items.push(MenuItem::new("Lyrics for all songs", Message::AlbumLyrics).icon(app_icons::MUSIC));
     items.push(MenuItem::new("Get the rest of the album", Message::GetRest).icon(Icon::Download));
     if fmt::truthy(&a, "mb_releasegroupid") {
-        items.push(MenuItem::new("Release info", Message::ReleaseInfo).icon(Icon::Disc));
+        items.push(MenuItem::new("Release info", Message::ReleaseInfo).icon(app_icons::DISC));
     }
     items.push(MenuItem::new("Report a problem", Message::ReportAlbum).icon(Icon::Shield));
     // the admin's part, in the web's order: Change type… (0.36) after Edit details; the album goes to the Trash
@@ -1334,7 +1335,7 @@ fn album_menu<'a>(state: &State, ctx: &Ctx<'a>, at: Point) -> El<'a, Message> {
             "Tag / match metadata" => MenuItem::new(label, Message::MatchOpen).icon(Icon::Tag),
             "Edit details (album, artist, songs)" => MenuItem::new(label, Message::EditOpen).icon(Icon::Edit),
             lt::CHANGE_TYPE => MenuItem::new(label, Message::TypeOpen).icon(Icon::Tag),
-            "Change artwork…" => MenuItem::new(label, Message::ArtOpen).icon(Icon::Disc),
+            "Change artwork…" => MenuItem::new(label, Message::ArtOpen).icon(app_icons::DISC),
             "Find artwork automatically" => MenuItem::new(label, Message::FindArt).icon(Icon::Refresh),
             _ => MenuItem::new(label, Message::TrashAsk).icon(Icon::Trash).danger(),
         });
@@ -1407,7 +1408,7 @@ fn match_dialog<'a>(m: &'a MatchState, ctx: &Ctx<'a>) -> El<'a, Message> {
                 .content_fit(ContentFit::Cover)
                 .border_radius(8.0)
                 .into(),
-            None => container(icon(Icon::Disc, size * 0.4, p.faint))
+            None => container(icon(app_icons::DISC, size * 0.4, p.faint))
                 .width(size)
                 .height(size)
                 .center(size)

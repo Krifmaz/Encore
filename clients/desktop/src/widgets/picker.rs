@@ -12,6 +12,7 @@
 //! source anew (`fresh`). The switch "Don't check the audio" (beside Lossless only, kept on this
 //! computer) sends the pick with `no_check`, so the audio check can't turn it away.
 
+use super::app_icons;
 use super::catalog;
 use super::{badge, btn, btn_icon, btn_sm, h3, modal, muted, small_muted, t, El, Icon};
 use crate::api::ApiError;
@@ -756,7 +757,7 @@ fn result_row<'a>(ctx: &Ctx<'a>, state: &State, src: &str, i: usize, x: &Value) 
     }
     let mut r = row![].spacing(12).align_y(Alignment::Center);
     if fmt::truthy(x, "cover") {
-        r = r.push(catalog::art(ctx, &fmt::s(x, "cover"), 44.0, false, Icon::Disc));
+        r = r.push(catalog::art(ctx, &fmt::s(x, "cover"), 44.0, false, app_icons::DISC));
     }
     r = r.push(lines.width(Length::Fill));
     r = r.push(btn_icon(

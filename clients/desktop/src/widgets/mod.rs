@@ -2,6 +2,7 @@
 //! `pub mod <theirs>;` lines here and a `widgets/<theirs>.rs` file; everything else in this
 //! file belongs to the architect and the integrator.
 
+pub mod app_icons;
 pub mod catalog;
 pub mod centered_bar;
 pub mod choice;
@@ -30,7 +31,8 @@ pub use kit_iced::widgets::{badge, icons, modal, skeleton, tabs, text_area};
 
 pub use cover::Covers;
 pub use empty::empty;
-pub use icons::{icon, logo, Icon};
+pub use app_icons::logo;
+pub use icons::{icon, Icon};
 pub use list_row::list_row;
 pub use modal::confirm;
 pub use pop_menu::{pop_menu, MenuItem};

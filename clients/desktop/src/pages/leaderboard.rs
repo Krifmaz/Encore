@@ -4,6 +4,7 @@
 //! this week's top listener, the most played songs and artists, the biggest artists in the
 //! library and the fun facts.
 
+use crate::widgets::app_icons;
 use crate::api::ApiError;
 use crate::fmt;
 use crate::pages::{Ctx, El, Page};
@@ -107,7 +108,7 @@ fn song_row<'a>(i: usize, s: &Value, ctx: &Ctx<'a>) -> El<'a, Message> {
             .content_fit(ContentFit::Cover)
             .border_radius(6.0)
             .into(),
-        None => container(widgets::icon(Icon::Music, 16.0, look.faint))
+        None => container(widgets::icon(app_icons::MUSIC, 16.0, look.faint))
             .width(36)
             .height(36)
             .center(36)
