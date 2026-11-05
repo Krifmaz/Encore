@@ -23,7 +23,8 @@
 #   advanced       for people who know what they are doing (the field says so in its label)
 # A card's fields are the keys that name it, in the order they appear in this file.
 #
-# The order of TABLE (the diagnostics page lists changed settings in this order): every key A to Z.
+# The order of TABLE: every key A to Z. The diagnostics page lists changed settings A to Z, then the keys of
+# `encore_config::LISTED_LAST` in their order (they were added after the first table and kept their place).
 
 [sections.general]
 title = "General"

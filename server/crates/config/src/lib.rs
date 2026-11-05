@@ -14,11 +14,39 @@ use std::sync::Arc;
 
 pub use kit_server_settings::{Def, EnvLookup, MASK};
 
+/// The settings that come after the A-to-Z run in [`Config::defs`], in this order: they were added after the first
+/// table and kept their place, so the diagnostics page (which lists changed settings in `defs` order) reads
+/// as it always has. Every other key, including any added later, is A to Z before them.
+pub const LISTED_LAST: &[&str] = &[
+    "email_login", "app_session_days", "lastfm_shared_secret", "acoustid_user_key", "contribute_acoustid",
+    "contribute_isrc", "mb_client_id", "mb_client_secret", "mb_oauth_access_token", "mb_oauth_refresh_token",
+    "mb_oauth_expires_at", "mb_oauth_account", "torznab_enabled", "prowlarr_url", "prowlarr_api_key",
+    "torznab_min_seeders", "torznab_timeout_minutes", "qbit_url", "qbit_user", "qbit_password", "qbit_category",
+    "qbit_download_path", "sab_url", "sab_api_key", "sab_category", "sab_download_path", "torrent_client",
+    "transmission_url", "transmission_user", "transmission_password", "transmission_label",
+    "transmission_download_path", "deluge_url", "deluge_password", "deluge_label", "deluge_download_path",
+    "rtorrent_url", "rtorrent_user", "rtorrent_password", "rtorrent_label", "rtorrent_download_path",
+    "torrent_blackhole_watch", "torrent_blackhole_completed", "nzb_client", "nzbget_url", "nzbget_user",
+    "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
+    "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
+    "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
+    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days", "backup_keep",
+    "backup_keep_upgrade",
+];
+
+/// `defs` (A to Z, as the kit's table has them) in Encore's order: the [`LISTED_LAST`] keys moved to the
+/// end, in their order.
+fn in_encore_order(defs: &[(String, Def)]) -> Vec<(String, Def)> {
+    let mut out: Vec<(String, Def)> = defs.iter().filter(|(k, _)| !LISTED_LAST.contains(&k.as_str())).cloned().collect();
+    out.extend(LISTED_LAST.iter().filter_map(|l| defs.iter().find(|(k, _)| k == l).cloned()));
+    out
+}
+
 /// The settings in effect: defaults, then the values saved in the UI, then the environment. Clones share them.
 /// The kit's settings [`Store`] keeps them; Config adds Encore's start-up steps and typed accessors.
 #[derive(Clone)]
 pub struct Config {
-    /// every setting's definition, in `settings::TABLE` order
+    /// every setting's definition: A to Z, then [`LISTED_LAST`] in its order
     pub defs: Arc<Vec<(String, Def)>>,
     /// the values: environment, then saved, then default
     store: Store,
@@ -74,7 +102,7 @@ impl Config {
     /// environment untouched).
     pub fn load_with(db: Db, lookup: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> anyhow::Result<Config> {
         let store = Store::new(SettingsTable(db.clone()), settings::ENCORE, lookup);
-        let cfg = Config { defs: store.defs.clone(), store, db };
+        let cfg = Config { defs: Arc::new(in_encore_order(&store.defs)), store, db };
         cfg.reload()?;
         Ok(cfg)
     }
