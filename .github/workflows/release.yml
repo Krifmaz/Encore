@@ -89,7 +89,7 @@ jobs:
   # The checks every release and every pull request runs (docker.yml runs the same).
   test:
     needs: guard
-    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@v0.3.0
     with:
       rust-dirs: server
       wasm-dirs: web-rs
@@ -109,7 +109,7 @@ jobs:
   # the version, the web app (web-rs → static/) and the server tarballs for x86_64 and aarch64
   prepare:
     needs: test
-    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@v0.3.0
     with:
       stage: prepare
       app-name: Encore
@@ -134,7 +134,7 @@ jobs:
   docker:
     # an Android-only release too: the in-app updater pulls :<version> of every release
     needs: prepare
-    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@v0.3.0
     with:
       image: encore
       version: ${{ needs.prepare.outputs.version }}
@@ -148,7 +148,7 @@ jobs:
   android:
     needs: prepare
     if: inputs.apps || inputs.only == 'android'
-    uses: Krifmaz/kit/.github/workflows/kit-android.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-android.yml@v0.3.0
     with:
       app-name: Encore
       version: ${{ needs.prepare.outputs.version }}
@@ -174,12 +174,20 @@ jobs:
   desktop:
     needs: prepare
     if: inputs.apps && inputs.only != 'android'
-    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@v0.3.0
     with:
       app-name: Encore
       version: ${{ needs.prepare.outputs.version }}
       project-dir: clients/desktop
-      package-script: scripts/desktop-package.sh
+      # the kit runs this at the repository root with $V, $RELEASE, $FEATURES, $ARGS and $OUT set; --stamp (a
+      # release) builds the app as that version, so its updater compares the right number
+      package: bash scripts/desktop-package.sh --version "$V" $([ "$RELEASE" = true ] && echo --stamp) --features "$FEATURES" $ARGS --out "$OUT"
+      # what the kit chose before v0.2.0 (its defaults are neutral now): Ubuntu 22.04 for the AppImage's glibc,
+      # an Intel Mac building both Mac targets joined with lipo, and NSIS for the Windows installer
+      linux-runner: ubuntu-22.04
+      macos-runner: macos-15-intel
+      macos-args: --universal
+      nsis: true
       linux-features: cuda
       windows-features: cuda
       # ALSA (Cadenza's output), xkbcommon and Wayland (the window), udev; no GTK or libxdo: the tray is ksni over
@@ -204,12 +212,13 @@ jobs:
     if: >-
       always() && needs.prepare.result == 'success' && needs.docker.result == 'success' &&
       (inputs.only != 'android' || needs.android.result == 'success')
-    uses: Krifmaz/kit/.github/workflows/kit-release.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-release.yml@v0.3.0
     with:
       stage: publish
       app-name: Encore
       version: ${{ needs.prepare.outputs.version }}
-      only: ${{ inputs.only || 'all' }}
+      # an Android-only release keeps the other files of the previous release
+      keep-previous: ${{ inputs.only == 'android' }}
       # success when every app built, skipped when none ran
       apps-result: >-
         ${{ (needs.android.result == 'skipped' && needs.desktop.result == 'skipped') && 'skipped' ||
@@ -241,7 +250,7 @@ jobs:
         * **Linux without Docker**: \`encore-$V-linux-x86_64.tar.gz\` / \`-aarch64\` – run \`ENCORE_CONFIG_DIR=./config ENCORE_STATIC_DIR=./static ./encore\` (the yt-dlp and streamrip plugins need uv and Python 3.14 on the host, python3.14 in /usr/bin or /usr/local/bin; the Docker image has both)
         * **YouTube sign-in extension**: \`Encore-youtube-extension-$V.zip\` – load the chrome or firefox folder (see extension/encore-youtube-cookies/README.md)
         EOT
-        if [ "$ONLY" = android ]; then cat >> "$NOTES" <<EOT
+        if [ "$KEEP" = true ]; then cat >> "$NOTES" <<EOT
         * **Android**: \`Encore-android-$V.apk\` (this build) · the desktop apps are from the previous release
         EOT
         elif [ "$APPS" = success ]; then cat >> "$NOTES" <<EOT

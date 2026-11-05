@@ -24,7 +24,7 @@ permissions:
 jobs:
   android-native:
     if: inputs.only == 'all' || inputs.only == 'android-native'
-    uses: Krifmaz/kit/.github/workflows/kit-android.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-android.yml@v0.3.0
     with:
       app-name: Encore
       project-dir: clients/android
@@ -43,11 +43,19 @@ jobs:
 
   desktop:
     if: inputs.only == 'all' || inputs.only == 'desktop'
-    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@v0.3.0
     with:
       app-name: Encore
       project-dir: clients/desktop
-      package-script: scripts/desktop-package.sh
+      # the kit runs this at the repository root with $V, $RELEASE, $FEATURES, $ARGS and $OUT set; --stamp (a
+      # release) builds the app as that version, so its updater compares the right number
+      package: bash scripts/desktop-package.sh --version "$V" $([ "$RELEASE" = true ] && echo --stamp) --features "$FEATURES" $ARGS --out "$OUT"
+      # what the kit chose before v0.2.0 (its defaults are neutral now): Ubuntu 22.04 for the AppImage's glibc,
+      # an Intel Mac building both Mac targets joined with lipo, and NSIS for the Windows installer
+      linux-runner: ubuntu-22.04
+      macos-runner: macos-15-intel
+      macos-args: --universal
+      nsis: true
       linux-features: cuda
       windows-features: cuda
       linux-packages: libasound2-dev libxkbcommon-dev libwayland-dev libudev-dev pkg-config file

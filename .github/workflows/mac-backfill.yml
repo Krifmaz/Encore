@@ -46,7 +46,7 @@ jobs:
   # release's tag
   build:
     needs: version
-    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-desktop.yml@v0.3.0
     with:
       app-name: Encore
       version: ${{ needs.version.outputs.v }}
@@ -54,7 +54,11 @@ jobs:
       ref: v${{ needs.version.outputs.v }}
       macos-runner: ${{ inputs.runner }}
       project-dir: clients/desktop
-      package-script: scripts/desktop-package.sh
+      # the kit runs this at the repository root with $V, $RELEASE, $FEATURES, $ARGS and $OUT set; --stamp (a
+      # release) builds the app as that version, so its updater compares the right number
+      package: bash scripts/desktop-package.sh --version "$V" $([ "$RELEASE" = true ] && echo --stamp) --features "$FEATURES" $ARGS --out "$OUT"
+      # both Mac targets joined with lipo (the kit's default is neutral since v0.2.0)
+      macos-args: --universal
       macos-files: "Encore-{V}-macos-universal.dmg"
     secrets:
       macos-cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
@@ -74,7 +78,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: Encore-desktop-macOS
+          name: kit-app-desktop-macOS
           path: out
       - name: Upload, SHA256SUMS and notes
         run: |
