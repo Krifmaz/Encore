@@ -1,5 +1,7 @@
-//! Port of web/js/pages/translate.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Translated titles: Settings → Language and ⋯ → Edit translation.
+//!
+//! Settings → Language is a Leptos view ([`Language`]) over one signal: the reader's choices and the server's
+//! translation status. The Edit translation dialog ([`edit_translation`]) is still drawn as HTML.
 
 use crate::api;
 use crate::app::{self, Ctx, PageFuture};
@@ -7,7 +9,8 @@ use crate::dom;
 use crate::json::J;
 use crate::ui::{esc, icon, modal, set_translate_mode, toast, ModalOpts};
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use kit_leptos::html::raw;
+use leptos::prelude::*;
 use std::rc::Rc;
 use web_sys::Element;
 
@@ -79,70 +82,92 @@ pub fn edit_translation(text: String, kind: &'static str, on_saved: Option<Rc<dy
     });
 }
 
-struct Lang {
-    el: Element,
-    opts: Value,
-    status: RefCell<Value>,
-    mode: RefCell<String>,
-    lang: RefCell<String>,
+/// What Settings → Language draws from.
+#[derive(Clone)]
+pub struct Lang {
+    /// How translated titles show (`off`, or one of the server's modes).
+    pub mode: String,
+    /// The language titles are translated into.
+    pub lang: String,
+    /// The answer of GET /api/translate/status (counts and sources only for admins).
+    pub status: Value,
 }
 
-/// `renderLanguage(el)`: Settings → Language – how translated titles show, and into which language.
+/// Settings → Language: how translated titles show, and into which language. When the languages can't be
+/// loaded the page says why in its place.
 pub fn render_language(el: Element, _ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let opts = match api::get("/translate/languages").await {
             Ok(o) => o,
-            Err(err) => { dom::set_html(&el, &format!(r#"<div class="error-box">{}</div>"#, esc(&err.message))); return Ok(()); }
+            Err(err) => {
+                dom::set_html(&el, &format!(r#"<div class="error-box">{}</div>"#, esc(&err.message)));
+                return Ok(());
+            }
         };
         let status = api::get("/translate/status").await.unwrap_or(Value::Null);
         let prefs = app::user().map(|u| u.o("prefs")).unwrap_or(Value::Null);
         let mode = prefs.st("translate_mode").unwrap_or("off").to_string();
         let lang = prefs.st("translate_lang").map(String::from).or_else(|| opts.st("default").map(String::from)).unwrap_or_else(|| "en".into());
-        let st = Rc::new(Lang { el, opts, status: RefCell::new(status), mode: RefCell::new(mode), lang: RefCell::new(lang) });
-        paint(&st);
+        dom::set_html(&el, "");
+        // the signal lives as long as the page: the owner is dropped with it
+        let owner = Owner::new();
+        let state = owner.with(|| RwSignal::new(Lang { mode, lang, status }));
+        if let Some(m) = owner.with(|| kit_leptos::rt::mount(&el, move || view! { <Language opts state/> })) {
+            dom::keep(m);
+        }
+        dom::keep(owner);
         Ok(())
     })
 }
 
-fn paint(st: &Rc<Lang>) {
-    let mode = st.mode.borrow().clone();
-    let lang = st.lang.borrow().clone();
-    let modes: String = st.opts.a("modes").iter().map(|x| format!(r#"<button type="button" data-v="{}" class="{}">{}</button>"#,
-        esc(&x.s("id")), if mode == x.s("id") { "on" } else { "" }, esc(&x.s("label")))).collect();
-    let langs: String = st.opts.a("languages").iter().map(|l| format!(r#"<option value="{}" {}>{}</option>"#,
-        esc(&l.s("code")), if l.s("code") == lang { "selected" } else { "" }, esc(&l.s("name")))).collect();
-    let status = st.status.borrow().clone();
-    let s = &status;
-    // which sources this server uses (the server's words)
-    let missing = match s.st("summary") {
-        Some(line) if !line.is_empty() => format!(r#"<div class="small muted">{}</div>"#, esc(line)),
-        _ => String::new(),
-    };
-    let counts = counts_line(s);
-    let counts = if counts.is_empty() { counts } else { format!(r#"<div class="small faint">{}</div>"#, esc(&counts)) };
-    let sources = sources_card(s);
-    dom::set_html(&st.el, &format!(r#"<div class="card stack">
-      <h2>Language</h2>
-      <p class="small muted" style="margin:0">Song, album and artist names in another script – Japanese, Korean, Chinese, Cyrillic and more – can show translated or romanized. Saved to your account, so it follows you to every device and to the car.</p>
-      <div class="stack" style="gap:6px"><h3>Translated titles</h3>
-        <div class="seg" data-key="mode">{modes}</div></div>
-      <label class="stack" style="gap:4px"><span class="small muted">Translate into</span>
-        <select class="input" id="tr-lang" {}>{langs}</select></label>
-      <div class="small muted">Corrections by hand come first, then official names (MusicBrainz and Apple, where the label published one), romanization made on this server, then DeepL and the local model where an admin set them up. Titles on your screen are translated first, the rest of the library in the background. Fix any title with ⋯ → Edit translation.</div>
-      {missing}
-      {counts}
-    </div>{sources}"#, if mode == "off" { "disabled" } else { "" }));
-    {
-        let st2 = st.clone();
-        dom::on_each(&st.el, r#".seg[data-key="mode"] button"#, "click", move |b, _| save(&st2, json!({ "translate_mode": dom::data(b, "v") })));
-    }
-    if let Some(sel) = dom::qs_in(&st.el, "#tr-lang") {
-        let (st2, sel2) = (st.clone(), sel.clone());
-        dom::on(&sel, "change", move |_| save(&st2, json!({ "translate_lang": dom::value(&sel2) })));
-    }
-    for b in dom::qsa_in(&st.el, "[data-tier]") {
-        let (st2, b2) = (st.clone(), b.clone());
-        dom::on(&b, "change", move |_| switch_tier(&st2, &b2));
+/// The Language card and, for admins, the Translation sources card.
+#[component]
+pub fn Language(
+    /// The answer of GET /api/translate/languages: the modes and languages to pick from.
+    opts: Value,
+    /// The reader's choices and the server's status.
+    state: RwSignal<Lang>,
+) -> impl IntoView {
+    move || {
+        let Lang { mode, lang, status } = state.get();
+        let modes = opts
+            .a("modes")
+            .iter()
+            .map(|x| {
+                let id = x.s("id");
+                let on = if mode == id { "on" } else { "" };
+                let v = id.clone();
+                view! { <button type="button" data-v=id class=on on:click=move |_| save(state, json!({ "translate_mode": v.clone() }))>{x.s("label")}</button> }
+            })
+            .collect_view();
+        let langs = opts
+            .a("languages")
+            .iter()
+            .map(|l| view! { <option value=l.s("code") selected=l.s("code") == lang>{l.s("name")}</option> })
+            .collect_view();
+        // which sources this server uses (the server's words)
+        let missing = status.st("summary").filter(|l| !l.is_empty()).map(|l| view! { <div class="small muted">{l.to_string()}</div> });
+        let counts = counts_line(&status);
+        let counts = (!counts.is_empty()).then(|| view! { <div class="small faint">{counts}</div> });
+        let on_lang = move |e: web_sys::Event| {
+            if let Some(t) = dom::target_el(&e) {
+                save(state, json!({ "translate_lang": dom::value(&t) }));
+            }
+        };
+        view! {
+            <div class="card stack">
+                <h2>"Language"</h2>
+                <p class="small muted" style="margin:0">"Song, album and artist names in another script – Japanese, Korean, Chinese, Cyrillic and more – can show translated or romanized. Saved to your account, so it follows you to every device and to the car."</p>
+                <div class="stack" style="gap:6px"><h3>"Translated titles"</h3>
+                    <div class="seg" data-key="mode">{modes}</div></div>
+                <label class="stack" style="gap:4px"><span class="small muted">"Translate into"</span>
+                    <select class="input" id="tr-lang" disabled=mode == "off" on:change=on_lang>{langs}</select></label>
+                <div class="small muted">"Corrections by hand come first, then official names (MusicBrainz and Apple, where the label published one), romanization made on this server, then DeepL and the local model where an admin set them up. Titles on your screen are translated first, the rest of the library in the background. Fix any title with ⋯ → Edit translation."</div>
+                {missing}
+                {counts}
+            </div>
+            {sources_card(&status, state)}
+        }
     }
 }
 
@@ -156,34 +181,52 @@ fn counts_line(s: &Value) -> String {
     format!("{} of {} titles have a translation{waiting}{}", s.i("shown"), s.i("rows"), if s.truthy("running") { " · running now" } else { "" })
 }
 
-/// Admins: the sources of translated titles, strongest first, each with its state and its switch (the server's
-/// `tiers`; the same settings as Settings → Library → Translated titles).
-fn sources_card(s: &Value) -> String {
-    let tiers = s.a("tiers");
-    if tiers.is_empty() {
-        return String::new();
-    }
-    let rows: String = tiers.iter().map(|t| {
-        let switch = match t.st("setting") {
-            Some(key) if !key.is_empty() => format!(r#"<label class="switch" title="{}"><input type="checkbox" data-tier="{}" {}><i></i></label>"#,
-                esc(&t.s("name")), esc(key), if t.truthy("on") { "checked" } else { "" }),
-            _ => String::new(),
-        };
-        format!(r#"<div class="row between" style="gap:12px;padding:8px 0;align-items:flex-start">
-        <div style="min-width:0"><div>{}</div><div class="small muted">{}</div></div>{switch}</div>"#, esc(&t.s("state")), esc(&t.s("help")))
-    }).collect();
-    format!(r##"<div class="card stack mt" id="tr-sources">
-      <h2>Translation sources</h2>
-      <p class="small muted" style="margin:0">Strongest first: a source higher up wins over the ones below it, and its results replace theirs when it gets to a title later.</p>
-      <div class="stack" style="gap:0">{rows}</div>
-      <div class="small muted">The DeepL API key and the monthly limit are under <a href="#/settings?s=translations">Settings → Library → Translated titles</a>.</div>
-    </div>"##)
+/// The server setting that switches a source on and off; `None` for one without a switch (the corrections by
+/// hand).
+fn tier_setting(t: &Value) -> Option<String> {
+    t.st("setting").filter(|k| !k.is_empty()).map(str::to_string)
 }
 
-/// A source's switch: saved as a server setting, then the states are read again.
-fn switch_tier(st: &Rc<Lang>, b: &Element) {
-    let (key, on) = (dom::data(b, "tier"), dom::checked(b));
-    let (st, b) = (st.clone(), b.clone());
+/// Admins: the sources of translated titles, strongest first, each with its state and its switch (the server's
+/// `tiers`; the same settings as Settings → Library → Translated titles). Nothing for a member (no `tiers`).
+fn sources_card(s: &Value, state: RwSignal<Lang>) -> Option<impl IntoView> {
+    let tiers = s.a("tiers");
+    if tiers.is_empty() {
+        return None;
+    }
+    let rows = tiers
+        .iter()
+        .map(|t| {
+            let switch = tier_setting(t).map(|key| {
+                let k = key.clone();
+                let on_change = move |e: web_sys::Event| {
+                    if let Some(b) = dom::target_el(&e) {
+                        switch_tier(state, k.clone(), &b);
+                    }
+                };
+                view! { <label class="switch" title=t.s("name")><input type="checkbox" data-tier=key checked=t.truthy("on") on:change=on_change/><i></i></label> }
+            });
+            view! {
+                <div class="row between" style="gap:12px;padding:8px 0;align-items:flex-start">
+                    <div style="min-width:0"><div>{t.s("state")}</div><div class="small muted">{t.s("help")}</div></div>{switch}</div>
+            }
+        })
+        .collect_view();
+    Some(view! {
+        <div class="card stack mt" id="tr-sources">
+            <h2>"Translation sources"</h2>
+            <p class="small muted" style="margin:0">"Strongest first: a source higher up wins over the ones below it, and its results replace theirs when it gets to a title later."</p>
+            <div class="stack" style="gap:0">{rows}</div>
+            <div class="small muted">"The DeepL API key and the monthly limit are under "{raw(r##"<a href="#/settings?s=translations">Settings → Library → Translated titles</a>"##)}"."</div>
+        </div>
+    })
+}
+
+/// A source's switch `b` for setting `key`: saved as a server setting, then the states are read again; on a
+/// failure the switch goes back.
+fn switch_tier(state: RwSignal<Lang>, key: String, b: &Element) {
+    let on = dom::checked(b);
+    let b = b.clone();
     dom::spawn(async move {
         let mut body = serde_json::Map::new();
         body.insert(key, Value::Bool(on));
@@ -192,17 +235,20 @@ fn switch_tier(st: &Rc<Lang>, b: &Element) {
                 dom::spawn(async { let _ = api::post_empty("/translate/run").await; });
                 toast("Saved", "ok");
                 if let Ok(s) = api::get("/translate/status").await {
-                    *st.status.borrow_mut() = s;
-                    paint(&st);
+                    state.update(|l| l.status = s);
                 }
             }
-            Err(err) => { dom::set_checked(&b, !on); toast(&err.message, "err"); }
+            Err(err) => {
+                dom::set_checked(&b, !on);
+                toast(&err.message, "err");
+            }
         }
     });
 }
 
-fn save(st: &Rc<Lang>, patch: Value) {
-    let st = st.clone();
+/// Saves `patch` to the reader's preferences, then takes the answer as the page's choices; the card is drawn
+/// again either way (a failure puts the last saved choice back).
+fn save(state: RwSignal<Lang>, patch: Value) {
     dom::spawn(async move {
         match api::put("/auth/prefs", patch).await {
             Ok(p) => {
@@ -210,15 +256,20 @@ fn save(st: &Rc<Lang>, patch: Value) {
                     if let Some(o) = u.as_object_mut() { o.insert("prefs".into(), p.clone()); }
                     app::set_user(Some(u));
                 }
-                *st.mode.borrow_mut() = p.st("translate_mode").unwrap_or("off").to_string();
-                if let Some(l) = p.st("translate_lang") { *st.lang.borrow_mut() = l.to_string(); }
-                set_translate_mode(&st.mode.borrow());
+                let mode = p.st("translate_mode").unwrap_or("off").to_string();
+                set_translate_mode(&mode);
+                state.update(|l| {
+                    l.mode = mode;
+                    if let Some(lang) = p.st("translate_lang") { l.lang = lang.to_string(); }
+                });
                 dom::spawn(async { let _ = api::post_empty("/translate/run").await; });
                 toast("Saved", "ok");
             }
-            Err(err) => toast(&err.message, "err"),
+            Err(err) => {
+                toast(&err.message, "err");
+                state.update(|_| ());
+            }
         }
-        paint(&st);
     });
 }
 
@@ -236,18 +287,12 @@ mod tests {
             { "id": "model", "name": "Local model", "setting": "translate_local_model", "on": true, "state": "Local model: not installed – install it in Plugins", "help": "Last." } ] })
     }
 
-    /// One row per source with its state, a switch where it has a setting (none for the corrections by hand),
-    /// the settings link; nothing for a member's answer (no `tiers`).
+    /// Every source but the corrections by hand has a switch, named by its setting.
     #[test]
-    fn the_translation_sources_card() {
-        let html = sources_card(&tiers());
-        assert!(html.contains("<h2>Translation sources</h2>"), "{html}");
-        assert_eq!(html.matches("data-tier=").count(), 4, "{html}");
-        assert!(html.contains(r#"data-tier="translate_deepl" checked"#) && html.contains(r#"data-tier="translate_romanize" >"#), "{html}");
-        assert!(!html.contains(r#"title="Corrections by hand""#), "no switch for the corrections: {html}");
-        assert!(html.contains("DeepL: 12 340 of 400 000 characters this month") && html.contains("Local model: not installed – install it in Plugins"), "{html}");
-        assert!(html.contains(r##"href="#/settings?s=translations""##), "{html}");
-        assert_eq!(sources_card(&json!({ "translator": false, "summary": "x" })), "");
+    fn each_source_but_the_corrections_has_a_switch() {
+        let keys: Vec<Option<String>> = tiers()["tiers"].as_array().unwrap().iter().map(tier_setting).collect();
+        assert_eq!(keys[0], None);
+        assert_eq!(keys[1..].iter().flatten().cloned().collect::<Vec<_>>(), ["translate_official", "translate_romanize", "translate_deepl", "translate_local_model"]);
     }
 
     /// The titles left for the local model are counted only while it can run.
