@@ -23,8 +23,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/stats/me", get(me))
         .route("/api/stats/leaderboard", get(leaderboard))
         // GET /api/system/diagnostics and POST /api/system/test/{service}
-        .merge(kit_server_diagnostics::router())
-        .route("/api/diagnostics/client-crash", get(client_crash::list).post(client_crash::upload).delete(client_crash::clear))
+        .merge(kit_server_diagnostics::router_with(kit_server_diagnostics::DiagnosticsPaths {
+            list: "/api/system/diagnostics".into(),
+            test: "/api/system/test/{id}".into(),
+        }))
+        .merge(client_crash::router())
         .route("/api/admin/autodownload", get(get_auto).put(put_auto))
         .route("/api/admin/autodownload/upgrade-now", post(upgrade_now))
         .route("/api/admin/autodownload/run-now", post(run_sync_now))

@@ -6,8 +6,10 @@ pub mod settings;
 pub mod when;
 
 use encore_db::{p, Db};
-use kit_server_settings::{Store, Table, Values};
+use futures_util::FutureExt;
+use kit_server_settings::{SettingsStore, Store, Table, Values};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use kit_server_settings::{Def, EnvLookup, MASK};
@@ -19,9 +21,44 @@ pub struct Config {
     /// every setting's definition, in `settings::TABLE` order
     pub defs: Arc<Vec<(String, Def)>>,
     /// the values: environment, then saved, then default
-    store: Store<Db>,
+    store: Store,
     /// where the saved values are
     db: Db,
+}
+
+/// The saved values where Encore always kept them: its `settings` table (`key`, `value` as JSON text), which
+/// the backup retention and the release-type migration read too. The kit's `SettingsStore` on it.
+#[derive(Clone)]
+struct SettingsTable(Db);
+
+#[kit_server_core::async_trait]
+impl SettingsStore for SettingsTable {
+    async fn saved(&self) -> kit_server_core::Result<HashMap<String, Value>> {
+        saved_now(&self.0)
+    }
+
+    async fn save(&self, values: &[(String, Value)]) -> kit_server_core::Result<()> {
+        for (k, v) in values {
+            self.0
+                .execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", p![k, v.to_string()])
+                .map_err(kit_server_core::Error::database)?;
+        }
+        Ok(())
+    }
+}
+
+/// Every saved value in the `settings` table (a value that is not JSON is left out), read on this thread.
+fn saved_now(db: &Db) -> kit_server_core::Result<HashMap<String, Value>> {
+    Ok(db
+        .query("SELECT key, value FROM settings", p![])
+        .map_err(kit_server_core::Error::database)?
+        .into_iter()
+        .filter_map(|r| {
+            let key = r.get("key")?.as_str()?.to_string();
+            let value = serde_json::from_str(r.get("value")?.as_str()?).ok()?;
+            Some((key, value))
+        })
+        .collect())
 }
 
 /// settings row that marks the one-time discography_singles → release_types migration as done
@@ -36,7 +73,7 @@ impl Config {
     /// [`Config::load`] with the environment variables `lookup` gives (a test's own set, the process's
     /// environment untouched).
     pub fn load_with(db: Db, lookup: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> anyhow::Result<Config> {
-        let store = Store::new(db.clone(), settings::ENCORE, lookup);
+        let store = Store::new(SettingsTable(db.clone()), settings::ENCORE, lookup);
         let cfg = Config { defs: store.defs.clone(), store, db };
         cfg.reload()?;
         Ok(cfg)
@@ -44,7 +81,7 @@ impl Config {
 
     /// Read the saved values and the environment again (and generate an API key on first start).
     pub fn reload(&self) -> anyhow::Result<()> {
-        let mut stored = self.store.saved()?;
+        let mut stored = saved_now(&self.db)?;
         // "discography includes singles" (before release types) becomes the Single box, once, on installs
         // that existed before (a fresh install has nothing stored and keeps the new defaults)
         if !stored.contains_key(RELEASE_TYPES_MIGRATED) {
@@ -104,9 +141,16 @@ impl Config {
         self.store.env_locked(key)
     }
 
-    /// Save `values` (`{key: value}`), each coerced to its setting's type; unknown keys are skipped.
+    /// Save `values` (`{key: value}`), each coerced to its setting's type; unknown keys are skipped. A value
+    /// that could not be written is logged and left as it was.
     pub fn set_many(&self, values: &Value) {
-        self.store.set_many(values)
+        // the kit's store is async for databases that wait; Encore's settings table answers on this thread, so
+        // the save is done after one poll
+        match self.store.set_many(values).now_or_never() {
+            Some(Ok(())) => {}
+            Some(Err(e)) => tracing::error!("settings: could not save: {}", e.detail),
+            None => unreachable!("the settings table answers without waiting"),
+        }
     }
 
     /// A number that changes whenever any setting may have changed (a reload, a save). Something worked
@@ -128,6 +172,7 @@ impl Config {
 }
 
 /// The settings routes (kit-server-settings) read and save Encore's settings through it.
+#[kit_server_core::async_trait]
 impl Values for Config {
     fn table(&self) -> Table {
         settings::ENCORE
@@ -141,8 +186,8 @@ impl Values for Config {
     fn env_locked(&self, key: &str) -> bool {
         Config::env_locked(self, key)
     }
-    fn set_many(&self, values: &Value) {
-        Config::set_many(self, values)
+    async fn set_many(&self, values: &Value) -> kit_server_core::Result<()> {
+        self.store.set_many(values).await
     }
     fn dump(&self) -> Value {
         self.public_dump()

@@ -1,0 +1,7 @@
+-- Schema 43: bug reports (with their replies and files) and the apps' crash reports are kept in the Krifmaz kit's
+-- own tables from here on (kit_bug_reports, kit_bug_report_messages, kit_bug_report_files, kit_client_crashes),
+-- which the kit makes and keeps up to date itself (kit_migrations). When the server starts, encore_api::kit copies
+-- the rows of the old tables (bug_reports, bug_report_messages, bug_report_files, client_crashes) over once, ids
+-- and all; the old tables are left as they were. This file changes nothing itself: it raises the schema number,
+-- so an older Encore, which reads only the old tables and would miss every report filed since, refuses this
+-- database instead of showing an incomplete list (and the updater refuses to go back to it).

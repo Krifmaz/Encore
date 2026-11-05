@@ -23,25 +23,7 @@
 #   advanced       for people who know what they are doing (the field says so in its label)
 # A card's fields are the keys that name it, in the order they appear in this file.
 #
-# The order of TABLE (the diagnostics page lists changed settings in this order): every key A to Z, except the keys in
-# `listed_last`, which follow in the order given there (they were added after the first table and kept their place).
-
-listed_last = [
-    "email_login", "app_session_days", "lastfm_shared_secret", "acoustid_user_key", "contribute_acoustid",
-    "contribute_isrc", "mb_client_id", "mb_client_secret", "mb_oauth_access_token", "mb_oauth_refresh_token",
-    "mb_oauth_expires_at", "mb_oauth_account", "torznab_enabled", "prowlarr_url", "prowlarr_api_key",
-    "torznab_min_seeders", "torznab_timeout_minutes", "qbit_url", "qbit_user", "qbit_password", "qbit_category",
-    "qbit_download_path", "sab_url", "sab_api_key", "sab_category", "sab_download_path", "torrent_client",
-    "transmission_url", "transmission_user", "transmission_password", "transmission_label",
-    "transmission_download_path", "deluge_url", "deluge_password", "deluge_label", "deluge_download_path",
-    "rtorrent_url", "rtorrent_user", "rtorrent_password", "rtorrent_label", "rtorrent_download_path",
-    "torrent_blackhole_watch", "torrent_blackhole_completed", "nzb_client", "nzbget_url", "nzbget_user",
-    "nzbget_password", "nzbget_category", "nzbget_download_path", "nzb_blackhole_watch", "nzb_blackhole_completed",
-    "task_backup_enabled", "task_backup_minutes", "youtube_light_refresh", "release_types", "release_skip",
-    "quality_check_on_import", "quality_min_lufs", "task_quality_enabled", "task_quality_minutes", "translator_model",
-    "tools_auto_translator", "translate_background", "single_to_album", "trash_keep", "trash_days", "backup_keep",
-    "backup_keep_upgrade",
-]
+# The order of TABLE (the diagnostics page lists changed settings in this order): every key A to Z.
 
 [sections.general]
 title = "General"

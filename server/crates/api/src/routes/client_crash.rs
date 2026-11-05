@@ -7,29 +7,32 @@
 //! GET    /api/diagnostics/client-crash  (admin) → {crashes: [{id, kind, user, device, device_id, app_version, os, time, received_at, first_line, text}]}
 //! DELETE /api/diagnostics/client-crash  (admin) → {ok}
 use crate::state::AppState;
-use axum::extract::State;
-use axum::Json;
-use kit_server_bugreports::crash;
-use kit_server_core::{Admin, Result, SignedIn};
-use serde_json::Value;
+use axum::Router;
+use kit_server_bugreports::crash::{self, CrashConfig, CrashHost, CrashPaths};
+use kit_server_bugreports::CrashStore;
 
-pub use kit_server_bugreports::crash::CrashBody;
 #[cfg(test)]
-use kit_server_bugreports::crash::{first_line, KEEP};
+use kit_server_bugreports::crash::first_line;
 
-/// POST /api/diagnostics/client-crash: keep a crash report from an app.
-pub async fn upload(st: State<AppState>, u: SignedIn, b: Json<CrashBody>) -> Result<Json<Value>> {
-    crash::upload(st, u, b).await
+/// How many crash reports are kept, the oldest going first.
+pub const KEEP: i64 = 50;
+
+/// The crash report route (POST, GET, DELETE) at Encore's path.
+pub fn router() -> Router<AppState> {
+    crash::router_with(CrashConfig {
+        paths: CrashPaths {
+            crashes: "/api/diagnostics/client-crash".into(),
+        },
+        keep: KEEP,
+        ..CrashConfig::default()
+    })
 }
 
-/// GET /api/diagnostics/client-crash: the crash reports, newest first (admins).
-pub async fn list(st: State<AppState>, a: Admin) -> Result<Json<Value>> {
-    crash::list(st, a).await
-}
-
-/// DELETE /api/diagnostics/client-crash: delete every crash report (admins).
-pub async fn clear(st: State<AppState>, a: Admin) -> Result<Json<Value>> {
-    crash::clear(st, a).await
+/// The crash reports are kept with the bug reports, in the kit's tables of Encore's database.
+impl CrashHost for AppState {
+    fn crashes(&self) -> &dyn CrashStore {
+        &self.kit.reports
+    }
 }
 
 #[cfg(test)]

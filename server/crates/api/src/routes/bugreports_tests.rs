@@ -488,7 +488,7 @@ async fn too_many_or_too_much_is_refused() {
     let (status, body) = post_form(&e.app, "/api/bug-reports", &e.other, &fields, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     let rid = body["id"].as_i64().unwrap();
-    e.st.db.execute("INSERT INTO bug_report_files (report_id, message_id, name, mime, size, path, created_at) VALUES (?,NULL,'old.log','text/plain',?,'',0)",
+    e.st.db.execute("INSERT INTO kit_bug_report_files (report_id, message_id, name, mime, size, path, created_at) VALUES (?,NULL,'old.log','text/plain',?,'',0)",
         p![rid, 600i64 * 1024 * 1024]).unwrap();
     let (status, body) = post_form(&e.app, &format!("/api/bug-reports/{rid}/messages"), &e.other, &[], &[("more.log", "text/plain", b"line\n")]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
@@ -511,39 +511,39 @@ async fn too_many_or_too_much_is_refused() {
 
 #[test]
 fn names_dates_and_labels() {
-    assert_eq!(super::safe_name("../../etc/passwd.png", "png"), "passwd.png");
-    assert_eq!(super::safe_name("C:\\Users\\me\\shot:1?.png", "png"), "shot_1_.png");
-    assert_eq!(super::safe_name("", "jpg"), "file.jpg");
-    assert_eq!(super::safe_name("...", "jpg"), "file.jpg");
-    assert_eq!(super::safe_name(&"é".repeat(200), "png").chars().count(), 120);
+    assert_eq!(kit_server_bugreports::safe_name("../../etc/passwd.png", "png"), "passwd.png");
+    assert_eq!(kit_server_bugreports::safe_name("C:\\Users\\me\\shot:1?.png", "png"), "shot_1_.png");
+    assert_eq!(kit_server_bugreports::safe_name("", "jpg"), "file.jpg");
+    assert_eq!(kit_server_bugreports::safe_name("...", "jpg"), "file.jpg");
+    assert_eq!(kit_server_bugreports::safe_name(&"é".repeat(200), "png").chars().count(), 120);
     // the sniffed type names the file, not the browser
-    assert_eq!(super::safe_name("readme.html", "png"), "readme.png");
-    assert_eq!(super::safe_name("shot", "png"), "shot.png");
-    assert_eq!(super::safe_name("Screenshot 2026-10-18 (1).png", "png"), "Screenshot 2026-10-18 (1).png");
-    assert_eq!(super::safe_name(".hidden", "jpg"), "hidden.jpg");
+    assert_eq!(kit_server_bugreports::safe_name("readme.html", "png"), "readme.png");
+    assert_eq!(kit_server_bugreports::safe_name("shot", "png"), "shot.png");
+    assert_eq!(kit_server_bugreports::safe_name("Screenshot 2026-10-18 (1).png", "png"), "Screenshot 2026-10-18 (1).png");
+    assert_eq!(kit_server_bugreports::safe_name(".hidden", "jpg"), "hidden.jpg");
     // a title stays on one line
-    assert_eq!(super::line("Play stops\r\n## #999 [Bug] fake — Fixed\r\n"), "Play stops ## #999 [Bug] fake — Fixed");
-    assert_eq!(super::line("  two\t\tspaces  "), "two spaces");
+    assert_eq!(kit_server_bugreports::line("Play stops\r\n## #999 [Bug] fake — Fixed\r\n"), "Play stops ## #999 [Bug] fake — Fixed");
+    assert_eq!(kit_server_bugreports::line("  two\t\tspaces  "), "two spaces");
     assert_eq!(encore_core::time::ymd(0.0), "1970-01-01");
     assert_eq!(encore_core::time::ymd(1_700_000_000.0), "2023-11-14");
-    assert_eq!(super::kind_label("howto"), "How do I…");
-    assert_eq!(super::status_label("wontfix"), "Won't fix");
-    assert_eq!(super::status_label("anything"), "New");
-    assert_eq!(super::check_file("notes.log", b"line").unwrap(), ("text/plain", "log"));
-    assert!(super::check_file("notes.txt", &[0xff, 0xfe, 0x00]).is_err());
-    assert!(super::check_file("notes.md", b"text").is_err());
+    assert_eq!(kit_server_bugreports::Words::default().kind_label("howto"), "How do I…");
+    assert_eq!(kit_server_bugreports::Words::default().status_label("wontfix"), "Won't fix");
+    assert_eq!(kit_server_bugreports::Words::default().status_label("anything"), "New");
+    assert_eq!(kit_server_bugreports::check_file("notes.log", b"line", &kit_server_bugreports::Limits::default()).unwrap(), ("text/plain", "log"));
+    assert!(kit_server_bugreports::check_file("notes.txt", &[0xff, 0xfe, 0x00], &kit_server_bugreports::Limits::default()).is_err());
+    assert!(kit_server_bugreports::check_file("notes.md", b"text", &kit_server_bugreports::Limits::default()).is_err());
 }
 
 #[test]
 fn huge_images_are_refused_on_their_header() {
     // the hand-made PNG is a sound one
-    assert_eq!(super::check_file("ok.png", &huge_png(64, 48)).unwrap(), ("image/png", "png"));
+    assert_eq!(kit_server_bugreports::check_file("ok.png", &huge_png(64, 48), &kit_server_bugreports::Limits::default()).unwrap(), ("image/png", "png"));
     // 11000×11000 RGBA8 would take 484 MB: refused before the buffer is allocated
-    let e = super::check_file("huge.png", &huge_png(11000, 11000)).unwrap_err();
+    let e = kit_server_bugreports::check_file("huge.png", &huge_png(11000, 11000), &kit_server_bugreports::Limits::default()).unwrap_err();
     assert_eq!((e.status.as_u16(), e.detail.as_str()), (400, "That image can't be read"));
     // and so is one side over 8192
-    assert!(super::check_file("wide.png", &huge_png(8193, 2)).is_err());
-    assert!(super::check_file("fine.png", &huge_png(8192, 2)).is_ok());
+    assert!(kit_server_bugreports::check_file("wide.png", &huge_png(8193, 2), &kit_server_bugreports::Limits::default()).is_err());
+    assert!(kit_server_bugreports::check_file("fine.png", &huge_png(8192, 2), &kit_server_bugreports::Limits::default()).is_ok());
 }
 
 #[tokio::test]

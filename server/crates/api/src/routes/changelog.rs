@@ -35,6 +35,11 @@ impl ChangelogHost for AppState {
     fn changelog(&self) -> &Changelog {
         changelog()
     }
+
+    /// The What's new marks are kept in the account's own preferences (`users.prefs`).
+    fn prefs(&self) -> &dyn kit_server_core::PrefsStore {
+        &self.kit.prefs
+    }
 }
 
 /// Every release with notes, newest first.

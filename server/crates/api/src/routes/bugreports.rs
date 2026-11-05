@@ -1,8 +1,9 @@
 //! Bug reports (side bar → "Bug reports"), served by the Krifmaz kit's `kit-server-bugreports`. A user writes what
 //! went wrong, attaches screenshots or a log, and the admin answers in a thread; the admin can export the lot as a
 //! zip (or one plain text file) to hand to the developer. The routes, limits and words are the kit crate's; this
-//! file hands it Encore's pieces: the config folder, the name and version, the rate limiter, the activity log, the
-//! Discord notification, the reply mail, the enrichment pass and the upload decode slots.
+//! file hands it Encore's pieces: the store (the kit's tables in Encore's database), the config folder, the name and
+//! version, the rate limiter, the activity log, the Discord notification, the reply mail and the upload decode
+//! slots.
 //!
 //! POST   /api/bug-reports                      multipart kind, title, body, page, app_version, device, file… → {ok, id}
 //! GET    /api/bug-reports?status=&kind=&q=&mine=1 → {reports: […]}
@@ -17,16 +18,10 @@ use crate::email;
 use crate::state::AppState;
 use axum::Router;
 use encore_requests::notify;
-use kit_server_bugreports::BugReportsHost;
-use kit_server_core::Account;
-use serde_json::Value;
+use kit_server_bugreports::{BugReportStore, BugReportsHost};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-pub use kit_server_bugreports::{
-    check_file, kind_label, line, safe_name, status_label, KINDS, MAX_FILE, MAX_FILES, STATUSES,
-};
 
 /// The bug report routes.
 pub fn router() -> Router<AppState> {
@@ -34,6 +29,10 @@ pub fn router() -> Router<AppState> {
 }
 
 impl BugReportsHost for AppState {
+    fn reports(&self) -> &dyn BugReportStore {
+        &self.kit.reports
+    }
+
     fn data_dir(&self) -> PathBuf {
         AppState::data_dir(self).to_path_buf()
     }
@@ -79,10 +78,6 @@ impl BugReportsHost for AppState {
                 .await
                 .map_err(|e| e.to_string())
         }
-    }
-
-    async fn enrich(&self, viewer: &Account, answer: &mut Value) {
-        crate::enrich::enrich(self, Some(&viewer.row), answer).await;
     }
 
     fn decodes(&self) -> Arc<tokio::sync::Semaphore> {
