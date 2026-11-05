@@ -8,7 +8,7 @@
 set -eu
 src="${TRUNK_SOURCE_DIR:-.}"
 out="${TRUNK_STAGING_DIR:-${TRUNK_DIST_DIR:-dist}}"
-files="/ /index.html /css/app.css /favicon.svg /manifest.webmanifest /share.html"
+files="/ /index.html /css/kit.css /css/app.css /favicon.svg /manifest.webmanifest /share.html"
 # the icons dir as it is (png and svg; the image's pre-compressed .br/.gz copies are made later and not listed)
 for f in "$out"/icons/*; do
   [ -f "$f" ] || continue
