@@ -2,6 +2,37 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05 – Lantern: what is built before Lantern 1.0, and what waits for it
+
+**Situation.** Lantern 1.0 is not out: github.com/Krifmaz/lantern has no commits, releases or API docs yet. The
+ask was to connect Encore to it once 1.0 is out, so everything that doesn't depend on Lantern's API is built
+now and nothing guesses that API (docs/contracts/lantern.md has the details).
+
+**Decisions.**
+- *Two steps: connected, then taken over.* Saving Lantern's address and key (Settings → Connections →
+  Lantern) changes nothing about downloads. Lantern only takes over once the one-time move of the settings
+  into it is done (`lantern_took_over`). So connecting can't break a working server, and "hide the native
+  settings while connected" means while Lantern has taken over: hiding them before the move would hide
+  settings that are still in use.
+- *The move waits for Lantern 1.0.* The dry run (what would move, card by card, secrets masked) works now.
+  The move itself answers 501 with the reason and changes nothing, because writing into Lantern needs its API.
+  As a result Lantern can't take over yet, so the Lantern source never runs before 1.0.
+- *The dry run follows the settings table.* It reads the Torrents & Usenet and Soulseek cards of
+  settings.toml and their `when` rules, so only the chosen clients' fields move, and a field added to those
+  cards later moves without a change in the plan.
+- *Lantern replaces sources in place.* In the request worker's source list, Soulseek (FLAC and any format)
+  and the indexers become one Lantern turn, at the place of the first of them, so the admin's order against
+  streamrip, yt-dlp and plugins stays the same. Import, tagging and filing stay Encore's.
+- *Nothing native is deleted.* The move keeps Encore's own settings. Disconnecting clears the address, the
+  key and the takeover, and the native sources and cards come back exactly as they were. A key that goes
+  away (an environment variable removed) also ends the takeover at once.
+- *Encore's Soulseek engine stops while Lantern has taken over*, because one Soulseek login can't be signed in
+  from two clients at once (`slskd_managed::configured`).
+- *The Lantern card sits on Connections, under a Server heading for admins.* Connections is otherwise per
+  user, but this is where it was asked for, and admins look for service links there.
+- *The connection test only checks that Lantern answers over HTTP.* Checking the key needs Lantern's API, and
+  the test says so.
+
 ## 2026-11-05: re-land the kit release workflows (#4) and Android on kit-compose (#5) onto main
 
 - **Why.** Both pull requests were merged into the stale branch `ccr-a4585b2e-d7xdtf` (0.42.6) instead of `main`, so

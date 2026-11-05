@@ -547,6 +547,7 @@ pub fn page_html(list: &Value, body: impl Fn(&Value) -> String, open: &[String],
 /// The settings part of an installed card: the form with Save, the line naming the page that has them, or why
 /// they could not be read.
 pub fn body_html(c: &Value, answer: Option<&Value>, settings: &Value, reveal: bool, schema: &Schema, list: &Value) -> String {
+    if c.s("handled_by") == "lantern" { return lantern_note_html(); }
     let on = c.s("settings_on");
     if !on.is_empty() {
         let title = schema.section(&on).map(|s| s.title.clone()).unwrap_or_else(|| on.clone());
@@ -563,6 +564,12 @@ pub fn body_html(c: &Value, answer: Option<&Value>, settings: &Value, reveal: bo
     if c.s("id") == "torznab" { html.push_str(&format!("<div data-clients>{}</div>", chosen_clients_html(&chosen_clients(settings, list, schema)))); }
     html.push_str(&format!(r##"<div class="row mt" style="justify-content:flex-end"><button class="btn primary" type="button" data-save>{}Save</button></div></div>"##, icon("check")));
     html
+}
+
+/// The settings part of a card Lantern has taken over (`handled_by: "lantern"`): what handles it now, and that
+/// its settings are kept and come back when Lantern is disconnected.
+pub fn lantern_note_html() -> String {
+    r##"<div class="small muted mt">Lantern handles this now: requests are searched and downloaded through it. These settings are kept as they were and come back if you disconnect Lantern under <a href="#/settings?s=connections" style="color:var(--accent)">Settings → Connections</a>.</div>"##.to_string()
 }
 
 /// A field of the settings schema by key.

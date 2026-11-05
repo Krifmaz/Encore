@@ -62,7 +62,19 @@ fn known(st: &AppState, id: &str) -> ApiResult<()> {
 /// The catalog and the installed plugins, with the sandbox level.
 async fn list(State(st): State<AppState>, Admin(_): Admin) -> ApiResult<Json<Value>> {
     let p = st.plugins.clone();
-    Ok(Json(tokio::task::spawn_blocking(move || p.list()).await.map_err(|e| err(500, e.to_string()))?))
+    let mut list = tokio::task::spawn_blocking(move || p.list()).await.map_err(|e| err(500, e.to_string()))?;
+    if let Some(cards) = list["plugins"].as_array_mut() {
+        cards.iter_mut().for_each(|c| mark_handled(&st, c));
+    }
+    Ok(Json(list))
+}
+
+/// A card Lantern has taken over gets `handled_by: "lantern"`: the Plugins page shows a note instead of its
+/// settings, which stay saved as they are (encore_requests::lantern::hides_plugin).
+fn mark_handled(st: &AppState, card: &mut Value) {
+    if encore_requests::lantern::hides_plugin(st, card["id"].as_str().unwrap_or("")) {
+        card["handled_by"] = json!(encore_requests::lantern::SOURCE);
+    }
 }
 
 /// One plugin's card, with its status asked now (an installed plugin).
@@ -71,7 +83,9 @@ async fn one(State(st): State<AppState>, Admin(_): Admin, Path(id): Path<String>
     if st.plugins.installed(&id) {
         st.plugins.status(&id).await.map_err(refused)?;
     }
-    st.plugins.card(&id).map(Json).ok_or_else(|| err(404, "Unknown plugin"))
+    let mut card = st.plugins.card(&id).ok_or_else(|| err(404, "Unknown plugin"))?;
+    mark_handled(&st, &mut card);
+    Ok(Json(card))
 }
 
 /// POST /api/plugins/check: look for updates of every plugin.

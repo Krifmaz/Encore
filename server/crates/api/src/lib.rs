@@ -154,6 +154,7 @@ pub fn app(st: AppState) -> Router {
         .merge(routes::files::router())
         .merge(routes::plugins::router())
         .merge(routes::wrapper::router())
+        .merge(routes::lantern::router())
         .merge(routes::changelog::router())
         .merge(routes::video_links::router())
         // the handlers add covers, credits and translations to their answers themselves (crate::enrich)

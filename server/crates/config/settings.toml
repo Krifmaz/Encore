@@ -2070,6 +2070,23 @@ help = "When the MusicBrainz access token runs out (Unix seconds); saved by the 
 default = ""
 help = "The MusicBrainz account that signed in on the Contribute page."
 
+# ---- Connections → Lantern (the card on Settings → Connections, admins only: not on the generic form)
+
+[keys.lantern_url]
+env = "LANTERN_URL"
+default = ""
+help = "Lantern's address (e.g. http://lantern:8080), set on Settings → Connections → Lantern. Lantern searches and downloads torrents, Usenet and Soulseek for Encore once it has taken over."
+
+[keys.lantern_api_key]
+env = "LANTERN_API_KEY"
+default = ""
+secret = true
+help = "Lantern's API key, set on Settings → Connections → Lantern."
+
+[keys.lantern_took_over]
+default = false
+help = "Whether Lantern has taken over Encore's torrent, Usenet and Soulseek downloads: set when the one-time move of the download settings into Lantern is done, cleared when Lantern is disconnected. While it is on, those sources go through Lantern and their own settings are hidden."
+
 # ---- Other pages
 
 [keys.email_login]
