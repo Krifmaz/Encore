@@ -2,6 +2,16 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the notice banner, What's new and the offline banners come from kit-leptos
+
+- **`notice.rs`, `whats_new.rs` and offline mode's banners are thin calls into the kit** (`kit_leptos::notice`,
+  `whats_new`, `offline`), which were made from them. Encore keeps its words (the downloads-folder check, the
+  What's new opening sentence, the offline banner's "songs downloaded to this device") and its paths
+  (`/requests/storage`), set once in `kit.rs`.
+- **The connection banner's four window listeners became `kit_leptos::offline::watch_connection()`;** the
+  `.notice-banner` and `.spinner.sm` rules sit next to Encore's `.storage-banner` in app.css until the page loads
+  the kit's stylesheet.
+
 ## 2026-11-05: desktop on the kit's latest tag (kit-iced after the kit went neutral)
 
 - **Encore's music icons and logo live in the app.** The kit dropped Music, Disc, Next, Prev, Shuffle, Library and
@@ -14,6 +24,7 @@ Calls made while working hands-off, with why. Newest first.
   is `Target::Page` or `Target::Play`, and the kit's new `with_button_icon` keeps the Play icon on it.
 - **Encore's own words where the kit's defaults moved:** the offline banner sentence, the update toast's place
   ("Settings → This computer → Updates") and the What's new first line ("This server runs Encore …").
+
 ## 2026-11-05: the web app's self-update and service worker side come from kit-leptos
 
 - **`update.rs` and `sw.rs` are gone; `kit::start_updates` starts the kit's.** The kit's `update` module is the
