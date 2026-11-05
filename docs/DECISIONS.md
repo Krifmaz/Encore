@@ -2,6 +2,15 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the Diagnostics checks are the kit's view
+
+- **`#diag` is `kit_leptos::diagnostics::DiagnosticsView`.** The summary, the check groups and "Where settings come
+  from" are the kit's; Encore's Server block, download folders and Soulseek lines go in through `DiagHooks` as the
+  same HTML (`kit_leptos::html::raw`), and Copy report is the kit's `report_text` with those two sections. The page
+  head, Updates, Backups and App crashes stay Encore's: they are Encore's own parts, not the kit's checks page.
+- **Run checks now keeps "Where settings come from" unfolded,** as the old comment said it should (the old code read
+  the fold after the spinner had replaced it, so it always folded).
+
 ## 2026-11-05: the web app loads the kit's stylesheet; app.css keeps only Encore's own rules
 
 - **`css/kit.css` (a copy of `kit_leptos::CSS`, a test keeps it the same) loads before `css/app.css`.** The red-on-red

@@ -32,6 +32,8 @@ console_error_panic_hook = "0.1"
 # to a kit tag; Encore's server paths and words are set at start-up (src/kit.rs)
 kit-leptos = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.4" }
 kit-rules = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.4" }
+# the reactive pieces a kit component takes (a signal for "Where settings come from"); the kit's own version
+leptos = { version = "=0.8.23", default-features = false }
 gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
 gloo-net = { version = "0.6", features = ["http"] }
