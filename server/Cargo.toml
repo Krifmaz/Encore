@@ -27,16 +27,18 @@ encore-requests = { path = "crates/requests" }
 encore-api = { path = "crates/api" }
 encore-files = { path = "crates/files" }
 encore-plugins = { path = "crates/plugins" }
-# the shared server crates of Krifmaz/kit (health, What's new, notices, bug reports, diagnostics, settings, updates),
+# the shared server crates of Krifmaz/kit (health, What's new, notices, bug reports, diagnostics, settings, updates,
+# the Docker self-update),
 # pinned to a kit release tag
-kit-server-core = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
-kit-server-health = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
-kit-server-changelog = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1", default-features = false }
-kit-server-notices = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
-kit-server-bugreports = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
-kit-server-diagnostics = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
-kit-server-settings = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1", default-features = false }
-kit-server-updates = { git = "https://github.com/Krifmaz/kit", tag = "v0.6.1" }
+kit-server-core = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-health = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-changelog = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0", default-features = false }
+kit-server-notices = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-bugreports = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-diagnostics = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-settings = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0", default-features = false }
+kit-server-updates = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
+kit-server-selfupdate = { git = "https://github.com/Krifmaz/kit", tag = "v0.7.0" }
 axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1", features = ["full"] }
@@ -84,10 +86,6 @@ webp = { version = "0.3", default-features = false }
 libc = "0.2"
 # quality checks on imports: spectrum of the decoded audio (fake lossless, upsampled)
 rustfft = "6.4"
-# "Update now": the Docker Engine API over the unix socket (HTTP/1.1 client; already in the tree via axum/reqwest)
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 
 [workspace.lints.clippy]
 # Lints on top of clippy's defaults that catch wasted copies: a String or Vec copied with to_string/to_owned

@@ -17,10 +17,11 @@
 //! again at once, and a service unit can do the same (`RestartForceExitStatus=75`). The routes are the API's
 //! (encore_api, served by the kit's `kit_server_updates::router`); this module is what they call. The release
 //! rules (what a release and a hotfix are, the newest of them, notes cut, newer by number) and the restart
-//! planning are the kit's (`kit_server_updates`); the Docker self-update is Encore's own.
-use crate::docker::{self, Docker};
+//! planning are the kit's (`kit_server_updates`), and so are the Docker self-update's socket check, pull,
+//! helper start and container swap (`kit_server_selfupdate`, with Encore's facts in `selfupdate::app`).
 use crate::selfupdate::{self, IMAGE};
 use crate::update_report::{self, Report};
+use kit_server_selfupdate::{start, Docker};
 use crate::Ctx;
 use encore_core::VERSION;
 use encore_db::{self as db, p};
@@ -33,6 +34,7 @@ use std::time::Duration;
 
 pub use kit_server_updates::server::{is_newer, Channel};
 pub use kit_server_updates::{Restart, EXIT_RESTART};
+pub use kit_server_selfupdate::probe::SelfUpdate;
 
 /// The GitHub repository releases are looked up in.
 pub const REPO: &str = "Krifmaz/Encore";
@@ -40,8 +42,6 @@ pub const REPO: &str = "Krifmaz/Encore";
 pub const HOTFIX_PREFIX: &str = "hotfix-";
 /// A build without ENCORE_VERSION (cargo build on a desk) is not a release: any release counts as newer.
 pub const DEV: bool = option_env!("ENCORE_VERSION").is_none();
-/// The oldest image that has the self-update helper in it.
-const FIRST_SELF_UPDATING: &str = "0.28.0";
 /// How long a release check is trusted before GitHub is asked again (seconds).
 const FRESH_SECS: f64 = 3600.0;
 /// Where the last answer from GitHub is kept (sync_state, connection 0), one per channel.
@@ -74,8 +74,6 @@ pub fn feed() -> kit_server_updates::feed::Feed {
 const DOCKER_CACHE: &str = "update:docker";
 /// Requests still open this long after "Restart server" are cut off.
 const GRACE: Duration = Duration::from_secs(10);
-/// A pull of a new image (a few hundred MB) on a slow line.
-const PULL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 // ---- the newest release -----------------------------------------------------------------------------
 
@@ -157,118 +155,14 @@ pub fn machine_fields(st: &impl Ctx) -> (bool, Option<String>) {
 
 // ---- can this container replace itself -----------------------------------------------------------------
 
-/// Whether "Update now" can replace this container, and the facts it needs to.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SelfUpdate {
-    /// the container can update itself
-    pub ready: bool,
-    /// why not, when it can't
-    pub reason: Option<String>,
-    /// this container's full id, its name and the image it was created from (when ready)
-    pub id: Option<String>,
-    /// the container's name
-    pub name: Option<String>,
-    /// the image it was created from
-    pub image: Option<String>,
-}
-
-impl SelfUpdate {
-    /// A "cannot update" answer with `reason`.
-    fn no(reason: impl Into<String>) -> SelfUpdate {
-        SelfUpdate { reason: Some(reason.into()), ..Default::default() }
-    }
-    /// The answer as cached.
-    fn json(&self) -> Value {
-        json!({ "ready": self.ready, "reason": self.reason, "id": self.id, "name": self.name, "image": self.image })
-    }
-    /// The answer from its cached JSON.
-    fn from_json(v: &Value) -> SelfUpdate {
-        let s = |k: &str| v[k].as_str().map(String::from);
-        SelfUpdate { ready: v["ready"] == true, reason: s("reason"), id: s("id"), name: s("name"), image: s("image") }
-    }
-}
-
-/// The 64-hex container id Docker mounts this container's /etc/hostname (and resolv.conf, hosts) from:
-/// `… /var/lib/docker/containers/<id>/hostname /etc/hostname …` in /proc/self/mountinfo.
-pub fn container_id_from_mountinfo(text: &str) -> Option<String> {
-    for line in text.lines() {
-        for part in line.split_whitespace() {
-            if let Some(rest) = part.split("/containers/").nth(1) {
-                let id = rest.split('/').next().unwrap_or("");
-                if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Some(id.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// This machine's host name (the container id inside Docker).
-pub(crate) fn hostname() -> String {
-    ["/proc/sys/kernel/hostname", "/etc/hostname"].iter().filter_map(|p| std::fs::read_to_string(p).ok())
-        .map(|h| h.trim().to_string()).find(|h| !h.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default()
-}
-
-/// Whether this process may write `path` (`access(W_OK)`).
-fn writable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
-    // SAFETY: a valid NUL-terminated path; access() only reads it
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
-}
-
-/// Whether "Update now" can work here, and in plain words why not: the `self_update` setting, the socket
-/// (there, a socket, writable, answering `_ping`), and this process in a container Docker knows (the id from
-/// mountinfo, or the hostname, which is the id's first 12 characters unless the owner set one).
+/// Whether "Update now" can work here, and in plain words why not: the `self_update` setting, then the kit's
+/// check of the socket and of this process in a container Docker may replace (`hostname` and `mountinfo`
+/// find it).
 pub async fn probe_with(sock: &Path, setting: &str, hostname: &str, mountinfo: &str) -> SelfUpdate {
     if matches!(setting.trim().to_ascii_lowercase().as_str(), "off" | "false" | "no" | "0") {
         return SelfUpdate::no("Switched off in the settings (self_update = off)");
     }
-    let meta = match std::fs::metadata(sock) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SelfUpdate::no("The Docker socket is not mounted"),
-        Err(e) => return SelfUpdate::no(format!("The Docker socket can't be read: {e}")),
-    };
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    if !meta.file_type().is_socket() {
-        return SelfUpdate::no(format!("The Docker socket is not mounted ({} is not a socket)", sock.display()));
-    }
-    if !writable(sock) {
-        // SAFETY: plain getters without arguments
-        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        return SelfUpdate::no(format!("The Docker socket is not writable by Encore (it runs as uid {uid}, gid {gid}; the socket's group is {}): set PGID={} or PUID=0",
-            meta.gid(), meta.gid()));
-    }
-    let d = Docker::new(sock);
-    match d.get("/_ping").await {
-        Ok((200, _)) => {}
-        Ok((code, v)) => return SelfUpdate::no(format!("The Docker socket refused the request: Docker answered {code}: {}", docker::message(&v))),
-        Err(e) => return SelfUpdate::no(format!("The Docker socket refused the request: {e}")),
-    }
-    let mut candidates: Vec<String> = container_id_from_mountinfo(mountinfo).into_iter().collect();
-    if !hostname.is_empty() && !candidates.iter().any(|c| c == hostname) {
-        candidates.push(hostname.to_string());
-    }
-    for c in candidates {
-        match d.inspect(&c).await {
-            Ok(Some(v)) => {
-                let id = v["Id"].as_str().unwrap_or("");
-                if id.starts_with(&c) || v["Config"]["Hostname"].as_str() == Some(hostname) {
-                    if let Some(why) = selfupdate::cannot_replace(&v) {
-                        return SelfUpdate::no(why);
-                    }
-                    let s = |x: &Value| x.as_str().map(String::from);
-                    return SelfUpdate { ready: true, reason: None, id: s(&v["Id"]), name: v["Name"].as_str().map(|n| n.trim_start_matches('/').to_string()),
-                        image: s(&v["Config"]["Image"]) };
-                }
-            }
-            Ok(None) => {}
-            Err(e) => return SelfUpdate::no(format!("The Docker socket refused the request: {e}")),
-        }
-    }
-    SelfUpdate::no("Not running in a container")
+    kit_server_selfupdate::probe::probe_with(&selfupdate::app(), sock, hostname, mountinfo).await
 }
 
 /// `probe_with` for this process, kept for an hour.
@@ -279,7 +173,7 @@ pub async fn self_update(st: &impl Ctx, force: bool) -> SelfUpdate {
         }
     }
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let s = probe_with(&st.system().docker_socket, &st.cfg().str("self_update"), &hostname(), &mountinfo).await;
+    let s = probe_with(&st.system().docker_socket, &st.cfg().str("self_update"), &kit_server_selfupdate::docker::hostname(), &mountinfo).await;
     st.cache_put(DOCKER_CACHE, s.json(), 3600);
     s
 }
@@ -313,66 +207,9 @@ pub async fn status(st: &impl Ctx, force: bool) -> Value {
 
 /// The tag to pull: `latest` or a version (a leading v is dropped: the images are tagged 0.28.0), letters,
 /// digits, dots, dashes and underscores only; versions before the first self-updating image are refused
-/// (their binary has no helper, so the swap could never finish).
+/// (their binary has no helper, so the swap could never finish). The kit's check with Encore's facts.
 pub fn check_tag(tag: &str) -> Result<String, String> {
-    let t = tag.trim();
-    let valid = !t.is_empty() && t.len() <= 64 && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-    if !valid {
-        return Err("Not a valid image tag".into());
-    }
-    let t = if t.len() > 1 && t.starts_with(['v', 'V']) && t.as_bytes()[1].is_ascii_digit() { &t[1..] } else { t };
-    if t.as_bytes()[0].is_ascii_digit() && encore_core::version::compare(t, FIRST_SELF_UPDATING) == std::cmp::Ordering::Less {
-        return Err(format!("Encore {t} can't update itself; pick {FIRST_SELF_UPDATING} or newer"));
-    }
-    Ok(t.to_string())
-}
-
-/// The words for a failed pull. The pull carries no registry login, so "unauthorized" or "denied" means the image
-/// is private on GHCR (or the tag doesn't exist there).
-pub fn pull_error(image: &str, e: &str) -> String {
-    let l = e.to_ascii_lowercase();
-    if l.contains("unauthorized") || l.contains("denied") {
-        format!("Could not pull {image}: {e}. GitHub refused an anonymous pull: the encore package on ghcr.io must be public (GitHub → Packages → encore → Package settings → Change visibility).")
-    } else {
-        format!("Could not pull {image}: {e}")
-    }
-}
-
-/// Pull `IMAGE:tag`, then create and start the helper container from it, writing each step into `r`.
-/// Ok(the helper's name); Err((the step that failed, its error)).
-pub async fn start_update(d: &Docker, self_id: &str, tag: &str, r: &mut Report) -> Result<String, (&'static str, String)> {
-    let image = format!("{IMAGE}:{tag}");
-    r.line("pull", &format!("pulling {image}"));
-    d.pull(IMAGE, tag, PULL_TIMEOUT).await.map_err(|e| ("pull", pull_error(&image, &e)))?;
-    r.line("pull", &format!("{image} is on this host"));
-    let me = d.inspect(self_id).await.map_err(|e| ("helper", format!("The Docker socket refused the request: {e}")))?
-        .ok_or_else(|| ("helper", "Not running in a container".to_string()))?;
-    let body = selfupdate::plan_helper_body(&me, &image, db::SCHEMA_VERSION)
-        .ok_or_else(|| ("helper", "The Docker socket is not mounted from the host (no bind for /var/run/docker.sock)".to_string()))?;
-    // an ended helper of an earlier try would be read as this one's: it goes first
-    if let Ok(old) = update_report::helpers(d).await {
-        for (id, running, _) in old {
-            if running {
-                return Err(("helper", "An update helper is still running: wait for it to end".into()));
-            }
-            let _ = d.delete(&format!("/containers/{id}?force=true")).await;
-        }
-    }
-    let name = format!("{}-update-{}", me["Name"].as_str().unwrap_or("encore").trim_start_matches('/'), db::now() as i64);
-    r.line("helper", &format!("creating the helper container {name} (database schema {})", db::SCHEMA_VERSION));
-    let (code, v) = d.post(&format!("/containers/create?name={}", urlencoding::encode(&name)), Some(&body)).await
-        .map_err(|e| ("helper", format!("Could not start the update helper: {e}")))?;
-    if code != 201 {
-        return Err(("helper", format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v))));
-    }
-    let id = v["Id"].as_str().unwrap_or(&name).to_string();
-    let (code, v) = d.post(&format!("/containers/{id}/start"), None).await.map_err(|e| ("helper", format!("Could not start the update helper: {e}")))?;
-    if !(200..300).contains(&code) {
-        let _ = d.delete(&format!("/containers/{id}?force=true")).await;
-        return Err(("helper", format!("Could not start the update helper: Docker answered {code}: {}", docker::message(&v))));
-    }
-    r.line("helper", &format!("{name} started: it stops this server and swaps the container (the server is down for about a minute)"));
-    Ok(name)
+    start::check_tag(&selfupdate::app(), tag)
 }
 
 /// The file of Encore's repository that holds the database schema a version writes (`SCHEMA_VERSION`).
@@ -430,7 +267,7 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
     // the release's own database schema, before anything is pulled: an older one would refuse this database
     let target_schema = release_schema(st, &tag).await;
     if let Some(why) = target_schema.and_then(|s| older_schema_refusal(&tag, s, db::SCHEMA_VERSION)) {
-        let mut r = Report::start(&format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
+        let mut r = Report::start(&selfupdate::app(), &format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
         r.fail("check", &why, db::now());
         update_report::store(st, &r);
         st.db().log("error", &format!("Update to {IMAGE}:{tag} refused: {why}"));
@@ -441,7 +278,7 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
         return Err(Refused(409, "An update is already on its way".into()));
     }
     st.db().log("warning", &format!("{who} started an update to {IMAGE}:{tag}"));
-    let mut report = Report::start(&format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
+    let mut report = Report::start(&selfupdate::app(), &format!("{IMAGE}:{tag}"), &tag, VERSION, who, db::now());
     report.line("check", &format!("Encore {VERSION} → {tag}; container {} ({})", su.name.as_deref().unwrap_or("?"), su.image.as_deref().unwrap_or("?")));
     report.line("check", &match target_schema {
         Some(s) => format!("Encore {tag} knows database schema {s}; this database is at {}", db::SCHEMA_VERSION),
@@ -452,7 +289,7 @@ pub async fn update_now(st: &impl Ctx, who: &str, tag: Option<String>) -> Result
     // proxy's read timeout, a closed tab) neither stops the update half-way nor leaves it marked as running.
     let (st2, sock, id, tag2) = (st.clone(), st.system().docker_socket.clone(), su.id.clone().unwrap_or_default(), tag.clone());
     let res = tokio::spawn(async move {
-        let res = start_update(&Docker::new(sock), &id, &tag2, &mut report).await;
+        let res = start::start_update(&selfupdate::app(), &Docker::new(sock), &id, &tag2, Some(db::SCHEMA_VERSION), &mut report).await;
         updating.store(false, Ordering::SeqCst);
         match &res {
             Ok(helper) => tracing::info!("update to {IMAGE}:{tag2}: helper container {helper} started"),

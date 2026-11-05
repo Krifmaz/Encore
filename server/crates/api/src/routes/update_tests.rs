@@ -197,7 +197,7 @@ async fn a_failed_update_shows_its_step_and_error() {
     let (_, v, _) = call(&app, "GET", "/api/system/update", &admin, false, None).await;
     assert_eq!(v["last_update"], Value::Null, "no update yet");
 
-    let mut r = encore_system::update_report::Report::start("ghcr.io/krifmaz/encore:0.42.18", "0.42.18", crate::VERSION, "boss", encore_db::now());
+    let mut r = encore_system::update_report::Report::start(&encore_system::selfupdate::app(), "ghcr.io/krifmaz/encore:0.42.18", "0.42.18", crate::VERSION, "boss", encore_db::now());
     r.line("pull", "ghcr.io/krifmaz/encore:0.42.18 is on this host");
     encore_system::update_report::store(&st, &r);
 
