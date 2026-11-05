@@ -6,54 +6,19 @@
 //! DELETE to disconnect, POST …/migrate with `dry_run`; Test is the kit's POST /api/system/test/lantern.
 //! While Lantern 1.0 is not out the server says so (`api_ready: false`, `waiting`) and the move answers 501:
 //! the card shows that line and the move's error, and nothing else changes.
+//!
+//! A Leptos view ([`Lantern`]) over the state; a save, a disconnect or the move draws the card anew from the
+//! state the server answers, as before.
 
 use crate::api;
 use crate::dom;
 use crate::json::J;
 use crate::settings::test_result;
 use crate::ui::{confirm_dialog, esc, icon, toast};
+use kit_leptos::html::html;
+use leptos::prelude::*;
 use serde_json::{json, Value};
 use web_sys::Element;
-
-/// The card's HTML for the state `s` (GET /api/admin/lantern), drawn into `[data-lantern]`.
-pub fn card_html(s: &Value) -> String {
-    let connected = s.truthy("connected");
-    let badge = if s.truthy("took_over") {
-        r#"<span class="badge ok">handles downloads</span>"#
-    } else if connected {
-        r#"<span class="badge ok">connected</span>"#
-    } else {
-        ""
-    };
-    let locked = s.truthy("env_locked");
-    let dis = if locked { " disabled" } else { "" };
-    let key_hint = if s.truthy("key_set") { "Saved – type to replace" } else { "Lantern → Settings → API key" };
-    let lock_line = if locked { r#"<div class="small muted">Set by LANTERN_URL and LANTERN_API_KEY in the environment.</div>"# } else { "" };
-    let waiting = if s.truthy("api_ready") { String::new() } else { format!(r#"<div class="small muted">{}</div>"#, esc(&s.s("waiting"))) };
-    let disconnect = if connected && !locked { r#"<button class="btn sm danger ghost" type="button" data-lantern-act="disconnect">Disconnect</button>"# } else { "" };
-    let mover = if connected {
-        format!(r#"<div class="stack" style="border-top:1px solid var(--border);padding-top:12px">
-      <div class="small">Move Encore's torrent, Usenet and Soulseek settings into Lantern once. Encore keeps its own copy: disconnecting brings them back.</div>
-      <div class="row wrap"><button class="btn sm" type="button" data-lantern-act="preview">{}Preview the move</button>
-        <button class="btn sm primary" type="button" data-lantern-act="move">Move settings into Lantern</button></div>
-      <div data-lantern-plan></div>
-    </div>"#, icon("search"))
-    } else {
-        String::new()
-    };
-    format!(r#"<div class="card stack" data-server="lantern">
-    <div class="row between"><h3>Lantern</h3>{badge}</div>
-    <div class="small muted">Your own grabber for torrents, Usenet and Soulseek. Once it takes over, requests are searched and downloaded through it, and Encore still imports, tags and files what it finishes.</div>
-    {waiting}
-    <label class="field"><span>Address</span><input class="input" type="url" data-lantern-url placeholder="http://lantern:8080" value="{url}"{dis}></label>
-    <label class="field"><span>API key</span><input class="input" type="password" data-lantern-key placeholder="{key_hint}" autocomplete="off"{dis}></label>
-    {lock_line}
-    <div class="row wrap"><button class="btn sm primary" type="button" data-lantern-act="save"{dis}>{check}Save</button>
-      <button class="btn sm" type="button" data-lantern-act="test">Test connection</button>{disconnect}</div>
-    <div data-lantern-out></div>
-    {mover}
-  </div>"#, url = esc(&s.s("url")), check = icon("check"))
-}
 
 /// The dry run's answer (`plan`: `items` and `skipped`) as a list, one heading per part ("Indexers
 /// (Prowlarr)", "Torrent client", "Usenet client", "Soulseek"), in the order the server sends.
@@ -88,7 +53,7 @@ pub fn plan_html(plan: &Value) -> String {
     html
 }
 
-/// Draw the card into `slot` (admins: the Connections page adds the slot only for them) and handle its buttons.
+/// Draw the card into `slot` (admins: the Connections page adds the slot only for them).
 pub async fn mount(slot: Element) {
     let state = match api::get("/admin/lantern").await {
         Ok(s) => s,
@@ -97,88 +62,173 @@ pub async fn mount(slot: Element) {
             return;
         }
     };
-    dom::set_html(&slot, &card_html(&state));
-    let root = slot.clone();
-    dom::on(&slot, "click", move |e| {
-        let Some(b) = dom::closest(e, "[data-lantern-act]") else { return };
-        let act = dom::data(&b, "lantern-act");
-        let root = root.clone();
-        dom::spawn(async move {
-            dom::set_disabled(&b, true);
-            act_on(&root, &act).await;
-            dom::set_disabled(&b, false);
-        });
-    });
+    // the state lives as long as the page: the owner is dropped with it
+    let owner = Owner::new();
+    let state = owner.with(|| RwSignal::new(state));
+    if let Some(m) = owner.with(|| kit_leptos::rt::mount(&slot, move || view! { <Lantern state/> })) {
+        dom::keep(m);
+    }
+    dom::keep(owner);
 }
 
-/// One of the card's buttons: `save`, `test`, `disconnect`, `preview` or `move`.
-async fn act_on(root: &Element, act: &str) {
-    let out = |sel: &str, html: &str| if let Some(o) = dom::qs_in(root, sel) { dom::set_html(&o, html) };
-    match act {
-        "save" => {
-            let url = dom::value_of(root, "[data-lantern-url]");
-            let key = dom::value_of(root, "[data-lantern-key]");
-            let mut body = json!({ "url": url });
-            if !key.is_empty() { body["api_key"] = json!(key); }
-            match api::put("/admin/lantern", body).await {
-                Ok(s) => {
-                    toast("Lantern saved", "ok");
-                    redraw(root, &s);
-                }
-                Err(e) => toast(&e.message, "err"),
-            }
-        }
-        "test" => match api::post_empty("/system/test/lantern").await {
-            Ok(r) => out("[data-lantern-out]", &test_result(&r)),
-            Err(e) => out("[data-lantern-out]", &test_result(&json!({ "ok": false, "message": e.message }))),
-        },
-        "disconnect" => {
-            if !confirm_dialog("Disconnect Lantern", "Encore searches and downloads with its own sources and settings again.", "Disconnect", true).await { return; }
-            match api::del("/admin/lantern").await {
-                Ok(s) => redraw(root, &s),
-                Err(e) => toast(&e.message, "err"),
-            }
-        }
-        "preview" => match api::post("/admin/lantern/migrate", json!({ "dry_run": true })).await {
-            Ok(r) => out("[data-lantern-plan]", &plan_html(r.g("plan"))),
-            Err(e) => toast(&e.message, "err"),
-        },
-        "move" => {
-            if !confirm_dialog("Move settings into Lantern", "Lantern takes over torrents, Usenet and Soulseek, and their cards under Settings → Plugins are hidden. Encore keeps its own copy.", "Move", false).await { return; }
-            match api::post("/admin/lantern/migrate", json!({ "dry_run": false })).await {
-                Ok(r) => {
-                    toast("Lantern handles downloads now", "ok");
-                    redraw(root, r.g("state"));
-                }
-                Err(e) => toast(&e.message, "err"),
-            }
-        }
-        _ => {}
+/// The card's badge for the state: whether Lantern handles downloads, or is only connected.
+fn badge(s: &Value) -> Option<&'static str> {
+    if s.truthy("took_over") {
+        Some("handles downloads")
+    } else if s.truthy("connected") {
+        Some("connected")
+    } else {
+        None
     }
 }
 
-/// Draw the card again for the state `s` (after a save, a disconnect or the move).
-fn redraw(root: &Element, s: &Value) {
-    dom::set_html(root, &card_html(s));
+/// The Lantern card for the state (GET /api/admin/lantern), drawn anew when a button changes it.
+#[component]
+pub fn Lantern(
+    /// Lantern's state: `url`, `key_set`, `connected`, `took_over`, `env_locked`, `api_ready`, `waiting`.
+    state: RwSignal<Value>,
+) -> impl IntoView {
+    // what the boxes hold, Test's answer and the dry run
+    let url = RwSignal::new(state.with_untracked(|s| s.s("url")));
+    let key = RwSignal::new(String::new());
+    let out = RwSignal::new(String::new());
+    let plan = RwSignal::new(String::new());
+    // a new state draws the card anew, as before: the boxes hold what it says, the answers are gone
+    let redraw = move |s: Value| {
+        url.try_set(s.s("url"));
+        key.try_set(String::new());
+        out.try_set(String::new());
+        plan.try_set(String::new());
+        state.try_set(s);
+    };
+    move || {
+        let s = state.get();
+        let connected = s.truthy("connected");
+        let locked = s.truthy("env_locked");
+        let key_hint = if s.truthy("key_set") { "Saved – type to replace" } else { "Lantern → Settings → API key" };
+        let waiting = (!s.truthy("api_ready")).then(|| view! { <div class="small muted">{s.s("waiting")}</div> });
+        let lock_line = locked.then(|| view! { <div class="small muted">"Set by LANTERN_URL and LANTERN_API_KEY in the environment."</div> });
+        let save = move || {
+            let mut body = json!({ "url": url.get_untracked() });
+            let k = key.get_untracked();
+            if !k.is_empty() {
+                body["api_key"] = json!(k);
+            }
+            async move {
+                match api::put("/admin/lantern", body).await {
+                    Ok(s) => {
+                        toast("Lantern saved", "ok");
+                        redraw(s);
+                    }
+                    Err(e) => toast(&e.message, "err"),
+                }
+            }
+        };
+        let test = move || async move {
+            let r = match api::post_empty("/system/test/lantern").await {
+                Ok(r) => r,
+                Err(e) => json!({ "ok": false, "message": e.message }),
+            };
+            out.try_set(test_result(&r));
+        };
+        let disconnect = move || async move {
+            if !confirm_dialog("Disconnect Lantern", "Encore searches and downloads with its own sources and settings again.", "Disconnect", true).await {
+                return;
+            }
+            match api::del("/admin/lantern").await {
+                Ok(s) => redraw(s),
+                Err(e) => toast(&e.message, "err"),
+            }
+        };
+        let preview = move || async move {
+            match api::post("/admin/lantern/migrate", json!({ "dry_run": true })).await {
+                Ok(r) => {
+                    plan.try_set(plan_html(r.g("plan")));
+                }
+                Err(e) => toast(&e.message, "err"),
+            }
+        };
+        let take_over = move || async move {
+            if !confirm_dialog("Move settings into Lantern", "Lantern takes over torrents, Usenet and Soulseek, and their cards under Settings → Plugins are hidden. Encore keeps its own copy.", "Move", false).await {
+                return;
+            }
+            match api::post("/admin/lantern/migrate", json!({ "dry_run": false })).await {
+                Ok(r) => {
+                    toast("Lantern handles downloads now", "ok");
+                    redraw(r.g("state").clone());
+                }
+                Err(e) => toast(&e.message, "err"),
+            }
+        };
+        let disconnect = (connected && !locked).then(|| view! { <ActButton class="btn sm danger ghost" act="disconnect" label="Disconnect".to_string() run=disconnect/> });
+        let mover = connected.then(|| view! {
+            <div class="stack" style="border-top:1px solid var(--border);padding-top:12px">
+                <div class="small">"Move Encore's torrent, Usenet and Soulseek settings into Lantern once. Encore keeps its own copy: disconnecting brings them back."</div>
+                <div class="row wrap"><ActButton class="btn sm" act="preview" label=format!("{}Preview the move", icon("search")) run=preview/>
+                    <ActButton class="btn sm primary" act="move" label="Move settings into Lantern".to_string() run=take_over/></div>
+                <div data-lantern-plan inner_html=move || plan.get()></div>
+            </div>
+        });
+        view! {
+            <div class="card stack" data-server="lantern">
+                <div class="row between"><h3>"Lantern"</h3>{badge(&s).map(|b| view! { <span class="badge ok">{b}</span> })}</div>
+                <div class="small muted">"Your own grabber for torrents, Usenet and Soulseek. Once it takes over, requests are searched and downloaded through it, and Encore still imports, tags and files what it finishes."</div>
+                {waiting}
+                <label class="field"><span>"Address"</span><input class="input" type="url" data-lantern-url placeholder="http://lantern:8080" value=s.s("url") prop:value=move || url.get() disabled=locked
+                    on:input=move |e| url.set(event_target_value(&e))/></label>
+                <label class="field"><span>"API key"</span><input class="input" type="password" data-lantern-key placeholder=key_hint autocomplete="off" prop:value=move || key.get() disabled=locked
+                    on:input=move |e| key.set(event_target_value(&e))/></label>
+                {lock_line}
+                <div class="row wrap"><ActButton class="btn sm primary" act="save" label=format!("{}Save", icon("check")) run=save locked/>
+                    <ActButton class="btn sm" act="test" label="Test connection".to_string() run=test/>{disconnect}</div>
+                <div data-lantern-out inner_html=move || out.get()></div>
+                {mover}
+            </div>
+        }
+    }
+}
+
+/// One of the card's buttons (`data-lantern-act`): disabled while `run` works (and for good when `locked`).
+#[component]
+fn ActButton<F, Fut>(
+    /// The button's classes.
+    class: &'static str,
+    /// What it does: `save`, `test`, `disconnect`, `preview` or `move`.
+    act: &'static str,
+    /// Its label, as HTML (an icon may lead).
+    label: String,
+    /// The work it starts.
+    run: F,
+    /// Whether the environment holds the settings, so it is never enabled.
+    #[prop(optional)]
+    locked: bool,
+) -> impl IntoView
+where
+    F: Fn() -> Fut + Copy + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let busy = RwSignal::new(false);
+    let click = move |_| {
+        busy.set(true);
+        let work = run();
+        dom::spawn(async move {
+            work.await;
+            busy.try_set(false);
+        });
+    };
+    view! { <button class=class type="button" data-lantern-act=act disabled=move || locked || busy.get() on:click={click} {..html(label)}>{""}</button> }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The badge says whether Lantern handles downloads or is only connected.
     #[test]
-    fn the_card_follows_the_state() {
-        let off = card_html(&json!({ "url": "", "key_set": false, "connected": false, "took_over": false, "api_ready": false, "waiting": "Lantern 1.0 isn't out yet" }));
-        assert!(off.contains("Lantern 1.0 isn&#39;t out yet"));
-        assert!(!off.contains("data-lantern-act=\"move\"") && !off.contains("Disconnect"));
-        let on = card_html(&json!({ "url": "http://lantern:8080", "key_set": true, "connected": true, "took_over": false, "api_ready": false, "waiting": "w" }));
-        assert!(on.contains("value=\"http://lantern:8080\"") && on.contains("Saved – type to replace"));
-        assert!(on.contains("data-lantern-act=\"preview\"") && on.contains("Disconnect") && on.contains(">connected<"));
-        let locked = card_html(&json!({ "url": "http://l", "connected": true, "env_locked": true, "api_ready": true }));
-        assert!(locked.contains("LANTERN_URL") && !locked.contains("Disconnect") && locked.contains(" disabled"));
-        assert!(card_html(&json!({ "connected": true, "took_over": true })).contains("handles downloads"));
-        // an address is escaped
-        assert!(card_html(&json!({ "url": "http://x/\"><b>" })).contains("http://x/&quot;&gt;&lt;b&gt;"));
+    fn the_badge_follows_the_state() {
+        assert_eq!(badge(&json!({ "connected": false })), None);
+        assert_eq!(badge(&json!({ "connected": true })), Some("connected"));
+        assert_eq!(badge(&json!({ "connected": true, "took_over": true })), Some("handles downloads"));
     }
 
     #[test]
