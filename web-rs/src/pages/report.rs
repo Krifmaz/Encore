@@ -1,11 +1,15 @@
-//! Port of web/js/pages/report.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! ⋯ → Report a problem (songs and albums), and Settings → Blocked: reports, blocked sources with Undo,
 //! and the songs the quality checks flagged.
+//!
+//! Settings → Blocked is a Leptos view ([`Blocked`]) over one signal, the page's answers; each action loads them
+//! again. The Report a problem dialog ([`report_modal`]) is still drawn as HTML.
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
 use crate::json::J;
 use crate::ui::{esc, fmt, icon, modal, toast, ModalOpts};
+use kit_leptos::html::html;
+use leptos::prelude::*;
 use serde_json::{json, Value};
 use std::rc::Rc;
 use web_sys::Element;
@@ -120,148 +124,234 @@ fn status(s: &str) -> (&str, &str) {
     }
 }
 
-/// One report on Settings → Blocked: what, why, who and when, its status, Try again and (admins) Dismiss.
-fn report_row(r: &Value, admin: bool) -> String {
-    let st = r.s("status");
-    let (label, cls) = status(&st);
-    let href = if r.s("kind") == "album" && r.truthy("album_id") { format!("#/library/album/{}", enc(&r.s("album_id"))) } else { String::new() };
-    let name = format!("{} – {}", esc(&r.s("artist")), esc(&r.s("title")));
-    let retry = if st == "no_replacement" || st == "lyrics_none" { format!(r#"<button class="btn sm" data-retry="{}">{}Try again</button>"#, r.i("id"), icon("refresh")) } else { String::new() };
-    let dismiss = if admin && ["replacing", "no_replacement", "lyrics_found", "lyrics_none"].contains(&st.as_str()) { format!(r#"<button class="btn sm ghost" data-dismiss="{}">Dismiss</button>"#, r.i("id")) } else { String::new() };
-    format!(r#"<div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:10px" data-report="{id}">
-    <div class="grow" style="min-width:220px"><div style="font-weight:650">{title} <span class="small muted">{kind}</span></div>
-      <div class="small">{reason}{note}</div>
-      <div class="small faint">{who}{ago}{src}{msg}</div></div>
-    <span class="badge {cls}">{label}</span>
-    <span class="row" style="gap:6px">{retry}{dismiss}</span>
-  </div>"#,
-        id = r.i("id"),
-        title = if href.is_empty() { name } else { format!(r#"<a href="{href}">{name}</a>"#) },
-        kind = if r.s("kind") == "album" { "album" } else { "song" },
-        reason = esc(&if r.truthy("reason_label") { r.s("reason_label") } else { r.s("reason") }),
-        note = if r.truthy("note") { format!(" · “{}”", esc(&r.s("note"))) } else { String::new() },
-        who = if admin && r.truthy("username") { format!("{} · ", esc(&r.s("username"))) } else { String::new() },
-        ago = fmt::ago(r.f("created_at")),
-        src = if r.truthy("source") { format!(" · from {}", esc(&r.s("source"))) } else { String::new() },
-        msg = if r.truthy("message") { format!(" · {}", esc(&r.s("message"))) } else { String::new() },
-        label = esc(label))
+/// What Settings → Blocked draws from. The admin's parts are empty for a member.
+#[derive(Clone)]
+pub struct Loaded {
+    /// Whether the reader is an admin (who sees everyone's reports, the blocks and the flagged songs).
+    pub admin: bool,
+    /// The answer of GET /api/admin/settings (admins).
+    pub values: Value,
+    /// The answer of GET /api/reports.
+    pub reports: Value,
+    /// The answer of GET /api/blocks (admins).
+    pub blocks: Value,
+    /// The answer of GET /api/quality/suspect (admins).
+    pub suspect: Value,
 }
 
-fn rerender(view: Element, ctx: Ctx) {
-    dom::spawn(async move { if let Err(e) = render(view, ctx).await { dom::console_error(&e); } });
+/// Loads everything the page shows (a member only gets the reports).
+async fn fetch(admin: bool) -> Result<Loaded, String> {
+    let values = if admin { api::get("/admin/settings").await.map_err(|e| e.message)? } else { json!({}) };
+    let reports = api::get("/reports").await.map_err(|e| e.message)?;
+    let blocks = if admin { api::get("/blocks").await.map_err(|e| e.message)? } else { json!({ "blocks": [] }) };
+    let suspect = if admin { api::get("/quality/suspect").await.map_err(|e| e.message)? } else { json!({ "tracks": [] }) };
+    Ok(Loaded { admin, values, reports, blocks, suspect })
 }
 
-/// Settings → Blocked
+/// Loads the page again into `state`; a failure keeps what is shown (it only reaches the console, as before).
+fn reload(state: RwSignal<Option<Loaded>>) {
+    let Some(admin) = state.with_untracked(|s| s.as_ref().map(|s| s.admin)) else { return };
+    dom::spawn(async move {
+        match fetch(admin).await {
+            Ok(l) => state.set(Some(l)),
+            Err(e) => dom::console_error(&e),
+        }
+    });
+}
+
+/// Settings → Blocked: the view, mounted once the answers have come (a failure is the page's error).
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let role = ctx.user.s("role");
-        let admin = role == "admin" || role == "owner";
-        let values = if admin { api::get("/admin/settings").await.map_err(|e| e.message)? } else { json!({}) };
-        let reps = api::get("/reports").await.map_err(|e| e.message)?;
-        let blocks = if admin { api::get("/blocks").await.map_err(|e| e.message)? } else { json!({ "blocks": [] }) };
-        let sus = if admin { api::get("/quality/suspect").await.map_err(|e| e.message)? } else { json!({ "tracks": [] }) };
-        let meta = values.o("_meta");
-        let locked_q = meta.o("quality_check_on_import").s("source") == "env";
-        let toggle = if admin {
-            format!(r#"<div class="field" style="justify-content:center"><label class="switch"><input type="checkbox" id="q-import" {} {}><i></i>Check every download before it enters the library</label>
-        <small>Fake lossless (a lossy file saved as FLAC), upsampled hi-res, very quiet audio and the wrong length are turned away and the next copy is tried. The Quality scan under Scheduled tasks checks the songs already in the library.</small></div>"#,
-                if values.truthy("quality_check_on_import") { "checked" } else { "" }, if locked_q { "disabled" } else { "" })
-        } else { String::new() };
-        let rl = reps.a("reports");
-        let reports = if rl.is_empty() { r#"<p class="muted small" style="margin:0">Nothing reported yet.</p>"#.to_string() }
-            else { format!(r#"<div class="list">{}</div>"#, rl.iter().map(|r| report_row(r, admin)).collect::<String>()) };
-        let tracks = sus.a("tracks");
-        let admin_cards = if admin {
-            let bl = blocks.a("blocks");
-            let blist = if bl.is_empty() { r#"<p class="muted small" style="margin:0">No blocked sources.</p>"#.to_string() } else {
-                format!(r#"<div class="list">{}</div>"#, bl.iter().map(|b| format!(r#"<div class="list-item" style="flex-wrap:wrap;gap:10px" data-block="{id}">
-        <div class="grow" style="min-width:220px"><div style="font-weight:600" class="ellipsis">{label}</div>
-          <div class="small faint">{kind}{reason}{title}{who} · {ago}</div></div>
-        <button class="btn sm" data-undo="{id}">Undo</button></div>"#,
-                    id = b.i("id"), label = esc(&if b.truthy("label") { b.s("label") } else { b.s("key") }), kind = esc(&b.s("kind")),
-                    reason = if b.truthy("reason_label") { format!(" · {}", esc(&b.s("reason_label"))) } else { String::new() },
-                    title = if b.truthy("title") { format!(" · {} – {}", esc(&b.s("artist")), esc(&b.s("title"))) } else { String::new() },
-                    who = if b.truthy("username") { format!(" · {}", esc(&b.s("username"))) } else { String::new() },
-                    ago = fmt::ago(b.f("created_at")))).collect::<String>())
-            };
-            let slist = if tracks.is_empty() { r#"<p class="muted small" style="margin:0">Nothing flagged.</p>"#.to_string() } else {
-                format!(r#"<div class="list">{}</div>"#, tracks.iter().enumerate().map(|(i, t)| format!(r##"<div class="list-item" style="flex-wrap:wrap;gap:10px">
-        <div class="grow" style="min-width:220px"><div style="font-weight:600"><a href="#/library/album/{aid}">{artist} – {title}</a></div>
-          <div class="small" style="color:var(--warn)">{summary}</div>
-          <div class="small faint">{fmt}{br}{album}</div></div>
-        <span class="row" style="gap:6px"><button class="btn sm ghost" data-check="{i}">{refresh}Check again</button><button class="btn sm primary" data-replace="{i}">Replace</button></span></div>"##,
-                    aid = enc(&t.s("album_id")), artist = esc(&t.s("artist")), title = esc(&t.s("title")), summary = esc(&t.s("summary")),
-                    fmt = esc(&t.s("format").to_uppercase()), br = if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() },
-                    album = if t.truthy("album") { format!(" · {}", esc(&t.s("album"))) } else { String::new() }, refresh = icon("refresh"))).collect::<String>())
-            };
-            format!(r#"<div class="card stack" style="margin-bottom:16px">
-      <h2>Blocked sources</h2>
-      {blist}
-    </div>
-    <div class="card stack">
-      <h2>Suspect quality</h2>
-      <p class="muted small" style="margin:0">Songs the quality checks flagged. Replace one to block where it came from and get it again.</p>
-      {slist}
-    </div>"#)
-        } else { String::new() };
-        dom::set_html(&view, &format!(r#"
-    <div class="card stack" style="margin-bottom:16px">
-      <h2>Blocked</h2>
-      <p class="muted small" style="margin:0">When someone reports a song or album (⋯ → Report a problem), the exact source it came from is blocked – that Soulseek file or folder, torrent, Usenet post, streaming item or YouTube video – and the music is fetched again from somewhere else. Undo a block to allow that source again.</p>
-      {toggle}
-    </div>
-    <div class="card stack" style="margin-bottom:16px">
-      <h2>Reports</h2>
-      {reports}
-    </div>
-    {admin_cards}"#));
+        let loaded = fetch(role == "admin" || role == "owner").await?;
+        dom::set_html(&view, "");
+        // the signal lives as long as the page: the owner is dropped with it
+        let owner = Owner::new();
+        let state = owner.with(|| RwSignal::new(Some(loaded)));
+        if let Some(m) = owner.with(|| kit_leptos::rt::mount(&view, move || view! { <Blocked state/> })) {
+            dom::keep(m);
+        }
+        dom::keep(owner);
+        Ok(())
+    })
+}
 
-        if let Some(q) = dom::qs_in(&view, "#q-import") {
-            let q2 = q.clone();
-            dom::on(&q, "change", move |_| {
-                let on = dom::checked(&q2);
+/// A button's action on the page: disables it, runs `act`, then loads the page again; on a failure the error
+/// is a toast and the button is enabled again.
+fn act<F>(state: RwSignal<Option<Loaded>>, act: impl Fn() -> F + 'static) -> impl Fn(web_sys::MouseEvent) + 'static
+where
+    F: std::future::Future<Output = Result<(), api::ApiError>> + 'static,
+{
+    move |e| {
+        let b = dom::target_el(&e).and_then(|t| t.closest("button").ok().flatten());
+        if let Some(b) = &b {
+            dom::set_disabled(b, true);
+        }
+        let run = act();
+        dom::spawn(async move {
+            match run.await {
+                Ok(()) => reload(state),
+                Err(e) => {
+                    toast(&e.message, "err");
+                    if let Some(b) = &b {
+                        dom::set_disabled(b, false);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// One report: what, why, who and when, its status, Try again and (admins) Dismiss.
+fn report_row(r: &Value, admin: bool, state: RwSignal<Option<Loaded>>) -> impl IntoView {
+    let st = r.s("status");
+    let (label, cls) = status(&st);
+    let id = r.i("id");
+    let name = format!("{} – {}", r.s("artist"), r.s("title"));
+    let title = if r.s("kind") == "album" && r.truthy("album_id") {
+        view! { <a href=format!("#/library/album/{}", enc(&r.s("album_id")))>{name}</a> }.into_any()
+    } else {
+        name.into_any()
+    };
+    let retry = (st == "no_replacement" || st == "lyrics_none").then(|| {
+        let on = act(state, move || async move {
+            api::post_empty(&format!("/reports/{id}/retry")).await?;
+            toast("Trying again", "ok");
+            Ok(())
+        });
+        view! { <button class="btn sm" data-retry=id on:click={on} {..html(format!("{}Try again", icon("refresh")))}>{""}</button> }
+    });
+    let dismiss = (admin && ["replacing", "no_replacement", "lyrics_found", "lyrics_none"].contains(&st.as_str())).then(|| {
+        let on = act(state, move || async move {
+            api::post_empty(&format!("/reports/{id}/dismiss")).await?;
+            toast("Dismissed", "ok");
+            Ok(())
+        });
+        view! { <button class="btn sm ghost" data-dismiss=id on:click=on>"Dismiss"</button> }
+    });
+    let reason = if r.truthy("reason_label") { r.s("reason_label") } else { r.s("reason") };
+    let note = if r.truthy("note") { format!(" · “{}”", r.s("note")) } else { String::new() };
+    let who = if admin && r.truthy("username") { format!("{} · ", r.s("username")) } else { String::new() };
+    let src = if r.truthy("source") { format!(" · from {}", r.s("source")) } else { String::new() };
+    let msg = if r.truthy("message") { format!(" · {}", r.s("message")) } else { String::new() };
+    view! {
+        <div class="list-item" style="align-items:flex-start;flex-wrap:wrap;gap:10px" data-report=id>
+            <div class="grow" style="min-width:220px"><div style="font-weight:650">{title}" "<span class="small muted">{if r.s("kind") == "album" { "album" } else { "song" }}</span></div>
+                <div class="small">{format!("{reason}{note}")}</div>
+                <div class="small faint">{format!("{who}{}{src}{msg}", fmt::ago(r.f("created_at")))}</div></div>
+            <span class=format!("badge {cls}")>{label.to_string()}</span>
+            <span class="row" style="gap:6px">{retry}{dismiss}</span>
+        </div>
+    }
+}
+
+/// One blocked source: what it is, why and when, with Undo.
+fn block_row(b: &Value, state: RwSignal<Option<Loaded>>) -> impl IntoView {
+    let id = b.i("id");
+    let label = if b.truthy("label") { b.s("label") } else { b.s("key") };
+    let reason = if b.truthy("reason_label") { format!(" · {}", b.s("reason_label")) } else { String::new() };
+    let title = if b.truthy("title") { format!(" · {} – {}", b.s("artist"), b.s("title")) } else { String::new() };
+    let who = if b.truthy("username") { format!(" · {}", b.s("username")) } else { String::new() };
+    let undo = act(state, move || async move {
+        api::del(&format!("/blocks/{id}")).await?;
+        toast("Unblocked – that source may be used again", "ok");
+        Ok(())
+    });
+    view! {
+        <div class="list-item" style="flex-wrap:wrap;gap:10px" data-block=id>
+            <div class="grow" style="min-width:220px"><div style="font-weight:600" class="ellipsis">{label}</div>
+                <div class="small faint">{format!("{}{reason}{title}{who} · {}", b.s("kind"), fmt::ago(b.f("created_at")))}</div></div>
+            <button class="btn sm" data-undo=id on:click=undo>"Undo"</button></div>
+    }
+}
+
+/// One song the quality checks flagged: what was found, with Check again and Replace (which opens Report a
+/// problem with the reason the flag suggests).
+fn suspect_row(i: usize, t: &Value, state: RwSignal<Option<Loaded>>) -> impl IntoView {
+    let tid = t.i("id");
+    let check = act(state, move || async move {
+        let q = api::post_empty(&format!("/quality/tracks/{tid}/check")).await?;
+        let bad = q.s("status") == "suspect";
+        toast(&if bad { q.s("summary") } else { "Looks fine now".to_string() }, if bad { "err" } else { "ok" });
+        Ok(())
+    });
+    let t2 = t.clone();
+    let replace = move |_| {
+        let codes: Vec<String> = t2.a("issues").iter().map(|x| x.s("code")).collect();
+        report_modal("track", t2.g("id").clone(), &t2.s("title"), reason_for(&codes), Some(Rc::new(move |_| reload(state))));
+    };
+    let br = if t.truthy("bitrate") { format!(" {}k", t.s("bitrate")) } else { String::new() };
+    let album = if t.truthy("album") { format!(" · {}", t.s("album")) } else { String::new() };
+    view! {
+        <div class="list-item" style="flex-wrap:wrap;gap:10px">
+            <div class="grow" style="min-width:220px"><div style="font-weight:600"><a href=format!("#/library/album/{}", enc(&t.s("album_id")))>{format!("{} – {}", t.s("artist"), t.s("title"))}</a></div>
+                <div class="small" style="color:var(--warn)">{t.s("summary")}</div>
+                <div class="small faint">{format!("{}{br}{album}", t.s("format").to_uppercase())}</div></div>
+            <span class="row" style="gap:6px"><button class="btn sm ghost" data-check=i on:click={check} {..html(format!("{}Check again", icon("refresh")))}>{""}</button><button class="btn sm primary" data-replace=i on:click=replace>"Replace"</button></span></div>
+    }
+}
+
+/// A card's list, or its line for when it is empty.
+fn list_or<V: IntoView>(rows: Vec<V>, empty: &'static str) -> AnyView {
+    if rows.is_empty() {
+        view! { <p class="muted small" style="margin:0">{empty}</p> }.into_any()
+    } else {
+        view! { <div class="list">{rows}</div> }.into_any()
+    }
+}
+
+/// Settings → Blocked: what blocking does (with the import check for admins), the reports, and for admins the
+/// blocked sources and the flagged songs.
+#[component]
+pub fn Blocked(
+    /// What the page draws from (always `Some` once mounted).
+    state: RwSignal<Option<Loaded>>,
+) -> impl IntoView {
+    move || {
+        let Loaded { admin, values, reports, blocks, suspect } = state.get()?;
+        let toggle = admin.then(|| {
+            let locked = values.o("_meta").o("quality_check_on_import").s("source") == "env";
+            let on_change = move |e: web_sys::Event| {
+                let on = dom::target_el(&e).is_some_and(|t| dom::checked(&t));
                 dom::spawn(async move {
                     match api::put("/admin/settings", json!({ "quality_check_on_import": on })).await {
                         Ok(_) => toast("Saved", "ok"),
                         Err(e) => toast(&e.message, "err"),
                     }
                 });
-            });
-        }
-        let tracks = Rc::new(tracks);
-        for b in dom::qsa_in(&view, "[data-retry],[data-dismiss],[data-undo],[data-check],[data-replace]") {
-            let (view2, ctx2, b2, tracks) = (view.clone(), ctx.clone(), b.clone(), tracks.clone());
-            dom::on(&b, "click", move |_| {
-                let (view, ctx, b) = (view2.clone(), ctx2.clone(), b2.clone());
-                if let Some(i) = dom::data_opt(&b, "replace") {
-                    let Some(t) = tracks.get(i.parse::<usize>().unwrap_or(usize::MAX)).cloned() else { return };
-                    let codes: Vec<String> = t.a("issues").iter().map(|x| x.s("code")).collect();
-                    let (v, c) = (view, ctx);
-                    report_modal("track", t.g("id").clone(), &t.s("title"), reason_for(&codes), Some(Rc::new(move |_| rerender(v.clone(), c.clone()))));
-                    return;
-                }
-                dom::set_disabled(&b, true);
-                let tracks = tracks.clone();
-                dom::spawn(async move {
-                    let r: Result<(), api::ApiError> = async {
-                        if let Some(id) = dom::data_opt(&b, "retry") { api::post_empty(&format!("/reports/{id}/retry")).await?; toast("Trying again", "ok"); }
-                        else if let Some(id) = dom::data_opt(&b, "dismiss") { api::post_empty(&format!("/reports/{id}/dismiss")).await?; toast("Dismissed", "ok"); }
-                        else if let Some(id) = dom::data_opt(&b, "undo") { api::del(&format!("/blocks/{id}")).await?; toast("Unblocked – that source may be used again", "ok"); }
-                        else if let Some(i) = dom::data_opt(&b, "check") {
-                            let t = tracks.get(i.parse::<usize>().unwrap_or(usize::MAX)).cloned().unwrap_or(Value::Null);
-                            let q = api::post_empty(&format!("/quality/tracks/{}/check", t.i("id"))).await?;
-                            let bad = q.s("status") == "suspect";
-                            toast(&if bad { q.s("summary") } else { "Looks fine now".to_string() }, if bad { "err" } else { "ok" });
-                        }
-                        Ok(())
-                    }.await;
-                    match r {
-                        Ok(()) => rerender(view, ctx),
-                        Err(e) => { toast(&e.message, "err"); dom::set_disabled(&b, false); }
-                    }
-                });
-            });
-        }
-        Ok(())
-    })
+            };
+            view! {
+                <div class="field" style="justify-content:center"><label class="switch"><input type="checkbox" id="q-import" checked=values.truthy("quality_check_on_import") disabled=locked on:change=on_change/><i></i>"Check every download before it enters the library"</label>
+                    <small>"Fake lossless (a lossy file saved as FLAC), upsampled hi-res, very quiet audio and the wrong length are turned away and the next copy is tried. The Quality scan under Scheduled tasks checks the songs already in the library."</small></div>
+            }
+        });
+        let report_rows: Vec<_> = reports.a("reports").iter().map(|r| report_row(r, admin, state)).collect();
+        let admin_cards = admin.then(|| {
+            let block_rows: Vec<_> = blocks.a("blocks").iter().map(|b| block_row(b, state)).collect();
+            let suspect_rows: Vec<_> = suspect.a("tracks").iter().enumerate().map(|(i, t)| suspect_row(i, t, state)).collect();
+            view! {
+                <div class="card stack" style="margin-bottom:16px">
+                    <h2>"Blocked sources"</h2>
+                    {list_or(block_rows, "No blocked sources.")}
+                </div>
+                <div class="card stack">
+                    <h2>"Suspect quality"</h2>
+                    <p class="muted small" style="margin:0">"Songs the quality checks flagged. Replace one to block where it came from and get it again."</p>
+                    {list_or(suspect_rows, "Nothing flagged.")}
+                </div>
+            }
+        });
+        Some(view! {
+            <div class="card stack" style="margin-bottom:16px">
+                <h2>"Blocked"</h2>
+                <p class="muted small" style="margin:0">"When someone reports a song or album (⋯ → Report a problem), the exact source it came from is blocked – that Soulseek file or folder, torrent, Usenet post, streaming item or YouTube video – and the music is fetched again from somewhere else. Undo a block to allow that source again."</p>
+                {toggle}
+            </div>
+            <div class="card stack" style="margin-bottom:16px">
+                <h2>"Reports"</h2>
+                {list_or(report_rows, "Nothing reported yet.")}
+            </div>
+            {admin_cards}
+        })
+    }
 }
