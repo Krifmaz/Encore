@@ -1,7 +1,9 @@
-//! Port of web/js/pages/connections.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The Connections settings page: one card per service, the connect forms (user/password, token, Deezer profile,
 //! Plex PIN, YouTube Music device code / headers, Last.fm), remote playlist import and "Sync now"; for admins, the
 //! server's own connections under Server (Lantern: settings/lantern.rs).
+//!
+//! The page is a Leptos view ([`Connections`]) of GET /api/connections, drawn again (by the router) after a
+//! change. The connect and import dialogs are still HTML.
 
 use crate::api;
 use crate::app::{Ctx, PageFuture};
@@ -9,8 +11,9 @@ use crate::dom;
 use crate::json::{json, J};
 use crate::pages::playlists::import_modal;
 use crate::ui::{confirm_dialog, esc, fmt, icon, modal, toast, ModalOpts};
+use kit_leptos::html::{html, raw};
+use leptos::prelude::*;
 use serde_json::Value;
-use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use web_sys::Element;
 
@@ -44,6 +47,8 @@ fn hashchange() {
     }
 }
 
+/// The Connections page: the view of GET /api/connections (its failure is the page's error); for admins, the
+/// Lantern card is drawn into its slot once it has its own answer.
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let connected = ctx.q("connected");
@@ -52,124 +57,161 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         if !error.is_empty() { toast(&error, "err"); }
         let d = api::get("/connections").await.map_err(|e| e.message)?;
         let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
-        let sync = d.g("sync");
-        let last_sync = if sync.truthy("last") { format!(" Last sync {}.", fmt::ago(sync.f("last"))) } else { String::new() };
-        let cards: String = d.g("services").as_object()
-            .map(|m| m.iter().map(|(k, s)| card(k, s, d.g("connections").g(k), d.g("available").truthy(k))).collect())
-            .unwrap_or_default();
-        dom::set_html(&view, &format!(r#"
-    <div class="row wrap between" style="margin-bottom:18px">
-      <div><h1>Connections</h1><div class="small muted">Link your accounts so likes and playlists stay the same in Finamp, Plexamp, Navidrome and here.{last_sync}</div></div>
-      <button class="btn primary" id="sync-now">{}Sync now</button>
-    </div>
-    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">
-      {cards}
-    </div>{server}"#, icon("refresh"),
-            // the server's own connections, for admins: Lantern (settings/lantern.rs draws it into the slot)
-            server = if admin { r#"<h2 style="margin:24px 0 12px">Server</h2><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))"><div data-lantern></div></div>"# } else { "" }));
+        dom::set_html(&view, "");
+        // kept while this page is on screen; the next page takes it off
+        if let Some(m) = kit_leptos::rt::mount(&view, move || view! { <Connections d admin/> }) {
+            dom::keep(m);
+        }
         if let Some(slot) = dom::qs_in(&view, "[data-lantern]") {
             dom::spawn(super::lantern::mount(slot));
-        }
-        if let Some(b) = dom::qs_in(&view, "#sync-now") {
-            dom::on(&b, "click", move |e| {
-                let Some(t) = dom::target_el(e) else { return };
-                dom::spawn(async move {
-                    dom::set_disabled(&t, true);
-                    match api::post_empty("/sync").await {
-                        Ok(r) => {
-                            let errors = r.truthy("errors");
-                            toast(&format!("Synced: +{} / −{} likes, {} changes pushed, {} playlist(s){}",
-                                r.s("liked_added"), r.s("liked_removed"), r.s("pushed"), r.s("playlists"),
-                                if errors { format!(" · {} error(s)", r.s("errors")) } else { String::new() }),
-                                if errors { "err" } else { "ok" });
-                            hashchange();
-                        }
-                        Err(err) => toast(&err.message, "err"),
-                    }
-                    dom::set_disabled(&t, false);
-                });
-            });
-        }
-        let d = Rc::new(d);
-        if let Some(grid) = dom::qs_in(&view, ".grid") {
-            let d2 = d;
-            dom::on(&grid, "click", move |e| {
-                let Some(b) = dom::closest(e, "[data-act]") else { return };
-                let Some(card_el) = dom::closest_of(&b, "[data-svc]") else { return };
-                let svc = dom::data(&card_el, "svc");
-                let act = dom::data(&b, "act");
-                if act == "connect" { connect(&svc, &d2, admin); return; }
-                if act == "disconnect" {
-                    let d = d2.clone();
-                    dom::spawn(async move {
-                        if !confirm_dialog("Disconnect", &format!("Disconnect {}?", d.g("services").g(&svc).s("label")), "Disconnect", true).await { return; }
-                        if api::del(&format!("/connections/{svc}")).await.is_ok() { hashchange(); }
-                    });
-                    return;
-                }
-                if act == "playlists" { remote_playlists(&svc, &d2.g("services").g(&svc).s("label")); }
-            });
-            dom::on(&grid, "change", move |e| {
-                let Some(t) = dom::target_el(e) else { return };
-                let f = dom::data(&t, "flag");
-                if f.is_empty() { return; }
-                let Some(card_el) = dom::closest_of(&t, "[data-svc]") else { return };
-                let svc = dom::data(&card_el, "svc");
-                let checked = dom::checked(&t);
-                dom::spawn(async move {
-                    let mut body = serde_json::Map::new();
-                    body.insert(f, Value::Bool(checked));
-                    let _ = api::patch(&format!("/connections/{svc}"), Value::Object(body)).await;
-                });
-            });
         }
         Ok(())
     })
 }
 
-/// `card(k, s, c, available)`: one service card (`c` is the connection or Null).
-fn card(k: &str, s: &Value, c: &Value, available: bool) -> String {
-    let info = info(k);
-    let connected = crate::json::truthy(c);
-    let badge = if connected {
-        if c.truthy("last_error") { format!(r#"<span class="badge err" title="{}"{}>error</span>"#, esc(&c.s("last_error")), crate::details::attrs(&s.s("label"), &c.s("last_error"))) }
-        else { r#"<span class="badge ok">connected</span>"#.to_string() }
-    } else { String::new() };
-    let body = if connected {
-        let synced = if c.truthy("last_sync") { format!(" · synced {}", fmt::ago(c.f("last_sync"))) } else { String::new() };
-        let err_line = if c.truthy("last_error") { format!(r#"<div class="small" style="color:var(--err)">{}</div>"#, esc(&c.s("last_error"))) } else { String::new() };
-        let scrobble = if c.truthy("can_scrobble") {
-            format!(r#"<label class="switch"><input type="checkbox" data-flag="scrobble" {}><i></i>Scrobble what I play</label>"#, if c.truthy("scrobble") { "checked" } else { "" })
-        } else { String::new() };
-        let playlists = if s.s("kind") != "stream" {
-            format!(r#"<label class="switch"><input type="checkbox" data-flag="sync_playlists" {}><i></i>Sync playlists</label>"#, if c.truthy("sync_playlists") { "checked" } else { "" })
-        } else { String::new() };
-        // `k === 'lastfm' && !c.can_scrobble && c.can_scrobble !== undefined`
-        let lastfm_hint = if k == "lastfm" && !c.truthy("can_scrobble") && c.has("can_scrobble") {
-            r#"<div class="small muted">Connected by username only – <button class="btn sm ghost" data-act="connect" style="padding:2px 6px">Sign in with Last.fm</button> to scrobble.</div>"#
-        } else { "" };
-        let import_btn = if k != "lastfm" { format!(r#"<button class="btn sm" data-act="playlists">{}Import playlists</button>"#, icon("download")) } else { String::new() };
-        format!(r#"<div class="small">Signed in as <b>{}</b>{synced}</div>
-      {err_line}
-      <div class="row wrap">
-        {scrobble}
-        <label class="switch"><input type="checkbox" data-flag="sync_likes" {}><i></i>Sync likes</label>
-        {playlists}
-      </div>
-      {lastfm_hint}
-      <div class="row wrap">{import_btn}
-        <button class="btn sm danger ghost" data-act="disconnect">Disconnect</button></div>"#,
-            esc(&c.s("account")), if c.truthy("sync_likes") { "checked" } else { "" })
-    } else if available {
-        format!(r#"<button class="btn" data-act="connect">{}Connect</button>"#, icon("link"))
-    } else {
-        r#"<div class="small faint">Not set up yet – an admin needs to add it in Settings.</div>"#.to_string()
+/// What Sync now says it did: likes added and removed, changes pushed, playlists, and errors (then it is an error).
+fn synced_text(r: &Value) -> (String, &'static str) {
+    let errors = r.truthy("errors");
+    let text = format!("Synced: +{} / −{} likes, {} changes pushed, {} playlist(s){}",
+        r.s("liked_added"), r.s("liked_removed"), r.s("pushed"), r.s("playlists"),
+        if errors { format!(" · {} error(s)", r.s("errors")) } else { String::new() });
+    (text, if errors { "err" } else { "ok" })
+}
+
+/// The page: the title with Sync now, a card per service, and for admins the Server cards (Lantern's slot).
+#[component]
+fn Connections(
+    /// The answer of GET /api/connections: `services`, `connections`, `available`, `sync`, `base_url`.
+    d: Value,
+    /// Whether the reader is an admin.
+    admin: bool,
+) -> impl IntoView {
+    let sync = d.g("sync");
+    let last_sync = if sync.truthy("last") { format!(" Last sync {}.", fmt::ago(sync.f("last"))) } else { String::new() };
+    let d = StoredValue::new(d);
+    let syncing = RwSignal::new(false);
+    let sync_now = move |_| {
+        syncing.set(true);
+        dom::spawn(async move {
+            match api::post_empty("/sync").await {
+                Ok(r) => {
+                    let (text, kind) = synced_text(&r);
+                    toast(&text, kind);
+                    hashchange();
+                }
+                Err(err) => toast(&err.message, "err"),
+            }
+            syncing.try_set(false);
+        });
     };
-    format!(r#"<div class="card stack" data-svc="{k}">
-    <div class="row between"><h3>{}</h3>{badge}</div>
-    <div class="small muted">{}</div>
-    {body}
-  </div>"#, esc(&s.s("label")), esc(info.what))
+    let cards = d.with_value(|all| {
+        all.g("services").as_object().map(|m| {
+            m.iter().map(|(k, s)| view! { <ServiceCard k=k.clone() s=s.clone() c=all.g("connections").g(k).clone() available=all.g("available").truthy(k) d admin/> }).collect_view()
+        })
+    });
+    // the server's own connections, for admins: Lantern (settings/lantern.rs draws it into the slot)
+    let server = admin.then(|| view! {
+        <h2 style="margin:24px 0 12px">"Server"</h2><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))"><div data-lantern></div></div>
+    });
+    view! {
+        <div class="row wrap between" style="margin-bottom:18px">
+            <div><h1>"Connections"</h1><div class="small muted">"Link your accounts so likes and playlists stay the same in Finamp, Plexamp, Navidrome and here."{last_sync}</div></div>
+            <button class="btn primary" id="sync-now" disabled=move || syncing.get() on:click={sync_now} {..html(format!("{}Sync now", icon("refresh")))}>{""}</button>
+        </div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">{cards}</div>
+        {server}
+    }
+}
+
+/// A switch of a connection (`flag`: `scrobble`, `sync_likes` or `sync_playlists`), saved when it is flipped.
+fn flag_switch(svc: &str, flag: &'static str, on: bool, label: &'static str) -> impl IntoView {
+    let svc = svc.to_string();
+    let flip = move |e: web_sys::Event| {
+        let checked = dom::target_el(&e).is_some_and(|t| dom::checked(&t));
+        let svc = svc.clone();
+        dom::spawn(async move {
+            let mut body = serde_json::Map::new();
+            body.insert(flag.to_string(), Value::Bool(checked));
+            let _ = api::patch(&format!("/connections/{svc}"), Value::Object(body)).await;
+        });
+    };
+    view! { <label class="switch"><input type="checkbox" data-flag=flag checked=on on:change=flip/><i></i>{label}</label> }
+}
+
+/// One service's card: what it does, and its connection (with its switches, Import playlists and Disconnect), or
+/// Connect, or that an admin has not set it up.
+#[component]
+fn ServiceCard(
+    /// The service's key (`plex`, `spotify`…).
+    k: String,
+    /// The service: `label`, `kind`.
+    s: Value,
+    /// The reader's connection to it, or null.
+    c: Value,
+    /// Whether an admin has set it up.
+    available: bool,
+    /// The whole answer, for the connect flows.
+    d: StoredValue<Value>,
+    /// Whether the reader is an admin.
+    admin: bool,
+) -> impl IntoView {
+    let info = info(&k);
+    let label = s.s("label");
+    let connected = crate::json::truthy(&c);
+    let connect = {
+        let k = k.clone();
+        move |_| d.with_value(|d| self::connect(&k, d, admin))
+    };
+    let badge = connected.then(|| {
+        if c.truthy("last_error") {
+            let err = c.s("last_error");
+            raw(format!(r#"<span class="badge err" title="{}"{}>error</span>"#, esc(&err), crate::details::attrs(&label, &err)))
+        } else {
+            raw(r#"<span class="badge ok">connected</span>"#.to_string())
+        }
+    });
+    let body = if connected {
+        let synced = c.truthy("last_sync").then(|| format!(" · synced {}", fmt::ago(c.f("last_sync"))));
+        let err_line = c.truthy("last_error").then(|| view! { <div class="small" style="color:var(--err)">{c.s("last_error")}</div> });
+        let scrobble = c.truthy("can_scrobble").then(|| flag_switch(&k, "scrobble", c.truthy("scrobble"), "Scrobble what I play"));
+        let playlists = (s.s("kind") != "stream").then(|| flag_switch(&k, "sync_playlists", c.truthy("sync_playlists"), "Sync playlists"));
+        // signed in by name only: no scrobbling until a real sign-in
+        let lastfm_hint = (k == "lastfm" && !c.truthy("can_scrobble") && c.has("can_scrobble")).then(|| view! {
+            <div class="small muted">"Connected by username only – "<button class="btn sm ghost" data-act="connect" style="padding:2px 6px" on:click=connect.clone()>"Sign in with Last.fm"</button>" to scrobble."</div>
+        });
+        let import_btn = (k != "lastfm").then(|| {
+            let (k, label) = (k.clone(), label.clone());
+            view! { <button class="btn sm" data-act="playlists" on:click=move |_| remote_playlists(&k, &label) {..html(format!("{}Import playlists", icon("download")))}>{""}</button> }
+        });
+        let disconnect = {
+            let (k, label) = (k.clone(), label.clone());
+            move |_| {
+                let (k, label) = (k.clone(), label.clone());
+                dom::spawn(async move {
+                    if !confirm_dialog("Disconnect", &format!("Disconnect {label}?"), "Disconnect", true).await { return; }
+                    if api::del(&format!("/connections/{k}")).await.is_ok() { hashchange(); }
+                });
+            }
+        };
+        view! {
+            <div class="small">"Signed in as "<b>{c.s("account")}</b>{synced}</div>
+            {err_line}
+            <div class="row wrap">{scrobble}{flag_switch(&k, "sync_likes", c.truthy("sync_likes"), "Sync likes")}{playlists}</div>
+            {lastfm_hint}
+            <div class="row wrap">{import_btn}<button class="btn sm danger ghost" data-act="disconnect" on:click=disconnect>"Disconnect"</button></div>
+        }.into_any()
+    } else if available {
+        view! { <button class="btn" data-act="connect" on:click={connect} {..html(format!("{}Connect", icon("link")))}>{""}</button> }.into_any()
+    } else {
+        view! { <div class="small faint">"Not set up yet – an admin needs to add it in Settings."</div> }.into_any()
+    };
+    view! {
+        <div class="card stack" data-svc=k>
+            <div class="row between"><h3>{label}</h3>{badge}</div>
+            <div class="small muted">{info.what}</div>
+            {body}
+        </div>
+    }
 }
 
 /// `Object.fromEntries(new FormData(form))` as a JSON object (every value a string).
