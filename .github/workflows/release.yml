@@ -81,6 +81,8 @@ jobs:
       # `check` so a split can't come back.
       advisory-name: Cadenza is pinned to the same rev everywhere
       advisory: bash scripts/check-cadenza-pins.sh
+      # Dependencies a Cargo.toml lists but no code uses fail the run (cargo machete over every Rust project)
+      check: bash scripts/check-unused-deps.sh
 
   # the version, the web app (web-rs → static/) and the server tarballs for x86_64 and aarch64
   prepare:

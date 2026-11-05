@@ -2,6 +2,26 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: re-land the kit release workflows (#4) and Android on kit-compose (#5) onto main
+
+- **Why.** Both pull requests were merged into the stale branch `ccr-a4585b2e-d7xdtf` (0.42.6) instead of `main`, so
+  main (0.42.7 onwards) had neither. Their commits were cherry-picked onto main; nothing was released from the stale
+  branch.
+- **Releases follow `main` by name.** `release-on-merge.yml` now runs on pushes to `main` only, instead of the
+  repository's default branch: the default branch was the stale one, and a merge there would have shipped a release
+  built from old code.
+- **Unused dependencies still fail CI.** main had added `cargo machete` to the release test job after #4 was
+  written; the kit's `kit-ci` has no such step, so it runs as Encore's app check (`scripts/check-unused-deps.sh`),
+  in releases and pull requests alike. It belongs in `kit-ci` as an option; until then it stays an app check.
+- **The hotfix "Latest" guard is gone with the hotfix job.** main had taught the hotfix job not to take "Latest"
+  from a higher full release. Every merge is a full release now (#4), so that job and its guard are removed.
+- **`DownloadsFolder.kt` stays in the app for now.** #5 removed it in favour of kit-compose's copy, but main has since
+  added `saveStream` (the Downloader's MP4 straight from the response body), which kit-compose lacks. The app keeps
+  its own copy until kit-compose has a streaming save; the bug report and crash log exports use the kit's.
+- **Kit pins unchanged.** The workflows stay on kit commit `3262a89` and kit-compose on `d656c28`, as #4 and #5 were
+  tested. Moving them to the kit's latest tag (v0.2.0) changes inputs (`package-script` → `package`, `only` →
+  `keep-previous`, runner and NSIS defaults) and kit-compose's neutral base, so it is a change of its own.
+
 ## 2026-11-05 – Self-update: why 0.42.15 → 0.42.18 came back on 0.42.15, and what changed
 
 **What happened.** The repository's default branch was a stale branch (`ccr-a4585b2e-d7xdtf`, stopped around

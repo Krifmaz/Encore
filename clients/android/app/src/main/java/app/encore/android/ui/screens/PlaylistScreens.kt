@@ -55,7 +55,7 @@ import app.encore.android.features.library.LinkedPlaylistMenu
 import app.encore.android.features.library.PlaylistCollabRules
 import app.encore.android.features.library.PlaylistLinkRules
 import app.encore.android.features.library.PlaylistMissingRules
-import app.encore.android.features.settings.copyToClipboard
+import dev.krifmaz.kit.compose.details.copyToClipboard
 import app.encore.android.features.library.PlaylistShareRules
 import app.encore.android.R
 import app.encore.android.data.api.Playlist

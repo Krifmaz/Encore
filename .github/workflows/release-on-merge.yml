@@ -1,12 +1,15 @@
 name: release-on-merge
 
-# A normal release (release.yml) on every push to the default branch: v<next version>, PATCH by default, MINOR or
+# A normal release (release.yml) on every push to main: v<next version>, PATCH by default, MINOR or
 # MAJOR when the push adds docs/releases/<that version>.md, with the server and the Docker image (:<version> and
 # :latest) and the apps of the previous release attached again. The apps themselves are built by a release started
 # by hand with "apps" ticked. A push that only touches docs makes none, and neither does one whose head commit says
 # [skip hotfix] (the old hotfix builds' marker, kept) or [skip release].
+# main by name, not the repository's default branch: while the default branch pointed at a stale branch, merges
+# there would have shipped releases built from old code.
 on:
   push:
+    branches: [main]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
@@ -19,7 +22,7 @@ permissions:
 jobs:
   release:
     if: >-
-      github.ref_name == github.event.repository.default_branch &&
+      github.ref_name == 'main' &&
       !contains(github.event.head_commit.message, '[skip hotfix]') &&
       !contains(github.event.head_commit.message, '[skip release]')
     uses: ./.github/workflows/release.yml
