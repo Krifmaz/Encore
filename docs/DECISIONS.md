@@ -2,6 +2,13 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: pages move to Leptos one at a time, starting with the Leaderboard
+
+- **Each page becomes a Leptos component mounted into `#view`** (`kit_leptos::rt::mount`, kept with `dom::keep`
+  until the next page), with the same markup: the check is the page's DOM before and after with attributes sorted
+  (Leptos writes `style` before `class`) and a pixel diff, on the real answer and on a filled fake one. Encore's
+  HTML helpers that are still strings (`art_sized`, `empty_state`) go in through `kit_leptos::html`.
+
 ## 2026-11-05: the Server settings pages read their schema with the kit's model
 
 - **`settings/fields.rs` is gone; `settings::fields` is `kit_leptos::schema_form::schema`.** The two were the same
