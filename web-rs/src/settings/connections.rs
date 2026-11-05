@@ -1,6 +1,7 @@
 //! Port of web/js/pages/connections.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! The Connections settings page: one card per service, the connect forms (user/password, token, Deezer profile,
-//! Plex PIN, YouTube Music device code / headers, Last.fm), remote playlist import and "Sync now".
+//! Plex PIN, YouTube Music device code / headers, Last.fm), remote playlist import and "Sync now"; for admins, the
+//! server's own connections under Server (Lantern: settings/lantern.rs).
 
 use crate::api;
 use crate::app::{Ctx, PageFuture};
@@ -50,6 +51,7 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
         let error = ctx.q("error");
         if !error.is_empty() { toast(&error, "err"); }
         let d = api::get("/connections").await.map_err(|e| e.message)?;
+        let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         let sync = d.g("sync");
         let last_sync = if sync.truthy("last") { format!(" Last sync {}.", fmt::ago(sync.f("last"))) } else { String::new() };
         let cards: String = d.g("services").as_object()
@@ -62,7 +64,12 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     </div>
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">
       {cards}
-    </div>"#, icon("refresh")));
+    </div>{server}"#, icon("refresh"),
+            // the server's own connections, for admins: Lantern (settings/lantern.rs draws it into the slot)
+            server = if admin { r#"<h2 style="margin:24px 0 12px">Server</h2><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))"><div data-lantern></div></div>"# } else { "" }));
+        if let Some(slot) = dom::qs_in(&view, "[data-lantern]") {
+            dom::spawn(super::lantern::mount(slot));
+        }
         if let Some(b) = dom::qs_in(&view, "#sync-now") {
             dom::on(&b, "click", move |e| {
                 let Some(t) = dom::target_el(e) else { return };
@@ -84,7 +91,6 @@ pub fn render(view: Element, ctx: Ctx) -> PageFuture {
             });
         }
         let d = Rc::new(d);
-        let admin = matches!(ctx.user.s("role").as_str(), "admin" | "owner");
         if let Some(grid) = dom::qs_in(&view, ".grid") {
             let d2 = d;
             dom::on(&grid, "click", move |e| {

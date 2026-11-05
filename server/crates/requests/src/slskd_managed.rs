@@ -464,9 +464,10 @@ pub fn installed_version(st: &impl Ctx) -> Option<String> {
 }
 
 /// Soulseek is switched on with a login (whether or not slskd is installed yet), and its plugin is installed
-/// and switched on.
+/// and switched on. Not while Lantern has taken over Soulseek: the account moved there, and one Soulseek
+/// login can't be signed in from two places at once.
 pub fn configured(st: &impl Ctx) -> bool {
-    st.plugins().enabled("slskd") && st.cfg().bool("slskd_enabled") && !st.cfg().str("soulseek_username").trim().is_empty() && !st.cfg().str("soulseek_password").is_empty()
+    !crate::lantern::took_over(st) && st.plugins().enabled("slskd") && st.cfg().bool("slskd_enabled") && !st.cfg().str("soulseek_username").trim().is_empty() && !st.cfg().str("soulseek_password").is_empty()
 }
 
 /// slskd's API address on localhost.

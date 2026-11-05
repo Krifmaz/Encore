@@ -146,6 +146,9 @@ pub(super) async fn next_source(st: &impl Ctx, r: &mut Req, reason: &str) -> any
             "torznab" => start_torznab(st, r, false).await,
             "ytdlp" => start_ytdlp(st, r, None).await,
             "streamrip" => start_streamrip(st, r, None).await,
+            // searching and grabbing through Lantern needs its API, final with Lantern 1.0: until then its turn
+            // passes to the next source (it only gets one once the move into Lantern is done, which waits too)
+            crate::lantern::SOURCE => Ok(Out::Next(crate::lantern::NOT_YET.into())),
             // a plugin program's source (uploaded or installed from a URL): searched and downloaded through the
             // registry
             other => match crate::sources::plugin::find(st, other) {
@@ -325,6 +328,9 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
     let plugins = st.plugins().plugin_sources();
     let lossless: Vec<String> = plugins.iter().filter(|p| p.lossless).map(|p| p.id.clone()).collect();
     let order = arrange(&st.cfg().str("source_order"), st.cfg().bool("quality_first"), lossless_only, st.cfg().bool("ytdlp_last_resort"), &lossless);
+    // once Lantern has taken over, it stands in for Soulseek and the indexers (before the check below, which
+    // would drop them for not being set up in Encore any more)
+    let order = if crate::lantern::took_over(st) { crate::lantern::route(order) } else { order };
     let kind = r.s("kind");
     let album = kind == "album";
     // every source through its plugin: installed and switched on (the registry), then set up
@@ -332,6 +338,8 @@ pub(super) fn source_order(st: &impl Ctx, r: &Req) -> Vec<String> {
         // an album, or a song: its own releases and its album's, of which only the song's file is taken
         "torznab" => torznab::enabled(st) && (album || kind == "track"),
         "slskd" | "slskd_lossless" => slskd::enabled(st),
+        // albums and songs, like the indexers and Soulseek it stands in for
+        crate::lantern::SOURCE => album || kind == "track",
         "ytdlp" => ytdlp::plugin_on(st) && (ytdlp::enabled(st) || st.cfg().bool("ytdlp_last_resort")),
         // still being installed after the upgrade: kept in its place, the request waits for it there
         "streamrip" => streamrip::enabled(st) || being_installed(st, "streamrip").is_some(),

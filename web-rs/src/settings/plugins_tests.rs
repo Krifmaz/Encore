@@ -329,3 +329,15 @@ fn words_of_actions_tests_and_failures() {
     assert_eq!(kind_label("widget"), "Widget");
     assert_eq!(kinds_words(&[json!("track"), json!("album"), json!("url")]), "songs, albums and links");
 }
+
+/// A card Lantern has taken over shows the note instead of its settings, which are kept (the server marks it
+/// `handled_by: "lantern"`).
+#[test]
+fn a_card_lantern_took_over_shows_the_note_instead_of_its_settings() {
+    let schema = schema();
+    let card = json!({ "id": "slskd", "has_settings": true, "handled_by": "lantern" });
+    let html = body_html(&card, Some(&json!({ "fields": [] })), &json!({}), false, &schema, &json!({ "plugins": [] }));
+    assert_eq!(html, lantern_note_html());
+    assert!(html.contains("Lantern handles this now") && html.contains("#/settings?s=connections"));
+    assert!(!html.contains("data-save"));
+}
