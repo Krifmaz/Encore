@@ -1,24 +1,25 @@
-//! Port of web/js/pages/diagnostics.js – see docs/archive/ui-rewrite/CONTRACT.md
-use crate::api::{self, ApiError};
+//! Settings → Diagnostics: the checks are the kit's ([`kit_leptos::diagnostics::DiagnosticsView`]: the summary,
+//! the groups, where settings come from); Encore adds its Server block, the download folders, the Soulseek lines
+//! and the VPN row through [`hooks`], and keeps its own Updates, Backups and App crashes parts of the page.
+use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom;
 use crate::json::{js_string, truthy, J};
 use crate::ui::{confirm_dialog, copy_text, esc, esck, fmt, icon, toast};
+use kit_leptos::diagnostics::{DiagHooks, DiagnosticsView, DiagnosticsViewProps};
+use kit_leptos::html::raw;
+use kit_leptos::rt::Mounted;
+use kit_rules::diagnostics::{js_str, or_empty, report_text};
+use leptos::prelude::{IntoAny, RwSignal};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, FormData, HtmlInputElement};
 
-const KIND: [(&str, &str); 3] = [("service", "Connections"), ("path", "Folders & permissions"), ("tool", "Tools in the container")];
-
-/// `${obj[key]}` / `String(obj[key])` as JavaScript prints it (null → "null", missing → "undefined").
-fn js_str(v: &Value, key: &str) -> String {
-    if !v.has(key) { return "undefined".into(); }
-    match v.g(key) { Value::Null => "null".into(), x => js_string(x) }
-}
-/// `String(obj[key] || '')`.
-fn or_empty(v: &Value, key: &str) -> String { if v.truthy(key) { v.s(key) } else { String::new() } }
+/// The app's name in the checks' summary, the settings' sources and the copied report.
+const APP: &str = "Encore";
 
 /// The VPN for Soulseek line (Settings → Soulseek and the Diagnostics row; the same words in web/js):
 /// "Connected · port 51234 · public IP 1.2.3.4 · last handshake 12 s ago" / "Connecting…" / the error / "Off".
@@ -147,24 +148,24 @@ pub fn render(view: Element, _ctx: Ctx) -> PageFuture {
             let v = view.clone();
             dom::spawn(async move { load_crashes(&v, &cr).await });
         }
-        let last: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let checks = Rc::new(Checks { view: view.clone(), diag, last: RefCell::new(None), drawn: RefCell::new(None) });
         {
-            let (v, d, l) = (view.clone(), diag.clone(), last.clone());
+            let c = checks.clone();
             dom::on_sel(&view, "#run", "click", move |_| {
-                let (v, d, l) = (v.clone(), d.clone(), l.clone());
+                let c = c.clone();
                 // the JS `onclick = run`: a failure here is an unhandled rejection (console only)
-                dom::spawn(async move { if let Err(e) = run(v, d, l).await { dom::console_error(&e.message); } });
+                dom::spawn(async move { if let Err(e) = c.run().await { dom::console_error(&e); } });
             });
         }
         {
-            let l = last.clone();
+            let c = checks.clone();
             dom::on_sel(&view, "#copy", "click", move |_| {
-                let l = l.borrow();
+                let l = c.last.borrow();
                 let Some(last) = l.as_ref() else { return };
-                copy_report(last);
+                copy_text(&report(last));
             });
         }
-        run(view, diag, last).await.map_err(|e| e.message)?;
+        checks.run().await?;
         Ok(())
     })
 }
@@ -256,66 +257,90 @@ async fn load_backups(bk: &Element) {
     }
 }
 
-/// The JS `run`: fetch the checks and draw them into `#diag` (the result is kept in `last` for the report).
-async fn run(view: Element, diag: Element, last: Rc<RefCell<Option<Value>>>) -> Result<(), ApiError> {
-    dom::set_html(&diag, r#"<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>"#);
-    let mut data = api::get("/system/diagnostics").await?;
-    // Encore's VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
-    if let Ok(v) = api::get("/system/vpn").await {
-        let row = json!({ "kind": "service", "name": "VPN for Soulseek", "ok": !v.truthy("enabled") || v.g("state").as_str() == Some("up"),
-            "request": if v.truthy("endpoint") { format!("WireGuard {}", v.s("endpoint")) } else { String::new() }, "detail": vpn_text(&v) });
-        if let Some(a) = data.get_mut("checks").and_then(|c| c.as_array_mut()) { a.push(row); }
+/// The checks part of the page: `#diag`, the last answer (for Copy report) and the kit's view drawn from it.
+struct Checks {
+    view: Element,
+    diag: Element,
+    last: RefCell<Option<Value>>,
+    /// The kit's view in `#diag`; replacing it takes the old one off the page.
+    drawn: RefCell<Option<Mounted>>,
+}
+
+impl Checks {
+    /// Run the checks and draw them into `#diag` (the answer is kept in `last` for the report).
+    async fn run(&self) -> Result<(), String> {
+        // a Run checks redraws the checks: keep "Where settings come from" unfolded when it was
+        let sources_open = dom::qs_in(&self.diag, ".diag-sources").is_some_and(|d| d.has_attribute("open"));
+        drop(self.drawn.borrow_mut().take());
+        dom::set_html(&self.diag, r#"<div class="empty"><span class="spinner"></span><p class="muted">Checking…</p></div>"#);
+        let mut data = api::get("/system/diagnostics").await.map_err(|e| e.message)?;
+        // Encore's VPN for Soulseek, as one more connection check (older servers have no /system/vpn)
+        if let Ok(v) = api::get("/system/vpn").await {
+            let row = json!({ "kind": "service", "name": "VPN for Soulseek", "ok": !v.truthy("enabled") || v.g("state").as_str() == Some("up"),
+                "request": if v.truthy("endpoint") { format!("WireGuard {}", v.s("endpoint")) } else { String::new() }, "detail": vpn_text(&v) });
+            if let Some(a) = data.get_mut("checks").and_then(|c| c.as_array_mut()) { a.push(row); }
+        }
+        *self.last.borrow_mut() = Some(data.clone());
+        remember_machine(data.g("machine"));
+        if let Some(sv) = settings_view() { show_banner(&sv, data.g("machine").truthy("encore_update_available"), &data.g("machine").s("encore_latest")); }
+        if let Some(c) = dom::qs_in(&self.view, "#copy") { dom::set_disabled(&c, false); }
+        dom::set_html(&self.diag, "");
+        let drawn = kit_leptos::rt::mount(&self.diag, move || {
+            DiagnosticsView(DiagnosticsViewProps { app: Some(APP.into()), data, hooks: hooks(), sources_open: Some(RwSignal::new(sources_open)) })
+        });
+        *self.drawn.borrow_mut() = drawn;
+        Ok(())
     }
-    *last.borrow_mut() = Some(data.clone());
-    remember_machine(data.g("machine"));
-    if let Some(sv) = settings_view() { show_banner(&sv, data.g("machine").truthy("encore_update_available"), &data.g("machine").s("encore_latest")); }
-    if let Some(c) = dom::qs_in(&view, "#copy") { dom::set_disabled(&c, false); }
-    // a Run checks redraws the page: keep "Where settings come from" unfolded when it was
-    let sources_open = dom::qs_in(&diag, ".diag-sources").is_some_and(|d| d.has_attribute("open"));
-    let server = server_block(data.g("machine"));
-    let checks = data.a("checks");
-    let bad = checks.iter().filter(|c| !c.truthy("ok")).count();
-    let groups: String = KIND.iter().map(|(k, title)| {
-        let g: Vec<&Value> = checks.iter().filter(|c| c.s("kind") == *k).collect();
-        if g.is_empty() { return String::new(); }
-        let now = dom::now_s();
-        let items: String = g.iter().map(|c| check_item(c, now)).collect();
-        format!(r#"
-        <div class="section-head"><h2>{title}</h2></div>
-        <div class="card flat"><div class="list">{items}</div></div>"#)
-    }).collect();
-    let rows: String = data.a("settings").iter().map(|s| format!(r#"<tr><td class="mono small">{key}</td>
-          <td>{source}</td>
-          <td class="small mono ellipsis" style="max-width:360px">{value}</td></tr>"#,
-        key = esck(s, "key"),
-        source = if s.g("source").as_str() == Some("env") { format!(r#"<span class="badge info">env {}</span>"#, esck(s, "env")) } else { r#"<span class="badge">saved in Encore</span>"#.to_string() },
-        value = esc(&js_str(s, "value")),
-    )).collect();
-    dom::set_html(&diag, &format!(r#"
-      <div class="card row" style="margin-bottom:16px">
-        <span class="badge {badc}">{badl}</span>
-        <span class="muted small">Encore {version} · running as uid {uid} · {time}</span>
-      </div>
-      {server}
-      {groups}
-      {folders}
-      <details class="card settings-card diag-sources" style="margin-top:22px" {open}>
-        <summary class="row" style="justify-content:space-between"><div><h2 style="margin:0">Where settings come from</h2><div class="small muted">Environment variables always win over values saved in Encore · {count} settings</div></div><span class="chev">{chev}</span></summary>
-        <div class="table-wrap" style="margin-top:12px"><table class="table"><thead><tr><th>Setting</th><th>Source</th><th>Value</th></tr></thead><tbody>
-        {rows}
-      </tbody></table></div></details>"#,
-        // the settings list is long, so it starts folded (a <details> without `open`), as the What's new cards do
-        count = data.a("settings").len(),
-        open = if sources_open { "open" } else { "" },
-        chev = { let c = icon("chevron"); if c.is_empty() { "▾".to_string() } else { c } },
-        badc = if bad > 0 { "err" } else { "ok" },
-        badl = if bad > 0 { format!("{bad} problem{}", if bad > 1 { "s" } else { "" }) } else { "All good".to_string() },
-        version = esck(&data, "version"),
-        uid = js_str(&data, "uid"),
-        time = fmt::date(data.f("time")),
-        folders = download_folders_html(data.g("download_folders"), &fmt::date),
-    ));
-    Ok(())
+}
+
+/// What Encore adds to the kit's checks: the Server block after the summary, the download folders after the
+/// groups, and the Soulseek check's own sentence and lines.
+fn hooks() -> DiagHooks {
+    DiagHooks {
+        after_summary: Some(Arc::new(|d: &Value| raw(server_block(d.g("machine"))).into_any())),
+        after_checks: Some(Arc::new(|d: &Value| raw(download_folders_html(d.g("download_folders"), &fmt::date)).into_any())),
+        check_detail: Some(Arc::new(check_detail)),
+        check_extra: Some(Arc::new(|c: &Value| raw(soulseek_lines(c, dom::now_s())).into_any())),
+        ..DiagHooks::default()
+    }
+}
+
+/// A check's detail line: the Soulseek check says its session in the words of the Soulseek card.
+fn check_detail(c: &Value) -> String {
+    let soulseek = c.g("soulseek");
+    if !soulseek.is_object() { return or_empty(c, "detail"); }
+    super::apps::session_text_elsewhere(&if c.truthy("detail") { c.s("detail") } else { super::apps::session_text(soulseek) })
+}
+
+/// The Soulseek check's lines under its detail (servers since 0.29): what is waiting, and the way to the card
+/// when it fails. Nothing for any other check.
+fn soulseek_lines(c: &Value, now: f64) -> String {
+    let soulseek = c.g("soulseek");
+    if !soulseek.is_object() { return String::new(); }
+    let details = super::apps::session_details(soulseek, now);
+    let link = if c.truthy("ok") { String::new() } else { r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Plugins → Soulseek</a>"##.to_string() };
+    let parts: Vec<String> = [esc(&details), link].into_iter().filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() { String::new() } else { format!(r#"<div class="small faint">{}</div>"#, parts.join(" · ")) }
+}
+
+/// Copy report's text: the kit's report, with Encore's download folders and Server block before the settings.
+fn report(last: &Value) -> String {
+    let mut extra = vec![];
+    let folders = last.g("download_folders").a("roots");
+    if !folders.is_empty() {
+        let mut lines = vec!["Download folders:".to_string()];
+        for r in &folders {
+            let (what, detail, when) = folder_lines(r, &fmt::date);
+            lines.push(format!("{} {what}\n     {detail} ({when})", if r.truthy("ok") { "OK  " } else { "FAIL" }));
+        }
+        extra.push(lines);
+    }
+    if last.g("machine").is_object() {
+        let mut lines = vec!["Server:".to_string()];
+        lines.extend(server_rows(last.g("machine")).into_iter().map(|(k, v)| format!("  {k}: {v}")));
+        extra.push(lines);
+    }
+    report_text(APP, last, &extra)
 }
 
 // ---- the download folders (backlog item 17): each folder downloads are saved in, its probe's result and time ----
@@ -405,79 +430,6 @@ fn server_block(s: &Value) -> String {
     format!(r#"
         <div class="section-head"><h2>Server</h2><span class="small muted">What Encore sees of the machine it runs on</span></div>
         <div class="card flat"><div class="table-wrap"><table class="table"><tbody>{rows}</tbody></table></div></div>"#)
-}
-
-/// One `.list-item` of a check group.
-fn check_item(c: &Value, now: f64) -> String {
-    let ok = c.truthy("ok");
-    // the Soulseek session (servers since 0.29): the card's sentence, what is waiting, and the way to the card
-    let soulseek = c.g("soulseek");
-    let extra = if soulseek.is_object() {
-        let details = super::apps::session_details(soulseek, now);
-        let link = if ok { String::new() } else { r##"<a href="#/settings?s=slskd" style="color:var(--accent)">Settings → Plugins → Soulseek</a>"##.to_string() };
-        let parts: Vec<String> = [esc(&details), link].into_iter().filter(|p| !p.is_empty()).collect();
-        if parts.is_empty() { String::new() } else { format!(r#"<div class="small faint">{}</div>"#, parts.join(" · ")) }
-    } else { String::new() };
-    let detail = if soulseek.is_object() { super::apps::session_text_elsewhere(&if c.truthy("detail") { c.s("detail") } else { super::apps::session_text(soulseek) }) } else { or_empty(c, "detail") };
-    let okc = if ok { "ok" } else { "err" };
-    let status = if c.truthy("status") { format!(r#"<span class="badge {okc}">HTTP {}</span>"#, js_str(c, "status")) } else { String::new() };
-    let ms = if !c.is_nullish("ms") { format!(r#"<span class="small faint">{} ms</span>"#, js_str(c, "ms")) } else { String::new() };
-    let body = if c.truthy("body") {
-        format!(r#"<details><summary class="small muted" style="cursor:pointer">Raw response</summary><div class="code diag-raw">{}</div></details>"#, esck(c, "body"))
-    } else { String::new() };
-    format!(r#"
-          <div class="list-item" style="align-items:flex-start">
-            <span class="dot {okc}" style="margin-top:7px"></span>
-            <div class="grow">
-              <div class="row wrap"><b>{name}</b>{status}{ms}</div>
-              <div class="small mono faint ellipsis"{whole}>{request}</div>
-              <div class="small" style="color:{color}">{detail}</div>
-              {extra}
-              {body}
-            </div>
-          </div>"#,
-        name = esck(c, "name"),
-        // the cut-off request line opens the whole check, to read and copy (R1)
-        whole = if c.truthy("request") { crate::details::attrs(&c.s("name"), &[c.s("name"), or_empty(c, "request"), detail.clone(), or_empty(c, "body")].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join("\n")) } else { String::new() },
-        request = esc(&or_empty(c, "request")),
-        color = if ok { "var(--muted)" } else { "var(--err)" },
-        detail = esc(&detail),
-    )
-}
-
-/// The `#copy` handler: the plain-text report on the clipboard.
-fn copy_report(last: &Value) {
-    let mut lines = vec![format!("Encore {} diagnostics (uid {})", js_str(last, "version"), js_str(last, "uid"))];
-    for c in last.a("checks") {
-        let ok = c.truthy("ok");
-        let status = if c.truthy("status") { format!(" → HTTP {}", js_str(&c, "status")) } else { String::new() };
-        let ms = if !c.is_nullish("ms") { format!(" ({} ms)", js_str(&c, "ms")) } else { String::new() };
-        // `c.body.slice(0, 300)` – JS slices by UTF-16 units
-        let body = if c.truthy("body") && !ok { format!("\n     body: {}", String::from(js_sys::JsString::from(c.s("body")).slice(0, 300))) } else { String::new() };
-        lines.push(format!("{} {} – {}{status}{ms}\n     {}{body}", if ok { "OK  " } else { "FAIL" }, js_str(&c, "name"), or_empty(&c, "request"), or_empty(&c, "detail")));
-    }
-    let folders = last.g("download_folders").a("roots");
-    if !folders.is_empty() {
-        lines.push(String::new());
-        lines.push("Download folders:".into());
-        for r in &folders {
-            let (what, detail, when) = folder_lines(r, &fmt::date);
-            lines.push(format!("{} {what}\n     {detail} ({when})", if r.truthy("ok") { "OK  " } else { "FAIL" }));
-        }
-    }
-    if last.g("machine").is_object() {
-        lines.push(String::new());
-        lines.push("Server:".into());
-        for (k, v) in server_rows(last.g("machine")) {
-            lines.push(format!("  {k}: {v}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push("Settings:".into());
-    for s in last.a("settings") {
-        lines.push(format!("  {} = {}  [{}]", js_str(&s, "key"), js_str(&s, "value"), if s.g("source").as_str() == Some("env") { format!("env {}", js_str(&s, "env")) } else { "saved".to_string() }));
-    }
-    copy_text(&lines.join("\n"));
 }
 
 // ---- Updates (0.28): the version this server runs, the newest release, Check now, Restart server, Update now ----
