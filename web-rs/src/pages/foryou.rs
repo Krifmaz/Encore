@@ -1,6 +1,8 @@
-//! Port of web/js/pages/foryou.js – see docs/archive/ui-rewrite/CONTRACT.md
 //! Discovery: "For you" (the mixes the server makes from the library and your taste, then ListenBrainz and
 //! Last.fm recommendations), genre pages, similar artists and "More like this".
+//!
+//! The For you page ([`ForYou`]) and a genre's page ([`Genre`]) are Leptos views over signals that fill as their
+//! answers come. The rows, tiles and the More like this dialog are shared HTML builders, used by other pages too.
 use crate::api;
 use crate::app::{Ctx, PageFuture};
 use crate::dom::{self, set_html};
@@ -8,8 +10,10 @@ use crate::json::{js_string, json, truthy, J};
 use crate::pages::common::{album_tile, bind_tiles, submit_request};
 use crate::player;
 use crate::ui::{art, empty_state, esc, escv, fmt, icon, icon_attr, modal, status_badge, toast, ModalOpts};
+use kit_leptos::html::{html, raw};
+use leptos::prelude::*;
 use serde_json::Value;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use web_sys::Element;
@@ -241,188 +245,312 @@ fn mix_tile(m: &Value) -> String {
         id = esc(&m.s("id")), art = art(&cover, &m.s("title"), ""), play = icon("play"), title = esc(&m.s("title")), sub = esc(&m.s("subtitle")))
 }
 
-/// The mixes made from the library (`/api/taste/mixes`) and the listener's genres (`/api/taste/genres`) into
-/// `#fy-mixes` and `#fy-genres`: each plays on a click.
-async fn load_mixes(view: Element) {
-    let (Some(rail), Some(chips)) = (dom::qs_in(&view, "#fy-mixes"), dom::qs_in(&view, "#fy-genres")) else { return };
-    match api::get("/taste/mixes?limit=30").await {
-        Ok(d) => {
-            let mixes = d.a("mixes");
-            if mixes.is_empty() {
-                set_html(&rail, &empty_state(&icon("spark"), "No mixes yet", "Mixes appear once the library has songs. They get better the more you play, like and dislike."));
-            } else {
-                let note = if d.truthy("cold") { r#"<p class="small muted" style="margin:0 0 10px">Play, like and dislike songs and these mixes learn what you like.</p>"# } else { "" };
-                set_html(&rail, &format!(r#"{note}<div class="grid rail">{}</div>"#, mixes.iter().map(mix_tile).collect::<String>()));
-            }
-        }
-        Err(e) => set_html(&rail, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))),
-    }
-    if let Ok(g) = api::get("/taste/genres").await {
-        let list: Vec<Value> = g.items().into_iter().take(16).collect();
-        set_html(&chips, &list.iter().map(|x| format!(r#"<button class="badge {}" data-mix="genre:{}" style="padding:6px 12px;font-size:13px;cursor:pointer" title="Play a {} mix">{}{}</button>"#,
-            if x.f("affinity") > 0.0 { "accent" } else { "" }, esc(&x.s("genre")), esc(&x.s("title")), icon_attr("play", r#"width="11" height="11""#), esc(&x.s("title")))).collect::<String>());
-    }
+/// The library's mixes as they load: `None` while waiting, then the answer or its error.
+type Loading = Option<Result<Value, String>>;
+
+/// What the recommendations part of For you shows.
+#[derive(Clone)]
+enum Recs {
+    /// Still loading.
+    Waiting,
+    /// GET /api/discover/for-you failed.
+    Failed(String),
+    /// Neither Last.fm nor ListenBrainz is connected.
+    NotConnected,
+    /// Connected, nothing yet (the ListenBrainz user's name).
+    Nothing(String),
+    /// The answer, with each playlist's songs (Last.fm's songs first, as one more list).
+    Ready(Value, Vec<Value>, Rc<Vec<Tracks>>),
 }
 
+/// The genre chips under "Browse by genre": the library's own (first 15, highlighted), then the top ones.
+fn tag_chips(t: &Value) -> Vec<(Value, bool)> {
+    let lib: Vec<Value> = t.a("library").into_iter().take(15).collect();
+    let mut chips: Vec<(Value, bool)> = lib.iter().map(|g| (g.clone(), true)).collect();
+    chips.extend(t.a("top").into_iter().filter(|g| !lib.contains(&Value::String(js_string(g).to_lowercase()))).map(|g| (g, false)));
+    chips
+}
+
+/// The For you page: the view at once, its parts filled as their answers come (the mixes, the genres, the
+/// genre chips and the recommendations).
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
-        set_html(&view, r#"<h1>For you</h1><div id="fy-lib">
-    <div class="section-head"><div><h2>Mixes from your library</h2><div class="small muted">Made on this server from what you play, like, skip and dislike</div></div></div>
-    <div id="fy-mixes"><div class="skeleton" style="height:180px"></div></div>
-    <div class="section-head"><div><h2>Your genres</h2><div class="small muted">A mix of each genre in your library</div></div><button class="btn sm" id="fy-gs" type="button">Genre shuffle…</button></div><div id="fy-genres" class="chips"></div></div>
-    <div class="section-head"><h2>From ListenBrainz and Last.fm</h2></div><p class="muted" style="margin:6px 0 20px">Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click.</p>
-    <div id="fy-body"><div class="skeleton" style="height:300px"></div></div>
-    <div class="section-head"><h2>Browse by genre</h2></div><div id="fy-tags" class="chips"></div>"#);
-        {
-            // api.get('/discover/tags').then(…).catch(() => {})
-            let view = view.clone();
-            dom::spawn(async move {
-                let Ok(t) = api::get("/discover/tags").await else { return };
-                let Some(el) = dom::qs_in(&view, "#fy-tags") else { return };
-                let lib: Vec<Value> = t.a("library").into_iter().take(15).collect();
-                let mut chips: Vec<(Value, bool)> = lib.iter().map(|g| (g.clone(), true)).collect();
-                chips.extend(t.a("top").into_iter().filter(|g| !lib.contains(&Value::String(js_string(g).to_lowercase()))).map(|g| (g, false)));
-                set_html(&el, &chips.iter().map(|(g, mine)| format!(r##"<a class="badge {}" href="#/tag/{}" style="padding:6px 12px;font-size:13px">{}</a>"##,
-                    if *mine { "accent" } else { "" }, String::from(js_sys::encode_uri_component(&js_string(g))), escv(g))).collect::<String>());
-            });
+        set_html(&view, "");
+        // the signals live as long as the page: the owner is dropped with it
+        let owner = Owner::new();
+        let (mixes, genres, tags, recs) = owner.with(|| (RwSignal::new(None), RwSignal::new(Vec::new()), RwSignal::new(Vec::new()), RwSignal::new_local(Recs::Waiting)));
+        let again = StoredValue::new_local((view.clone(), ctx));
+        if let Some(m) = owner.with(|| kit_leptos::rt::mount(&view, move || view! { <ForYou mixes genres tags recs again/> })) {
+            dom::keep(m);
         }
-        // the library's mixes: play one with a click (on its tile or a genre chip)
-        dom::spawn(load_mixes(view.clone()));
-        if let Some(lib) = dom::qs_in(&view, "#fy-lib") { dom::on(&lib, "click", |e| {
-            if dom::closest(e, "#fy-gs").is_some() { player::genre_shuffle_modal(); return; }
-            let Some(m) = dom::closest(e, "[data-mix]") else { return };
-            let id = dom::data(&m, "mix");
-            dom::spawn(async move { player::play_mix(&id).await; });
-        }); }
-        let Some(body) = dom::qs_in(&view, "#fy-body") else { return Ok(()) };
-        let d = match api::get("/discover/for-you").await {
-            Ok(d) => d,
-            Err(e) => { set_html(&body, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message))); return Ok(()); }
+        dom::keep(owner);
+        dom::spawn(async move {
+            if let Ok(t) = api::get("/discover/tags").await {
+                tags.try_set(tag_chips(&t));
+            }
+        });
+        dom::spawn(async move {
+            mixes.try_set(Some(api::get("/taste/mixes?limit=30").await.map_err(|e| e.message)));
+            if let Ok(g) = api::get("/taste/genres").await {
+                genres.try_set(g.items().into_iter().take(16).collect());
+            }
+        });
+        let answer = match api::get("/discover/for-you").await {
+            Err(e) => Recs::Failed(e.message),
+            Ok(d) if !d.truthy("connected") => Recs::NotConnected,
+            Ok(d) => {
+                let lf = d.g("lastfm").clone();
+                let mut playlists = d.a("playlists");
+                if playlists.is_empty() && !truthy(&lf) {
+                    Recs::Nothing(d.s("user"))
+                } else {
+                    // Last.fm: shown as one more list of songs, plus artists you might like
+                    if !lf.a("tracks").is_empty() {
+                        playlists.insert(0, json!({ "id": null, "title": "Songs for you", "kind": "lastfm", "tracks": lf.g("tracks").clone() }));
+                    }
+                    let tracks = Rc::new(playlists.iter().map(|p| shared(p.a("tracks"))).collect());
+                    Recs::Ready(d, playlists, tracks)
+                }
+            }
         };
-        if !d.truthy("connected") {
-            set_html(&body, &format!(r#"<div class="card">{}</div>"#, empty_state(&icon("spark"), "Connect Last.fm or ListenBrainz to get recommendations",
-                r##"Connect either one on the <a href="#/connections">Connections</a> page. Encore scrobbles what you play here to them, and your other players (Navidrome, Finamp, Plexamp…) can scrobble too."##)));
-            return Ok(());
-        }
-        let lf = d.g("lastfm").clone();
-        let mut playlists = d.a("playlists");
-        if playlists.is_empty() && !truthy(&lf) {
-            set_html(&body, &format!(r#"<div class="card">{}</div>"#, empty_state(&icon("spark"), "No recommendations yet",
-                &format!("ListenBrainz builds Weekly Exploration once {} has a few weeks of listens. Check that your players scrobble to ListenBrainz.", esc(&d.s("user"))))));
-            return Ok(());
-        }
-        // Last.fm: shown as one more list of songs, plus artists you might like
-        if !lf.a("tracks").is_empty() { playlists.insert(0, json!({ "id": null, "title": "Songs for you", "kind": "lastfm", "tracks": lf.g("tracks").clone() })); }
-        let lf_artists = lf.a("artists");
-        let lf_albums = lf.a("albums");
-        let pl_tracks: Rc<Vec<Tracks>> = Rc::new(playlists.iter().map(|p| shared(p.a("tracks"))).collect());
-        let errors: String = d.a("errors").iter().map(|e| format!(r#"<div class="error-box" style="margin-bottom:12px">{}</div>"#, escv(e))).collect();
-        let artists_html = if !lf_artists.is_empty() {
-            format!(r#"<div class="section-head"><div><h2>Artists for you</h2>
-      <div class="small muted">Similar to what {} plays most on Last.fm</div></div></div><div class="grid" id="fy-artists">{}</div>"#,
-                esc(&lf.s("user")), lf_artists.iter().map(artist_card).collect::<String>())
-        } else { String::new() };
-        let albums_html = if !lf_albums.is_empty() {
-            format!(r#"<div class="section-head"><div><h2>Albums for you</h2><div class="small muted">The best-known album of artists you might like</div></div></div>
-      <div class="grid" id="fy-albums">{}</div>"#,
-                lf_albums.iter().map(|a| album_tile(a, &format!("/search?q={}&type=album", String::from(js_sys::encode_uri_component(&format!("{} {}", a.s("artist"), a.s("title"))))), "", None)).collect::<String>())
-        } else { String::new() };
-        let pl_html: String = playlists.iter().enumerate().map(|(pi, p)| {
-            let tracks = &pl_tracks[pi];
-            let missing = tracks.iter().filter(|t| is_missing(t)).count();
-            let owned = tracks.iter().filter(|t| in_library(t)).count();
-            format!(r#"<div class="section-head"><div><h2>{}</h2><div class="small muted">{}{}</div></div>
-        <div class="row">{}
-        {}
-        {}</div></div>
-      <div class="card flat"><div class="table-wrap"><table class="table" data-pl="{pi}"><tbody>{}</tbody></table></div></div>"#,
-                esc(&p.s("title")),
-                esc(kind(&p.s("kind"))),
-                if !tracks.is_empty() { format!(" · {owned}/{} in library", tracks.len()) } else { String::new() },
-                if owned > 0 { format!(r#"<button class="btn sm" data-play-pl="{pi}">{}Play owned</button>"#, icon("play")) } else { String::new() },
-                if missing > 0 { format!(r#"<button class="btn sm primary" data-req-pl="{pi}">{}Request {missing} missing</button>"#, icon("download")) } else { String::new() },
-                if p.truthy("id") { format!(r#"<a class="btn sm ghost" target="_blank" rel="noopener" href="https://listenbrainz.org/playlist/{}">{}</a>"#, escv(p.g("id")), icon("external")) } else { String::new() },
-                tracks.iter().enumerate().map(|(i, t)| track_row(&t.borrow(), i)).collect::<String>())
-        }).collect();
-        set_html(&body, &format!("{errors}{artists_html}{albums_html}{pl_html}"));
-        for tb in dom::qsa_in(&body, "table[data-pl]") {
-            let Ok(pi) = dom::data(&tb, "pl").parse::<usize>() else { continue };
-            let Some(tracks) = pl_tracks.get(pi) else { continue };
-            bind_tracks(&tb, tracks.clone());
-        }
-        if !lf_artists.is_empty() { if let Some(g) = dom::qs_in(&body, "#fy-artists") { bind_tiles(&g); } }
-        if !lf_albums.is_empty() { if let Some(g) = dom::qs_in(&body, "#fy-albums") { bind_tiles(&g); } }
-        {
-            let (view, ctx, pl_tracks) = (view.clone(), ctx.clone(), pl_tracks);
-            dom::on(&body, "click", move |e| {
-                if let Some(r) = dom::closest(e, "[data-req-pl]") {
-                    let Ok(pi) = dom::data(&r, "reqPl").parse::<usize>() else { return };
-                    let Some(tracks) = pl_tracks.get(pi) else { return };
-                    let missing: Vec<Track> = tracks.iter().filter(|t| is_missing(t)).cloned().collect();
-                    let (view, ctx) = (view.clone(), ctx.clone());
-                    dom::spawn(async move { request_all(missing, r).await; let _ = render(view, ctx).await; });
-                    return;
-                }
-                if let Some(p) = dom::closest(e, "[data-play-pl]") {
-                    let Ok(pi) = dom::data(&p, "playPl").parse::<usize>() else { return };
-                    let Some(tracks) = pl_tracks.get(pi) else { return };
-                    player::play_queue(tracks.iter().filter(|t| in_library(t)).map(|t| t.borrow().g("library").clone()).collect(), 0, "list");
-                }
-            });
-        }
+        recs.try_set(answer);
         Ok(())
     })
 }
 
+/// The library's mixes: a tile each, or why there are none, or the error.
+fn mixes_view(m: Loading) -> impl IntoView {
+    match m {
+        None => raw(r#"<div class="skeleton" style="height:180px"></div>"#.to_string()),
+        Some(Err(e)) => raw(format!(r#"<div class="error-box">{}</div>"#, esc(&e))),
+        Some(Ok(d)) => {
+            let mixes = d.a("mixes");
+            if mixes.is_empty() {
+                return raw(empty_state(&icon("spark"), "No mixes yet", "Mixes appear once the library has songs. They get better the more you play, like and dislike."));
+            }
+            let note = if d.truthy("cold") { r#"<p class="small muted" style="margin:0 0 10px">Play, like and dislike songs and these mixes learn what you like.</p>"# } else { "" };
+            raw(format!(r#"{note}<div class="grid rail">{}</div>"#, mixes.iter().map(mix_tile).collect::<String>()))
+        }
+    }
+}
+
+/// A genre of the library as a chip that plays its mix.
+fn genre_chip(x: &Value) -> impl IntoView {
+    let cls = if x.f("affinity") > 0.0 { "badge accent" } else { "badge " };
+    view! {
+        <button class=cls data-mix=format!("genre:{}", x.s("genre")) style="padding:6px 12px;font-size:13px;cursor:pointer" title=format!("Play a {} mix", x.s("title"))>
+            {raw(icon_attr("play", r#"width="11" height="11""#))}{x.s("title")}</button>
+    }
+}
+
+/// One recommended playlist: its title, how much of it is in the library, Play owned, Request missing, its
+/// ListenBrainz link and its songs.
+fn playlist_view(pi: usize, p: &Value, tracks: Tracks, again: StoredValue<(Element, Ctx), LocalStorage>) -> impl IntoView {
+    let missing = tracks.iter().filter(|t| is_missing(t)).count();
+    let owned = tracks.iter().filter(|t| in_library(t)).count();
+    let counts = (!tracks.is_empty()).then(|| format!(" · {owned}/{} in library", tracks.len()));
+    let play = (owned > 0).then(|| {
+        let tracks = tracks.clone();
+        let go = move |_| player::play_queue(tracks.iter().filter(|t| in_library(t)).map(|t| t.borrow().g("library").clone()).collect(), 0, "list");
+        view! { <button class="btn sm" data-play-pl=pi on:click={go} {..html(format!("{}Play owned", icon("play")))}>{""}</button> }
+    });
+    let request = (missing > 0).then(|| {
+        let tracks = tracks.clone();
+        let go = move |e: web_sys::MouseEvent| {
+            let Some(b) = dom::target_el(&e).and_then(|t| dom::closest_of(&t, "button")) else { return };
+            let missing: Vec<Track> = tracks.iter().filter(|t| is_missing(t)).cloned().collect();
+            dom::spawn(async move {
+                request_all(missing, b).await;
+                if let Some((view, ctx)) = again.try_get_value() {
+                    let _ = render(view, ctx).await;
+                }
+            });
+        };
+        view! { <button class="btn sm primary" data-req-pl=pi on:click={go} {..html(format!("{}Request {missing} missing", icon("download")))}>{""}</button> }
+    });
+    let link = p.truthy("id").then(|| view! {
+        <a class="btn sm ghost" target="_blank" rel="noopener" href=format!("https://listenbrainz.org/playlist/{}", js_string(p.g("id"))) {..html(icon("external"))}>{""}</a>
+    });
+    let rows: String = tracks.iter().enumerate().map(|(i, t)| track_row(&t.borrow(), i)).collect();
+    let table = NodeRef::<leptos::html::Table>::new();
+    table.on_load(move |el| bind_tracks(&el, tracks));
+    view! {
+        <div class="section-head"><div><h2>{p.s("title")}</h2><div class="small muted">{kind(&p.s("kind"))}{counts}</div></div>
+            <div class="row">{play}{request}{link}</div></div>
+        <div class="card flat"><div class="table-wrap"><table class="table" data-pl=pi node_ref=table><tbody inner_html=rows></tbody></table></div></div>
+    }
+}
+
+/// The recommendations: errors from the services, artists and albums for you, then each playlist.
+fn recs_view(r: Recs, again: StoredValue<(Element, Ctx), LocalStorage>) -> AnyView {
+    match r {
+        Recs::Waiting => raw(r#"<div class="skeleton" style="height:300px"></div>"#.to_string()).into_any(),
+        Recs::Failed(e) => raw(format!(r#"<div class="error-box">{}</div>"#, esc(&e))).into_any(),
+        Recs::NotConnected => raw(format!(r#"<div class="card">{}</div>"#, empty_state(&icon("spark"), "Connect Last.fm or ListenBrainz to get recommendations",
+            r##"Connect either one on the <a href="#/connections">Connections</a> page. Encore scrobbles what you play here to them, and your other players (Navidrome, Finamp, Plexamp…) can scrobble too."##))).into_any(),
+        Recs::Nothing(user) => raw(format!(r#"<div class="card">{}</div>"#, empty_state(&icon("spark"), "No recommendations yet",
+            &format!("ListenBrainz builds Weekly Exploration once {} has a few weeks of listens. Check that your players scrobble to ListenBrainz.", esc(&user))))).into_any(),
+        Recs::Ready(d, playlists, tracks) => {
+            let lf = d.g("lastfm").clone();
+            let errors: String = d.a("errors").iter().map(|e| format!(r#"<div class="error-box" style="margin-bottom:12px">{}</div>"#, escv(e))).collect();
+            let artists = lf.a("artists");
+            let artists = (!artists.is_empty()).then(|| {
+                let grid = NodeRef::<leptos::html::Div>::new();
+                grid.on_load(|el| bind_tiles(&el));
+                let tiles: String = artists.iter().map(artist_card).collect();
+                view! {
+                    <div class="section-head"><div><h2>"Artists for you"</h2>
+                        <div class="small muted">{format!("Similar to what {} plays most on Last.fm", lf.s("user"))}</div></div></div>
+                    <div class="grid" id="fy-artists" node_ref=grid inner_html=tiles></div>
+                }
+            });
+            let albums = lf.a("albums");
+            let albums = (!albums.is_empty()).then(|| {
+                let grid = NodeRef::<leptos::html::Div>::new();
+                grid.on_load(|el| bind_tiles(&el));
+                let tiles: String = albums.iter().map(|a| album_tile(a, &format!("/search?q={}&type=album", String::from(js_sys::encode_uri_component(&format!("{} {}", a.s("artist"), a.s("title"))))), "", None)).collect();
+                view! {
+                    <div class="section-head"><div><h2>"Albums for you"</h2><div class="small muted">"The best-known album of artists you might like"</div></div></div>
+                    <div class="grid" id="fy-albums" node_ref=grid inner_html=tiles></div>
+                }
+            });
+            let lists = playlists.iter().enumerate().map(|(pi, p)| playlist_view(pi, p, tracks[pi].clone(), again)).collect_view();
+            view! { {raw(errors)}{artists}{albums}{lists} }.into_any()
+        }
+    }
+}
+
+/// The For you page: the library's mixes and genres, the recommendations, and the genres to browse.
+#[component]
+fn ForYou(
+    /// The library's mixes.
+    mixes: RwSignal<Loading>,
+    /// The listener's genres (a mix each).
+    genres: RwSignal<Vec<Value>>,
+    /// The genres to browse, and whether each is the library's own.
+    tags: RwSignal<Vec<(Value, bool)>>,
+    /// The recommendations.
+    recs: RwSignal<Recs, LocalStorage>,
+    /// The page's element and context, to draw it again after Request missing.
+    again: StoredValue<(Element, Ctx), LocalStorage>,
+) -> impl IntoView {
+    // the library's mixes: play one with a click (on its tile or a genre chip)
+    let on_lib = |e: web_sys::MouseEvent| {
+        if dom::closest(&e, "#fy-gs").is_some() {
+            player::genre_shuffle_modal();
+            return;
+        }
+        let Some(m) = dom::closest(&e, "[data-mix]") else { return };
+        let id = dom::data(&m, "mix");
+        dom::spawn(async move { player::play_mix(&id).await; });
+    };
+    let chips = move || tags.with(|t| t.iter().map(|(g, mine)| view! {
+        <a class=if *mine { "badge accent" } else { "badge " } href=format!("#/tag/{}", String::from(js_sys::encode_uri_component(&js_string(g)))) style="padding:6px 12px;font-size:13px">{js_string(g)}</a>
+    }).collect_view());
+    view! {
+        <h1>"For you"</h1>
+        <div id="fy-lib" on:click=on_lib>
+            <div class="section-head"><div><h2>"Mixes from your library"</h2><div class="small muted">"Made on this server from what you play, like, skip and dislike"</div></div></div>
+            <div id="fy-mixes">{move || mixes_view(mixes.get())}</div>
+            <div class="section-head"><div><h2>"Your genres"</h2><div class="small muted">"A mix of each genre in your library"</div></div><button class="btn sm" id="fy-gs" type="button">"Genre shuffle…"</button></div>
+            <div id="fy-genres" class="chips">{move || genres.with(|g| g.iter().map(genre_chip).collect_view())}</div>
+        </div>
+        <div class="section-head"><h2>"From ListenBrainz and Last.fm"</h2></div><p class="muted" style="margin:6px 0 20px">"Recommendations from your ListenBrainz and Last.fm listening. Songs you already have play right here; request the rest in one click."</p>
+        <div id="fy-body">{move || recs_view(recs.get(), again)}</div>
+        <div class="section-head"><h2>"Browse by genre"</h2></div><div id="fy-tags" class="chips">{chips}</div>
+    }
+}
+
+/// A genre's page: its name, what it is, and its top artists, 40 at a time with Load more.
 pub fn render_tag(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let tag: String = js_sys::decode_uri_component(&ctx.param(0)).map_err(|_| "URI malformed".to_string())?.into();
-        // +(ctx.query.page || 1)
-        let page = Rc::new(Cell::new({ let p = ctx.q("page"); if p.is_empty() { 1.0 } else { js_number(&p) } }));
-        set_html(&view, &format!(r#"<div class="kicker muted small" style="text-transform:uppercase;letter-spacing:.1em;font-weight:700">Genre</div><h1 style="text-transform:capitalize">{}</h1>
-    <p class="muted" id="tag-sum" style="max-width:80ch"></p><div id="tag-grid">{}</div>
-    <div class="row mt" style="justify-content:center"><button class="btn hidden" id="tag-more">Load more</button></div>"#,
-            esc(&tag), r#"<div class="skeleton" style="height:200px"></div>"#));
-        let (Some(grid), Some(more)) = (dom::qs_in(&view, "#tag-grid"), dom::qs_in(&view, "#tag-more")) else { return Ok(()) };
-        let first = Rc::new(Cell::new(true));
-
-        // load(): one page of artists; the first call also writes the summary
-        async fn load(view: &Element, grid: &Element, more: &Element, tag: &str, page: f64, first: &Cell<bool>) -> Result<(), api::ApiError> {
-            let d = api::get(&format!("/discover/tag/{}?page={}", String::from(js_sys::encode_uri_component(tag)), js_num(page))).await?;
-            if first.get() {
-                set_html(grid, r#"<div class="grid" id="tag-tiles"></div>"#);
-                if let Some(sum) = dom::qs_in(view, "#tag-sum") {
-                    set_html(&sum, &if d.truthy("summary") {
-                        format!(r#"{} <span class="faint small">· {}</span>"#, esc(&d.s("summary")), esc(&d.s("source")))
-                    } else {
-                        format!(r#"<span class="faint small">Top artists from {}</span>"#, esc(&d.s("source")))
-                    });
-                }
-                first.set(false);
-            }
-            let artists = d.a("artists");
-            if let Some(tiles) = dom::qs_in(view, "#tag-tiles") { let _ = tiles.insert_adjacent_html("beforeend", &artists.iter().map(artist_card).collect::<String>()); }
-            dom::toggle_class(more, "hidden", artists.len() < 40);
-            if artists.is_empty() && page == 1.0 { set_html(grid, &empty_state(&icon("users"), "No artists for this genre", "")); }
-            Ok(())
+        // the page asked for (`?page=`), 1 by default
+        let page = { let p = ctx.q("page"); if p.is_empty() { 1.0 } else { js_number(&p) } };
+        set_html(&view, "");
+        // the signals live as long as the page: the owner is dropped with it
+        let owner = Owner::new();
+        let g = owner.with(|| GenreState { page: RwSignal::new(page), summary: RwSignal::new(None), artists: RwSignal::new(None), more: RwSignal::new(false), busy: RwSignal::new(false) });
+        let name = tag.clone();
+        if let Some(m) = owner.with(|| kit_leptos::rt::mount(&view, move || view! { <Genre tag=name.clone() g/> })) {
+            dom::keep(m);
         }
-
+        dom::keep(owner);
         bind_tiles(&view);
-        {
-            let (view, grid, btn, tag, page, first) = (view.clone(), grid.clone(), more.clone(), tag.clone(), page.clone(), first.clone());
-            dom::on(&more, "click", move |_| {
-                let (view, grid, more, tag, page, first) = (view.clone(), grid.clone(), btn.clone(), tag.clone(), page.clone(), first.clone());
-                dom::spawn(async move {
-                    dom::set_disabled(&more, true);
-                    page.set(page.get() + 1.0);
-                    if let Err(e) = load(&view, &grid, &more, &tag, page.get(), &first).await { dom::console_error(&e.message); return; }
-                    dom::set_disabled(&more, false);
-                });
-            });
-        }
-        if let Err(e) = load(&view, &grid, &more, &tag, page.get(), &first).await {
-            set_html(&grid, &format!(r#"<div class="error-box">{}</div>"#, esc(&e.message)));
+        if let Err(e) = g.load(&tag).await {
+            g.artists.try_set(Some(Err(e.message)));
         }
         Ok(())
     })
+}
+
+/// A genre page's state.
+#[derive(Clone, Copy)]
+struct GenreState {
+    /// The page of artists last loaded.
+    page: RwSignal<f64>,
+    /// What the genre is (HTML), once the first page came.
+    summary: RwSignal<Option<String>>,
+    /// The artists so far (`None`: still loading), or the first page's error.
+    artists: RwSignal<Option<Result<Vec<Value>, String>>>,
+    /// Whether Load more shows (the last page was full).
+    more: RwSignal<bool>,
+    /// Load more is loading.
+    busy: RwSignal<bool>,
+}
+
+impl GenreState {
+    /// One page of artists, added to the list; the first also writes the summary.
+    async fn load(self, tag: &str) -> Result<(), api::ApiError> {
+        let page = self.page.get_untracked();
+        let d = api::get(&format!("/discover/tag/{}?page={}", String::from(js_sys::encode_uri_component(tag)), js_num(page))).await?;
+        if self.summary.get_untracked().is_none() {
+            self.summary.try_set(Some(if d.truthy("summary") {
+                format!(r#"{} <span class="faint small">· {}</span>"#, esc(&d.s("summary")), esc(&d.s("source")))
+            } else {
+                format!(r#"<span class="faint small">Top artists from {}</span>"#, esc(&d.s("source")))
+            }));
+        }
+        let artists = d.a("artists");
+        self.more.try_set(artists.len() >= 40);
+        self.artists.try_update(|a| match a {
+            Some(Ok(list)) => list.extend(artists),
+            _ => *a = Some(Ok(artists)),
+        });
+        Ok(())
+    }
+}
+
+/// A genre's page.
+#[component]
+fn Genre(
+    /// The genre's name.
+    tag: String,
+    /// The page's state.
+    g: GenreState,
+) -> impl IntoView {
+    let name = tag.clone();
+    let load_more = move |_| {
+        let tag = name.clone();
+        g.busy.set(true);
+        g.page.update(|p| *p += 1.0);
+        dom::spawn(async move {
+            match g.load(&tag).await {
+                Ok(()) => { g.busy.try_set(false); }
+                // the button stays disabled, as before
+                Err(e) => dom::console_error(&e.message),
+            }
+        });
+    };
+    let grid = move || match g.artists.get() {
+        None => raw(r#"<div class="skeleton" style="height:200px"></div>"#.to_string()),
+        Some(Err(e)) => raw(format!(r#"<div class="error-box">{}</div>"#, esc(&e))),
+        Some(Ok(list)) if list.is_empty() && g.page.get_untracked() == 1.0 => raw(empty_state(&icon("users"), "No artists for this genre", "")),
+        Some(Ok(list)) => raw(format!(r#"<div class="grid" id="tag-tiles">{}</div>"#, list.iter().map(artist_card).collect::<String>())),
+    };
+    view! {
+        <div class="kicker muted small" style="text-transform:uppercase;letter-spacing:.1em;font-weight:700">"Genre"</div><h1 style="text-transform:capitalize">{tag}</h1>
+        <p class="muted" id="tag-sum" style="max-width:80ch" inner_html=move || g.summary.get().unwrap_or_default()></p><div id="tag-grid">{grid}</div>
+        <div class="row mt" style="justify-content:center"><button class="btn" class:hidden=move || !g.more.get() id="tag-more" disabled=move || g.busy.get() on:click=load_more>"Load more"</button></div>
+    }
 }
