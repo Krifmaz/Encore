@@ -63,8 +63,14 @@ pub struct Dropped {
     files: Vec<File>,
 }
 
-/// Whether a drag carries files, and the pointer over the drop place: shared with every other upload.
-pub use crate::dropzone::{has_files, set_drop_effect};
+/// Whether a drag carries files from the computer: the kit's test, shared with every other upload.
+pub use kit_leptos::dropzone::has_files;
+
+/// What the pointer shows over the file manager (`copy` over a place that takes the drop, `none` elsewhere).
+pub fn set_drop_effect(e: &web_sys::Event, effect: &str) {
+    let dt = get(e.as_ref(), "dataTransfer");
+    if dt.is_object() { let _ = Reflect::set(&dt, &"dropEffect".into(), &effect.into()); }
+}
 
 /// The dropped files and folders (`webkitGetAsEntry`), or the plain file list where a browser has no entries.
 pub fn take_drop(e: &web_sys::Event) -> Dropped {

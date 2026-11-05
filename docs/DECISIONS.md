@@ -2,6 +2,13 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: drag and drop for uploads is the kit's
+
+- **`dropzone.rs` is gone; `kit_leptos::dropzone::init` runs instead.** The kit's is the same code (made from
+  it): the same zones (`data-dropzone`, a `<label>` with a file input), the same accept rule and words. The file
+  manager keeps its own `set_drop_effect` (three lines the kit keeps private). The outline styles stay in app.css
+  until the kit's stylesheet carries them.
+
 ## 2026-11-05: the Diagnostics checks are the kit's view
 
 - **`#diag` is `kit_leptos::diagnostics::DiagnosticsView`.** The summary, the check groups and "Where settings come
