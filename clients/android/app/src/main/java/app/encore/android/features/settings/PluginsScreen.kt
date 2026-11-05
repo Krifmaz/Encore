@@ -254,9 +254,9 @@ private class PluginsPage(private val api: SettingsApi, private val schemaApi: S
 
     /** The form state of a plugin's own settings: Save and clear go to PUT /api/plugins/{id}/settings. */
     private fun ownState(id: String, answer: JsonObject): SchemaFormState =
-        SchemaFormState(shared?.schema ?: SettingsSchema(), PluginRules.cardValues(answer, null), canReveal = false) { body ->
+        SchemaFormState(shared?.schema ?: SettingsSchema(), PluginRules.cardValues(answer, null), canReveal = false, target = { body ->
             PluginRules.cardValues(api.pluginSaveSettings(id, body), null)
-        }
+        })
 
     /** One plugin's card with its status asked now (GET /api/plugins/{id}). */
     suspend fun statusOf(id: String) {
