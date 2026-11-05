@@ -1,7 +1,7 @@
 //! Port of web/js/ui.js: escaping, the icon set, toasts, modals, formatting, badges, the ⋯ menu and the
 //! show/hide eye on secrets. Same HTML, same class names.
 
-use crate::dom::{self, body, by_id, closest, create, document, keep, on, qs_in, qsa_in, set_html, EventListener};
+use crate::dom::{self, body, closest, create, document, keep, on, qs_in, qsa_in, set_html, EventListener};
 use crate::json::J;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -84,146 +84,71 @@ pub fn icon(name: &str) -> String {
 /// `icon.x.replace('<svg', '<svg width="12" height="12"')` and friends.
 pub fn icon_attr(name: &str, attrs: &str) -> String { icon(name).replacen("<svg", &format!("<svg {attrs}"), 1) }
 
-/// The words when the clipboard refuses: the toast says what to do instead, so it has no Copy of its own.
-pub const COPY_FAILED: &str = "Copy failed – select and copy manually";
-/// At most this many error toasts stay on screen; a new one pushes out the oldest.
-const ERROR_TOASTS: usize = 3;
+/// The words when the clipboard refuses: the toast says what to do instead, so it has no Copy of its own (the
+/// kit's words, the same Encore always said).
+pub use kit_leptos::clipboard::COPY_FAILED;
+/// `toast(msg, kind)` and the Undo toast: the kit's smart toasts. An error toast (`err`) stays until it is closed
+/// and has Copy, so a long error can be read in full and pasted into a bug report; the same error twice is shown
+/// once; at most three errors stay.
+pub use kit_leptos::toasts::{error_toast_html, toast, toast_action};
 
-/// `toast(msg, type)`. An error toast (`err`) stays until it is closed and has a Copy button, so a long error can
-/// be read in full and pasted into a bug report (R1); the same error twice in a row is shown once.
-pub fn toast(msg: &str, kind: &str) {
-    if kind == "err" && msg != COPY_FAILED { return error_toast(msg); }
-    let el = create("div");
-    el.set_class_name(&format!("toast {kind}"));
-    el.set_text_content(Some(msg));
-    if let Some(t) = by_id("toasts") { let _ = t.append_child(&el); }
-    let e1 = el.clone();
-    let e2 = el;
-    keep_app(gloo_timers::callback::Timeout::new(3800, move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
-    keep_app(gloo_timers::callback::Timeout::new(4200, move || e2.remove()));
-}
-fn keep_app(x: impl std::any::Any + 'static) { dom::keep_forever(x) }
-
-/// A toast with one button (`label`, "Undo") that stays `ms`: a click runs `f` once and the toast goes.
-pub fn toast_action(msg: &str, label: &str, ms: u32, f: impl FnOnce() + 'static) {
-    let Some(t) = by_id("toasts") else { return };
-    let el = create("div");
-    el.set_class_name("toast act");
-    set_html(&el, &format!(r#"<div class="toast-text">{}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-toast-action>{}</button></div>"#, esc(msg), esc(label)));
-    let _ = t.append_child(&el);
-    let f = Rc::new(RefCell::new(Some(f)));
-    if let Some(b) = qs_in(&el, "[data-toast-action]") {
-        let el2 = el.clone();
-        on(&b, "click", move |_| { el2.remove(); if let Some(f) = f.borrow_mut().take() { f(); } });
-    }
-    let (e1, e2) = (el.clone(), el);
-    keep_app(gloo_timers::callback::Timeout::new(ms.saturating_sub(400), move || { dom::set_style(&e1, "opacity", "0"); dom::set_style(&e1, "transition", "opacity .3s"); }));
-    keep_app(gloo_timers::callback::Timeout::new(ms, move || e2.remove()));
-}
-
-/// The error toast's HTML: the whole message, Copy and Close.
-pub fn error_toast_html(msg: &str) -> String {
-    format!(r#"<div class="toast-text">{m}</div><div class="toast-acts"><button type="button" class="btn sm ghost" data-copy-text="{m}">{copy}Copy</button><button type="button" class="btn sm ghost icon" data-toast-close title="Close" aria-label="Close">{x}</button></div>"#,
-        m = esc(msg), copy = icon("copy"), x = icon("x"))
-}
-
-fn error_toast(msg: &str) {
-    let Some(t) = by_id("toasts") else { return };
-    let open = qsa_in(&t, ".toast.err.stays");
-    // the same error again (a retry that failed the same way): the one on screen stays, nothing piles up
-    if open.iter().any(|e| dom::data(e, "msg") == msg) { return; }
-    for old in open.iter().take((open.len() + 1).saturating_sub(ERROR_TOASTS)) { old.remove(); }
-    let el = create("div");
-    el.set_class_name("toast err stays");
-    let _ = el.set_attribute("role", "alert");
-    dom::set_data(&el, "msg", msg);
-    // Copy and Close are handled by the page's one click listener (details.rs `init`)
-    set_html(&el, &error_toast_html(msg));
-    let _ = t.append_child(&el);
-}
-
-/// A modal on screen: `el` is the `.modal`, `close()` removes it.
+/// A modal on screen, opened by the kit ([`kit_leptos::modal::open`]): `el` is the `.modal`, `bg` its backdrop,
+/// [`Modal::close`] takes it away. The two elements are kept as fields because Encore's pages wire their
+/// dialogs by hand on them.
 #[derive(Clone)]
 pub struct Modal {
+    /// The `.modal` element.
     pub el: Element,
+    /// The `.modal-bg` around it.
     pub bg: Element,
-    close_fn: Rc<dyn Fn()>,
+    /// The kit's handle, which closes it.
+    inner: kit_leptos::modal::Modal,
 }
 impl Modal {
-    pub fn close(&self) { (self.close_fn)(); }
+    /// Takes the dialog away (once).
+    pub fn close(&self) { self.inner.close(); }
+    /// `querySelector` inside the dialog.
     pub fn qs(&self, sel: &str) -> Option<Element> { qs_in(&self.el, sel) }
+    /// `querySelectorAll` inside the dialog.
     pub fn qsa(&self, sel: &str) -> Vec<Element> { qsa_in(&self.el, sel) }
-    pub fn is_open(&self) -> bool { self.el.is_connected() }
+    /// Whether it is still on screen.
+    pub fn is_open(&self) -> bool { self.inner.is_open() }
 }
 
+/// What a dialog shows: title, body and footer are HTML (escaped by the caller), `wide` for the wide dialog.
 pub struct ModalOpts<'a> {
+    /// The title, HTML.
     pub title: &'a str,
+    /// The body, HTML.
     pub body: &'a str,
+    /// The buttons, HTML; "" for none.
     pub footer: &'a str,
+    /// The wide dialog.
     pub wide: bool,
 }
 impl<'a> ModalOpts<'a> {
+    /// A dialog with this title and body (both HTML).
     pub fn new(title: &'a str, body: &'a str) -> Self { Self { title, body, footer: "", wide: false } }
+    /// Its buttons (HTML).
     pub fn footer(mut self, f: &'a str) -> Self { self.footer = f; self }
+    /// The wide dialog.
     pub fn wide(mut self, w: bool) -> Self { self.wide = w; self }
 }
 
-/// `modal({ title, body, footer, wide })` – title/body/footer are HTML, exactly like the JS.
+/// Opens a dialog in `#modal-root` through the kit: Escape, a press on the backdrop and every `[data-close]`
+/// close it.
 pub fn modal(o: ModalOpts) -> Modal {
-    let root = by_id("modal-root").expect("#modal-root");
-    let bg = create("div");
-    bg.set_class_name("modal-bg");
-    let foot = if o.footer.is_empty() { String::new() } else { format!(r#"<div class="modal-foot">{}</div>"#, o.footer) };
-    set_html(&bg, &format!(r#"<div class="modal {}" role="dialog" aria-modal="true">
-    <div class="modal-head"><h2>{}</h2><button class="btn ghost icon" data-close aria-label="Close">{}</button></div>
-    <div class="modal-body">{}</div>
-    {}
-  </div>"#, if o.wide { "wide" } else { "" }, o.title, icon("x"), o.body, foot));
-    let _ = root.append_child(&bg);
-    let el = qs_in(&bg, ".modal").expect(".modal");
-    let key_listener: Rc<RefCell<Option<EventListener>>> = Rc::new(RefCell::new(None));
-    let bg2 = bg.clone();
-    let kl = key_listener.clone();
-    let close_fn: Rc<dyn Fn()> = Rc::new(move || { bg2.remove(); kl.borrow_mut().take(); });
-    let c = close_fn.clone();
-    *key_listener.borrow_mut() = Some(dom::listen(&document(), "keydown", move |e| { if dom::key(e) == "Escape" { c(); } }));
-    let c = close_fn.clone();
-    let bg3 = bg.clone();
-    on(&bg, "mousedown", move |e| { let is_bg = e.target().map(|t| { let bt: &web_sys::EventTarget = bg3.as_ref(); &t == bt }).unwrap_or(false); if is_bg { c(); } });
-    for b in qsa_in(&bg, "[data-close]") { let c = close_fn.clone(); on(&b, "click", move |_| c()); }
-    keep(key_listener);
-    Modal { el, bg, close_fn }
+    let mut k = kit_leptos::modal::ModalOpts::new(o.title, o.body).wide(o.wide);
+    if !o.footer.is_empty() { k = k.footer(o.footer); }
+    let inner = kit_leptos::modal::open(k);
+    // the shell always has #modal-root, so the kit drew the dialog; the fallback only keeps the types whole
+    let bg = inner.bg().unwrap_or_else(|| create("div"));
+    let el = inner.el().unwrap_or_else(|| bg.clone());
+    Modal { el, bg, inner }
 }
 
-/// `confirmDialog(title, text, okLabel, danger)` – resolves to true on OK, false when dismissed.
-pub async fn confirm_dialog(title: &str, text: &str, ok_label: &str, danger: bool) -> bool {
-    confirm_dialog_html(title, &format!(r#"<p class="muted" style="margin:0">{}</p>"#, esc(text)), ok_label, danger).await
-}
-
-/// [`confirm_dialog`] with a body that is HTML already (escaped by the caller).
-pub async fn confirm_dialog_html(title: &str, body: &str, ok_label: &str, danger: bool) -> bool {
-    let (tx, rx) = futures::channel::oneshot::channel::<bool>();
-    let tx = Rc::new(RefCell::new(Some(tx)));
-    let m = modal(ModalOpts::new(&esc(title), body)
-        .footer(&format!(r#"<button class="btn" data-close>Cancel</button><button class="btn {}" data-ok>{}</button>"#, if danger { "danger" } else { "primary" }, esc(ok_label))));
-    if let Some(ok) = m.qs("[data-ok]") {
-        let m2 = m.clone();
-        let tx2 = tx.clone();
-        on(&ok, "click", move |_| { m2.close(); if let Some(t) = tx2.borrow_mut().take() { let _ = t.send(true); } });
-    }
-    // dismissed (Escape, backdrop, Cancel): the modal leaves the DOM without OK
-    let el = m.el.clone();
-    let tx3 = tx.clone();
-    let obs = web_sys::MutationObserver::new(wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(move |_m, o: web_sys::MutationObserver| {
-        if !el.is_connected() { o.disconnect(); if let Some(t) = tx3.borrow_mut().take() { let _ = t.send(false); } }
-    }).into_js_value().unchecked_ref()).ok();
-    if let (Some(o), Some(root)) = (obs, by_id("modal-root")) {
-        let init = web_sys::MutationObserverInit::new();
-        init.set_child_list(true);
-        let _ = o.observe_with_options(&root, &init);
-    }
-    rx.await.unwrap_or(false)
-}
+/// The kit's confirm dialog: true on OK, false when it is dismissed (Cancel, Escape, the backdrop).
+pub use kit_leptos::modal::{confirm_dialog, confirm_dialog_html};
 
 pub mod fmt {
     /// `fmt.dur(s)`: 3:05 or 1:02:03.
@@ -436,7 +361,6 @@ pub fn skeleton_grid(n: usize) -> String {
     format!(r#"<div class="grid">{}</div>"#, cell.repeat(n))
 }
 
-/// `copyText(t)`.
 /// `navigator.share` when the browser has it.
 fn navigator_share() -> Option<js_sys::Function> {
     let nav: wasm_bindgen::JsValue = dom::window().navigator().into();
@@ -498,54 +422,10 @@ async fn share_link(res: crate::api::ApiResult, title: &str, text: &str, copied:
     }
 }
 
-/// `copyText(t)`: the clipboard API where the page may use it (https or localhost), otherwise – a server reached
-/// over plain http on the home network has no `navigator.clipboard` – the text is selected in a hidden box and
-/// copied the old way. The toast says which way it went.
-pub fn copy_text(t: &str) {
-    copy_then(t, "Copied to clipboard");
-}
-
-/// [`copy_text`] with `copied` as the toast when it worked (a share link says what the link does instead).
-pub fn copy_then(t: &str, copied: &str) {
-    let has_api = js_sys::Reflect::get(&dom::window().navigator(), &"clipboard".into()).map(|c| !c.is_undefined() && !c.is_null()).unwrap_or(false);
-    if !has_api {
-        // no await before this: the browser still counts the click that asked for it
-        copy_done(copy_by_selection(t), copied);
-        return;
-    }
-    let (t, copied) = (t.to_string(), copied.to_string());
-    dom::spawn(async move {
-        let clip = dom::window().navigator().clipboard();
-        let ok = wasm_bindgen_futures::JsFuture::from(clip.write_text(&t)).await.is_ok() || copy_by_selection(&t);
-        copy_done(ok, &copied);
-    });
-}
-
-fn copy_done(ok: bool, copied: &str) {
-    if ok { toast(copied, "ok") } else { toast(COPY_FAILED, "err") }
-}
-
-/// The old way: the text in an off-screen box, selected, `document.execCommand('copy')`.
-fn copy_by_selection(t: &str) -> bool {
-    let Ok(area) = create("textarea").dyn_into::<web_sys::HtmlTextAreaElement>() else { return false };
-    area.set_value(t);
-    let _ = area.set_attribute("readonly", "");
-    let _ = area.set_attribute("style", "position:fixed;top:-1000px;left:0;width:1px;height:1px;opacity:0");
-    // inside an open dialog, so focus stays where the user is
-    let host: Element = dom::qs("#modal-root .modal-bg:last-child .modal").unwrap_or_else(|| body().into());
-    let _ = host.append_child(&area);
-    area.select();
-    // iOS selects a read-only box only with a range
-    let _ = area.set_selection_range(0, t.encode_utf16().count() as u32);
-    let doc = document();
-    let ok = js_sys::Reflect::get(&doc, &"execCommand".into()).ok()
-        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-        .and_then(|f| f.call1(&doc, &"copy".into()).ok())
-        .and_then(|r| r.as_bool())
-        .unwrap_or(false);
-    area.remove();
-    ok
-}
+/// Copy to the clipboard through the kit: the clipboard API where the page may use it (https or localhost),
+/// otherwise – a server reached over plain http on the home network – the old way; the toast says how it went.
+/// [`copy_then`] says its own words when it worked (a share link says what the link does).
+pub use kit_leptos::clipboard::{copy_text, copy_then};
 
 /// One entry of the ⋯ menu (`None` in the list = separator).
 #[derive(Clone)]

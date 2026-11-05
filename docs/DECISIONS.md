@@ -2,6 +2,17 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the web app's toasts, dialogs, confirm, copy and details come from kit-leptos
+
+- **Kept as adapters, not rewritten call sites.** `ui::toast`, `ui::modal`, `ui::confirm_dialog`, `ui::copy_text` and
+  `details::*` now hand over to `kit_leptos` (tag v0.3.0); their 500 call sites stay as they are. `ui::Modal` keeps its
+  `el`/`bg` fields because the hand-written pages wire their dialogs on them; it closes through the kit's handle.
+- **Encore keeps its own stylesheet; the kit's `kit.css` is not loaded.** Loaded together, the kit's filled danger
+  button (`.btn.danger`) mixed with Encore's outlined one into red text on red. `css/app.css` already styles every
+  class the kit's markup uses; it gains only the confirm dialog's `.confirm-text`. Moving to the kit's look would be a
+  visible change, which this move must not make.
+- **The strings parity test reads the kit's words.** Strings such as "Copy failed – select and copy manually" now
+  live in kit-rules; the test adds the Debug form of `kit_leptos::config::Words::default()` to what it searches.
 ## 2026-11-05 – Lantern: what is built before Lantern 1.0, and what waits for it
 
 **Situation.** Lantern 1.0 is not out: github.com/Krifmaz/lantern has no commits, releases or API docs yet. The

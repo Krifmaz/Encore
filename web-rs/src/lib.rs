@@ -14,6 +14,7 @@ pub mod dom;
 pub mod dropzone;
 pub mod group;
 pub mod json;
+pub mod kit;
 pub mod notice;
 pub mod num;
 pub mod offline;
@@ -36,6 +37,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(on_panic));
+    kit::init();
     ui::init();
     details::init();
     appearance::init();
