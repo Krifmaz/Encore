@@ -2,6 +2,15 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the web app's self-update and service worker side come from kit-leptos
+
+- **`update.rs` and `sw.rs` are gone; `kit::start_updates` starts the kit's.** The kit's `update` module is the
+  same logic (it was made from them): health polling, the reload gate, the loop guard (`encore.update.tried`), the
+  worker flow. Encore only says what holds the page (music, an upload, songs being saved; the kit adds a dialog).
+- **The worker script stays Encore's.** `static/sw.js` and `hooks/sw.sh` (the offline shell and saved songs) are
+  the app's; the test that checks they speak the kit's messages (`skip-waiting`, `version?`, `encore:version`)
+  moved to `kit.rs`.
+
 ## 2026-11-05: the web app's toasts, dialogs, confirm, copy and details come from kit-leptos
 
 - **Kept as adapters, not rewritten call sites.** `ui::toast`, `ui::modal`, `ui::confirm_dialog`, `ui::copy_text` and
