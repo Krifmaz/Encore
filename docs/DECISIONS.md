@@ -2,6 +2,17 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: release workflows on kit v0.3.0
+
+- **Pinned by tag.** Every call of the kit's shared workflows names `@v0.3.0`, the kit's latest tag, instead of commit
+  `3262a89`. The reusable workflows are the same in v0.2.0 and v0.3.0.
+- **Inputs that changed in v0.2.0.** kit-desktop takes a `package` command instead of `package-script`: it runs
+  `scripts/desktop-package.sh` with the flags the old kit passed (`--stamp` only for a release). kit-release's `only`
+  became `keep-previous` (`$KEEP` in the notes script), true for an Android-only release. The app and desktop
+  artifacts are now `kit-app-*`, so mac-backfill downloads `kit-app-desktop-macOS`.
+- **Old defaults kept.** The kit's defaults are neutral since v0.2.0, so Encore passes what it used before: Ubuntu
+  22.04 (the AppImage's glibc), an Intel Mac with `--universal` (arm64 Macs were short of runners), and NSIS.
+
 ## 2026-11-05: the web app's toasts, dialogs, confirm, copy and details come from kit-leptos
 
 - **Kept as adapters, not rewritten call sites.** `ui::toast`, `ui::modal`, `ui::confirm_dialog`, `ui::copy_text` and
@@ -61,9 +72,8 @@ now and nothing guesses that API (docs/contracts/lantern.md has the details).
 - **`DownloadsFolder.kt` stays in the app for now.** #5 removed it in favour of kit-compose's copy, but main has since
   added `saveStream` (the Downloader's MP4 straight from the response body), which kit-compose lacks. The app keeps
   its own copy until kit-compose has a streaming save; the bug report and crash log exports use the kit's.
-- **Kit pins unchanged.** The workflows stay on kit commit `3262a89` and kit-compose on `d656c28`, as #4 and #5 were
-  tested. Moving them to the kit's latest tag (v0.2.0) changes inputs (`package-script` → `package`, `only` →
-  `keep-previous`, runner and NSIS defaults) and kit-compose's neutral base, so it is a change of its own.
+- **Kit pins unchanged.** The workflows stayed on kit commit `3262a89` and kit-compose on `d656c28`, as #4 and #5 were
+  tested; moving them to a kit tag is a change of its own each (the workflows: see "release workflows on kit v0.3.0").
 
 ## 2026-11-05 – Self-update: why 0.42.15 → 0.42.18 came back on 0.42.15, and what changed
 

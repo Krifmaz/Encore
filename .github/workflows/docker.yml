@@ -16,7 +16,7 @@ permissions:
 jobs:
   # the same tests as a release (release.yml's test job)
   test:
-    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-ci.yml@v0.3.0
     with:
       rust-dirs: server
       wasm-dirs: web-rs
@@ -74,7 +74,7 @@ jobs:
   # the image builds (amd64, not pushed)
   docker:
     needs: test
-    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@3262a89a54fdb51b9bd62bd2f8366fdf4d2f6160
+    uses: Krifmaz/kit/.github/workflows/kit-docker.yml@v0.3.0
     with:
       image: encore
       push: false
