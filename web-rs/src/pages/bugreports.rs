@@ -2,11 +2,16 @@
 //! images or text files; the admin reads them in the app, sets a status, replies in a thread the reporter sees
 //! (and gets by email when that is set up) and exports them as a zip for the developer.
 //! Server side: server/src/routes/bugreports.rs (/api/bug-reports).
+//!
+//! The list ([`BugList`]) and one report ([`BugReport`]) are Leptos views; the New report dialog and the file
+//! picker behind "Add images" are still HTML.
 use crate::api;
 use crate::app::{self, Ctx, PageFuture};
 use crate::dom;
 use crate::json::{js_string, json, truthy, J};
 use crate::ui::{confirm_dialog, esc, fmt, icon, modal, toast, ModalOpts};
+use kit_leptos::html::{html, raw};
+use leptos::prelude::*;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -204,128 +209,131 @@ fn report_row(r: &Value) -> String {
         files = if files > 0 { format!(" · {files} file{}", if files == 1 { "" } else { "s" }) } else { String::new() })
 }
 
-async fn load_list(list: &Element, f: &Filter, admin: bool) -> Result<(), String> {
+/// The reports for the filter (admins: only their own with Mine).
+async fn load_list(f: &Filter, admin: bool) -> Result<Vec<Value>, String> {
     let mut p = f.params();
     if !f.q.trim().is_empty() { p.push(format!("q={}", enc(f.q.trim()))); }
     if admin && f.mine { p.push("mine=1".into()); }
     let d = api::get(&format!("/bug-reports{}", if p.is_empty() { String::new() } else { format!("?{}", p.join("&")) })).await.map_err(|e| e.message)?;
-    let rows = d.a("reports");
-    let html = if rows.is_empty() {
-        if f.active() {
-            format!(r#"<div class="empty" id="bugs-empty">{}<p class="muted">Nothing matches these filters.</p></div>"#, icon("bug"))
-        } else {
-            format!(r#"<div class="empty" id="bugs-empty">{}<p class="muted">No reports yet. New report writes the first one.</p></div>"#, icon("bug"))
-        }
-    } else {
-        format!(r#"<div class="list">{}</div>"#, rows.iter().map(report_row).collect::<String>())
-    };
-    dom::set_html(list, &html);
-    Ok(())
+    Ok(d.a("reports"))
+}
+
+/// The list as HTML: the rows, or why there are none.
+fn list_html(rows: &[Value], f: &Filter) -> String {
+    if rows.is_empty() {
+        let why = if f.active() { "Nothing matches these filters." } else { "No reports yet. New report writes the first one." };
+        return format!(r#"<div class="empty" id="bugs-empty">{}<p class="muted">{why}</p></div>"#, icon("bug"));
+    }
+    format!(r#"<div class="list">{}</div>"#, rows.iter().map(report_row).collect::<String>())
+}
+
+/// The list page's state.
+#[derive(Clone, Copy)]
+struct ListPage {
+    /// Whether the reader is an admin (Everyone / Mine and Export).
+    admin: bool,
+    /// The filter, kept in this browser.
+    filter: RwSignal<Filter>,
+    /// The reports (`None`: loading), or the error.
+    rows: RwSignal<Option<Result<Vec<Value>, String>>>,
+}
+
+impl ListPage {
+    /// Saves the filter and loads the list for it.
+    fn reload(self) {
+        let f = self.filter.get_untracked();
+        f.save();
+        dom::spawn(async move {
+            let rows = load_list(&f, self.admin).await;
+            self.rows.try_set(Some(rows));
+        });
+    }
 }
 
 /// #/bug-reports – the list.
 pub fn render(view: Element, ctx: Ctx) -> PageFuture {
     Box::pin(async move {
         let admin = app::is_admin_user(&ctx.user);
-        let filter = Rc::new(RefCell::new(Filter::load(admin)));
-        let (status_tabs, kind_chips, scope, export) = {
-            let f = filter.borrow();
-            // the tab row reads "Looking" (the badge and the export keep the long label): six tabs have to fit a phone
-            let tabs: String = std::iter::once(("all", "All")).chain(STATUSES.iter().map(|(k, l, _)| (*k, if *k == "looking" { "Looking" } else { *l })))
-                .map(|(k, l)| format!(r#"<button data-s="{k}" class="{}">{l}</button>"#, if k == f.status { "active" } else { "" })).collect();
-            let chips: String = KINDS.iter().map(|(k, l)| format!(r#"<button class="badge{} bug-chip" data-k="{k}">{l}</button>"#, if *k == f.kind { " accent on" } else { "" })).collect();
-            let scope = if admin {
-                format!(r#"<div class="seg" id="bugs-scope"><button data-v="all" class="{}">Everyone</button><button data-v="mine" class="{}">Mine</button></div>"#,
-                    if f.mine { "" } else { "on" }, if f.mine { "on" } else { "" })
-            } else { String::new() };
-            let export = if admin { format!(r#"<a class="btn sm" id="bugs-export" href="{}" download>{}Export</a>"#, esc(&export_href(&f)), icon("download")) } else { String::new() };
-            (tabs, chips, scope, export)
-        };
-        dom::set_html(&view, &format!(r#"
-    <div class="row wrap between" style="margin-bottom:18px;gap:10px">
-      <h1 style="margin:0">Bug reports</h1>
-      <div class="row wrap" style="gap:8px">
-        {scope}
-        {export}
-        <button class="btn primary" id="bugs-new">{plus}New report</button>
-      </div>
-    </div>
-    <div class="tabs" id="bugs-status">{status_tabs}</div>
-    <div class="row wrap mt" style="gap:10px">
-      <div class="chips" id="bugs-kind">{kind_chips}</div>
-      <input class="input" id="bugs-q" type="search" placeholder="Search reports" value="{q}" style="max-width:260px;padding:7px 12px">
-    </div>
-    <div class="card flat mt" id="bugs-list"><div class="empty"><span class="spinner"></span></div></div>"#,
-            plus = icon("plus"), q = esc(&filter.borrow().q)));
-        let list = dom::qs_in(&view, "#bugs-list").ok_or("#bugs-list")?;
-        let reload: Rc<dyn Fn()> = {
-            let (list, filter, view) = (list.clone(), filter.clone(), view.clone());
-            Rc::new(move || {
-                let f = filter.borrow().clone();
-                f.save();
-                if let Some(a) = dom::qs_in(&view, "#bugs-export") { let _ = a.set_attribute("href", &export_href(&f)); }
-                let list = list.clone();
-                dom::spawn(async move { if let Err(e) = load_list(&list, &f, admin).await { dom::set_html(&list, &format!(r#"<div class="error-box">{}</div>"#, esc(&e))); } });
-            })
-        };
-        {
-            let (v, filter, reload) = (view.clone(), filter.clone(), reload.clone());
-            dom::on_sel(&view, "#bugs-status", "click", move |e| {
-                let Some(t) = dom::closest(e, "[data-s]") else { return };
-                filter.borrow_mut().status = dom::data(&t, "s");
-                for b in dom::qsa_in(&v, "#bugs-status button") { dom::toggle_class(&b, "active", b == t); }
-                reload();
-            });
+        let filter = Filter::load(admin);
+        dom::set_html(&view, "");
+        // the signals live as long as the page: the owner is dropped with it
+        let owner = Owner::new();
+        let page = owner.with(|| ListPage { admin, filter: RwSignal::new(filter.clone()), rows: RwSignal::new(None) });
+        if let Some(m) = owner.with(|| kit_leptos::rt::mount(&view, move || view! { <BugList page/> })) {
+            dom::keep(m);
         }
-        {
-            let (v, filter, reload) = (view.clone(), filter.clone(), reload.clone());
-            dom::on_sel(&view, "#bugs-kind", "click", move |e| {
-                let Some(t) = dom::closest(e, "[data-k]") else { return };
-                let k = dom::data(&t, "k");
-                let next = if filter.borrow().kind == k { String::new() } else { k };
-                filter.borrow_mut().kind = next.clone();
-                for b in dom::qsa_in(&v, "#bugs-kind button") {
-                    let on = !next.is_empty() && dom::data(&b, "k") == next;
-                    dom::toggle_class(&b, "accent", on);
-                    dom::toggle_class(&b, "on", on);
-                }
-                reload();
-            });
-        }
-        {
-            let (filter, reload) = (filter.clone(), reload.clone());
-            let deb = Rc::new(crate::ui::Debounce::new(250, move || reload()));
-            dom::on_sel(&view, "#bugs-q", "input", move |e| {
-                filter.borrow_mut().q = dom::target_el(e).map(|t| dom::value(&t)).unwrap_or_default();
-                deb.run();
-            });
-        }
-        if admin {
-            let (v, filter, reload) = (view.clone(), filter.clone(), reload.clone());
-            dom::on_sel(&view, "#bugs-scope", "click", move |e| {
-                let Some(t) = dom::closest(e, "[data-v]") else { return };
-                filter.borrow_mut().mine = dom::data(&t, "v") == "mine";
-                for b in dom::qsa_in(&v, "#bugs-scope button") { dom::toggle_class(&b, "on", b == t); }
-                reload();
-            });
-        }
-        dom::on_sel(&view, "#bugs-new", "click", |_| new_report_modal());
-        // a click anywhere on a row opens it (the title is a real link for middle-click and the keyboard)
-        dom::on(&list, "click", |e| {
-            if dom::closest(e, "a").is_some() { return; }
-            let Some(row) = dom::closest(e, "[data-id]") else { return };
-            app::navigate(&format!("/bug-reports/{}", dom::data(&row, "id")));
-        });
-        let f = filter.borrow().clone();
-        load_list(&list, &f, admin).await?;
+        dom::keep(owner);
+        let rows = load_list(&filter, admin).await?;
+        page.rows.try_set(Some(Ok(rows)));
         // the badge agrees with the rows it stands next to (a reply may have come in since the last refresh)
         changed();
-        {
-            let reload = reload.clone();
-            dom::interval(&view, 60_000, move || reload());
-        }
+        dom::interval(&view, 60_000, move || page.reload());
         Ok(())
     })
+}
+
+/// The list page: Everyone / Mine and Export (admins), New report, the status tabs, the kind chips, the search
+/// and the reports.
+#[component]
+fn BugList(
+    /// The page's state.
+    page: ListPage,
+) -> impl IntoView {
+    let filter = page.filter;
+    // the tab row reads "Looking" (the badge and the export keep the long label): six tabs have to fit a phone
+    let tabs = std::iter::once(("all", "All")).chain(STATUSES.iter().map(|(k, l, _)| (*k, if *k == "looking" { "Looking" } else { *l })))
+        .map(|(k, l)| {
+            let pick = move |_| { filter.update(|f| f.status = k.to_string()); page.reload(); };
+            view! { <button data-s=k class=move || if filter.with(|f| f.status == k) { "active" } else { "" } on:click=pick>{l}</button> }
+        })
+        .collect_view();
+    let chips = KINDS.iter().map(|&(k, l)| {
+        let pick = move |_| { filter.update(|f| f.kind = if f.kind == k { String::new() } else { k.to_string() }); page.reload(); };
+        view! { <button class=move || if filter.with(|f| f.kind == k) { "badge accent on bug-chip" } else { "badge bug-chip" } data-k=k on:click=pick>{l}</button> }
+    }).collect_view();
+    let deb = std::rc::Rc::new(crate::ui::Debounce::new(250, move || page.reload()));
+    let typed = move |e: web_sys::Event| {
+        let q = dom::target_el(&e).map(|t| dom::value(&t)).unwrap_or_default();
+        filter.update(|f| f.q = q);
+        deb.run();
+    };
+    let scope = page.admin.then(|| {
+        let set = move |mine: bool| move |_| { filter.update(|f| f.mine = mine); page.reload(); };
+        view! {
+            <div class="seg" id="bugs-scope"><button data-v="all" class=move || if filter.with(|f| f.mine) { "" } else { "on" } on:click=set(false)>"Everyone"</button>
+                <button data-v="mine" class=move || if filter.with(|f| f.mine) { "on" } else { "" } on:click=set(true)>"Mine"</button></div>
+        }
+    });
+    let export = page.admin.then(|| view! {
+        <a class="btn sm" id="bugs-export" href=move || filter.with(export_href) download {..html(format!("{}Export", icon("download")))}>{""}</a>
+    });
+    // a click anywhere on a row opens it (the title is a real link for middle-click and the keyboard)
+    let open = |e: web_sys::MouseEvent| {
+        if dom::closest(&e, "a").is_some() { return; }
+        let Some(row) = dom::closest(&e, "[data-id]") else { return };
+        app::navigate(&format!("/bug-reports/{}", dom::data(&row, "id")));
+    };
+    let list = move || match page.rows.get() {
+        None => r#"<div class="empty"><span class="spinner"></span></div>"#.to_string(),
+        Some(Err(e)) => format!(r#"<div class="error-box">{}</div>"#, esc(&e)),
+        Some(Ok(rows)) => list_html(&rows, &filter.get_untracked()),
+    };
+    view! {
+        <div class="row wrap between" style="margin-bottom:18px;gap:10px">
+            <h1 style="margin:0">"Bug reports"</h1>
+            <div class="row wrap" style="gap:8px">
+                {scope}
+                {export}
+                <button class="btn primary" id="bugs-new" on:click=|_| new_report_modal() {..html(format!("{}New report", icon("plus")))}>{""}</button>
+            </div>
+        </div>
+        <div class="tabs" id="bugs-status">{tabs}</div>
+        <div class="row wrap mt" style="gap:10px">
+            <div class="chips" id="bugs-kind">{chips}</div>
+            <input class="input" id="bugs-q" type="search" placeholder="Search reports" value=filter.with_untracked(|f| f.q.clone()) style="max-width:260px;padding:7px 12px" on:input=typed/>
+        </div>
+        <div class="card flat mt" id="bugs-list" on:click=open inner_html=list></div>
+    }
 }
 
 /// The New report modal: kind, title, description, images; sends FormData to POST /api/bug-reports.
@@ -407,6 +415,7 @@ fn message_html(m: &Value) -> String {
         when = fmt::date(m.f("created_at")), body = esc(&m.s("body")), files = files_html(&m.a("files")))
 }
 
+/// Draws the report again (after a reply); a failure replaces the page with its error.
 fn rerender(view: Element, ctx: Ctx) {
     dom::spawn(async move { if let Err(e) = render_one(view.clone(), ctx).await { if view.is_connected() { dom::set_html(&view, &format!(r#"<div class="error-box">{}</div>"#, esc(&e))); } } });
 }
@@ -422,95 +431,120 @@ pub fn render_one(view: Element, ctx: Ctx) -> PageFuture {
         let d = api::get(&format!("/bug-reports/{id}")).await.map_err(|e| e.message)?;
         // the server marked it seen: the sidebar badge may drop
         changed();
-        let r = d.g("report");
-        let msgs = d.a("messages");
-        let status = r.s("status");
-        let status_html = if admin {
-            format!(r#"<select class="input" id="bug-status" style="width:auto;padding:5px 10px" aria-label="Status">{}</select>"#,
-                STATUSES.iter().map(|(k, l, _)| format!(r#"<option value="{k}"{}>{l}</option>"#, if *k == status { " selected" } else { "" })).collect::<String>())
-        } else { status_badge(&status) };
-        let page = r.s("page");
-        let page_html = if page.is_empty() { String::new() } else if page.starts_with("#/") { format!(r#" · page <a href="{0}">{0}</a>"#, esc(&page)) } else { format!(" · page {}", esc(&page)) };
-        let admin_tools = if admin {
-            format!(r#"<a class="btn sm" id="bug-export" href="/api/bug-reports/export?ids={id}&format=txt" download>{}Export this report</a><button class="btn sm danger" id="bug-delete">{}Delete</button>"#, icon("download"), icon("trash"))
-        } else { String::new() };
-        let thread = if msgs.is_empty() { r#"<div class="empty" style="padding:24px"><p class="muted small" style="margin:0">No replies yet.</p></div>"#.to_string() }
-            else { format!(r#"<div class="list">{}</div>"#, msgs.iter().map(message_html).collect::<String>()) };
-        dom::set_html(&view, &format!(r##"
-    <a href="#/bug-reports" class="small muted" id="bug-back">← Bug reports</a>
-    <div class="row wrap between" style="gap:10px;margin-top:10px">
-      <div class="row wrap" style="gap:10px;min-width:0">{kind}<h1 id="bug-title" style="margin:0;overflow-wrap:anywhere">{title}</h1>{status}</div>
-      <div class="row wrap" style="gap:8px">{admin_tools}</div>
-    </div>
-    <div class="small muted" id="bug-meta" style="margin-top:8px;overflow-wrap:anywhere">by {user} · {when}{page}{version}{device}</div>
-    <div class="card mt" id="bug-report">
-      <div id="bug-body" style="white-space:pre-wrap;overflow-wrap:anywhere">{body}</div>
-      {files}
-    </div>
-    <div class="section-head"><h2>Replies</h2></div>
-    <div class="card flat" id="bug-thread">{thread}</div>
-    <div class="card mt stack" id="bug-reply" style="gap:10px" data-dropzone>
-      <textarea class="input" id="bug-reply-text" rows="3" maxlength="20000" placeholder="Write a reply"></textarea>
-      <div class="row wrap" style="gap:8px">
-        <button type="button" class="btn sm" id="bug-reply-add">{plus}Add images</button>
-        <input type="file" id="bug-reply-files" multiple accept="image/*,.txt,.log" hidden>
-        <div class="bug-thumbs grow" id="bug-reply-thumbs"></div>
-        <button class="btn primary" id="bug-reply-send">Send</button>
-      </div>
-    </div>"##,
-            kind = kind_badge(&r.s("kind")), title = esc(&r.s("title")), status = status_html,
-            user = esc(&r.s("username")), when = fmt::date(r.f("created_at")), page = page_html,
-            version = if r.truthy("app_version") { format!(" · app {}", esc(&r.s("app_version"))) } else { String::new() },
-            device = if r.truthy("device") { format!(" · {}", esc(&r.s("device"))) } else { String::new() },
-            body = esc(&r.s("body")), files = files_html(&r.a("files")), thread = thread, plus = icon("plus")));
-        if admin {
-            {
-                let id = id.clone();
-                dom::on_sel(&view, "#bug-status", "change", move |e| {
-                    let Some(sel) = dom::target_el(e) else { return };
-                    let (id, s) = (id.clone(), dom::value(&sel));
-                    dom::spawn(async move {
-                        match api::post(&format!("/bug-reports/{id}/status"), json!({ "status": s })).await {
-                            Ok(_) => { toast(&format!("Status: {}", status_label(&s)), "ok"); changed(); }
-                            Err(e) => toast(&e.message, "err"),
-                        }
-                    });
-                });
-            }
-            {
-                let id = id.clone();
-                dom::on_sel(&view, "#bug-delete", "click", move |_| {
-                    let id = id.clone();
-                    dom::spawn(async move {
-                        if !confirm_dialog("Delete this report?", "The report, its replies and its files are removed for good.", "Delete", true).await { return; }
-                        match api::del(&format!("/bug-reports/{id}")).await {
-                            Ok(_) => { toast("Report deleted", "ok"); changed(); app::navigate("/bug-reports"); }
-                            Err(e) => toast(&e.message, "err"),
-                        }
-                    });
-                });
-            }
-        }
-        let Some(picker) = Picker::bind(&view, "#bug-reply-add", "#bug-reply-files", "#bug-reply-thumbs") else { return Ok(()) };
-        if let Some(send) = dom::qs_in(&view, "#bug-reply-send") {
-            let (v, c, send2, id) = (view.clone(), ctx.clone(), send.clone(), id.clone());
-            dom::on(&send, "click", move |_| {
-                let text = dom::value_of(&v, "#bug-reply-text").trim().to_string();
-                let files = picker.files();
-                if text.is_empty() && files.is_empty() { toast("Write a reply or add a file", "err"); return; }
-                let Ok(fd) = FormData::new() else { return };
-                let _ = fd.append_with_str("body", &text);
-                picker.append_to(&fd);
-                dom::set_disabled(&send2, true);
-                let (v, c, send, id) = (v.clone(), c.clone(), send2.clone(), id.clone());
-                dom::spawn(async move {
-                    match post_form(&format!("/bug-reports/{id}/messages"), fd).await {
-                        Ok(_) => { toast("Reply sent", "ok"); changed(); rerender(v, c); }
-                        Err(e) => { toast(&e, "err"); dom::set_disabled(&send, false); }
-                    }
-                });
-            });
+        dom::set_html(&view, "");
+        let again = (view.clone(), ctx);
+        // kept while this page is on screen; the next page (or the next drawing) takes it off
+        if let Some(m) = kit_leptos::rt::mount(&view, move || view! { <BugReport d id admin again=StoredValue::new_local(again)/> }) {
+            dom::keep(m);
         }
         Ok(())
     })
+}
+
+/// One report: its kind, title and status (a list for admins), Export and Delete (admins), who sent it from
+/// where, the text and files, the replies and the reply box.
+#[component]
+fn BugReport(
+    /// The answer of GET /api/bug-reports/<id>: `report` and `messages`.
+    d: Value,
+    /// The report's id.
+    id: String,
+    /// Whether the reader is an admin.
+    admin: bool,
+    /// The page's element and context, to draw it again after a reply.
+    again: StoredValue<(Element, Ctx), LocalStorage>,
+) -> impl IntoView {
+    let r = d.g("report").clone();
+    let msgs = d.a("messages");
+    let status = r.s("status");
+    let status_view = if admin {
+        let id = id.clone();
+        let set = move |e: web_sys::Event| {
+            let Some(sel) = dom::target_el(&e) else { return };
+            let (id, s) = (id.clone(), dom::value(&sel));
+            dom::spawn(async move {
+                match api::post(&format!("/bug-reports/{id}/status"), json!({ "status": s })).await {
+                    Ok(_) => { toast(&format!("Status: {}", status_label(&s)), "ok"); changed(); }
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        };
+        let options = STATUSES.iter().map(|&(k, l, _)| view! { <option value=k selected=k == status>{l}</option> }).collect_view();
+        view! { <select class="input" id="bug-status" style="width:auto;padding:5px 10px" aria-label="Status" on:change=set>{options}</select> }.into_any()
+    } else {
+        raw(status_badge(&status)).into_any()
+    };
+    let admin_tools = admin.then(|| {
+        let export = format!("/api/bug-reports/export?ids={id}&format=txt");
+        let id = id.clone();
+        let delete = move |_| {
+            let id = id.clone();
+            dom::spawn(async move {
+                if !confirm_dialog("Delete this report?", "The report, its replies and its files are removed for good.", "Delete", true).await { return; }
+                match api::del(&format!("/bug-reports/{id}")).await {
+                    Ok(_) => { toast("Report deleted", "ok"); changed(); app::navigate("/bug-reports"); }
+                    Err(e) => toast(&e.message, "err"),
+                }
+            });
+        };
+        view! {
+            <a class="btn sm" id="bug-export" href=export download {..html(format!("{}Export this report", icon("download")))}>{""}</a>
+            <button class="btn sm danger" id="bug-delete" on:click={delete} {..html(format!("{}Delete", icon("trash")))}>{""}</button>
+        }
+    });
+    let page = r.s("page");
+    let page_html = if page.is_empty() { String::new() } else if page.starts_with("#/") { format!(r#" · page <a href="{0}">{0}</a>"#, esc(&page)) } else { format!(" · page {}", esc(&page)) };
+    let meta = format!("by {} · {}{page_html}{}{}", esc(&r.s("username")), fmt::date(r.f("created_at")),
+        if r.truthy("app_version") { format!(" · app {}", esc(&r.s("app_version"))) } else { String::new() },
+        if r.truthy("device") { format!(" · {}", esc(&r.s("device"))) } else { String::new() });
+    let thread = if msgs.is_empty() { r#"<div class="empty" style="padding:24px"><p class="muted small" style="margin:0">No replies yet.</p></div>"#.to_string() }
+        else { format!(r#"<div class="list">{}</div>"#, msgs.iter().map(message_html).collect::<String>()) };
+    let sending = RwSignal::new(false);
+    // the reply box's files (the same picker as New report), wired once the box is on the page
+    let picker = StoredValue::new_local(None::<Rc<Picker>>);
+    let reply = NodeRef::<leptos::html::Div>::new();
+    reply.on_load(move |el| picker.set_value(Picker::bind(&el, "#bug-reply-add", "#bug-reply-files", "#bug-reply-thumbs")));
+    let send = move |_| {
+        let text = dom::qs("#bug-reply-text").map(|t| dom::value(&t)).unwrap_or_default().trim().to_string();
+        let Some(picker) = picker.get_value() else { return };
+        if text.is_empty() && picker.files().is_empty() { toast("Write a reply or add a file", "err"); return; }
+        let Ok(fd) = FormData::new() else { return };
+        let _ = fd.append_with_str("body", &text);
+        picker.append_to(&fd);
+        sending.set(true);
+        let id = id.clone();
+        dom::spawn(async move {
+            match post_form(&format!("/bug-reports/{id}/messages"), fd).await {
+                Ok(_) => {
+                    toast("Reply sent", "ok");
+                    changed();
+                    if let Some((v, c)) = again.try_get_value() { rerender(v, c); }
+                }
+                Err(e) => { toast(&e, "err"); sending.try_set(false); }
+            }
+        });
+    };
+    view! {
+        <a href="#/bug-reports" class="small muted" id="bug-back">"← Bug reports"</a>
+        <div class="row wrap between" style="gap:10px;margin-top:10px">
+            <div class="row wrap" style="gap:10px;min-width:0">{raw(kind_badge(&r.s("kind")))}<h1 id="bug-title" style="margin:0;overflow-wrap:anywhere">{r.s("title")}</h1>{status_view}</div>
+            <div class="row wrap" style="gap:8px">{admin_tools}</div>
+        </div>
+        <div class="small muted" id="bug-meta" style="margin-top:8px;overflow-wrap:anywhere" inner_html=meta></div>
+        <div class="card mt" id="bug-report">
+            <div id="bug-body" style="white-space:pre-wrap;overflow-wrap:anywhere">{r.s("body")}</div>
+            {raw(files_html(&r.a("files")))}
+        </div>
+        <div class="section-head"><h2>"Replies"</h2></div>
+        <div class="card flat" id="bug-thread" inner_html=thread></div>
+        <div class="card mt stack" id="bug-reply" style="gap:10px" data-dropzone node_ref=reply>
+            <textarea class="input" id="bug-reply-text" rows="3" maxlength="20000" placeholder="Write a reply"></textarea>
+            <div class="row wrap" style="gap:8px">
+                <button type="button" class="btn sm" id="bug-reply-add" {..html(format!("{}Add images", icon("plus")))}>{""}</button>
+                <input type="file" id="bug-reply-files" multiple accept="image/*,.txt,.log" hidden/>
+                <div class="bug-thumbs grow" id="bug-reply-thumbs"></div>
+                <button class="btn primary" id="bug-reply-send" disabled=move || sending.get() on:click=send>"Send"</button>
+            </div>
+        </div>
+    }
 }
