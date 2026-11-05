@@ -2,12 +2,24 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: crash logs for the web app are the kit's
+
+- **`kit_leptos::crash::install` replaces `on_panic`,** with Encore's path (`/diagnostics/client-crash`) and banner
+  sentence. The old hook's inline JavaScript had a line break inside a string, so it threw a SyntaxError: no banner
+  showed and no report was sent. With the kit's, a panic shows the banner and files the report at once (kind
+  `panic`); uncaught errors and unhandled rejections are filed too (`error`, `rejection`). Diagnostics → App
+  crashes calls all three "Web page", as it did "web".
+- **The banner and the immediate send went into the kit** (`CrashWords`, a plain `fetch` from the hook, kit
+  v0.6.2), since every kit app has the same need: after a panic its tasks may never run again. The web app moves
+  from kit v0.3.4 to v0.6.2 for it; `css/kit.css` is the new stylesheet (the palette, drop places and suite rules
+  added, nothing Encore draws changed), and app.css drops its own copy of the drop-place rules.
+
 ## 2026-11-05: drag and drop for uploads is the kit's
 
 - **`dropzone.rs` is gone; `kit_leptos::dropzone::init` runs instead.** The kit's is the same code (made from
   it): the same zones (`data-dropzone`, a `<label>` with a file input), the same accept rule and words. The file
-  manager keeps its own `set_drop_effect` (three lines the kit keeps private). The outline styles stay in app.css
-  until the kit's stylesheet carries them.
+  manager keeps its own `set_drop_effect` (three lines the kit keeps private). The outline styles moved to the
+  kit's stylesheet with kit v0.6.2.
 
 ## 2026-11-05: the Diagnostics checks are the kit's view
 

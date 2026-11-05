@@ -19,6 +19,12 @@ pub const WAITS_FOR_UPLOAD: &str = "It reloads when the upload is done";
 /// … while songs are saved for offline.
 pub const WAITS_FOR_SAVING: &str = "It reloads when the songs are saved";
 
+/// Where the web app's crash logs go (the phone app's go there too).
+pub const CRASH_REPORTS: &str = "/diagnostics/client-crash";
+/// The banner after a panic: a Rust panic used to leave the page half drawn with no word of what happened
+/// (0.26.0/0.26.1: empty Library and Requests pages).
+pub const CRASH_STOPPED: &str = "This page hit an error and stopped: {what}{where}. The report was sent to Settings → Diagnostics.";
+
 /// Configures the kit for Encore (id `encore`: its storage keys, events, the `X-Requested-With` header and the
 /// service worker's `encore:version` answer) and draws its toasts into the page's `#toasts`. Call once, first
 /// thing at start-up.
@@ -30,7 +36,13 @@ pub fn init() {
     // offline mode's banner says what still works here: the songs downloaded to this device
     cfg.words.offline.banner = crate::offline::mode::BANNER;
     cfg.words.offline.banner_ended = crate::offline::mode::BANNER_ENDED;
+    // crash logs: Encore's server keeps them at /api/diagnostics/client-crash (Settings → Diagnostics → App
+    // crashes), and the panic banner says where to read them
+    cfg.paths.crash_reports = CRASH_REPORTS.into();
+    cfg.words.crash.stopped = CRASH_STOPPED;
     config::set(cfg);
+    // a panic, an uncaught error or an unhandled rejection is written down and sent; a panic also shows the banner
+    kit_leptos::crash::install();
     kit_leptos::toasts::mount();
 }
 

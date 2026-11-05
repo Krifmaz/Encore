@@ -169,16 +169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console_error_panic_hook"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
-dependencies = [
- "cfg-if",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "const-str"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -316,7 +306,6 @@ name = "encore-web"
 version = "0.0.0"
 dependencies = [
  "cadenza-eq",
- "console_error_panic_hook",
  "futures",
  "gloo-events",
  "gloo-net",
@@ -731,7 +720,7 @@ dependencies = [
 [[package]]
 name = "kit-leptos"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.3.4#162dc5bd1805eb698fd0df1ea67b0a2a4cb7908e"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.6.2#8e1963b08840f2a78fc25943beb0c9d759679997"
 dependencies = [
  "futures",
  "gloo-net",
@@ -750,7 +739,7 @@ dependencies = [
 [[package]]
 name = "kit-rules"
 version = "0.1.0"
-source = "git+https://github.com/Krifmaz/kit?tag=v0.3.4#162dc5bd1805eb698fd0df1ea67b0a2a4cb7908e"
+source = "git+https://github.com/Krifmaz/kit?tag=v0.6.2#8e1963b08840f2a78fc25943beb0c9d759679997"
 dependencies = [
  "serde",
  "serde_json",
