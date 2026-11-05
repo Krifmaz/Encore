@@ -3156,15 +3156,6 @@ fn menu_items(state: &State, menu: &Menu) -> Vec<MenuItem<Message>> {
     }
 }
 
-/// A modal with Cancel and one button (the confirms of this page, with titles that carry a name).
-fn ask<'a>(title: String, text: &'a str, ok: &'a str, danger: bool) -> El<'a, Message> {
-    let footer = row![
-        btn("Cancel", Btn::Default, Some(Message::CloseDialog)),
-        btn(ok, if danger { Btn::Danger } else { Btn::Primary }, Some(Message::Submit)),
-    ]
-    .spacing(10);
-    widgets::modal(title, widgets::muted(text).size(14), Some(footer.into()), false, Message::CloseDialog)
-}
 
 fn footer<'a>(ok: impl iced::widget::text::IntoFragment<'a>, on: Option<Message>) -> El<'a, Message> {
     row![
@@ -3444,17 +3435,21 @@ pub fn overlay<'a>(state: &'a State, ctx: &Ctx<'a>) -> Option<El<'a, Message>> {
         Dialog::Move { names, root, path, dirs, .. } => move_dialog(state, names, root, path, dirs),
         Dialog::Trash { names } => {
             let keep = state.trash_keep().0;
-            ask(delete_title(names, keep), if keep { TRASH_NOTE } else { DELETE_NOTE }, delete_label(keep), true)
+            widgets::confirm(delete_title(names, keep), if keep { TRASH_NOTE } else { DELETE_NOTE }, delete_label(keep), true, Message::Submit, Message::CloseDialog)
         }
         Dialog::Tags { name, original, values, saving } => tags_dialog(name, original, values, *saving),
         Dialog::Upload { items, conflict } => upload_dialog(items, conflict, root_name, &state.path),
         Dialog::Import(imp) => import_dialog(imp, root_name),
-        Dialog::DeleteForever { name, .. } => ask(format!("Delete “{name}” forever?"), "This can't be undone.", "Delete forever", true),
-        Dialog::EmptyTrash => ask(
-            "Empty the trash?".to_string(),
+        Dialog::DeleteForever { name, .. } => {
+            widgets::confirm(format!("Delete “{name}” forever?"), "This can't be undone.", "Delete forever", true, Message::Submit, Message::CloseDialog)
+        }
+        Dialog::EmptyTrash => widgets::confirm(
+            "Empty the trash?",
             "Everything in it is deleted forever. This can't be undone.",
             "Empty trash",
             true,
+            Message::Submit,
+            Message::CloseDialog,
         ),
     })
 }
