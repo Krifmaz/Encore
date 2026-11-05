@@ -3,9 +3,9 @@
 //! itself ([`start_updates`]).
 //!
 //! The kit's defaults already say Encore's words and draw Encore's markup (the kit was made from them), so only
-//! the app itself is set here. The page keeps Encore's own stylesheet (`css/app.css`), which styles every class
-//! the kit's components use; the kit's `kit.css` is not loaded, because its buttons differ from Encore's (a
-//! filled danger button) and the page must look exactly as before.
+//! the app itself is set here. The page loads the kit's stylesheet first (`css/kit.css`, a copy of
+//! `kit_leptos::CSS` that a test keeps the same), which draws every class the kit's components use, then Encore's
+//! own (`css/app.css`): its theme variables and the classes of its own pages.
 
 use kit_leptos::config::{self, AppConfig};
 use kit_leptos::update::UpdateConfig;
@@ -113,5 +113,14 @@ mod tests {
         assert_eq!(kit_leptos::config::AppConfig::new(App::named("Encore")).script, "encore-web");
         let head = r#"<link rel="modulepreload" href="/encore-web-f92ab5b84b305a59.js">"#;
         assert_eq!(kit_rules::update::build_in(head, "encore-web").as_deref(), Some("f92ab5b84b305a59"));
+    }
+
+    /// The page's `css/kit.css` is the kit's stylesheet as it is, so the page takes the kit's look from the kit.
+    #[test]
+    fn the_stylesheet_is_the_kits() {
+        assert!(include_str!("../static/css/kit.css") == kit_leptos::CSS, "static/css/kit.css differs from the kit's: copy crates/kit-leptos/style/kit.css of the pinned kit tag");
+        let index = include_str!("../index.html");
+        let (kit, app) = (index.find(r#"href="/css/kit.css""#).expect("index.html loads kit.css"), index.find(r#"href="/css/app.css""#).expect("and app.css"));
+        assert!(kit < app, "kit.css loads before app.css, so Encore's rules win");
     }
 }

@@ -30,8 +30,8 @@ cadenza-eq = { git = "https://github.com/Krifmaz/cadenza", rev = "fc57f0c" }
 console_error_panic_hook = "0.1"
 # the shared web features of Krifmaz/kit (toasts with Copy, dialogs, confirm, the whole text of an error), pinned
 # to a kit tag; Encore's server paths and words are set at start-up (src/kit.rs)
-kit-leptos = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.0" }
-kit-rules = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.0" }
+kit-leptos = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.4" }
+kit-rules = { git = "https://github.com/Krifmaz/kit", tag = "v0.3.4" }
 gloo-events = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
 gloo-net = { version = "0.6", features = ["http"] }

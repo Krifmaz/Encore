@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- The public share page (/s/<token>): a song, album, artist or playlist anyone with the link can play.
-     It wears Encore's own look through the app's stylesheet: data-theme="encore" picks the charcoal-and-cream
+     It wears Encore's own look through the app's stylesheets (the kit's kit.css, then app.css): data-theme="encore" picks the charcoal-and-cream
      palette, data-brand the logo's cream accent (both in css/app.css), so a change to the app's theme reaches
      this page too. The styles below lay the page out and only ever use the theme's variables for colour; a test
      in web-rs/src/appearance.rs checks that. The server fills in the link-preview tags (share_page_html in the api crate). -->
@@ -15,6 +15,7 @@
 <!--META-->
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/kit.css">
 <link rel="stylesheet" href="/css/app.css">
 <style>
   /* the page: one card in the middle, over the cover blurred (as in the app's full-screen player) */

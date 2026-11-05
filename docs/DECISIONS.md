@@ -2,6 +2,16 @@
 
 Calls made while working hands-off, with why. Newest first.
 
+## 2026-11-05: the web app loads the kit's stylesheet; app.css keeps only Encore's own rules
+
+- **`css/kit.css` (a copy of `kit_leptos::CSS`, a test keeps it the same) loads before `css/app.css`.** The red-on-red
+  danger button was a kit-leptos bug (its kit.css was a second look, not the one DESIGN.md §5 asks for), so it was
+  fixed in the kit rather than worked around here. app.css lost every rule the kit now carries (919 → 762 lines)
+  and keeps the theme variables and Encore's own pages. A file, not a `<style>` added by the wasm, so the page
+  never shows unstyled while the app starts; the worker keeps it offline with the rest of the shell.
+- **Proof:** the computed style of every element on 33 pages (desktop and phone width, a dialog, the light theme)
+  is the same before and after, apart from widths of text that differs between runs (timings).
+
 ## 2026-11-05: the notice banner, What's new and the offline banners come from kit-leptos
 
 - **`notice.rs`, `whats_new.rs` and offline mode's banners are thin calls into the kit** (`kit_leptos::notice`,
